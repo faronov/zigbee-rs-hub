@@ -13,8 +13,8 @@ interface will be a WebSocket JSON API.
 
 | Phase | Content | Status |
 |---|---|---|
-| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | bridge works (esptool `flash-id`, H2 backup read, spinel round trip); 0.1.1 programmed into ota_0 and verified, waiting for an S3 RESET press to boot (see Status) |
-| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, provisioning and update through the H2 ROM loader (EN/BOOT driven by the S3), two NCP images kept on the S3 (known-good + candidate) with rollback | planned |
+| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | bridge 0.1.1 works (esptool `flash-id` and full reads through the auto-reset, verified H2 backup, spinel round trip); 0.1.2 fixes the USJ hand-back (see Status) |
+| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | planned |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
 ## Layout
@@ -69,27 +69,65 @@ Measured on the hwlab board (early sample):
 - Stock firmware: `esp_ot_br` in S3 ota_0; `esp_ot_rcp` (OpenThread RCP,
   built for 2 MB) on the H2 and a copy in the S3 `rcp_fw` partition.
 
-### S3 flash budget
+### S3 flash layout
 
-ZRHP spec 12.4 proposes, for 8 MB: hub app ×2 at 2.5 MiB, NCP images ×2 at
-1 MiB, host store journal 128 KiB, hub config 64 KiB (≈ 7.3 MiB with the
-128 KiB system area). That does not fit this board's 4 MB. Plan: detect the
-S3 flash size like the NCP does (decision N4) and ship two partition tables.
+The S3 stores **no NCP images**: NCP rollback lives on the H2 (A/B app
+slots, `FW_*` into the inactive slot, trial boot, `FW_CONFIRM`, H2 bootloader
+rollback; ZRHP decision N6 as amended 2026-11-18). The flash holds the hub app
+twice and one data partition. The hub detects 4 MB / 8 MB at boot and uses
+the matching table (ZRHP spec 3.4, decision N9; branch `zrhp-s3-4mb` of
+zigbee-rs):
 
-| Partition | 8 MB | 4 MB |
+| Partition | 4 MB | 8 MB |
 |---|---|---|
-| bootloader, partition table, nvs, otadata, phy | 128 KiB | 128 KiB |
-| hub app ×2 (OTA) | 2.5 MiB each | 1.25 MiB each |
-| NCP images (known-good + candidate) | 2 × 1 MiB, raw | one 1152 KiB partition, both images deflate-compressed |
-| ZRHP host store journal | 128 KiB | 128 KiB |
-| hub config | 64 KiB | 64 KiB |
+| bootloader | 0x000000, 32 KiB | same |
+| partition table | 0x008000, 4 KiB | same |
+| `nvs` (Wi-Fi, PHY calibration, small settings) | 0x009000, 24 KiB | same |
+| `otadata` | 0x00F000, 8 KiB | same |
+| `phy_init` | 0x011000, 4 KiB | same |
+| reserved (optional core dump) | 0x012000, 56 KiB | same |
+| hub app `ota_0` | 0x020000, **1.5 MiB** | 0x020000, 3 MiB |
+| hub app `ota_1` | 0x1A0000, **1.5 MiB** | 0x320000, 3 MiB |
+| `hubdata` (LittleFS or log-structured store) | 0x320000, **896 KiB** | 0x620000, 1 920 KiB |
 
-On 4 MB the NCP images are stored compressed, which the H2 ROM loader
-accepts directly (`FLASH_DEFL_*`, MD5-checked on the H2), so the ROM path
-needs no decompression on the S3. With about 50–60 % compression that holds
-two images of up to ~1 MB raw each; the hub refuses a candidate that does
-not fit. The hub app has to stay within 1.25 MiB on 4 MB boards; the stock
-`esp_ot_br` (Wi-Fi + OpenThread + web server) already fits in 1.6 MB.
+`hubdata` on 4 MB: ZRHP host store journal 128 KiB, configuration 32 KiB,
+converter database 2 × 256 KiB (active + staged, swapped atomically) and
+224 KiB (25 %) left free for copy-on-write and wear levelling. The hub app
+must stay within 1.5 MiB (to be enforced in CI); the stock `esp_ot_br` is
+1.6 MB *with* OpenThread, which the hub does not need.
+
+**Converter database.** Device definitions are declarative data, updated
+without an app OTA: compact CBOR records (model/manufacturer ids, exposes,
+cluster/attribute mappings, value scaling and enum maps, reporting, and
+references to generic handlers compiled into the app). No code in the
+database. Capacity estimate per 256 KiB bank, with dictionaries for keys,
+vendors and handler ids and an index of about 18 B per definition:
+
+| Definition kind | CBOR size | Per bank, raw | Per bank, 4 KiB-block deflate (≈ 2–2.5×) |
+|---|---:|---:|---:|
+| Simple (lights, plugs, sensors on standard clusters) | 150–250 B | ~1 000–1 500 | ~2 500–3 500 |
+| Tuya-style datapoint mappings | 600–1 200 B | ~200–400 | ~500–1 000 |
+| Realistic mix (≈ 300 B average) | | **~800** | **~1 600–2 000** |
+
+The full zigbee-herdsman-converters catalogue (≈ 4 500+ definitions,
+roughly 1.3–1.5 MB raw) does not fit a 4 MB board, even compressed with
+two banks. On 4 MB: a curated subset plus definitions fetched on demand for
+paired devices (a home rarely has more than ~100 distinct models). On 8 MB
+(`hubdata` 1 920 KiB) the whole catalogue fits compressed, with two banks.
+
+**Option (not decided): H2 spare flash as host storage over ZRHP BULK.**
+With the spec's 4 MB H2 layout (two 1.875 MiB slots) almost nothing is
+spare; ~1.8–2 MB becomes spare only if the 4 MB H2 keeps 896 KiB–1 MiB slots.
+
+- Pros: about 2 MB more without hardware changes; survives hub reflashes
+  and S3 partition changes; could hold the converter catalogue, backups or
+  logs; S3 flash stays free for the app.
+- Cons: hub data then depends on the NCP (a ROM-path reflash, chip swap or
+  layout change can lose it); 460 800 baud is about 40 KB/s, shared with
+  Zigbee traffic and credits, so random access needs an S3-side cache;
+  flash erases on the single-core H2 stall flash fetches and can hurt MAC
+  timing; new BULK object type, capacity negotiation and power-loss rules in
+  the spec; only on 4 MB H2 modules; not portable to other NCPs.
 
 ## Phase 0: `tbr-bridge`
 
@@ -212,9 +250,10 @@ so the bridge hands the PHY back to the USJ explicitly:
 | boot after a panic or watchdog reset | safe mode: TinyUSB never starts, PHY → USJ |
 | power cycle, or S3 BOOT held + RESET pressed | cold boot / ROM download on USJ |
 
-The hand-back must make the host see a real detach: 0.1.1 drops the D+
-pull-up (TinyUSB `tud_disconnect` + pull overrides) for 500 ms before giving
-the PHY to the USJ.
+The hand-back must make the host see a real detach and a new attach: 0.1.2
+drops the D+ pull-up (TinyUSB `tud_disconnect` + pull overrides) for 500 ms,
+re-routes the PHY, then returns the USJ pull-up registers to their reset
+state (`DP_PULLUP` = 1, no override) so the USJ attaches.
 
 ## Status
 
@@ -228,11 +267,15 @@ the PHY to the USJ.
   2. 0.1.0's `s3 download` switched the PHY without a detach: the host kept
      the stale OTG device (transaction errors) and never enumerated the USJ;
      recovering needed S3 BOOT + RESET by hand. 0.1.1 detaches first.
-- 0.1.1 (`bd5ac931…`) is programmed into ota_0 through hwlab and read back
-  equal. It has not booted yet: after BOOT + RESET, USJ resets keep the
-  download strap (see "Flashing the S3"); one S3 RESET press boots it. Then:
-  verify the 0.1.1 `s3 download` path with hwlab, and repeat the H2 backup
-  (two reads).
+- 0.1.1 (`bd5ac931…`) ran on hardware: three full H2 reads (two of them
+  through 0.1.1), identical SHA-256, 8.4 MB bridged with 0 bytes dropped
+  despite 10 802 SET_LINE_CODING requests.
+- Its `s3 download` now detaches (macOS logs "hardware connection lost"),
+  but the USJ never re-attached: 0.1.1 left the USJ `DP_PULLUP` bit at 0
+  (reset value 1) and the OTG pull override on. **0.1.2** (`4ad7b963…`)
+  restores both; built, not yet flashed. The S3 is meanwhile in ROM download
+  mode with no D+ pull-up, invisible to the host: S3 BOOT + RESET (ROM
+  download, hwlab can flash 0.1.2), then RESET alone to boot it.
 
 ## License
 

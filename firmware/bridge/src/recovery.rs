@@ -70,12 +70,14 @@ pub fn switch_to_usj(why: &str) {
         rmw(USB_SERIAL_JTAG_CONF0_REG, USJ_DP_PULLUP, USJ_PAD_PULL_OVERRIDE);
         // Detached long enough for any host to notice.
         sys::vTaskDelay(500);
-        rmw(USB_WRAP_OTG_CONF_REG, USB_WRAP_USB_PAD_ENABLE, 0);
+        rmw(USB_WRAP_OTG_CONF_REG, USB_WRAP_USB_PAD_ENABLE | USB_WRAP_PAD_PULL_OVERRIDE, 0);
         rmw(USB_SERIAL_JTAG_CONF0_REG, USJ_PHY_SEL, USJ_USB_PAD_ENABLE);
         rmw(RTC_CNTL_USB_CONF_REG, RTC_CNTL_SW_USB_PHY_SEL, RTC_CNTL_SW_HW_USB_PHY_SEL);
         sys::vTaskDelay(20);
-        // Hand the pull-up back to the USJ: it attaches and gets enumerated.
-        rmw(USB_SERIAL_JTAG_CONF0_REG, USJ_PAD_PULL_OVERRIDE, 0);
+        // Back to the USJ reset state (DP_PULLUP = 1, no override): the USJ
+        // pulls D+ up again and the host enumerates it. With DP_PULLUP left at
+        // 0 the USJ stays invisible (seen on hardware with bridge 0.1.1).
+        rmw(USB_SERIAL_JTAG_CONF0_REG, USJ_PAD_PULL_OVERRIDE, USJ_DP_PULLUP);
         sys::vTaskDelay(200);
     }
 }
