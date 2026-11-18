@@ -1,8 +1,8 @@
 //! Control console on the second CDC-ACM port.
 //!
 //! Line-oriented text commands; nothing here ever touches the bridge data
-//! stream on CDC 0. Setting this port to 1200 baud ("1200 bps touch") reboots
-//! the S3 into its ROM download mode on USB-Serial-JTAG (hwlab recovery).
+//! stream on CDC 0. Setting this port to 1200 baud ("1200 bps touch") hands
+//! the USB PHY back to USB-Serial-JTAG (hwlab recovery), like `s3 usj`.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -18,8 +18,8 @@ commands:\r
   h2 hold | h2 release hold the H2 in reset / let it run\r
   baud <rate>          set the H2 UART rate (also follows CDC0 line coding)\r
   lines on|off         map CDC0 DTR/RTS to H2 EN/BOOT (esptool auto-reset)\r
-  s3 download          reboot the S3 into ROM download mode on USB-Serial-JTAG\r
-  s3 usj               hand the USB PHY back to USB-Serial-JTAG (app keeps running)\r
+  s3 usj | s3 download hand the USB PHY back to USB-Serial-JTAG (app keeps\r
+                       running, bridge off; hwlab can flash, an RTS reset reboots)\r
   s3 reset             reboot the S3 (bridge restarts)\r
 ";
 
@@ -28,9 +28,9 @@ pub fn run() -> ! {
     let mut buf = [0u8; 64];
     loop {
         if recovery::take_touch_request() {
-            reply("1200 bps touch: rebooting the S3 into ROM download mode\r\n");
+            reply("1200 bps touch: handing the USB PHY to USB-Serial-JTAG\r\n");
             std::thread::sleep(Duration::from_millis(50));
-            recovery::reboot_to_rom_download();
+            recovery::switch_to_usj("1200 bps touch");
         }
         let n = usb::read_wait(usb::CONSOLE, &mut buf, 100);
         for &c in &buf[..n] {
@@ -98,12 +98,7 @@ fn execute(cmd: &str) {
             h2::AUTO_LINES.store(*v == "on", Ordering::Relaxed);
             reply(&format!("ok: DTR/RTS auto-reset {}\r\n", v));
         }
-        ["s3", "download"] => {
-            reply("rebooting the S3 into ROM download mode (USB-Serial-JTAG)\r\n");
-            std::thread::sleep(Duration::from_millis(50));
-            recovery::reboot_to_rom_download();
-        }
-        ["s3", "usj"] => {
+        ["s3", "usj"] | ["s3", "download"] => {
             reply("handing the USB PHY to USB-Serial-JTAG; this port disappears\r\n");
             std::thread::sleep(Duration::from_millis(50));
             recovery::switch_to_usj("console request");

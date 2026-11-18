@@ -6,9 +6,17 @@
 //! survive software and panic resets, so every path below hands the PHY back
 //! to USB-Serial-JTAG explicitly:
 //!
-//! - console `s3 download` or a 1200 bps touch on the console port: PHY → USJ,
-//!   then reboot into ROM download mode (hwlab's validated S3 mode);
-//! - console `s3 usj`: PHY → USJ, the app keeps running (bridge off);
+//! - console `s3 usj` (alias `s3 download`) or a 1200 bps touch on the
+//!   console port: PHY → USJ, the app keeps running with the bridge off.
+//!   hwlab then works on the running app, an RTS reset on the USJ boots the
+//!   bridge again, and the host can enter ROM download mode with the USJ's
+//!   esptool DTR/RTS sequence.
+//!
+//!   The firmware does not reboot into ROM download mode itself:
+//!   `RTC_CNTL_FORCE_DOWNLOAD_BOOT` survives USJ chip resets and the ROM does
+//!   not clear it, so every later RTS reset came back in download mode
+//!   (seen on hardware with 0.1.2).
+//!
 //! - USB not enumerated within [`MOUNT_TIMEOUT`] after boot: PHY → USJ;
 //! - boot after a panic or watchdog reset: TinyUSB is not started at all.
 //!
@@ -25,8 +33,6 @@ pub const MOUNT_TIMEOUT: Duration = Duration::from_secs(20);
 const RTC_CNTL_USB_CONF_REG: u32 = 0x6000_8120;
 const RTC_CNTL_SW_HW_USB_PHY_SEL: u32 = 1 << 20;
 const RTC_CNTL_SW_USB_PHY_SEL: u32 = 1 << 19;
-const RTC_CNTL_OPTION1_REG: u32 = 0x6000_812C;
-const RTC_CNTL_FORCE_DOWNLOAD_BOOT: u32 = 1 << 0;
 const USB_SERIAL_JTAG_CONF0_REG: u32 = 0x6003_8018;
 const USJ_PHY_SEL: u32 = 1 << 0;
 const USJ_PAD_PULL_OVERRIDE: u32 = 1 << 8;
@@ -79,15 +85,6 @@ pub fn switch_to_usj(why: &str) {
         // 0 the USJ stays invisible (seen on hardware with bridge 0.1.1).
         rmw(USB_SERIAL_JTAG_CONF0_REG, USJ_PAD_PULL_OVERRIDE, USJ_DP_PULLUP);
         sys::vTaskDelay(200);
-    }
-}
-
-/// Reboot into the S3 ROM serial loader, enumerated as USB-Serial-JTAG.
-pub fn reboot_to_rom_download() -> ! {
-    switch_to_usj("ROM download reboot");
-    unsafe {
-        rmw(RTC_CNTL_OPTION1_REG, 0, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
-        sys::esp_restart()
     }
 }
 

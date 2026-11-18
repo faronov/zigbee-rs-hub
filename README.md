@@ -13,7 +13,7 @@ interface will be a WebSocket JSON API.
 
 | Phase | Content | Status |
 |---|---|---|
-| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | bridge 0.1.1 works (esptool `flash-id` and full reads through the auto-reset, verified H2 backup, spinel round trip); 0.1.2 fixes the USJ hand-back (see Status) |
+| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.1.3 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons (see Status) |
 | **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | planned |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
@@ -172,7 +172,8 @@ CDC 0:
 Console (CDC 1): `help`, `info` (rate, framing, EN/BOOT levels, byte and
 drop counters), `h2 reset`, `h2 boot` (ROM loader: BOOT low, EN pulse 20 ms,
 BOOT released 100 ms after EN), `h2 hold` / `h2 release`, `baud <rate>`,
-`lines on|off`, `s3 download`, `s3 usj`, `s3 reset`.
+`lines on|off`, `s3 usj` (alias `s3 download`: hand the USB PHY back to
+USB-Serial-JTAG, app keeps running with the bridge off), `s3 reset`.
 
 ### Flashing the H2 through the bridge (for the zrhp-ncp work)
 
@@ -209,33 +210,45 @@ cd ../.. && tools/make-app-image.sh              # -> target/tbr-bridge-app.bin
 cargo test -p hub-core                           # host tests (repo root, stable Rust)
 ```
 
-### Flashing the S3 (hwlab only)
+### Flashing the S3 (hwlab only, no buttons)
 
 Phase 0 keeps the stock partition table and bootloader and replaces only
-**ota_0 at 0x20000** (otadata already selects ota_0). The S3 must be on
-USB-Serial-JTAG (stock firmware, ROM download mode, or after a bridge `s3
-download` / `s3 usj`):
+**ota_0 at 0x20000** (otadata already selects ota_0). Verified cycle
+(0.1.2 → 0.1.3 on 2026-11-18):
 
-```sh
-hwlab target flash program --yes --device espusbjtag/303a:1001:7C_DF_A1_FE_67_F0 \
-  --config allow_flash=true --config allow_erase=true \
-  --arg path=$HOME/.hwlab/artifacts/zigbee-rs-hub/tbr-bridge-<ver>-app.bin --arg address=0x20000 \
-  --arg confirm=program-flash \
-  --arg backup=$HOME/.hwlab/artifacts/esp-thread-br-s3-backup/esp-flash-5e4016-4096K-13775159baf7.bin
-```
+1. Bridge console: `s3 usj` (or `s3 download`, or `stty -f
+   /dev/cu.usbmodem7CDFA1FE67F03 1200`). The bridge ports vanish and
+   `espusbjtag/303a:1001:7C_DF_A1_FE_67_F0` / `uart/cu.usbmodem1474301`
+   appear within about 1 s. The app keeps running with the bridge off.
+2. hwlab's program guard needs a verified backup that matches the current
+   flash, so take one first (both cores are halted for it), then program:
 
-hwlab leaves the S3 cores halted and refuses a SoC reset on the S3. Boot the
-new image with the USJ's hardware reset, through hwlab's `uart` plugin (MCP):
-`capture_start` on `uart/cu.usbmodem1474301` with config `dtr=false,
-rts=false`, then `device_invoke uart SerialTransport.set_lines {dtr:false,
-rts:true}`; the S3 resets and the USJ port disappears as the bridge comes up.
+   ```sh
+   hwlab target flash backup --yes --device espusbjtag/303a:1001:7C_DF_A1_FE_67_F0 --arg dir=$DIR
+   hwlab target flash program --yes --device espusbjtag/303a:1001:7C_DF_A1_FE_67_F0 \
+     --config allow_flash=true --config allow_erase=true \
+     --arg path=$HOME/.hwlab/artifacts/zigbee-rs-hub/tbr-bridge-<ver>-app.bin --arg address=0x20000 \
+     --arg confirm=program-flash --arg backup=$DIR/esp-flash-5e4016-4096K-<sha>.bin
+   ```
+3. Boot it with the USJ's RTS reset through hwlab's `uart` plugin (MCP):
+   `capture_start` on `uart/cu.usbmodem1474301` (baud 115200, no `dtr`/`rts`
+   config), then `device_invoke uart SerialTransport.set_lines {dtr:false,
+   rts:false}`. Opening the port asserts both lines; dropping DTR first
+   passes through (DTR=0, RTS=1) = reset, and releasing RTS boots the app.
+   The USJ port disappears and the bridge ports come back. (hwlab refuses a
+   SoC reset on the S3, so this is the only button-free reset.)
 
-This works only if the S3 straps were last latched for SPI boot. A USJ chip
-reset (`rst:0x15 USB_UART_CHIP_RESET`) does not re-latch the boot straps:
-after the S3 was put into ROM download mode with BOOT + RESET, every RTS reset
-comes back in download mode (`boot:0x23`, `GPIO_STRAP` = 0x23 while GPIO0
-reads high). Press S3 RESET once without BOOT (or power cycle). hwlab refuses
-the RTC-watchdog SoC reset on the S3 that would re-latch them.
+**Do not reboot the S3 into ROM download mode from firmware.**
+`RTC_CNTL_FORCE_DOWNLOAD_BOOT` (0x6000812C bit 0) survives USJ chip resets
+(`rst:0x15`) and the S3 ROM does not clear it. Bridge 0.1.0–0.1.2 used it for
+`s3 download`, and afterwards every RTS reset came back in `boot:0x23
+DOWNLOAD`. If that happens: with the S3 in the ROM loader, send the loader
+`SYNC` and then `WRITE_REG 0x6000812C = 0` through the hwlab `uart` plugin
+(`SerialTransport.write`, SLIP frames), then do the RTS reset. Done once on
+2026-11-18. The same symptom after BOOT + RESET comes from the latched boot
+strap; only a plain RESET or a power cycle clears that. For ROM download mode
+without buttons, use the USJ's esptool sequence instead (DTR=1/RTS=0, then
+DTR=0/RTS=1, then both 0), which is not sticky.
 
 ### Recovery (getting hwlab back to the S3)
 
@@ -244,16 +257,15 @@ so the bridge hands the PHY back to the USJ explicitly:
 
 | Path | Result |
 |---|---|
-| console `s3 download`, or set the console port to 1200 baud (`stty -f /dev/cu.usbmodem7CDFA1FE67F03 1200`) | PHY → USJ, reboot into the S3 ROM download mode (hwlab's validated S3 mode) |
-| console `s3 usj` | PHY → USJ, the app keeps running with the bridge off |
+| console `s3 usj` / `s3 download`, or the console port set to 1200 baud | PHY → USJ, the app keeps running with the bridge off (verified) |
 | USB not enumerated within 20 s of boot | PHY → USJ |
 | boot after a panic or watchdog reset | safe mode: TinyUSB never starts, PHY → USJ |
 | power cycle, or S3 BOOT held + RESET pressed | cold boot / ROM download on USJ |
 
-The hand-back must make the host see a real detach and a new attach: 0.1.2
-drops the D+ pull-up (TinyUSB `tud_disconnect` + pull overrides) for 500 ms,
-re-routes the PHY, then returns the USJ pull-up registers to their reset
-state (`DP_PULLUP` = 1, no override) so the USJ attaches.
+The hand-back makes the host see a real detach and a new attach. It drops the
+D+ pull-up (TinyUSB `tud_disconnect` + pull overrides) for 500 ms, re-routes
+the PHY, then puts the USJ pull-up registers back to their reset state
+(`DP_PULLUP` = 1, no override).
 
 ## Status
 
@@ -270,12 +282,17 @@ state (`DP_PULLUP` = 1, no override) so the USJ attaches.
 - 0.1.1 (`bd5ac931…`) ran on hardware: three full H2 reads (two of them
   through 0.1.1), identical SHA-256, 8.4 MB bridged with 0 bytes dropped
   despite 10 802 SET_LINE_CODING requests.
-- Its `s3 download` now detaches (macOS logs "hardware connection lost"),
-  but the USJ never re-attached: 0.1.1 left the USJ `DP_PULLUP` bit at 0
-  (reset value 1) and the OTG pull override on. **0.1.2** (`4ad7b963…`)
-  restores both; built, not yet flashed. The S3 is meanwhile in ROM download
-  mode with no D+ pull-up, invisible to the host: S3 BOOT + RESET (ROM
-  download, hwlab can flash 0.1.2), then RESET alone to boot it.
+- 0.1.1's hand-back detached but the USJ never re-attached: it left the USJ
+  `DP_PULLUP` bit at 0 (reset value 1). Fixed in 0.1.2, verified: the USJ is
+  back within about 1 s.
+- 0.1.2's `s3 download` left `FORCE_DOWNLOAD_BOOT` set (see "Flashing the
+  S3"). In **0.1.3** (`b3406de0…`, current on the board) `s3 download` is a
+  plain hand-back. Verified without buttons: hand-back → hwlab backup and
+  program in app mode → RTS reset → bridge → hand-back → RTS reset → bridge;
+  `esptool flash-id` on the H2 afterwards.
+- Buttons are only needed for a stuck boot strap (after BOOT + RESET: plain
+  RESET), or if the bridge firmware itself no longer runs (BOOT + RESET for
+  ROM download).
 
 ## License
 
