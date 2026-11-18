@@ -13,7 +13,7 @@ interface will be a WebSocket JSON API.
 
 | Phase | Content | Status |
 |---|---|---|
-| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | bridge works (esptool `flash-id`, H2 backup read, spinel round trip); 0.1.1 fixes found on hardware wait to be flashed (see Status) |
+| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | bridge works (esptool `flash-id`, H2 backup read, spinel round trip); 0.1.1 programmed into ota_0 and verified, waiting for an S3 RESET press to boot (see Status) |
 | **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, provisioning and update through the H2 ROM loader (EN/BOOT driven by the S3), two NCP images kept on the S3 (known-good + candidate) with rollback | planned |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
@@ -58,13 +58,38 @@ board schematic v1.3 (`esp_thread_br_zigbee_gw_schematics_v1.3.pdf`,
 
 Measured on the hwlab board (early sample):
 
-- S3 flash: **4 MB** (Zbit 5e4016), not 8 MB — Espressif notes 4 MB "in some
-  early samples". PSRAM not yet checked.
+- S3 flash: **4 MB** (Zbit 5e4016, SFDP agrees), not 8 MB — Espressif's
+  ordering table notes 4 MB "in some early samples"; retail boards have 8 MB.
+  The stock image is laid out for 4 MB (ota_0/ota_1 1.6 MB each, `rcp_fw`
+  500 KB). The hub must therefore support both sizes (see "S3 flash budget").
+  PSRAM not yet checked.
 - H2: ESP32-H2 **rev v0.1**, flash **4 MB** (GigaDevice c84016). This answers
   the spec's open 2 MB/4 MB question for this board; the NCP still detects
   the size at runtime (spec decision N4).
 - Stock firmware: `esp_ot_br` in S3 ota_0; `esp_ot_rcp` (OpenThread RCP,
   built for 2 MB) on the H2 and a copy in the S3 `rcp_fw` partition.
+
+### S3 flash budget
+
+ZRHP spec 12.4 proposes, for 8 MB: hub app ×2 at 2.5 MiB, NCP images ×2 at
+1 MiB, host store journal 128 KiB, hub config 64 KiB (≈ 7.3 MiB with the
+128 KiB system area). That does not fit this board's 4 MB. Plan: detect the
+S3 flash size like the NCP does (decision N4) and ship two partition tables.
+
+| Partition | 8 MB | 4 MB |
+|---|---|---|
+| bootloader, partition table, nvs, otadata, phy | 128 KiB | 128 KiB |
+| hub app ×2 (OTA) | 2.5 MiB each | 1.25 MiB each |
+| NCP images (known-good + candidate) | 2 × 1 MiB, raw | one 1152 KiB partition, both images deflate-compressed |
+| ZRHP host store journal | 128 KiB | 128 KiB |
+| hub config | 64 KiB | 64 KiB |
+
+On 4 MB the NCP images are stored compressed, which the H2 ROM loader
+accepts directly (`FLASH_DEFL_*`, MD5-checked on the H2), so the ROM path
+needs no decompression on the S3. With about 50–60 % compression that holds
+two images of up to ~1 MB raw each; the hub refuses a candidate that does
+not fit. The hub app has to stay within 1.25 MiB on 4 MB boards; the stock
+`esp_ot_br` (Wi-Fi + OpenThread + web server) already fits in 1.6 MB.
 
 ## Phase 0: `tbr-bridge`
 
@@ -167,6 +192,13 @@ new image with the USJ's hardware reset, through hwlab's `uart` plugin (MCP):
 rts=false`, then `device_invoke uart SerialTransport.set_lines {dtr:false,
 rts:true}`; the S3 resets and the USJ port disappears as the bridge comes up.
 
+This works only if the S3 straps were last latched for SPI boot. A USJ chip
+reset (`rst:0x15 USB_UART_CHIP_RESET`) does not re-latch the boot straps:
+after the S3 was put into ROM download mode with BOOT + RESET, every RTS reset
+comes back in download mode (`boot:0x23`, `GPIO_STRAP` = 0x23 while GPIO0
+reads high). Press S3 RESET once without BOOT (or power cycle). hwlab refuses
+the RTC-watchdog SoC reset on the S3 that would re-latch them.
+
 ### Recovery (getting hwlab back to the S3)
 
 The PHY routing bits live in RTC_CNTL and survive software and panic resets,
@@ -189,14 +221,18 @@ the PHY to the USJ.
 - Verified on hardware with 0.1.0: enumeration, console, H2 boot log at
   115 200, spinel round trip with the stock RCP at 460 800, `esptool
   flash-id` through the auto-reset, a full 4 MB H2 `read-flash`.
-- Found on hardware, fixed in 0.1.1, **not yet flashed**:
+- Found on hardware with 0.1.0, fixed in 0.1.1:
   1. pyserial re-sends SET_LINE_CODING on every timeout change; 0.1.0
      re-programmed the UART each time (6 269 times during two reads), which
      broke a second 4 MB read. 0.1.1 applies line coding only on change.
   2. 0.1.0's `s3 download` switched the PHY without a detach: the host kept
-     the stale OTG device (transaction errors) and never enumerated the USJ.
-     The board needs a USB re-enumeration (replug USB2, or S3 BOOT+RESET for
-     ROM download) before hwlab can reach the S3 again.
+     the stale OTG device (transaction errors) and never enumerated the USJ;
+     recovering needed S3 BOOT + RESET by hand. 0.1.1 detaches first.
+- 0.1.1 (`bd5ac931…`) is programmed into ota_0 through hwlab and read back
+  equal. It has not booted yet: after BOOT + RESET, USJ resets keep the
+  download strap (see "Flashing the S3"); one S3 RESET press boots it. Then:
+  verify the 0.1.1 `s3 download` path with hwlab, and repeat the H2 backup
+  (two reads).
 
 ## License
 
