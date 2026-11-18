@@ -1,0 +1,17 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+# Pinned so local and CI builds use the same ESP-IDF.
+ESP_IDF_VERSION = "v5.5.1"
+# The workspace root has no [package]; tell esp-idf-sys whose metadata
+# (sdkconfig.defaults, esp_tinyusb component) to use.
+ESP_IDF_SYS_ROOT_CRATE = "tbr-bridge"

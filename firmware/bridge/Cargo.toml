@@ -1,0 +1,29 @@
+[package]
+name = "tbr-bridge"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Phase 0: ESP32-S3 USB CDC-ACM <-> ESP32-H2 UART bridge with esptool auto-reset (Espressif Thread BR board)"
+publish = false
+
+[[bin]]
+name = "tbr-bridge"
+harness = false
+test = false
+
+[dependencies]
+esp-idf-svc = "0.53"
+hub-core = { workspace = true }
+log = "0.4"
+
+[build-dependencies]
+embuild = "0.33"
+
+[package.metadata.esp-idf-sys]
+esp_idf_sdkconfig_defaults = ["firmware/bridge/sdkconfig.defaults"]
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_tinyusb", version = "1.7.6" }
+bindings_header = "src/bindings.h"

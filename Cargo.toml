@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/hub-core", "firmware/bridge"]
+# Host-side `cargo test` at the root only builds the portable crates; the
+# firmware is built from `firmware/bridge` (Xtensa toolchain, see README).
+default-members = ["crates/hub-core"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/faronov/zigbee-rs-hub"
+rust-version = "1.90"
+
+[workspace.dependencies]
+hub-core = { path = "crates/hub-core" }
+# ZRHP v1 protocol crate from zigbee-rs (ZRHP v1 spec + crate merge, master c0c7d97).
+zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "c0c7d97589d7ecace11039e6464aff243a68ffb5", default-features = false }
+
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+debug = true
+
+[profile.dev]
+opt-level = "z"
+debug = true

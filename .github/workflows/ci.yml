@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: hub-core (host tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p hub-core
+
+  bridge:
+    name: tbr-bridge firmware (ESP32-S3, esp-idf-svc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+          # Same Xtensa Rust as the local builds (last release with an x86_64 macOS host build).
+          version: "1.90.0.0"
+      - name: Cache ESP-IDF and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .embuild
+          key: bridge-${{ runner.os }}-idf-v5.5.1-${{ hashFiles('Cargo.lock', 'components_esp32s3.lock') }}
+          restore-keys: bridge-${{ runner.os }}-idf-v5.5.1-
+      - name: Build
+        working-directory: firmware/bridge
+        run: cargo build --release
+      - name: App image (ota_0 of the stock Thread BR layout)
+        run: |
+          pip install --quiet "esptool>=5,<6"
+          tools/make-app-image.sh release target/tbr-bridge-app.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tbr-bridge
+          path: |
+            target/tbr-bridge-app.bin
+            target/xtensa-esp32s3-espidf/release/tbr-bridge
