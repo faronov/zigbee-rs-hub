@@ -19,51 +19,52 @@ interface will be a WebSocket JSON API.
 
 ## Device support
 
-Спецификация (черновик, только дизайн): [`docs/device-support.md`](docs/device-support.md),
-примеры определений: [`definitions/examples/`](definitions/examples/),
-инструменты замера: [`tools/herdsman-coverage/`](tools/herdsman-coverage/),
-прототип компилятора: [`tools/zdefc-proto/`](tools/zdefc-proto/).
+Specification (draft, design only): [`docs/device-support.md`](docs/device-support.md),
+example definitions: [`definitions/examples/`](definitions/examples/),
+measurement tools: [`tools/herdsman-coverage/`](tools/herdsman-coverage/),
+compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 
-- **Три уровня без перепрошивки хаба.** (a) Generic ZCL: после интервью хаб
-  сам создаёт сущности из стандартных кластеров (On/Off, Level, Color,
-  датчики, IAS, метеринг, батарея, термостат, шторы, замки…) и настраивает
-  binding/reporting, как ZHA. (b) Декларативные определения (данные, не код):
-  match по производителю/модели/отпечатку (в т.ч. по маске), mfr-атрибуты,
-  Tuya EF00 DP, команды/события, маленький язык выражений, компилируемый в
-  проверяемый байткод без циклов. (c) YAML → детерминированный CBOR с хешем;
-  YAML компилируется только на клиенте (CLI и WASM в UI), хаб принимает CBOR;
-  генератор из zigbee-herdsman-converters с отчётом о покрытии.
-- **Приоритет слоёв:** пользовательское определение > самоописание устройства
-  > каталог > generic; каталог может понизить самоописание для заведомо
-  кривой прошивки.
-- **Каталог:** отдельный репозиторий `faronov/zigbee-rs-definitions`, релизы
-  GitHub (манифест, 256 шардов, банки для 4 и 8 МБ), подпись Ed25519 ключом
-  из секретов GitHub Actions. В банк 4 МБ попадают только полностью
-  переведённые определения, по популярности (число упоминаний модели в
-  issues Z2M/ZHA, `tools/herdsman-coverage/popularity.py`); на 4 МБ ещё
-  64 КиБ под пользовательские и скачанные определения, на 8 МБ — банки
-  2 × 576 КиБ и 128 КиБ локальных.
-- **zigbee-rs = manufacturer code 0x6D6B** (регистрация в CSA не планируется,
-  риск коллизии описан): кластер
-  самоописания Device Schema 0xFC6B, настройки 0xFC6C. Схема отдаётся кусками
-  по 48 байт через обычный Read Attributes и генерируется при сборке из
-  `#[derive(ZclSettings)]`.
-- **Green Power:** синк на NCP (`NCP_SINK`, уровень 0x00 с предупреждением в UI
-  для незащищённых GPD), хаб разбирает `EVT_GP_*`: идентификация по
-  SrcID/DeviceID/Manufacturer+Model ID, generic GP-уровень, GP-определения
-  (FlowerX GP, BGT1 GP, GP-датчик и выключатель zigbee-rs), таблица Model ID
-  под 0x6D6B; каждый отчёт обновляет last_seen и состояние. Трансляция на NCP —
-  только как будущий локальный fallback.
-- **Модель сущностей 1:1 с Home Assistant** (платформы, device/state class,
-  единицы, config/diagnostic), чтобы будущая HA-интеграция была тонким мостом.
-- **Измерено** на zigbee-herdsman-converters 26.130.0 (4 664 определения):
-  полностью декларативны 55,1 % (generic 41,7 % + Tuya 13,4 %), ещё 26,1 %
-  требуют вендорских шаблонов (порядок: Hue light — один закрывает 583, затем
-  Lumi, затем Tuya-специфика), 18,8 % — произвольный JS. Tuya DP-таблицы
-  декларативны на 79 %.
-- **Размеры:** простые определения 120–320 Б CBOR; банк 256 КиБ вмещает
-  ~2 000 сжатых определений (~83 Б в deflate-блоке, итого ~226 КиБ); на 8 МБ
-  банк 576 КиБ вмещает всё переводимое (~365 КиБ).
+- **Three tiers, none of them needs a hub reflash.** (a) Generic ZCL: after the
+  interview the hub creates entities from the standard clusters (On/Off, Level,
+  Color, sensors, IAS, metering, battery, thermostat, covers, locks…) and sets up
+  binding/reporting, like ZHA. (b) Declarative definitions (data, not code):
+  match on manufacturer/model/fingerprint (masks included), manufacturer
+  attributes, Tuya EF00 datapoints, commands/events, and a small expression
+  language compiled to verifiable loop-free bytecode. (c) YAML → deterministic,
+  hashed CBOR; YAML is compiled on the client only (CLI and WASM in the UI), the
+  hub accepts CBOR; a generator from zigbee-herdsman-converters reports its
+  coverage.
+- **Layer precedence:** user definition > device self-description > catalog >
+  generic; the catalog may demote the self-description of a known-broken
+  firmware.
+- **Catalog:** separate repository `faronov/zigbee-rs-definitions`, GitHub
+  releases (manifest, 256 shards, banks for 4 MB and 8 MB), Ed25519 signature
+  with a key kept in GitHub Actions secrets. The 4 MB bank holds only fully
+  translated definitions, chosen by popularity (model mentions in Z2M/ZHA
+  issues, `tools/herdsman-coverage/popularity.py`); 4 MB boards also get
+  64 KiB for user and downloaded definitions, 8 MB boards get 2 × 576 KiB banks
+  and 128 KiB of local definitions.
+- **zigbee-rs uses manufacturer code 0x6D6B** (no CSA registration planned; the
+  collision risk is documented): self-description cluster Device Schema 0xFC6B,
+  settings 0xFC6C. The schema is served in 48-byte chunks through plain Read
+  Attributes and generated at build time from `#[derive(ZclSettings)]`.
+- **Green Power:** the sink runs on the NCP (`NCP_SINK`, security level 0x00
+  with a UI warning for unsecured GPDs); the hub parses `EVT_GP_*`:
+  identification by SrcID/DeviceID/Manufacturer+Model ID, a generic GP tier,
+  GP definitions (FlowerX GP, BGT1 GP, the zigbee-rs GP sensor and switch), a
+  Model ID allocation table under 0x6D6B; every report refreshes last_seen and
+  state. Translation on the NCP is only a possible future local fallback.
+- **Entity model maps 1:1 onto Home Assistant** (platforms, device/state class,
+  units, config/diagnostic), so a future HA integration is a thin bridge.
+- **Measured** on zigbee-herdsman-converters 26.130.0 (4,664 definitions):
+  55.1 % fully declarative (generic 41.7 % + Tuya 13.4 %), another 26.1 % need
+  vendor templates (order: Hue light — one template covers 583 —, then Lumi,
+  then Tuya specifics), 18.8 % are arbitrary JS. Tuya DP tables are 79 %
+  declarative.
+- **Sizes:** simple definitions are 120–320 B of CBOR; a 256 KiB bank holds
+  ~2,000 compressed definitions (~83 B per definition in a deflate block,
+  ~226 KiB total); on 8 MB a 576 KiB bank holds everything translatable
+  (~365 KiB).
 
 ## Layout
 
