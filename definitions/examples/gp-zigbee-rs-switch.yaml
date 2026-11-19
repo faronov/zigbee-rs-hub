@@ -1,0 +1,30 @@
+# zigbee-rs Green Power switch (EFR32MG22, bin `efr32mg22-gpd-switch`).
+#
+# DeviceID 0x02 (On/Off switch), manufacturer ID 0x6D6B, model ID 0xF400
+# (allocation table in spec 13.3), commands Off 0x20, On 0x21, Toggle 0x22,
+# security level 3. The generic GP tier already turns these commands into an
+# "action" event entity; the definition fixes the event types from
+# commissioning on (HA needs the full list when the entity is created), sets
+# the HA device class `button`, and marks the device as never unavailable.
+zdef: 1
+id: zigbee-rs/gpd-switch-mg22
+revision: 1
+vendor: zigbee-rs
+model: GP switch (EFR32MG22)
+match:
+  - gp: {device_id: 0x02, manufacturer_id: 0x6D6B, model_id: 0xF400}
+device:
+  power: battery             # coin cell; switches are not tracked for availability
+gp:
+  security_min: 3
+generic:
+  exclude: [action]
+entities:
+  - key: action
+    platform: event
+    device_class: button
+    event_types: ["off", "on", toggle]
+    triggers:
+      - {gp_cmd: 0x20, event: '"off"'}
+      - {gp_cmd: 0x21, event: '"on"'}
+      - {gp_cmd: 0x22, event: '"toggle"'}

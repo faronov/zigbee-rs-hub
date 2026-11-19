@@ -20,36 +20,47 @@ interface will be a WebSocket JSON API.
 ## Device support
 
 Спецификация (черновик, только дизайн): [`docs/device-support.md`](docs/device-support.md),
-примеры определений: [`definitions/examples/`](definitions/examples/).
+примеры определений: [`definitions/examples/`](definitions/examples/),
+инструменты замера: [`tools/herdsman-coverage/`](tools/herdsman-coverage/),
+прототип компилятора: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 
 - **Три уровня без перепрошивки хаба.** (a) Generic ZCL: после интервью хаб
   сам создаёт сущности из стандартных кластеров (On/Off, Level, Color,
   датчики, IAS, метеринг, батарея, термостат, шторы, замки…) и настраивает
   binding/reporting, как ZHA. (b) Декларативные определения (данные, не код):
-  match по производителю/модели/отпечатку, mfr-атрибуты, Tuya EF00 DP,
-  команды/события, маленький язык выражений, компилируемый в проверяемый
-  байткод без циклов. (c) YAML → детерминированный CBOR с хешем; генератор из
-  zigbee-herdsman-converters с отчётом о покрытии.
+  match по производителю/модели/отпечатку (в т.ч. по маске), mfr-атрибуты,
+  Tuya EF00 DP, команды/события, маленький язык выражений, компилируемый в
+  проверяемый байткод без циклов. (c) YAML → детерминированный CBOR с хешем;
+  YAML компилируется только на клиенте (CLI и WASM в UI), хаб принимает CBOR;
+  генератор из zigbee-herdsman-converters с отчётом о покрытии.
 - **Приоритет слоёв:** пользовательское определение > самоописание устройства
-  > каталог (банк или скачанное по требованию, подписанный индекс) > generic.
-- **Самоописание zigbee-rs:** mfr-кластер Device Schema (0xFD5D, ID и mfr code
-  пока плейсхолдеры) отдаёт схему настроек кусками по 48 байт через обычный
-  Read Attributes; хаб кеширует её по хешу. На стороне zigbee-rs схема
-  генерируется на этапе сборки из `#[derive(ZclSettings)]`.
-- **Green Power:** синк на NCP (`NCP_SINK`, уровень безопасности 0x00), хаб
-  разбирает `EVT_GP_*`: идентификация по SrcID/DeviceID/Manufacturer+Model ID,
-  generic GP-уровень (кнопки → события, отчёты 0xA0–0xA3 → сенсоры по правилам
-  ZCL), декларативные GP-определения (в т.ч. 0xB0–0xBF), окно комиссионинга
-  через WebSocket API. Трансляция на NCP — только как будущий локальный fallback.
+  > каталог > generic; каталог может понизить самоописание для заведомо
+  кривой прошивки.
+- **Каталог:** отдельный репозиторий `faronov/zigbee-rs-definitions`, релизы
+  GitHub (манифест, 256 шардов, банки для 4 и 8 МБ), подпись Ed25519 ключом
+  из секретов GitHub Actions. В банк 4 МБ попадают только полностью
+  переведённые определения, по популярности; на 4 МБ ещё 64 КиБ под
+  пользовательские и скачанные определения.
+- **zigbee-rs = manufacturer code 0x6D6B** (не зарегистрирован в CSA): кластер
+  самоописания Device Schema 0xFC6B, настройки 0xFC6C. Схема отдаётся кусками
+  по 48 байт через обычный Read Attributes и генерируется при сборке из
+  `#[derive(ZclSettings)]`.
+- **Green Power:** синк на NCP (`NCP_SINK`, уровень 0x00 с предупреждением в UI
+  для незащищённых GPD), хаб разбирает `EVT_GP_*`: идентификация по
+  SrcID/DeviceID/Manufacturer+Model ID, generic GP-уровень, GP-определения
+  (FlowerX GP, BGT1 GP, GP-датчик и выключатель zigbee-rs), таблица Model ID
+  под 0x6D6B; каждый отчёт обновляет last_seen и состояние. Трансляция на NCP —
+  только как будущий локальный fallback.
 - **Модель сущностей 1:1 с Home Assistant** (платформы, device/state class,
   единицы, config/diagnostic), чтобы будущая HA-интеграция была тонким мостом.
 - **Измерено** на zigbee-herdsman-converters 26.130.0 (4 664 определения):
   полностью декларативны 55,1 % (generic 41,7 % + Tuya 13,4 %), ещё 26,1 %
-  требуют вендорских шаблонов (Hue light один закрывает 583), 18,8 % —
-  произвольный JS. Tuya DP-таблицы декларативны на 79 %.
-- **Размеры:** простые определения 120–310 Б CBOR; банк 256 КиБ вмещает
-  ~2 000 сжатых определений (среднее ~88 Б в deflate-блоке); на 8 МБ банк
-  576 КиБ вмещает всё переводимое (~376 КиБ).
+  требуют вендорских шаблонов (порядок: Hue light — один закрывает 583, затем
+  Lumi, затем Tuya-специфика), 18,8 % — произвольный JS. Tuya DP-таблицы
+  декларативны на 79 %.
+- **Размеры:** простые определения 120–320 Б CBOR; банк 256 КиБ вмещает
+  ~2 000 сжатых определений (~83 Б в deflate-блоке, итого ~226 КиБ); на 8 МБ
+  банк 576 КиБ вмещает всё переводимое (~365 КиБ).
 
 ## Layout
 
@@ -60,6 +71,8 @@ interface will be a WebSocket JSON API.
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
 | `definitions/examples/` | Example device definitions (YAML source form) |
+| `tools/herdsman-coverage/` | Coverage and size measurement of zigbee-herdsman-converters definitions (Node + Python) |
+| `tools/zdefc-proto/` | Python prototype of the definition compiler (YAML → CBOR, expression bytecode) |
 
 ## Framework choice: esp-idf-svc (`std`), not esp-hal
 

@@ -1,0 +1,55 @@
+# EfektaLab BGT1 GP: Green Power temperature sensor.
+#
+# Facts from the user's ZHA quirk (2026-11-19): DeviceID 0x30 (Temperature
+# Sensor), manufacturer ID 0x6D6B, model ID 0xF200 | bit 1 (DS18B20 probe
+# fitted), security level 3, Multi-Cluster Reporting (0xA2) with temperature
+# 0x0402/0x0000, battery 0x0001/0x0021 and voltage 0x0001/0x0020.
+#
+# Requirement from the quirk: every report refreshes last_seen and the entity
+# states even when the values did not change, so a sensor in a stable room
+# never looks stale. The hub does this for every device (spec 4.5, 13.6);
+# nothing in the definition is needed for it.
+#
+# Bit 1 only changes where the temperature comes from (internal sensor or
+# the DS18B20 probe); the entity set is the same, so one masked clause.
+zdef: 1
+id: efektalab/bgt1-gp
+revision: 1
+vendor: EfektaLab
+model: BGT1 GP
+description: Green Power temperature sensor (optional DS18B20 probe)
+match:
+  - gp: {device_id: 0x30, manufacturer_id: 0x6D6B, model_id: {value: 0xF200, mask: 0xFF00}}
+device:
+  power: battery
+gp:
+  security_min: 3
+generic:
+  disable: true
+entities:
+  - key: temperature
+    platform: sensor
+    device_class: temperature
+    unit: °C
+    state_class: measurement
+    gp: {report: {cluster: 0x0402, attr: 0x0000, type: i16}}
+    invalid: -32768          # -0x8000
+    div: 100
+  - key: battery
+    platform: sensor
+    device_class: battery
+    unit: "%"
+    state_class: measurement
+    category: diagnostic
+    gp: {report: {cluster: 0x0001, attr: 0x0021, type: u8}}
+    invalid: 0xFF
+    div: 2
+  - key: battery_voltage
+    platform: sensor
+    device_class: voltage
+    unit: V
+    state_class: measurement
+    category: diagnostic
+    gp: {report: {cluster: 0x0001, attr: 0x0020, type: u8}}
+    invalid: 0xFF
+    div: 10

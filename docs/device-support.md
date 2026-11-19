@@ -1,6 +1,7 @@
 # Device support: generic ZCL, declarative definitions, self-description, Green Power
 
-Design specification, draft of 2026-11-19 (branch `device-model-spec`).
+Design specification, draft of 2026-11-19, updated the same day with the
+user's second batch of decisions (D8–D16) (branch `device-model-spec`).
 Documentation only; nothing here is implemented yet. Code fragments are
 illustrations, not APIs.
 
@@ -66,6 +67,21 @@ User decisions (2026-11-19) this spec implements:
 | D5 | The entity model maps 1:1 onto Home Assistant platforms, device classes, units, state classes and entity categories, so a later HA custom integration over the WebSocket API is a thin bridge. |
 | D6 | Green Power devices (switches and sensors) are first-class: identity, generic GP tier, declarative GP definitions, commissioning through the WebSocket API. The NCP runs the GP sink (`NCP_SINK`); the hub handles the GPD commands. |
 | D7 | Budgets: ~150–300 B per simple definition; ~1 600–2 000 compressed definitions per 256 KiB bank; definitions loaded lazily per device; the index in PSRAM. |
+
+User decisions (2026-11-19, second batch), answering the first draft's open
+questions:
+
+| # | Decision | Where |
+|---|---|---|
+| D8 | **Manufacturer code 0x6D6B for everything zigbee-rs**: Zigbee devices (Node descriptor, manufacturer-specific frames), Green Power devices (Manufacturer ID), the self-description and settings clusters. It replaces the 0x1234 placeholder of the zigbee-rs products. 0x6D6B is **not registered with the CSA** (it is not in zigbee-herdsman's `ManufacturerCode` table, checked 2026-11-19); it is already used as GP Manufacturer ID by DIYRuZ FlowerX GP and EfektaLab BGT1 GP. Caveat: the CSA could assign 0x6D6B to another member at any time; frames with this code would then be ambiguous for stacks that key behaviour on the code. Registering a code before shipping products in volume stays advisable; a later move is one constant plus a catalog entry per old firmware. Cluster IDs: Device Schema **0xFC6B**, zigbee-rs Settings **0xFC6C** (12.2). | 12, 13.3 |
+| D9 | **Definitions repository `faronov/zigbee-rs-definitions`**, separate from the hub. The catalog (bank files, manifest, index shards) is published as **GitHub Releases** assets. The Ed25519 signing key lives in that repository's **GitHub Actions secrets**; the user owns it. | 9.3, 9.4 |
+| D10 | **64 KiB local-definition area** on 4 MB boards (user uploads, fetched definitions, self-description schemas); free space in `hubdata` becomes 160 KiB. | 9.2, 16.1 |
+| D11 | **Self-description above the catalog**; a catalog definition can still demote a known-buggy firmware (`self_description: under` / `ignore`). | 3.3, 12.5 |
+| D12 | **4 MB bank curation by popularity, fully translated definitions only** (no partial definitions in the bank). | 17.2 |
+| D13 | **Vendor template order: Hue light, then Lumi, then Tuya specifics** (schedule codecs, time-sync variants). | 6.6, 17.4 |
+| D14 | **GP sink security level stays 0x00**, with a UI warning on every GPD that is commissioned unsecured (or below its definition's `security_min`). | 13.1, 13.7 |
+| D15 | **YAML is compiled client-side** (`zdefc` CLI and its WebAssembly build in the UI); **the hub accepts CBOR only**. | 14.4 |
+| D16 | GP facts from the user's ZHA quirks become definitions (FlowerX GP, BGT1 GP, zigbee-rs GP sensor and switch), and the **GP model-ID space under 0x6D6B** is tracked in an allocation table. Every accepted GP report refreshes `last_seen` and the entity states even if the values are unchanged. | 13.3, 13.6 |
 
 Design goals derived from these:
 
@@ -216,7 +232,7 @@ Precedence rules:
   Ties: the higher explicit `priority` field, then the user source over the
   catalog, then the newer `revision`. A definition may be **pinned** per device
   (layer 5) to override scoring.
-- **Self-description over catalog.** A device's own schema is generated from
+- **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
   firmware is known to describe itself wrongly: `self_description: ignore`
@@ -273,6 +289,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `via` | the hub | the hub | `via_device` |
 | `power` | mains / battery / energy_harvesting | battery / energy_harvesting | (diagnostic) |
 | `availability`, `last_seen`, `lqi`, `rssi` | 4.6 | 4.6 | device availability |
+| `warnings` | e.g. configure failures | `gp_unsecured` (13.1) | repair issues (15) |
 | `definition` | resolved layer sources and revisions | same | diagnostics only |
 
 ### 4.2 Entity record
@@ -370,7 +387,11 @@ State message (WebSocket, 14.3):
   `null` for unknown (an invalid raw value, a failed expression).
 - `last_reported` changes on every report; `last_changed` only when the value
   changes (HA semantics). The hub never suppresses a report with an
-  unchanged value, because HA statistics and "last seen" depend on it.
+  unchanged value, because HA statistics and "last seen" depend on it: every
+  received report (ZCL attribute report, Tuya DP report, GP attribute report)
+  produces an `entity_state` message for each entity it carries, and updates
+  the device's `last_seen` (D16; required for GP sensors such as the BGT1 GP,
+  which report the same temperature for hours).
 - Commands are HA service names with HA's parameter names
   (`{"uid": …, "command": "set_temperature", "params": {"temperature":
   21.5}}`). The hub validates them against the capabilities, encodes them
@@ -382,7 +403,8 @@ State message (WebSocket, 14.3):
 |---|---|
 | Mains Zigbee (router, RxOnWhenIdle) | Unavailable after 10 min without any frame **and** a failed active check (read Basic 0x0000 ZCLVersion, 3 tries over 30 s). Checks start after 10 min of silence. |
 | Battery Zigbee | Unavailable after `max(2.5 × longest configured max reporting interval, 2.5 × check-in interval, 25 h)` without any frame. No active checks. |
-| GP with a known report interval | Unavailable after 3 × `gp.report_interval_s` without an accepted GPDF (13.6). |
+| GP sensor with a known report interval | Unavailable after 3 × `gp.report_interval_s` without an accepted GPDF (13.6). |
+| GP sensor without a known interval | Unavailable after 25 h without an accepted GPDF. |
 | GP switch or energy harvesting | Never unavailable. `last_seen` only. |
 
 `available` is per device; HA marks all its entities. `last_seen`, `lqi` and
@@ -551,7 +573,9 @@ generic:
 ### 6.1 File and top-level structure
 
 One YAML document per definition (YAML 1.2 core schema; `on`, `off`, `yes`,
-`no` must be quoted where they are values, and are never keys). Examples are
+`no` must be quoted where they are values, and are never keys; the core
+schema has no signed hexadecimal, so negative values are written in decimal,
+e.g. `invalid: -32768` for 0x8000 of an int16). Examples are
 in `definitions/examples/`.
 
 | Key | Type | Required | Meaning |
@@ -722,7 +746,7 @@ Button with a write (Efekta) or a command (zigbee-rs `reset_settings`):
 
 ```yaml
 press: {write: {cluster: 0x040D, attr: 0x0202, type: bool, value: true}}
-press: {cmd: {cluster: 0xFD5E, id: 0x00, mfr: 0x1234}, payload: 'pack("u8", 1)'}
+press: {cmd: {cluster: 0xFC6C, id: 0x00, mfr: 0x6D6B}, payload: 'pack("u8", 1)'}
 ```
 
 ### 6.8 Configure ops
@@ -898,11 +922,12 @@ except bounded `SmallStr`/`pack` buffers.
 | `x == 1` | `01 02 01 30` | 4 |
 | `x > 130536 ? 0 : x - 65536` (Aqara illuminance) | `01 03 d0 f7 0f 34 3d 04 02 00 3c 06 01 03 80 80 08 11` | 18 |
 | `(state.detection_interval ?? 30) + 2` | `0a 00 3e 03 3f 02 1e 02 02 10` | 10 |
-| `bit(payload[0], 0) && last != "press"` | `0c 02 00 40 02 00 70 00 02 0d 04 01 31 37` | 14 |
+| `bit(payload[0], 0) && last != "press"` | `0c 02 00 40 02 00 70 00 02 0d 04 00 31 37` | 14 |
+| `x == 0 ? 0 : round(pow10((x - 1) / 10000))` (FlowerX illuminance) | `01 02 00 30 3d 04 02 00 3c 0f 01 02 01 11 03 a0 9c 01 13 70 20 01 70 1b 01` | 25 |
 | `u16le(payload, 2)` | `0c 02 02 70 07 02` | 6 |
 
-(Measured with the prototype compiler, appendix 20. Constant indices depend
-on the definition.)
+(Output of `tools/zdefc-proto/zdefc.py expr`, appendix 20. Constant indices
+depend on the definition's constant pool.)
 
 ---
 
@@ -973,7 +998,8 @@ manufacturer_id 22, model_id 23, src_id 24, mask 25, gp 26, bind 27, read 28,
 power 29, sleepy 30, battery 31, voltage_to_percent 32, checkin_s 33,
 exclude 34, patch 35, disable 36, only_endpoints 37, time_sync 38,
 magic_packet 39, query 40, security_min 41, report_interval_s 42, vendor 43`,
-and the climate/light/cover/lock/fan part names from 44 on. The authoritative
+then codec parameter names and the climate/light/cover/lock/fan part names
+from 44 on. The authoritative
 tables live in the definitions repository as `schema/zdef-v1.cddl` (CDDL,
 RFC 8610) and are generated into the hub and the compiler; this list is
 illustrative of their size.
@@ -1088,7 +1114,7 @@ Blocks:        raw deflate, ≤ 4 KiB uncompressed each, holding whole definitio
 - definitions fetched on demand (9.3) for paired devices;
 - self-description schemas (12), by schema hash.
 
-Budget: 64 KiB on 4 MB (16). A fetched definition or schema not referenced
+Budget: 64 KiB on 4 MB (decided, D10; 16.1), 128 KiB on 8 MB. A fetched definition or schema not referenced
 by any paired device is evicted first (LRU). User definitions are never
 evicted; an upload that does not fit fails with `NO_SPACE`.
 
@@ -1098,20 +1124,39 @@ When a device resolves to "generic only" and the hub has Internet access
 (opt-in setting, default on), the hub asks the definitions repository:
 
 ```text
-GET {base}/v1/manifest.cose                      signed; lists shard hashes
-GET {base}/v1/index/{hh}.cbor                    shard for key-hash prefix hh (256 shards)
-GET {base}/v1/defs/{sha256}.cbor                 the standalone definition
+{base} = https://github.com/faronov/zigbee-rs-definitions/releases/latest/download
+
+GET {base}/manifest.cose          signed; catalog version, shard and bank hashes
+GET {base}/shard-{hh}.cbor        everything for key-hash prefix hh (256 shards)
+GET {base}/bank-4m.zdb            bank for 4 MB hubs (9.1), for catalog OTA
+GET {base}/bank-8m.zdb            bank for 8 MB hubs
 ```
 
-- `{base}` defaults to the GitHub Releases or Pages URL of the definitions
-  repository (open question Q2); HTTPS with the ESP-IDF certificate bundle.
-- `manifest.cose`: COSE_Sign1, Ed25519; payload: catalog version, list of
-  256 shard SHA-256 hashes, minimum hub feature set. The hub keeps the public
-  keys it trusts in firmware (plus user-added keys, 14.4); the manifest's
-  version must not go backwards (anti-rollback, stored in config).
-- Index shards map key hashes to `(content hash, requires)`; definitions are
-  verified by their content hash, so only the manifest needs a signature.
-  The server learns only the shard (1/256 of key space), not the exact model.
+- **Hosting** (D9): every catalog release of `faronov/zigbee-rs-definitions`
+  is a GitHub Release (tag `catalog-YYYY.MM.DD[.n]`). GitHub's
+  `releases/latest/download/<asset>` redirect gives stable URLs; a hub can pin
+  a tag instead. HTTPS with the ESP-IDF certificate bundle (the redirect goes
+  to `objects.githubusercontent.com`).
+- **Shards hold the definitions themselves**, not pointers: a release may
+  carry at most 1 000 assets, so one asset per definition is impossible.
+  `shard-{hh}.cbor` is a CBOR array of `[index key hash, requires, standalone
+  definition]` for all definitions whose index keys fall into prefix `hh`
+  (≈ 20–30 definitions, a few KiB deflated). 256 shards + 2 banks + manifest
+  = 259 assets.
+- `manifest.cose`: COSE_Sign1, Ed25519 (alg −8); payload: catalog version,
+  SHA-256 of every shard and bank, minimum hub feature set. Shards and banks
+  are verified by these hashes and each definition by its content hash, so
+  only the manifest is signed. The manifest's version must not go backwards
+  (anti-rollback, stored in config).
+- **Keys** (D9): the signing key is an Ed25519 private key in the GitHub
+  Actions secrets of `faronov/zigbee-rs-definitions` (`ZDEF_SIGNING_KEY`,
+  owned by the user); the release workflow signs the manifest and the bank
+  headers. The hub firmware carries the public key and one spare slot for a
+  rotation key; a rotation ships the new public key in a hub release first,
+  then switches the secret. Users can add their own keys (14.4) for private
+  catalogs.
+- The server learns only the shard (1/256 of the key space), not the exact
+  model.
 - A fetched definition goes to `defs/local/`, then resolution reruns. Fetches
   are rate-limited (one per device per hour on failure).
 - Without Internet: the UI offers "upload a definition" and "update the
@@ -1121,8 +1166,9 @@ GET {base}/v1/defs/{sha256}.cbor                 the standalone definition
 
 The catalog is versioned and released independently of the hub app:
 
-1. The hub (or the user through the API) downloads `bank-<version>.zdb` (or
-   receives it in chunks over the WebSocket API).
+1. The hub checks `manifest.cose` (daily, or on request), downloads
+   `bank-4m.zdb` / `bank-8m.zdb` of a newer release (9.3), or receives a bank
+   in chunks over the WebSocket API.
 2. It streams it into the inactive bank file, verifies signature and hash,
    decodes every definition, checks that every definition referenced by a
    paired device's resolution still exists or has a successor `id`.
@@ -1279,16 +1325,36 @@ any definition), `triggers` with `cmd` and `press` with `cmd`/`write`. The
 standard clusters need no entries: the generic tier covers them; the schema
 adds what the generic tier cannot know (settings, diagnostics, custom
 commands, overrides of generic choices). Example:
-`zigbee-rs-selfdesc-thermometer.yaml` (6 entities, 393 B CBOR, 288 B
+`zigbee-rs-selfdesc-thermometer.yaml` (6 entities, 393 B CBOR, 286 B
 deflated, i.e. 6 chunks on air).
 
 ### 12.2 Device Schema cluster (ZRDS)
 
 A manufacturer-specific server cluster on the device's first application
-endpoint. Cluster ID **0xFD5D** (placeholder; not used by any manufacturer in
-zigbee-herdsman's cluster table as of zhc 26.134.0), manufacturer code = the
-zigbee-rs code (placeholder 0x1234, open question Q1). All frames carry the
-manufacturer code (manufacturer-specific bit set).
+endpoint: cluster **0xFC6B**, manufacturer code **0x6D6B** (D8). All frames
+carry the manufacturer code (manufacturer-specific bit set).
+
+zigbee-rs cluster IDs under 0x6D6B:
+
+| Cluster | ID | Purpose |
+|---|---|---|
+| Device Schema (ZRDS) | 0xFC6B | this section |
+| zigbee-rs Settings | 0xFC6C | product settings generated by `#[derive(ZclSettings)]` (12.4) |
+| reserved | 0xFC6D–0xFC6F | later zigbee-rs clusters |
+
+Why these IDs:
+
+- they are in the manufacturer-specific range 0xFC00–0xFFFF, where the
+  manufacturer code, not the cluster ID, identifies the meaning;
+- the low byte repeats the code's low byte (0x6**B**), which makes the IDs
+  easy to recognise in captures and keeps the zigbee-rs block contiguous;
+- none of 0xFC6B–0xFC6F is defined for any manufacturer in
+  zigbee-herdsman's cluster table or zigbee-herdsman-converters' custom
+  clusters (zhc 26.134.0), nor in zigpy and zha-device-handlers (GitHub code
+  search, 2026-11-19). Stacks that decode manufacturer-specific clusters by ID
+  alone (as zigbee-herdsman does for registered custom clusters) therefore
+  never mistake these frames for another vendor's, even if the device is
+  later paired to Zigbee2MQTT or ZHA.
 
 | Attribute | ID | Type | Access | Meaning |
 |---|---|---|---|---|
@@ -1312,8 +1378,9 @@ status, type, length) = 51 B. 48 B leaves margin. Maximum blob: 256 × 48 =
 
 ### 12.3 Hub procedure
 
-1. Interview (3.1) sees cluster 0xFD5D in a Simple descriptor and the matching
-   manufacturer code in the Node descriptor.
+1. Interview (3.1) sees cluster 0xFC6B in a Simple descriptor (and usually
+   manufacturer code 0x6D6B in the Node descriptor; the cluster plus a valid
+   SchemaFormat is what counts, because other DIY firmwares may use 0x6D6B too).
 2. Read 0x0000–0x0003. Unknown format version → ignore the schema (use the
    generic and catalog layers only) and report it.
 3. If a schema with that hash is in `defs/local/`, use it.
@@ -1342,7 +1409,7 @@ the schema blob, at compile time.
 ```rust
 // zigbee-zcl (sketch): derive generates the cluster impl and a const schema.
 #[derive(ZclSettings)]
-#[zcl(cluster = 0xFD5E, mfr = 0x1234)]
+#[zcl(cluster = 0xFC6C, mfr = 0x6D6B)]
 pub struct ThermoSettings {
     #[zcl(attr = 0x0000, number, unit = "s", min = 10, max = 3600, step = 10,
           category = "config", default = 300)]
@@ -1357,12 +1424,12 @@ pub struct ThermoSettings {
 
 // Product composition:
 static SCHEMA: zigbee_zcl::selfdesc::Schema = zigbee_zcl::selfdesc::schema! {
-    vendor: "zigbee-rs", model: "zrs-thermo-1", mfr: 0x1234,
+    vendor: "zigbee-rs", model: "zrs-thermo-1", mfr: 0x6D6B,
     settings: ThermoSettings,                          // entities from the derive
     extra: [
-        sensor!(key = "tx_failures", cluster = 0xFD5E, attr = 0x0100, ty = u16,
+        sensor!(key = "tx_failures", cluster = 0xFC6C, attr = 0x0100, ty = u16,
                 state_class = "total_increasing", category = "diagnostic", enabled = false),
-        button!(key = "reset_settings", cmd(cluster = 0xFD5E, id = 0x00)),
+        button!(key = "reset_settings", cmd(cluster = 0xFC6C, id = 0x00)),
     ],
     generic_patch: { temperature: report(30, 600, 10) },
 };
@@ -1371,8 +1438,8 @@ let device = DeviceBuilder::new()
     .manufacturer("zigbee-rs").model("zrs-thermo-1")
     .endpoint(1, profile::HA, device_id::TEMPERATURE_SENSOR, |ep| ep
         .cluster_server(TEMPERATURE).cluster_server(HUMIDITY)
-        .settings::<ThermoSettings>()                   // 0xFD5E
-        .self_description(&SCHEMA))                     // 0xFD5D, serves the chunks
+        .settings::<ThermoSettings>()                   // 0xFC6C
+        .self_description(&SCHEMA))                     // 0xFC6B, serves the chunks
     .build();
 ```
 
@@ -1389,8 +1456,8 @@ let device = DeviceBuilder::new()
 
 ### 12.5 Interaction with tiers a and b
 
-- The schema is layer 3 (3.3): above the generic tier and, by default, above a
-  catalog definition; below user definitions and device overrides.
+- The schema is layer 3 (3.3): above the generic tier and above a catalog
+  definition (D11); below user definitions and device overrides.
 - Generic entities stay unless the schema excludes or patches them.
 - A catalog definition for a zigbee-rs device is only needed to correct a
   firmware (`self_description: ignore` or `under`, matched on `sw_build` or
@@ -1407,8 +1474,13 @@ The NCP runs the zigbee-rs GP combo as the network's only sink in
 `NCP_SINK` mode (ZRHP 7.11): it commissions GPDs (also bidirectionally, as
 TempMaster), verifies security and frame counters, de-duplicates frames from
 several proxies, keeps the Sink Table (16 entries on the H2 NCP) and sends GP
-Pairings. Default `gpsSecurityLevel` is 0x00, so unsecured GPDs (FlowerX GP,
-BGT1 GP) are accepted; anyone in range can spoof them (ZRHP 13).
+Pairings. `gpsSecurityLevel` stays **0x00** (D14), so unsecured GPDs such as
+FlowerX GP are accepted; anyone in range can spoof them (ZRHP 13). The hub
+therefore marks every GPD commissioned at security level 0 (or below its
+definition's `security_min`) with a persistent **"unsecured" warning**: a
+badge in the UI device list, a `security_level` diagnostic sensor, and a
+`warnings: ["gp_unsecured"]` field in the device record (14.2), which a later
+HA integration can surface as a repair issue.
 
 The hub:
 
@@ -1488,7 +1560,7 @@ match:
   - gp: {device_id: 0x07, src_id: [0x01500000, 0x015FFFFF]}          # EnOcean PTM 216Z
   - gp: {device_id: 0x02, src_id: [0x00400000, 0x004FFFFF]}          # Hue Tap
   - gp: {manufacturer_id: 0x6D6B, model_id: 0xF300, device_id: 0x33} # zigbee-rs MG22 sensor
-  - gp: {manufacturer_id: 0x6D6B, model_id: {value: 0xF100, mask: 0xFF00}}  # FlowerX GP family
+  - gp: {device_id: 0x33, manufacturer_id: 0x6D6B, model_id: {value: 0xF100, mask: 0xFF00}}  # FlowerX GP family
 ```
 
 Fields (all optional, AND-ed): `device_id`, `manufacturer_id`, `model_id`
@@ -1506,9 +1578,23 @@ Known identities:
 | Philips Hue Tap | DeviceID 0x02, SrcID 0x00400000–0x004FFFFF | commands 0x22 (button 1), 0x10, 0x11, 0x12 (buttons 2–4); zha-quirks `philips/hue_tap.py` |
 | Friends of Hue switches (EnOcean PTM 215Z based) | DeviceID 0x02, SrcID 0x01700000–0x017FFFFF and 0x01A40000–0x01A4FFFF | Recall/Store scene commands per contact pair; zha-quirks `enocean/ptm215z.py` |
 | EnOcean PTM 216Z | DeviceID 0x07, SrcID 0x01500000–0x015FFFFF | 0x69/0x6A contact bit vector; `gp-enocean-ptm216z.yaml` |
-| DIYRuZ FlowerX GP, EfektaLab BGT1 GP | manufacturer 0x6D6B, model 0xF100 \| bits / 0xF200 \| bits, DeviceID 0x33 or 0x30 | unsecured 0xA2 with ZCL MeasuredValue encodings (GP doc §1); definitions to be written from the user's existing quirks (Q8) |
-| zigbee-rs `efr32mg22-gpd-sensor` | 0x6D6B / 0xF300, DeviceID 0x33, commands [0xA2] | `gp-zigbee-rs-sensor.yaml` |
-| zigbee-rs `efr32mg22-gpd-switch` | 0x6D6B / 0xF400, DeviceID 0x02, commands 0x20–0x22 | generic tier is enough |
+| DIYRuZ FlowerX GP | DeviceID 0x33, 0x6D6B / 0xF100 \| bits (mask 0xFF00) | level 0, 0xA2; soil moisture, temperature, illuminance, battery, voltage; bit 0 BME280 → humidity, pressure; bits 0+1 → soil temperature 0x0402/0x5000; `gp-diyruz-flowerx.yaml` |
+| EfektaLab BGT1 GP | DeviceID 0x30, 0x6D6B / 0xF200 \| bits (mask 0xFF00) | level 3, 0xA2; temperature, battery, voltage; bit 1 DS18B20 probe; `gp-efektalab-bgt1.yaml` |
+| zigbee-rs `efr32mg22-gpd-sensor` | DeviceID 0x33, 0x6D6B / 0xF300 | level 3, 0xA2; temperature, humidity, battery, voltage; `gp-zigbee-rs-sensor.yaml` |
+| zigbee-rs `efr32mg22-gpd-switch` | DeviceID 0x02, 0x6D6B / 0xF400 | level 3; Off/On/Toggle (0x20–0x22) → event entity; `gp-zigbee-rs-switch.yaml` |
+
+GP model-ID allocation under Manufacturer ID 0x6D6B (D16). The ID space is
+shared with the DIY firmwares that already use 0x6D6B; new IDs are allocated
+here (and mirrored in zigbee-rs' GP doc) before a firmware ships:
+
+| Model ID | Owner / device | Low byte |
+|---|---|---|
+| 0xF100–0xF1FF | DIYRuZ FlowerX GP | sensor bits: bit 0 BME280, bit 1 DS18B20 |
+| 0xF200–0xF2FF | EfektaLab BGT1 GP | bit 1 DS18B20 probe |
+| 0xF300 | zigbee-rs GP sensor (`efr32mg22-gpd-sensor`) | — |
+| 0xF400 | zigbee-rs GP switch (`efr32mg22-gpd-switch`) | — |
+| 0xF500–0xFEFF | free; zigbee-rs allocates new GPD models from here (one 0xFn00 block per family when low-byte feature bits are needed) | |
+| 0x0000–0xF0FF, 0xFF00–0xFFFF | unused; avoid (0xFFFF reads as "unknown" in some tools) | |
 
 ### 13.4 Generic GP tier
 
@@ -1543,7 +1629,7 @@ A GP definition uses the same entity model with GP bindings:
 - `gp: {cmd: 0xNN}` binds a GPD command; `payload` is its payload. For
   0xB0–0xBF the payload starts with the Manufacturer ID (u16 LE) as zigpy
   reads it (`GPManufacturerDefinedPayload`), so vendor data starts at offset 2
-  (`gp-th-sensor-mfr.yaml`);
+  (snippet below);
 - event `triggers` use `gp_cmd: 0xNN` (with `when`/`event`/`attrs`);
 - `gp:` device block: `report_interval_s` (availability), `security_min`
   (warn when a GPD commissioned below it), `ignore_commands`;
@@ -1552,16 +1638,51 @@ A GP definition uses the same entity model with GP bindings:
 - `present_if` with `gpd.model_id` bits for families that encode features in
   the model ID.
 
-Examples: `gp-enocean-ptm216z.yaml` (four contact event entities from the
-0x69/0x6A bit vector), `gp-th-sensor-mfr.yaml` (masked model ID, 0xB0 and
-0xA3 decoding), `gp-zigbee-rs-sensor.yaml` (identity and naming only).
+Examples:
+
+- `gp-enocean-ptm216z.yaml`: four contact event entities from the 0x69/0x6A
+  bit vector;
+- `gp-diyruz-flowerx.yaml`: masked model ID, `present_if` on model bits
+  (humidity and pressure only with a BME280, soil temperature 0x0402/0x5000
+  only with BME280 + DS18B20), the illuminance formula as an expression;
+- `gp-efektalab-bgt1.yaml`: masked model ID, level 3, the "refresh on every
+  report" behaviour (13.6);
+- `gp-zigbee-rs-sensor.yaml`, `gp-zigbee-rs-switch.yaml`: the zigbee-rs GPDs.
+
+Manufacturer-specific frames (no example device uses them yet; illustrative):
+
+```yaml
+- key: battery_voltage           # 0xB0: [mfr u16][battery mV u16 LE][flags u8]
+  platform: sensor
+  device_class: voltage
+  unit: mV
+  gp: {cmd: 0xB0}
+  from: u16le(payload, 2)
+- key: sensor_fault
+  platform: binary_sensor
+  device_class: problem
+  gp: {cmd: 0xB0}
+  from: bit(payload[4], 0)
+- key: dew_point                 # 0xA3 with manufacturer code 0x6D6B
+  platform: sensor
+  device_class: temperature
+  unit: °C
+  gp: {report: {mfr: 0x6D6B, cluster: 0xFC6C, attr: 0x0001, type: i16}}
+  div: 100
+```
 
 ### 13.6 Battery and energy harvesting semantics
 
 - GPDs are never polled and never asked for anything (unidirectional), so
   availability is passive only: 4.6.
 - A GP sensor with `report_interval_s` is unavailable after 3 missed
-  intervals; its last values stay (HA shows them as unavailable).
+  intervals (25 h without a known interval); its last values stay (HA shows
+  them as unavailable).
+- **Every accepted report refreshes** `last_seen` and publishes an
+  `entity_state` for each entity in it, even when the value is unchanged
+  (D16, the BGT1 GP requirement; 4.5). The NCP already drops duplicates of
+  the same GPDF (same frame counter, several proxies), so a refresh means a
+  new report, never a repeat.
 - Switches have no availability; `last_seen` shows when they were last used.
 - The GPD frame counter is shown as a diagnostic; a counter that resets
   (re-flash, new key) appears as commissioning failures (`Stale`) in
@@ -1580,7 +1701,8 @@ Examples: `gp-enocean-ptm216z.yaml` (four contact event entities from the
 | event `gp/failed` | `EVT_GP_COMMISSIONING_FAILED{reason}` | reason text from `SinkDrop` (SecurityPolicy, TableFull, NoTempMaster, …) |
 | `gp/devices/list` | hub registry + `GP_SINK_TABLE_READ` | includes "on NCP but unknown to the hub" |
 | `gp/devices/remove {id, send_remove: true}` | `GP_SINK_REMOVE{gpd_id, flags bit0}` | `send_remove` sends GP Pairing RemoveGPD to proxies |
-| `gp/config {security_level, communication_mode}` | `GP_SINK_CONFIG` | admin only; level > 0 rejects the user's unsecured sensors |
+| `gp/config {security_level, communication_mode}` | `GP_SINK_CONFIG` | admin only; stays 0x00 (D14); a level > 0 would reject unsecured GPDs such as FlowerX GP |
+| device field `warnings: ["gp_unsecured"]` | `EVT_GP_COMMISSIONED` record security level | shown as a badge; set for level 0 or below `security_min` (13.1) |
 
 ---
 
@@ -1654,20 +1776,21 @@ Events (topic `entities`): `entity_added`, `entity_updated`,
 
 ### 14.4 Definitions and catalog
 
-The hub stores and runs **CBOR**; YAML is compiled by `zdefc` (the definition
-compiler, a Rust crate also built to WebAssembly for the web UI and as a CLI).
-A hub build with the optional `yaml` feature (planned for 8 MB boards only)
-also accepts YAML directly.
+The hub stores, accepts and returns **CBOR only** (D15). YAML is compiled by
+`zdefc` on the client: the CLI, or its WebAssembly build inside the web UI.
+The UI decompiles CBOR back to YAML for editing (lossless except comments,
+which the UI keeps with the user's own copy). The hub never parses YAML,
+which keeps a YAML parser and the compiler out of the 1.5 MiB app.
 
 | Type | Parameters | Result |
 |---|---|---|
-| `definitions/validate` | `cbor` (base64) or `yaml` (if supported) | `{ok, errors: [{path, line?, message}], warnings, requires, content_hash, size, matches: [device ids]}` — nothing stored |
+| `definitions/validate` | `cbor` (base64) | `{ok, errors: [{path, line?, message}], warnings, requires, content_hash, size, matches: [device ids]}` — nothing stored |
 | `definitions/upload` | same + `replace` (id) | stored in `defs/local/`, user source; devices it matches re-resolve; returns their resolution diffs |
 | `definitions/delete` | `id` | user definitions only; affected devices re-resolve |
 | `definitions/list` | `source` (catalog, fetched, user, self_description), `device` (only those matching it) | `{id, revision, vendor, model, source, content_hash, size, requires}` |
-| `definitions/get` | `id` or `content_hash`, `format` (`cbor`, `yaml` decompiled, `json`) | the definition |
-| `definitions/preview` | `device`, `cbor`/`yaml` | the resolution the device *would* get: entities added/changed/orphaned, configure diff; nothing applied |
-| `definitions/scaffold` | `device` | a starter YAML: identity, match clause, every attribute and Tuya DP seen with its type and last value, generic entities as comments |
+| `definitions/get` | `id` or `content_hash`, `format` (`cbor` base64, or `json`: the decoded CBOR with symbolic keys) | the definition |
+| `definitions/preview` | `device`, `cbor` | the resolution the device *would* get: entities added/changed/orphaned, configure diff; nothing applied |
+| `definitions/scaffold` | `device` | the material for a starter definition (JSON): identity, a match clause, every attribute and Tuya DP seen with its type and last value, the generic entities; the UI renders it as YAML |
 | `definitions/fetch` | `device` | force an on-demand lookup (9.3) |
 | `catalog/status` | — | active/staged bank: version, generation, counts, size, signature key, last check |
 | `catalog/update` | `url` or chunked upload (`catalog/upload_chunk {offset, data}` then `catalog/commit`) | progress events, then the per-device re-resolution report |
@@ -1718,8 +1841,8 @@ API.
 | Configuration | 32 KiB | hub settings, active-bank record (9.1), trusted keys, anti-rollback counter |
 | Converter bank A | 256 KiB | catalog (9.1) |
 | Converter bank B | 256 KiB | staged catalog |
-| Local definitions (proposed) | 64 KiB | user definitions, fetched definitions, self-description schemas (9.2) |
-| Free | 160 KiB (17.9 %) | LittleFS copy-on-write and wear levelling (was 224 KiB without the local area; Q4) |
+| Local definitions (D10) | 64 KiB | user definitions, fetched definitions, self-description schemas (9.2) |
+| Free | 160 KiB (17.9 %) | LittleFS copy-on-write and wear levelling (224 KiB before the local area) |
 
 ### 16.2 Flash: 8 MB S3 (`hubdata` 1 920 KiB), proposal
 
@@ -1738,29 +1861,30 @@ definitions, 4 KiB deflate blocks) and the examples (appendix 20):
 
 | Content | Definitions | Index keys | Definitions, deflated | String table | Index (12 B/key) | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| Fully declarative zhc (tiers A+B) | 2 569 | 4 084 | 220 KiB | 27 KiB | 48 KiB | **295 KiB** |
-| **Curated 4 MB catalog** | **2 000** | ~3 200 | ~172 KiB | ~27 KiB | ~37 KiB | **~237 KiB** |
-| A+B+C (with vendor templates) | 3 788 | 6 088 | 278 KiB | 27 KiB | 71 KiB | **376 KiB** |
-| Everything incl. partial D | 4 664 | 7 571 | 471 KiB | 27 KiB | 89 KiB | **587 KiB** |
+| Fully declarative zhc (tiers A+B) | 2 569 | 4 084 | 209 KiB | 26 KiB | 47 KiB | **284 KiB** |
+| **Curated 4 MB catalog** (D12) | **2 000** | ~3 200 | ~163 KiB | ~26 KiB | ~37 KiB | **~226 KiB** |
+| A+B+C (with vendor templates) | 3 788 | 6 088 | 267 KiB | 26 KiB | 71 KiB | **365 KiB** |
+| Everything incl. partial D | 4 664 | 7 571 | 457 KiB | 26 KiB | 88 KiB | **572 KiB** |
 
-- **4 MB:** about **2 000** curated definitions per 256 KiB bank, which meets
-  the 1 600–2 000 target. All A+B definitions (295 KiB) do not quite fit;
-  the rest is fetched on demand.
+- **4 MB:** about **2 000** curated definitions per 256 KiB bank (~30 KiB
+  spare), which meets the 1 600–2 000 target. All A+B definitions (284 KiB)
+  do not quite fit; the less popular ones are fetched on demand (D12).
 - **8 MB:** a 576 KiB bank holds all definitions the generator can translate
-  with vendor templates (A+B+C, 376 KiB) with ~50 % headroom; partial
-  D-tier definitions stay on-demand.
-- Per definition: the measured average for zhc A+B definitions is 234 B of
-  CBOR (A mean 184 B, median 80 B; B mean 411 B, median 292 B) and **~88 B
+  with vendor templates (A+B+C, 365 KiB) with ~58 % headroom. Everything
+  including partial D-tier translations (572 KiB) would only just fit, and
+  partial definitions are not banked anyway (D12).
+- Per definition: the measured average for zhc A+B definitions is 216 B of
+  CBOR (A mean 169 B, median 75 B; B mean 361 B, median 254 B) and **~83 B
   deflated in a bank block**. Our own richer examples (appendix 20) are 123–
-  1 019 B of CBOR and 252 B deflated on average inside one block; the simple
-  ones (plain ZCL override, Philips motion with two mfr attributes, GP sensor)
-  are 123–312 B, inside the 150–300 B target.
+  1 019 B of CBOR and 227 B deflated on average inside one block; the simple
+  ones (plain ZCL override, the GP switch and sensors, Philips motion with two
+  manufacturer attributes) are 123–317 B, inside the 150–300 B target.
 
 ### 16.4 RAM (PSRAM unless noted)
 
 | Item | Size |
 |---|---:|
-| Bank index (2 000 defs, ~3 200 keys × 12 B) | ~38 KiB |
+| Bank index (2 000 defs, ~3 200 keys × 12 B) | ~37 KiB |
 | String table, inflated | ~70 KiB (could be paged per block; not needed) |
 | Inflate buffer for one block + one standalone definition | 8 KiB |
 | Per device: entity table (~48 B/entity: binding, transform refs, flags, last state), bytecode and constants (~100–300 B), dispatch entries (16 B/binding) | ~0.5–1.5 KiB |
@@ -1782,8 +1906,9 @@ mbedTLS/ROM. Roughly 110–130 KB in total, before vendor templates (17.4).
 
 ### 17.1 Method (how the numbers were measured)
 
-zhc 26.130.0 from npm, loaded in Node 22 with instrumentation (a throw-away
-script, not in this repository):
+zhc 26.130.0 from npm, loaded in Node 22 with instrumentation by
+`tools/herdsman-coverage/measure.cjs` (how to run it:
+`tools/herdsman-coverage/README.md`; one run takes ~10 s):
 
 1. Every exported function of `lib/modernExtend` (`m.*`) and of the vendor
    libraries (`tuya.modernExtend.*`, `philips.m.*`, `lumi.lumiModernExtend.*`,
@@ -1853,7 +1978,13 @@ compile YAML with zdefc; run golden tests (18.1); build banks
 - Partial translation: a C/D definition whose untranslated items only affect
   some exposes is emitted with those entities dropped and `x-partial: true`
   (extension key), and listed in the coverage report. Partial definitions are
-  not put into the 4 MB bank by default (Q6).
+  never put into a bank (D12); they are only served on demand.
+- **Curation of the 4 MB bank** (D12): fully translated definitions only
+  (tiers A and B, and C once its vendor template exists), ordered by
+  popularity until the bank is full (~2 000, 16.3). The popularity source is
+  still open (Q2); definitions that the generic tier already handles
+  identically (most of the 1 282 "naming only" ones) rank last, because
+  without them the device still works, only its display name is generic.
 - **Coverage report** (Markdown + JSON per generator run): per vendor file and
   overall counts per tier, the list of untranslated items ranked by how many
   definitions they block (this ranks the next named codec or vendor template to
@@ -1899,16 +2030,18 @@ Details:
   behaviour, gradient flag as parameters) makes 595 of the 608 Philips
   definitions declarative. Next: Lumi cluster helpers and OTA (~130 each),
   Ledvance light (105), IKEA (89 + 66).
-- **D tier** reasons (a definition can have several): inline `fromZigbee` 583,
-  inline `toZigbee` 513, `onEvent` 82, custom Tuya value converter 98, `m.*`
-  with function arguments 86, non-recordable configure 87. 292 D definitions
+- **D tier** reasons (a definition can have several): inline `fromZigbee` 554,
+  inline `toZigbee` 495, custom Tuya value converter 98, `m.*` with function
+  arguments 86, `onEvent` 50, non-replayable configure 40. 292 D definitions
   have ≤ 800 characters of custom JS in total (candidates for hand-written
   YAML with expressions).
-- **Size proxy**: the per-definition generator input (identity strings,
-  extend calls with arguments, named converter references, exposes, DP
-  tables), encoded as CBOR with integer keys and a shared string table: A
-  mean 184 B, B mean 411 B; A+B 600 KiB raw, 220 KiB with 4 KiB-block deflate
-  (×2.7); all tiers 1 266 KiB raw, 471 KiB deflated. Used for 16.3.
+- **Size proxy** (`tools/herdsman-coverage/proxy_size.py`): the
+  per-definition generator input (identity strings, extend calls with
+  arguments, named converter references, exposes, DP tables), encoded as CBOR
+  with integer keys and a shared string table (3 949 strings, 26 KiB
+  deflated): A mean 169 B, B mean 361 B; A+B 541 KiB raw, 209 KiB with 4 KiB
+  block deflate (×2.6); all tiers 1 159 KiB raw, 457 KiB deflated. Used for
+  16.3.
 
 **Expected coverage** of the hub with the generator: ~55 % of zhc definitions
 fully declarative from day one (A+B, given the top ~100 standard converters
@@ -1920,8 +2053,20 @@ standard device zhc does not list at all.
 
 A template is hub code (like a named codec) parametrised by definition data
 (`templates: [{name: hue_light, params: {gradient: true}}]`, top-level key
-21, reserved in v1). Each costs app flash, so they are added in the order the
-coverage report ranks them (Q7).
+21, reserved in v1). Each costs app flash. Order (D13):
+
+1. **Hue light** (`philips.m.light`, 583 definitions; parameters: gradient,
+   effects, power-on behaviour on the Hue cluster 0xFC03/0xFC01);
+2. **Lumi** (manufacturer cluster 0xFCC0 helpers, `lumi_specific` struct
+   decoding beyond `zcl_tagged`, Lumi OTA and power-outage helpers; ~130
+   definitions each);
+3. **Tuya specifics**: the remaining schedule codecs
+   (`tuya_schedule_week` variants, `thermostatScheduleDayMultiDP*`), time-sync
+   variants and the other Tuya named converters the coverage report ranks
+   highest.
+
+After that, the coverage report's ranking decides (Ledvance light 105,
+IKEA 89 + 66 are next).
 
 ## 18. Testing strategy
 
@@ -1978,7 +2123,9 @@ For every generated definition the generator also emits test vectors:
 - GP: `EVT_GP_*` sequences for unidirectional and bidirectional commissioning
   (result 3 then 2), decommissioning, Sink Table reconciliation after an NCP
   swap, the generic tier on the PTM 216Z and zigbee-rs MG22 switch/sensor
-  frames.
+  frames; FlowerX GP with every combination of model bits (entity sets);
+  BGT1 GP identical reports producing a state refresh each time; the
+  `gp_unsecured` warning for level-0 commissioning.
 
 ### 18.5 Budgets in CI
 
@@ -1997,51 +2144,56 @@ catalog OTA with a forced failure and rollback.
 
 ## 19. Open questions
 
+Decided on 2026-11-19 (section 1): manufacturer code and cluster IDs (D8),
+definitions repository, hosting and signing key (D9), local-definition area
+(D10), self-description precedence (D11), bank curation (D12), vendor
+template order (D13), GP security level (D14), client-side YAML (D15), and
+the FlowerX/BGT1 facts (D16).
+
+Still open:
+
 | # | Question | Proposal |
 |---|---|---|
-| Q1 | zigbee-rs manufacturer code for the Device Schema cluster and the settings cluster (products use the placeholder 0x1234; the GPDs use manufacturer ID 0x6D6B, like FlowerX/BGT1). Apply to the CSA, or reuse 0x6D6B? Cluster IDs 0xFD5D (schema) and 0xFD5E (settings) are placeholders too. | decide the code; keep the cluster IDs unless they clash |
-| Q2 | Definitions repository: name (`faronov/zigbee-rs-definitions`?), hosting for on-demand fetch (GitHub Pages vs Releases), release cadence of banks | separate repo, Pages for `v1/` fetch tree, monthly banks |
-| Q3 | Signing: who holds the Ed25519 key (offline vs CI secret), how many keys built into the hub, rotation | one offline root key signing a CI key with expiry |
-| Q4 | 64 KiB "local definitions" area on 4 MB, taken from the 224 KiB free (leaves 160 KiB, 17.9 %); 8 MB layout in 16.2 | accept |
-| Q5 | Self-description above catalog definitions by default (3.3)? | yes |
-| Q6 | Curation of the ~2 000 definitions in the 4 MB bank: by brand popularity, by "pure generic not needed", include partial definitions or not | A+B minus definitions the generic tier already handles identically (most of the 1 282), plus top Tuya/Aqara/IKEA/Philips; no partials |
-| Q7 | Which vendor templates first (Hue light 583 defs, Lumi helpers, Ledvance, IKEA), given app flash | Hue light + Lumi first |
-| Q8 | FlowerX GP / BGT1 GP: their quirks from `/config/custom_zha_quirks` (model-ID bit layout, clusters) to write definitions | user to provide the quirk files |
-| Q9 | On-demand fetch default on (privacy: only the 1/256 shard is revealed) or off | on, with a setting |
-| Q10 | YAML compiler on the hub (`yaml` feature, 8 MB) or only client-side (WASM in the UI, CLI) | client-side only for v1 |
-| Q11 | Availability defaults (mains 10 min + active check; battery max(2.5 × max interval, 25 h); GP 3 intervals) | accept |
-| Q12 | GP security: keep the sink at level 0x00 (accepts spoofable GPDs) with a UI warning per GPD, or raise it and lose FlowerX/BGT1 | keep 0x00 + warning |
-| Q13 | Use zhc property names as entity keys (eases Z2M migration) | yes |
-| Q14 | HA integration domain name and distribution (HACS) | later |
+| Q1 | When to register a CSA manufacturer code (D8 caveat), and whether to move zigbee-rs Zigbee devices to it then | before the first product sold in volume; GP model IDs stay under 0x6D6B |
+| Q2 | Popularity data for the 4 MB curation (D12): zhc has no public usage statistics | rank by Zigbee2MQTT and ZHA GitHub issue/discussion mentions per model, plus the brands of devices users report through the hub's opt-in "unknown device" fetches |
+| Q3 | On-demand fetch on by default (only the 1/256 shard is revealed to GitHub) | on, with a setting |
+| Q4 | Availability defaults (mains 10 min + active check; battery max(2.5 × max interval, 25 h); GP 3 report intervals, else 25 h) | accept |
+| Q5 | Use zhc expose property names as entity keys (eases Z2M migration) | yes |
+| Q6 | Report intervals of FlowerX GP and BGT1 GP (for GP availability; their definitions leave `report_interval_s` unset today) | user to give the firmware's intervals |
+| Q7 | 8 MB `hubdata` layout (16.2: banks 2 × 576 KiB, local 128 KiB) | accept |
+| Q8 | HA integration domain name and distribution (HACS) | later |
 
 ## 20. Appendix: measured sizes of the examples
 
-Measured with a throw-away prototype of `zdefc` (Python, implementing 8.1–8.4
-and the bytecode of 7.5) on `definitions/examples/*.yaml`. "CBOR" is the
-standalone form with the description; "catalog" is without it; "deflate" is
-the catalog form deflated alone. Inside one bank block, the 11 examples take
-2 776 B deflated together (252 B each on average).
+Measured with `tools/zdefc-proto/zdefc.py measure definitions/examples`, a
+Python prototype of `zdefc` that implements 8.1–8.4 and the bytecode of 7.5
+(its README lists what it leaves out). "CBOR" is the standalone form with the
+description; "catalog form" is without it; "deflate" is the catalog form
+deflated alone. Inside one bank block, the 13 examples take 2 951 B deflated
+together (227 B each on average).
 
 | File | Entities | YAML (no comments) | CBOR | Catalog form | Deflate | Longest expression |
 |---|---:|---:|---:|---:|---:|---:|
 | `innr-sp120.yaml` (plain ZCL, overrides only) | 0 | 466 | 156 | 123 | 114 | — |
+| `gp-zigbee-rs-switch.yaml` | 1 | 559 | 177 | 177 | 156 | 2 |
 | `philips-sml001-motion.yaml` (2 mfr attributes) | 2 | 724 | 257 | 238 | 211 | — |
-| `gp-zigbee-rs-sensor.yaml` | 0 | 366 | 201 | 127 | 113 | — |
-| `gp-th-sensor-mfr.yaml` | 5 | 1 332 | 312 | 312 | 256 | 9 |
-| `zigbee-rs-selfdesc-thermometer.yaml` | 6 | 1 456 | 393 | 393 | 288 | — |
+| `gp-efektalab-bgt1.yaml` | 3 | 1 002 | 274 | 216 | 184 | — |
+| `gp-zigbee-rs-sensor.yaml` | 4 | 1 361 | 317 | 275 | 221 | — |
+| `zigbee-rs-selfdesc-thermometer.yaml` | 6 | 1 435 | 393 | 393 | 286 | — |
 | `gp-enocean-ptm216z.yaml` | 4 | 1 637 | 476 | 433 | 227 | 15 |
-| `tuya-ts0601-th-sensor.yaml` (24 mfr names) | 4 | 1 626 | 554 | 520 | 390 | — |
+| `gp-diyruz-flowerx.yaml` (3 conditional entities) | 8 | 2 313 | 525 | 490 | 325 | 25 |
+| `tuya-ts0601-th-sensor.yaml` (24 mfr names) | 4 | 1 627 | 554 | 520 | 390 | — |
 | `philips-rwl022-dimmer.yaml` (18 event types) | 1 | 1 218 | 567 | 542 | 348 | 16 |
-| `aqara-rtcgq14lm-motion-p1.yaml` | 9 | 2 585 | 698 | 680 | 453 | 18 |
-| `efekta-co2-smart-monitor.yaml` (14 settings) | 14 | 2 577 | 808 | 757 | 446 | — |
-| `tuya-ts0601-trv-me167.yaml` (20 mfr names, 7 white labels) | 18 | 3 685 | 1 049 | 1 019 | 687 | 4 |
+| `aqara-rtcgq14lm-motion-p1.yaml` | 9 | 2 586 | 698 | 680 | 453 | 18 |
+| `efekta-co2-smart-monitor.yaml` (14 settings) | 14 | 2 578 | 808 | 757 | 446 | — |
+| `tuya-ts0601-trv-me167.yaml` (20 mfr names, 7 white labels) | 18 | 3 686 | 1 049 | 1 019 | 687 | 4 |
 
 Observations:
 
-- Simple devices land at 120–310 B, as targeted; settings-heavy and Tuya
-  definitions grow with entities (~50 B per setting entity, mostly the key
-  string) and manufacturer-name lists (7 B per packed Tuya name).
+- Simple devices land at 120–320 B, as targeted; settings-heavy and Tuya
+  definitions grow with entities (~35–50 B per entity, mostly the key string)
+  and manufacturer-name lists (7 B per packed Tuya name).
 - Bank blocks compress well because keys, units and binding patterns repeat;
-  the catalog-scale average (~88 B per definition, 17.3) is far below the
+  the catalog-scale average (~83 B per definition, 17.3) is far below the
   examples' average because most real definitions are small (median A
-  definition: 80 B of CBOR).
+  definition: 75 B of CBOR).

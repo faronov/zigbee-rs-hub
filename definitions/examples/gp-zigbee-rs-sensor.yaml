@@ -1,34 +1,64 @@
-# zigbee-rs Green Power sensor (EFR32MG22 `efr32mg22-gpd-sensor`).
+# zigbee-rs Green Power sensor (EFR32MG22, bin `efr32mg22-gpd-sensor`).
 #
 # Identity from zigbee-rs `products/efr32mg22-gpd` and
 # `tools/zha-quirks/zigbee_rs_gp.py`: DeviceID 0x33 (Indoor Environment
-# Sensor), manufacturer ID 0x6D6B, model ID 0xF300, GPD command list [0xA2],
-# security level 3 with an individual key. It sends Multi-Cluster Reporting
-# (0xA2) every ~60 s with
+# Sensor), manufacturer ID 0x6D6B, model ID 0xF300 (GP model-ID allocation
+# table in spec 13.3), GPD command list [0xA2], security level 3 with an
+# individual key. Multi-Cluster Reporting (0xA2) every ~60 s.
 #
-#   0x0402/0x0000 int16  temperature, 0.01 degC (invalid 0x8000)
-#   0x0405/0x0000 uint16 humidity, 0.01 %       (invalid 0xFFFF)
-#   0x0001/0x0020 uint8  battery voltage, 100 mV (optional)
-#   0x0001/0x0021 uint8  battery remaining, 0.5 % (optional)
-#
-# All four are standard ZCL attributes, so the generic GP tier already creates
-# temperature, humidity, battery and (disabled) battery voltage. The
-# definition adds the name, the report interval for availability, and notes
-# the BRD4183A caveats. The sibling `efr32mg22-gpd-switch` (0x6D6B/0xF400,
-# DeviceID 0x02, commands 0x20-0x22) needs no definition: the generic GP tier
-# gives it an "action" event entity with off/on/toggle.
+# All four attributes are standard ZCL encodings, so the generic GP tier would
+# create the same entities on the first report. The definition lists them
+# explicitly so they exist from commissioning on, names the device, sets the
+# report interval for availability and the expected security level. On the
+# BRD4183A dev kit the temperature is the die sensor and the humidity is
+# synthetic.
 zdef: 1
 id: zigbee-rs/gpd-sensor-mg22
-revision: 1
+revision: 2
 vendor: zigbee-rs
 model: GP sensor (EFR32MG22)
-description: Green Power temperature/humidity sensor (dev kit humidity is synthetic)
+description: Green Power temperature/humidity sensor
 match:
-  - gp: {manufacturer_id: 0x6D6B, model_id: 0xF300, device_id: 0x33}
+  - gp: {device_id: 0x33, manufacturer_id: 0x6D6B, model_id: 0xF300}
 device:
   power: battery
 gp:
-  report_interval_s: 60
+  report_interval_s: 60      # unavailable after 3 missed reports
+  security_min: 3            # warn if it was commissioned below level 3
 generic:
-  patch:
-    battery_voltage: {enabled: true}
+  disable: true
+entities:
+  - key: temperature
+    platform: sensor
+    device_class: temperature
+    unit: °C
+    state_class: measurement
+    gp: {report: {cluster: 0x0402, attr: 0x0000, type: i16}}
+    invalid: -32768          # -0x8000
+    div: 100
+  - key: humidity
+    platform: sensor
+    device_class: humidity
+    unit: "%"
+    state_class: measurement
+    gp: {report: {cluster: 0x0405, attr: 0x0000, type: u16}}
+    invalid: 0xFFFF
+    div: 100
+  - key: battery
+    platform: sensor
+    device_class: battery
+    unit: "%"
+    state_class: measurement
+    category: diagnostic
+    gp: {report: {cluster: 0x0001, attr: 0x0021, type: u8}}
+    invalid: 0xFF
+    div: 2                   # 0.5 %
+  - key: battery_voltage
+    platform: sensor
+    device_class: voltage
+    unit: V
+    state_class: measurement
+    category: diagnostic
+    gp: {report: {cluster: 0x0001, attr: 0x0020, type: u8}}
+    invalid: 0xFF
+    div: 10                  # 100 mV
