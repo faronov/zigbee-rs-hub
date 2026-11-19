@@ -1,0 +1,104 @@
+# Tuya TS0601 thermostatic radiator valve (EF00 datapoints).
+#
+# AVATTO ME167 and white labels; zigbee-herdsman-converters `devices/tuya.ts`,
+# model "TS0601_thermostat_3" (checked at zhc 26.134.0). All Zigbee traffic is
+# the Tuya cluster 0xEF00; the hub implements the EF00 protocol once, this file
+# is only the datapoint table and the flags from `tuyaBase({dp: true,
+# timeStart: "2000"})`.
+zdef: 1
+id: tuya/ts0601-thermostat-3
+revision: 1
+vendor: Tuya
+model: TS0601_thermostat_3
+description: Thermostatic radiator valve
+match:
+  # herdsman `tuya.fingerprint("TS0601", [...])`: model AND manufacturer.
+  - model: TS0601
+    manufacturer:
+      any: [_TZE200_bvu2wnxz, _TZE200_6rdj8dzm, _TZE200_9xfjixap, _TZE200_jkfbph7l,
+            _TZE200_rxntag7i, _TZE200_4utwozi2, _TZE200_yqgbrdyo, _TZE284_p3dbf6qs,
+            _TZE200_rxq4iti9, _TZE204_ogx8u5z6, _TZE200_4utwoz2, _TZE284_ogx8u5z6,
+            _TZE284_o3x45p96, _TZE284_c6wv4xyo, _TZE204_o3x45p96, _TZE200_ow09xlxm,
+            _TZE284_rv6iuyxb, _TZE200_rv6iuyxb, _TZE200_suxywabt, _TZE200_d3z1ukqw]
+white_label:
+  - {vendor: AVATTO, model: ME167, manufacturer: [_TZE200_bvu2wnxz, _TZE200_6rdj8dzm, _TZE200_9xfjixap, _TZE200_jkfbph7l, _TZE200_4utwoz2, _TZE200_4utwozi2]}
+  - {vendor: AVATTO, model: ME168_1, manufacturer: [_TZE200_rxntag7i]}
+  - {vendor: AVATTO, model: TRV06_1, manufacturer: [_TZE284_o3x45p96]}
+  - {vendor: EARU, model: TRV06, manufacturer: [_TZE200_yqgbrdyo, _TZE200_rxq4iti9]}
+  - {vendor: AVATTO, model: AVATTO_TRV06, manufacturer: [_TZE284_c6wv4xyo, _TZE204_o3x45p96]}
+  - {vendor: THALEOS, model: TRV06-AT, manufacturer: [_TZE200_ow09xlxm, _TZE284_rv6iuyxb, _TZE200_rv6iuyxb, _TZE200_suxywabt]}
+  - {vendor: Echos, model: Eco-4160, manufacturer: [_TZE200_d3z1ukqw]}
+device:
+  power: battery
+tuya:
+  time_sync: 2000        # answer mcuSyncTime (0x24) with seconds since 2000-01-01
+  magic_packet: true     # read Basic attributes at configure (Tuya "magic packet")
+generic:
+  disable: true          # EF00-only device: no standard clusters to expose
+entities:
+  - key: thermostat
+    platform: climate
+    parts:
+      hvac_mode:
+        tuya: [2, enum]
+        map: {0: auto, 1: heat, 2: "off"}
+      hvac_action:
+        tuya: [3, enum]
+        map: {0: heating, 1: idle}
+      target_temperature:
+        tuya: [4, value]
+        div: 10
+        min: 5
+        max: 35
+        step: 0.5
+      current_temperature:
+        tuya: [5, value]
+        div: 10
+  - key: child_lock
+    platform: switch
+    category: config
+    tuya: [7, bool]
+  - key: local_temperature_calibration
+    platform: number
+    category: config
+    device_class: temperature
+    unit: °C
+    tuya: [47, value]
+    min: -20
+    max: 20
+  - key: pi_heating_demand
+    platform: sensor
+    unit: "%"
+    state_class: measurement
+    tuya: [101, value]
+  - key: frost_protection
+    platform: switch
+    category: config
+    tuya: [36, bool]
+  - key: scale_protection
+    platform: switch
+    category: config
+    tuya: [39, bool]
+  # DP 35 carries an error code; 1 means "battery low" (herdsman
+  # valueConverter.errorOrBatteryLow). Two entities read the same DP.
+  - key: battery_low
+    platform: binary_sensor
+    device_class: battery
+    category: diagnostic
+    tuya: [35, value]
+    from: x == 1
+  - key: error
+    platform: sensor
+    category: diagnostic
+    tuya: [35, value]
+  # Weekly schedule: one raw DP per day. The byte layout is a named codec
+  # implemented in the hub (herdsman valueConverter
+  # thermostatScheduleDayMultiDPWithDayNumber(day, 6)); the text format is
+  # "HH:MM/T HH:MM/T ..." with six transitions.
+  - {key: schedule_monday,    platform: text, category: config, tuya: [28, raw], codec: {tuya_schedule_day: {day: 1, transitions: 6}}}
+  - {key: schedule_tuesday,   platform: text, category: config, tuya: [29, raw], codec: {tuya_schedule_day: {day: 2, transitions: 6}}}
+  - {key: schedule_wednesday, platform: text, category: config, tuya: [30, raw], codec: {tuya_schedule_day: {day: 3, transitions: 6}}}
+  - {key: schedule_thursday,  platform: text, category: config, tuya: [31, raw], codec: {tuya_schedule_day: {day: 4, transitions: 6}}}
+  - {key: schedule_friday,    platform: text, category: config, tuya: [32, raw], codec: {tuya_schedule_day: {day: 5, transitions: 6}}}
+  - {key: schedule_saturday,  platform: text, category: config, tuya: [33, raw], codec: {tuya_schedule_day: {day: 6, transitions: 6}}}
+  - {key: schedule_sunday,    platform: text, category: config, tuya: [34, raw], codec: {tuya_schedule_day: {day: 7, transitions: 6}}}

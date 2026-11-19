@@ -1,0 +1,72 @@
+# Green Power temperature/humidity sensor with manufacturer-specific frames.
+#
+# ILLUSTRATIVE: the vendor, model ID bits and the 0xB0 layout are invented to
+# show the fields; no public product is claimed. A plain DeviceID 0x33 sensor
+# that only sends Multi-Cluster Reporting (0xA2) with standard clusters needs
+# no definition at all: the generic GP tier maps 0x0402/0x0000, 0x0405/0x0000
+# and 0x0001/0x0020-0x0021 with the tier-a ZCL rules. This file shows what a
+# definition adds on top:
+#
+# - model ID with feature bits (the DIYRuZ FlowerX GP / EfektaLab BGT1 GP
+#   pattern "0xF100 | bits"), matched with a mask;
+# - the expected report interval, which drives availability;
+# - a manufacturer-defined command (0xB0) decoded with the expression
+#   language. zigpy reads 0xB0-0xBF payloads as ManufacturerID (u16 LE)
+#   followed by vendor data, so the data starts at offset 2;
+# - a manufacturer-specific multi-cluster report (0xA3) attribute.
+zdef: 1
+id: example/gp-th-sensor
+revision: 1
+vendor: Example
+model: GP T/H sensor
+match:
+  - gp: {device_id: 0x33, manufacturer_id: 0xFFF0, model_id: {value: 0xF500, mask: 0xFF00}}
+device:
+  power: battery
+  battery: {voltage_to_percent: [2100, 3000]}
+gp:
+  report_interval_s: 300     # unavailable after 3 missed intervals (see availability rules)
+entities:
+  # Bit 0 of the model ID: the board has a humidity sensor. The generic
+  # humidity entity exists only on reports, so hide it on boards without one.
+  - key: humidity
+    platform: sensor
+    device_class: humidity
+    unit: "%"
+    state_class: measurement
+    gp: {report: {cluster: 0x0405, attr: 0x0000, type: u16}}
+    div: 100
+    invalid: 0xFFFF
+    present_if: bit(gpd.model_id, 0)
+  # 0xB0: [mfr u16][battery mV u16 LE][flags u8: bit0 sensor fault]
+  - key: battery_voltage
+    platform: sensor
+    device_class: voltage
+    unit: mV
+    state_class: measurement
+    category: diagnostic
+    gp: {cmd: 0xB0}
+    from: u16le(payload, 2)
+  - key: battery
+    platform: sensor
+    device_class: battery
+    unit: "%"
+    state_class: measurement
+    category: diagnostic
+    gp: {cmd: 0xB0}
+    from: battery_percent(u16le(payload, 2))
+  - key: sensor_fault
+    platform: binary_sensor
+    device_class: problem
+    category: diagnostic
+    gp: {cmd: 0xB0}
+    from: bit(payload[4], 0)
+  # 0xA3 with manufacturer code 0xFFF0: cluster 0xFC00 attribute 0x0001 is the
+  # dew point in 0.01 degC.
+  - key: dew_point
+    platform: sensor
+    device_class: temperature
+    unit: °C
+    state_class: measurement
+    gp: {report: {mfr: 0xFFF0, cluster: 0xFC00, attr: 0x0001, type: i16}}
+    div: 100

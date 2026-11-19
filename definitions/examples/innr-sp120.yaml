@@ -1,0 +1,32 @@
+# Plain ZCL device that only needs overrides of the generic tier.
+#
+# Innr SP 120 smart plug. Without a definition the generic tier already
+# exposes the switch (On/Off 0x0006), power, voltage, current (Electrical
+# Measurement 0x0B04) and energy (Metering 0x0702), and configures their
+# reporting. Two things are wrong on this firmware, which is all this file
+# fixes (same facts as zigbee-herdsman-converters `devices/innr.ts`, model
+# "SP 120": `m.onOff({powerOnBehavior: false})`, fixed divisors):
+#
+# - StartUpOnOff (0x0006/0x4003) is not supported, so the generic
+#   "power_on_behavior" select must not be created;
+# - the multiplier/divisor attributes it reports are wrong, so fixed
+#   divisors replace them.
+zdef: 1
+id: innr/sp-120
+revision: 1
+vendor: Innr
+model: SP 120
+description: Smart plug with power metering
+match:
+  # Model only, like herdsman's `zigbeeModel` (Basic 0x0000/0x0005). A clause
+  # with `manufacturer` as well would rank higher (see "Resolution").
+  - {model: SP 120}
+device:
+  power: mains
+generic:
+  exclude: [power_on_behavior]
+  patch:
+    current: {div: 1000}   # 0x0B04/0x0508 RMSCurrent in mA
+    voltage: {div: 1}      # 0x0B04/0x0505 RMSVoltage in V
+    power: {div: 1}        # 0x0B04/0x050B ActivePower in W
+    energy: {div: 100}     # 0x0702/0x0000 CurrentSummationDelivered in 0.01 kWh

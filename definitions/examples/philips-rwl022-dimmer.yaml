@@ -1,0 +1,54 @@
+# Remote with action events from a manufacturer-specific command.
+#
+# Philips Hue dimmer switch gen 2, RWL022 (929002398602);
+# zigbee-herdsman-converters `devices/philips.ts` + `lib/philips.ts`
+# (zhc 26.134.0). The remote sends standard On/Off and Level commands *and*
+# a Signify "hueNotification" (cluster 0xFC00, command 0x00, manufacturer
+# code 0x100B) that carries the button and the press type. Payload:
+#
+#   off 0 button u8 (1 on, 2 up, 3 down, 4 off)
+#   off 1 u24 (unknown)
+#   off 4 type u8 (0 press, 1 hold, 2 short release, 3 long release)
+#   off 5 u8, off 6 u8 hold time, off 7 u8 (unknown)
+#
+# The definition replaces the generic "action" event entity (same key) so the
+# richer FC00 event types win, and drops the duplicate standard commands.
+zdef: 1
+id: philips/rwl022
+revision: 1
+vendor: Philips
+model: "929002398602"
+description: Hue dimmer switch gen 2
+match:
+  - {model: RWL022}
+device:
+  power: battery
+  sleepy: true
+configure:
+  - bind: {ep: 1, clusters: [0x0006, 0x0008, 0xFC00, 0x0001]}
+  # Signify switch mode: report all buttons through 0xFC00 (herdsman writes
+  # genBasic 0x0031 = 0x000B, bitmap16, manufacturer code 0x100B).
+  - write: {ep: 1, cluster: 0x0000, attr: 0x0031, type: map16, value: 0x000B, mfr: 0x100B}
+entities:
+  - key: action
+    platform: event
+    device_class: button
+    event_types: [on_press, on_hold, on_press_release, on_hold_release,
+                  up_press, up_hold, up_press_release, up_hold_release,
+                  down_press, down_hold, down_press_release, down_hold_release,
+                  off_press, off_hold, off_press_release, off_hold_release,
+                  recall_0, recall_1]
+    triggers:
+      - cmd: {ep: 1, cluster: 0xFC00, id: 0x00, mfr: 0x100B}
+        event: >-
+          lookup(payload[0], {1: "on", 2: "up", 3: "down", 4: "off"}) + "_" +
+          lookup(payload[4], {0: "press", 1: "hold", 2: "press_release", 3: "hold_release"})
+        attrs: {hold_time: "payload[6]"}
+      # Scenes Recall Scene (0x0005/0x05): group u16, scene u8.
+      - cmd: {ep: 1, cluster: 0x0005, id: 0x05}
+        event: '"recall_" + str(payload[2])'
+# Standard On/Off and Level commands from the remote duplicate the FC00
+# events: no generic events for them.
+ignore:
+  - {ep: 1, cluster: 0x0006}
+  - {ep: 1, cluster: 0x0008}

@@ -1,0 +1,38 @@
+# Simple Tuya TS0601 temperature/humidity sensor (EF00 datapoints).
+#
+# zigbee-herdsman-converters `devices/tuya.ts`, model
+# "TS0601_temperature_humidity_sensor_2" (zhc 26.134.0). Smallest realistic
+# Tuya case: four datapoints, the flags of
+# `tuyaBase({dp: true, queryOnDeviceAnnounce: true, queryOnConfigure: true,
+# timeStart: "1970"})`, and a long manufacturer-name list, which dominates the
+# encoded size.
+zdef: 1
+id: tuya/ts0601-th-sensor-2
+revision: 1
+vendor: Tuya
+model: TS0601_temperature_humidity_sensor_2
+description: Temperature and humidity sensor
+match:
+  - model: TS0601
+    manufacturer:
+      any: [_TZE200_yjjdcqsq, _TZE284_9yapgbuv, _TZE200_9yapgbuv, _TZE200_utkemkbs,
+            _TZE204_utkemkbs, _TZE284_utkemkbs, _TZE204_9yapgbuv, _TZE204_upagmta9,
+            _TZE200_cirvgep4, _TZE204_d7lpruvi, _TZE200_upagmta9, _TZE204_yjjdcqsq,
+            _TZE204_jygvp6fk, _TZE204_cirvgep4, _TZE284_yjjdcqsq, _TZE200_d7lpruvi,
+            _TZE284_hdyjyqjm, _TZE284_d7lpruvi, _TZE284_upagmta9, _TZE204_ksz749x8,
+            _TZE204_1wnh8bqp, _TZE284_1wnh8bqp, _TZE284_ksz749x8, _TZE204_kwi6bbk4]
+white_label:   # two of herdsman's seven white labels
+  - {vendor: Tuya, model: ZTH01, manufacturer: [_TZE200_yjjdcqsq, _TZE204_yjjdcqsq, _TZE284_yjjdcqsq]}
+  - {vendor: Tuya, model: ZTH08, manufacturer: [_TZE204_d7lpruvi, _TZE284_d7lpruvi, _TZE284_hdyjyqjm]}
+device:
+  power: battery
+tuya:
+  time_sync: 1970
+  query: [configure, announce]   # dataQuery (0x03) after configure and Device_annce
+generic:
+  disable: true
+entities:
+  - {key: temperature, platform: sensor, device_class: temperature, unit: °C, state_class: measurement, tuya: [1, value], div: 10}
+  - {key: humidity, platform: sensor, device_class: humidity, unit: "%", state_class: measurement, tuya: [2, value]}
+  - {key: battery_state, platform: sensor, device_class: enum, category: diagnostic, tuya: [3, enum], map: {0: low, 1: medium, 2: high}}
+  - {key: temperature_unit, platform: select, category: config, tuya: [9, enum], map: {0: celsius, 1: fahrenheit}}

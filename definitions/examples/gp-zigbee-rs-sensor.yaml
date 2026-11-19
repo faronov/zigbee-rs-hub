@@ -1,0 +1,34 @@
+# zigbee-rs Green Power sensor (EFR32MG22 `efr32mg22-gpd-sensor`).
+#
+# Identity from zigbee-rs `products/efr32mg22-gpd` and
+# `tools/zha-quirks/zigbee_rs_gp.py`: DeviceID 0x33 (Indoor Environment
+# Sensor), manufacturer ID 0x6D6B, model ID 0xF300, GPD command list [0xA2],
+# security level 3 with an individual key. It sends Multi-Cluster Reporting
+# (0xA2) every ~60 s with
+#
+#   0x0402/0x0000 int16  temperature, 0.01 degC (invalid 0x8000)
+#   0x0405/0x0000 uint16 humidity, 0.01 %       (invalid 0xFFFF)
+#   0x0001/0x0020 uint8  battery voltage, 100 mV (optional)
+#   0x0001/0x0021 uint8  battery remaining, 0.5 % (optional)
+#
+# All four are standard ZCL attributes, so the generic GP tier already creates
+# temperature, humidity, battery and (disabled) battery voltage. The
+# definition adds the name, the report interval for availability, and notes
+# the BRD4183A caveats. The sibling `efr32mg22-gpd-switch` (0x6D6B/0xF400,
+# DeviceID 0x02, commands 0x20-0x22) needs no definition: the generic GP tier
+# gives it an "action" event entity with off/on/toggle.
+zdef: 1
+id: zigbee-rs/gpd-sensor-mg22
+revision: 1
+vendor: zigbee-rs
+model: GP sensor (EFR32MG22)
+description: Green Power temperature/humidity sensor (dev kit humidity is synthetic)
+match:
+  - gp: {manufacturer_id: 0x6D6B, model_id: 0xF300, device_id: 0x33}
+device:
+  power: battery
+gp:
+  report_interval_s: 60
+generic:
+  patch:
+    battery_voltage: {enabled: true}

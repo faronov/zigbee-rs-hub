@@ -1,0 +1,100 @@
+# Aqara/Xiaomi device with the Lumi manufacturer cluster and its TLV struct.
+#
+# Aqara Motion sensor P1, RTCGQ14LM (`lumi.motion.ac02`);
+# zigbee-herdsman-converters `devices/lumi.ts` + `lib/lumi.ts` (zhc 26.134.0).
+# Everything interesting lives in the Lumi cluster 0xFCC0 with manufacturer
+# code 0x115F:
+#
+# - 0x0112 (uint32) is reported on motion; it carries illuminance + 65536 and
+#   there is no "motion cleared" report, so occupancy is reset by the hub after
+#   detection_interval + 2 s (herdsman lumi_occupancy_illuminance);
+# - 0x0102 / 0x010C / 0x0152 are settings (writable only right after a button
+#   press: the device is sleepy, writes are queued until it polls);
+# - 0x00F7 (octet string) is the Lumi "heartbeat" struct: a sequence of
+#   (tag u8, ZCL type u8, value) records, decoded by the hub's built-in
+#   `zcl_tagged` codec. The same codec decodes the older genBasic 0xFF01
+#   struct.
+zdef: 1
+id: aqara/rtcgq14lm
+revision: 1
+vendor: Aqara
+model: RTCGQ14LM
+description: Motion sensor P1
+match:
+  - {model: lumi.motion.ac02}
+white_label:
+  - {vendor: Aqara, model: MS-S02}
+device:
+  power: battery
+  sleepy: true
+  battery: {voltage_to_percent: [2850, 3000]}   # linear, as herdsman meta.battery
+  checkin_s: 3600                               # m.quirkCheckinInterval("1_HOUR")
+generic:
+  # Battery percentage is derived from the struct voltage, not 0x0001/0x0021.
+  exclude: [battery]
+configure:
+  - read: {cluster: 0x0001, attrs: [0x0020]}
+  - read: {cluster: 0xFCC0, attrs: [0x0102, 0x010C, 0x0152], mfr: 0x115F}
+entities:
+  - key: occupancy
+    platform: binary_sensor
+    device_class: occupancy
+    zcl: {cluster: 0xFCC0, attr: 0x0112, type: u32, mfr: 0x115F}
+    from: "true"                                    # any report = motion
+    reset_after: "(state.detection_interval ?? 30) + 2"
+  - key: illuminance
+    platform: sensor
+    device_class: illuminance
+    unit: lx
+    state_class: measurement
+    zcl: {cluster: 0xFCC0, attr: 0x0112, type: u32, mfr: 0x115F}
+    from: "x > 130536 ? 0 : x - 65536"             # bogus values in the dark
+  - key: detection_interval
+    platform: number
+    category: config
+    unit: s
+    zcl: {cluster: 0xFCC0, attr: 0x0102, type: u8, mfr: 0x115F}
+    min: 2
+    max: 65
+  - key: motion_sensitivity
+    platform: select
+    category: config
+    zcl: {cluster: 0xFCC0, attr: 0x010C, type: u8, mfr: 0x115F}
+    map: {1: low, 2: medium, 3: high}
+  - key: trigger_indicator
+    platform: switch
+    category: config
+    zcl: {cluster: 0xFCC0, attr: 0x0152, type: u8, mfr: 0x115F}
+    value_on: 1
+    value_off: 0
+  # Heartbeat struct 0xFCC0/0x00F7, tags as in herdsman numericAttributes2Payload.
+  - key: battery_voltage
+    platform: sensor
+    device_class: voltage
+    unit: mV
+    state_class: measurement
+    category: diagnostic
+    struct: {cluster: 0xFCC0, attr: 0x00F7, mfr: 0x115F, codec: zcl_tagged, tag: 1}
+  - key: battery
+    platform: sensor
+    device_class: battery
+    unit: "%"
+    state_class: measurement
+    category: diagnostic
+    struct: {cluster: 0xFCC0, attr: 0x00F7, mfr: 0x115F, codec: zcl_tagged, tag: 1}
+    from: battery_percent(x)                       # device.battery curve
+  - key: device_temperature
+    platform: sensor
+    device_class: temperature
+    unit: °C
+    state_class: measurement
+    category: diagnostic
+    enabled: false
+    struct: {cluster: 0xFCC0, attr: 0x00F7, mfr: 0x115F, codec: zcl_tagged, tag: 3}
+  - key: power_outage_count
+    platform: sensor
+    state_class: total_increasing
+    category: diagnostic
+    enabled: false
+    struct: {cluster: 0xFCC0, attr: 0x00F7, mfr: 0x115F, codec: zcl_tagged, tag: 5}
+    from: x - 1

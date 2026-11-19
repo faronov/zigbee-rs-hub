@@ -17,6 +17,40 @@ interface will be a WebSocket JSON API.
 | **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | planned |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
+## Device support
+
+Спецификация (черновик, только дизайн): [`docs/device-support.md`](docs/device-support.md),
+примеры определений: [`definitions/examples/`](definitions/examples/).
+
+- **Три уровня без перепрошивки хаба.** (a) Generic ZCL: после интервью хаб
+  сам создаёт сущности из стандартных кластеров (On/Off, Level, Color,
+  датчики, IAS, метеринг, батарея, термостат, шторы, замки…) и настраивает
+  binding/reporting, как ZHA. (b) Декларативные определения (данные, не код):
+  match по производителю/модели/отпечатку, mfr-атрибуты, Tuya EF00 DP,
+  команды/события, маленький язык выражений, компилируемый в проверяемый
+  байткод без циклов. (c) YAML → детерминированный CBOR с хешем; генератор из
+  zigbee-herdsman-converters с отчётом о покрытии.
+- **Приоритет слоёв:** пользовательское определение > самоописание устройства
+  > каталог (банк или скачанное по требованию, подписанный индекс) > generic.
+- **Самоописание zigbee-rs:** mfr-кластер Device Schema (0xFD5D, ID и mfr code
+  пока плейсхолдеры) отдаёт схему настроек кусками по 48 байт через обычный
+  Read Attributes; хаб кеширует её по хешу. На стороне zigbee-rs схема
+  генерируется на этапе сборки из `#[derive(ZclSettings)]`.
+- **Green Power:** синк на NCP (`NCP_SINK`, уровень безопасности 0x00), хаб
+  разбирает `EVT_GP_*`: идентификация по SrcID/DeviceID/Manufacturer+Model ID,
+  generic GP-уровень (кнопки → события, отчёты 0xA0–0xA3 → сенсоры по правилам
+  ZCL), декларативные GP-определения (в т.ч. 0xB0–0xBF), окно комиссионинга
+  через WebSocket API. Трансляция на NCP — только как будущий локальный fallback.
+- **Модель сущностей 1:1 с Home Assistant** (платформы, device/state class,
+  единицы, config/diagnostic), чтобы будущая HA-интеграция была тонким мостом.
+- **Измерено** на zigbee-herdsman-converters 26.130.0 (4 664 определения):
+  полностью декларативны 55,1 % (generic 41,7 % + Tuya 13,4 %), ещё 26,1 %
+  требуют вендорских шаблонов (Hue light один закрывает 583), 18,8 % —
+  произвольный JS. Tuya DP-таблицы декларативны на 79 %.
+- **Размеры:** простые определения 120–310 Б CBOR; банк 256 КиБ вмещает
+  ~2 000 сжатых определений (среднее ~88 Б в deflate-блоке); на 8 МБ банк
+  576 КиБ вмещает всё переводимое (~376 КиБ).
+
 ## Layout
 
 | Path | What |
@@ -24,6 +58,8 @@ interface will be a WebSocket JSON API.
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb) |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF) |
+| `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
+| `definitions/examples/` | Example device definitions (YAML source form) |
 
 ## Framework choice: esp-idf-svc (`std`), not esp-hal
 

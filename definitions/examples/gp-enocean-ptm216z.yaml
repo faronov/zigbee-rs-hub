@@ -1,0 +1,61 @@
+# Green Power 4-contact switch (two rockers), energy harvesting.
+#
+# EnOcean PTM 216Z. Matching and contact layout as in zha-device-handlers
+# `zhaquirks/enocean/ptm216z.py` (checked 2026-11-19): DeviceID 0x07 (Generic
+# Switch), SrcID block 0x01500000-0x015FFFFF (the PTM 215ZE shares the block
+# but commissions as DeviceID 0x02, so the DeviceID is part of the match).
+#
+# The switch sends Press 8-bit vector (0x69) and Release 8-bit vector (0x6A).
+# Both carry one byte: the resulting state of every contact (bit set = closed).
+# Bit 0 A0 (rocker A top), bit 1 A1 (A bottom), bit 2 B0, bit 3 B1, bit 4 the
+# energy bar (not exposed). One event entity per contact fires press/release
+# only when its own bit changes (`when`); `last` is the entity's previous
+# event type.
+#
+# Hue Tap (DeviceID 0x02, SrcID 0x00400000-0x004FFFFF, commands 0x22, 0x10,
+# 0x11, 0x12 for buttons 1-4) is the same shape with `gp_cmd` alone deciding
+# the button; the generic GP tier already turns it into one "action" event
+# entity (toggle, recall_scene_0..2) without any definition.
+zdef: 1
+id: enocean/ptm216z
+revision: 1
+vendor: EnOcean
+model: PTM 216Z
+description: Self-powered double rocker switch module
+match:
+  - gp: {device_id: 0x07, src_id: [0x01500000, 0x015FFFFF]}
+device:
+  power: energy_harvesting   # no availability tracking, last_seen only
+gp:
+  security_min: 0            # what the sink accepted is shown; this is a floor
+generic:
+  exclude: [action]          # replace the generic per-command "action" entity
+entities:
+  - key: rocker_a_top
+    platform: event
+    device_class: button
+    event_types: [press, release]
+    triggers:
+      - {gp_cmd: 0x69, when: 'bit(payload[0], 0) && last != "press"', event: '"press"'}
+      - {gp_cmd: 0x6A, when: '!bit(payload[0], 0) && last == "press"', event: '"release"'}
+  - key: rocker_a_bottom
+    platform: event
+    device_class: button
+    event_types: [press, release]
+    triggers:
+      - {gp_cmd: 0x69, when: 'bit(payload[0], 1) && last != "press"', event: '"press"'}
+      - {gp_cmd: 0x6A, when: '!bit(payload[0], 1) && last == "press"', event: '"release"'}
+  - key: rocker_b_top
+    platform: event
+    device_class: button
+    event_types: [press, release]
+    triggers:
+      - {gp_cmd: 0x69, when: 'bit(payload[0], 2) && last != "press"', event: '"press"'}
+      - {gp_cmd: 0x6A, when: '!bit(payload[0], 2) && last == "press"', event: '"release"'}
+  - key: rocker_b_bottom
+    platform: event
+    device_class: button
+    event_types: [press, release]
+    triggers:
+      - {gp_cmd: 0x69, when: 'bit(payload[0], 3) && last != "press"', event: '"press"'}
+      - {gp_cmd: 0x6A, when: '!bit(payload[0], 3) && last == "press"', event: '"release"'}

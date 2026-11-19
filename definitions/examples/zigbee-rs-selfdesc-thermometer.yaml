@@ -1,0 +1,70 @@
+# zigbee-rs self-describing device: the schema it publishes on air.
+#
+# A zigbee-rs thermometer (temperature + humidity + battery on the standard
+# clusters) with a manufacturer-specific settings cluster. No catalog
+# definition exists or is needed: the hub reads this schema from the device's
+# Device Schema cluster (ZRDS, see docs/device-support.md, "Self-description")
+# and builds the entities from it.
+#
+# This YAML is the *source form*. The firmware build (`zigbee-zcl`
+# `#[derive(ZclSettings)]` or the `device_schema!` macro) emits the same
+# structure as deterministic CBOR, deflates it, and serves it in 48-byte
+# chunks. The standard clusters need no schema entries: the hub's generic tier
+# covers them. The schema only adds what the generic tier cannot know.
+#
+# Cluster and manufacturer IDs are placeholders until zigbee-rs has an
+# allocated manufacturer code (open question Q1).
+zdef_fragment: 1          # a fragment: no `match`, the device is its own match
+source: device
+vendor: zigbee-rs
+model: zrs-thermo-1
+mfr: 0x1234               # placeholder (zigbee-rs products use 0x1234 today)
+generic:
+  patch:
+    temperature: {report: [30, 600, 10]}
+    humidity: {report: [30, 600, 50]}
+entities:
+  - key: report_interval
+    platform: number
+    category: config
+    unit: s
+    zcl: {cluster: 0xFD5E, attr: 0x0000, type: u16, mfr: 0x1234}
+    min: 10
+    max: 3600
+    step: 10
+  - key: temperature_offset
+    platform: number
+    category: config
+    device_class: temperature
+    unit: °C
+    zcl: {cluster: 0xFD5E, attr: 0x0001, type: i16, mfr: 0x1234}
+    div: 100
+    min: -5
+    max: 5
+    step: 0.1
+  - key: humidity_offset
+    platform: number
+    category: config
+    unit: "%"
+    zcl: {cluster: 0xFD5E, attr: 0x0002, type: i16, mfr: 0x1234}
+    div: 100
+    min: -10
+    max: 10
+    step: 0.5
+  - key: led_mode
+    platform: select
+    category: config
+    zcl: {cluster: 0xFD5E, attr: 0x0003, type: enum8, mfr: 0x1234}
+    map: {0: "off", 1: on_report, 2: on_button}
+  - key: tx_failures
+    platform: sensor
+    category: diagnostic
+    state_class: total_increasing
+    enabled: false
+    zcl: {cluster: 0xFD5E, attr: 0x0100, type: u16, mfr: 0x1234}
+    access: rp
+    report: [3600, 43200, 1]
+  - key: reset_settings
+    platform: button
+    category: config
+    press: {cmd: {cluster: 0xFD5E, id: 0x00, mfr: 0x1234}}
