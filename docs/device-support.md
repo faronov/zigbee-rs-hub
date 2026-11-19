@@ -1,6 +1,6 @@
 # Device support: generic ZCL, declarative definitions, self-description, Green Power
 
-Design specification of 2026-11-19, with the user's decisions D1–D21 of the
+Design specification of 2026-11-19, with the user's decisions D1–D23 of the
 same day. All open questions of the drafts are decided.
 Documentation only; nothing here is implemented yet. Code fragments are
 illustrations, not APIs.
@@ -92,6 +92,7 @@ User decisions (2026-11-19, third batch), closing the remaining questions:
 | D19 | **FlowerX GP / BGT1 GP report intervals are unknown**: they keep the 25 h unavailability default for GP sensors; any definition can set `gp.report_interval_s` or `device.availability.timeout_s` to change it. | 4.6, 13.6 |
 | D20 | **8 MB layout approved**: banks 2 × 576 KiB, local definitions 128 KiB. | 16.2 |
 | D21 | The other proposals of the drafts are accepted: on-demand fetch on by default (with a setting); availability defaults of 4.6; zhc expose property names as entity keys; the HA integration's domain and distribution are decided when it is built. | 4.6, 9.3, 15, 17.2 |
+| D23 | **GP bindings (2026-11-19):** a GPD button or command can be bound to a device endpoint or a group with a ZCL command and payload. Two executors, one per binding: **(a) on-device**, programmed into a target that is a GP sink with CT-based commissioning and a Translation Table (gpsFunctionality bits 11 and 18) through ZRHP remote GP provisioning (GP Pairing Configuration + GP Translation Table Update); **(b) hub-side virtual binding**, the hub turning the NCP's `EVT_GP_FRAME` into ZCL commands to any light or group, including proxy-only lamps. Automatic choice, user override, listing, removal, drift repair, persistence in `hubdata`; GP event entities always still fire. | 13.8, 14.5 |
 | D22 | **Source formats (2026-11-19):** the canonical form in the definitions repository is **strict YAML 1.2** (core schema); `zdefc` also accepts **JSON, JSONC and JSON5** (one data model, one JSON Schema, identical CBOR). JSON5 is the alternative for authors who prefer explicit typing: it has comments, hexadecimal numbers and no implicit booleans. Catalog CI normalises contributed JSON/JSON5 files to the canonical YAML. | 6.1, 14.4 |
 
 Design goals derived from these:
@@ -112,7 +113,8 @@ Design goals derived from these:
 
 Non-goals (v1): arbitrary JavaScript, porting herdsman's custom converters
 one by one, Zigbee Light Link touchlink, hub-side automations beyond what
-event entities need, an HA integration itself (only its boundary, 15).
+event entities need (GP bindings, D23, are a bounded binding table, not a
+rule engine), an HA integration itself (only its boundary, 15).
 
 ## 2. Architecture
 
@@ -1518,18 +1520,12 @@ The hub:
 **Translation decision.** The NCP has no translation endpoint
 (`SinkConfig.endpoint = None`): it does not turn GPD commands into ZCL
 commands, and every accepted command reaches the hub as `EVT_GP_FRAME` with
-`result` 1 (passed through). **The hub is the only place where GPD commands
-take effect** (entities, events, hub automations). NCP-side translation
-(zigbee-rs `zigbee_gp::translation`, GP Translation Table) is reserved for a
-later **local fallback**: for example a GP switch that must toggle a light
-group even while the hub is down. If that is ever enabled for a GPD:
-
-- the hub programs it explicitly (a future ZRHP command; Translation Table
-  commands are deferred in zigbee-rs, GP doc §3.7) and marks the GPD's
-  bindings as `fallback`;
-- frames the NCP translated arrive with `result` 0; the hub still updates
-  entities and fires events, but hub automations marked "skip if translated"
-  do not act again, so a command is never executed twice.
+`result` 1 (passed through). The NCP itself never acts on a GPD command:
+GPD commands take effect through the hub's entities, events and **GP
+bindings** (D23, 13.8). A binding is executed either by the target device
+itself (a sink with a Translation Table, programmed by the hub through ZRHP
+remote GP provisioning) or by the hub; the former also works while the hub
+is down.
 
 ### 13.2 Identity and commissioning data
 
@@ -1722,7 +1718,146 @@ Manufacturer-specific frames (no example device uses them yet; illustrative):
 | `gp/devices/list` | hub registry + `GP_SINK_TABLE_READ` | includes "on NCP but unknown to the hub" |
 | `gp/devices/remove {id, send_remove: true}` | `GP_SINK_REMOVE{gpd_id, flags bit0}` | `send_remove` sends GP Pairing RemoveGPD to proxies |
 | `gp/config {security_level, communication_mode}` | `GP_SINK_CONFIG` | admin only; stays 0x00 (D14); a level > 0 would reject unsecured GPDs such as FlowerX GP |
+| `gp/bindings/list {gpd?, target?}` | hub registry | binding records with executor, state and per-target verification (13.8) |
+| `gp/bindings/create {gpd, trigger, target, action, executor: auto\|device\|hub}` | on-device: `GP_PAIRING_CONFIGURATION`, `GP_TRANSLATION_UPDATE`, `GP_TRANSLATION_REQUEST` (7.11); hub-side: none | admin only; returns the binding with state `pending`, then `active` or `failed{zcl_status}`; `unsupported` when `device` is forced on a target without gpsFunctionality bits 11 and 18 |
+| `gp/bindings/update {id, …}` | as create | changing the executor removes the old one first (13.8) |
+| `gp/bindings/delete {id}` | on-device: `GP_TRANSLATION_UPDATE{remove}`, last one: `GP_PAIRING_CONFIGURATION{remove pairing}` | state `removing` until the target confirmed |
+| `gp/bindings/verify {id?}` | `GP_TRANSLATION_REQUEST`, `GP_REMOTE_SINK_TABLE_REQUEST` | re-reads on-device targets, repairs drift |
+| `gp/targets/probe {device}` | ZCL Read Attributes of 0x0021 attrs 0x0000/0x0006 on EP 242, `GP_REMOTE_SINK_TABLE_REQUEST` | `{sink: bool, translation_table: bool, security_levels, max_sink_entries}` |
+| event `gp/binding` | the steps above | `{id, state, target, zcl_status?}` |
 | device field `warnings: ["gp_unsecured"]` | `EVT_GP_COMMISSIONED` record security level | shown as a badge; set for level 0 or below `security_min` (13.1) |
+
+### 13.8 GP bindings (D23)
+
+zigpy has no way to bind a GP switch to a light: ZHA only exposes GPD
+commands as events. The hub binds them.
+
+**Binding record.** A binding maps one trigger to one action on one
+target:
+
+- **trigger**: the GPD (`gpd_id`) and a GPD command (`command_id`), for
+  example Toggle 0x22, or Press 1 of 1 0x69 with a contact bitmask match
+  for generic switches; definitions name the commands per button (13.5),
+  so the UI offers "button 2, press";
+- **target**: a device endpoint (`device`, `endpoint`) or a group
+  (`group`);
+- **action**: profile (0x0104), cluster, ZCL command (client → server) and
+  a payload that is fixed (≤ 8 bytes), **derived** (the GP default
+  derivation, for example Step mode and step size from the GPD's Step
+  command) or **copied** from the GPD payload; the same three choices as
+  the GP Translation Table (ZRHP 7.11 `translation`);
+- **executor**: `device` (on-device) or `hub`, chosen automatically and
+  overridable.
+
+**(a) On-device bindings.** The target executes the binding itself; it
+works while the hub, the NCP or the host link is down, and costs no extra
+radio frame per press.
+
+- *Capability detection* when a binding is created and at every
+  interview: read the GP cluster server attributes of endpoint 242
+  (gpsFunctionality 0x0006, gpsMaxSinkTableEntries 0x0000) with ZCL Read
+  Attributes; on-device needs gpsFunctionality bit 11 (CT-based
+  commissioning: GP Pairing Configuration) and bit 18 (Translation
+  Table), and the security level of the GPD (13.1) among the levels the
+  target accepts (bits 13/15/16). A `GP_REMOTE_SINK_TABLE_REQUEST`
+  answered with SUCCESS or NOT_FOUND confirms a working sink. A Read
+  Attributes answered UNSUPPORTED_ATTRIBUTE, or a proxy-only device
+  (gppFunctionality 0x0016 only), means hub-side. zigbee-rs combo lights
+  with `green-power-translation-table` qualify (GP doc §3.8).
+- *Programming* (ZRHP 7.11, remote GP provisioning), all unicast to the
+  target, each step confirmed by `EVT_GP_REMOTE_STATUS` SUCCESS with the
+  request's `zcl_tsn` (timeout 3 s after `EVT_APS_DATA_CONFIRM`, 2
+  retries):
+  1. `GP_PAIRING_CONFIGURATION{dst, actions: extend | send GP Pairing,
+     gpd_id, device_id, communication_mode, flags, security, key,
+     frame_counter, paired: 0x00 (none)}`. The GPD data comes from the
+     hub's GP registry (13.2): the key and the current frame counter of the
+     NCP's Sink Table. `paired` 0x00 keeps the target from adding its own
+     default translations; the binding's translation is the only one.
+     Communication mode: the one the NCP sink uses for the GPD (13.1:
+     pre-commissioned groupcast to 0x0B84, `communication_mode` 2 with
+     that group; derived groupcast for GPDs commissioned that way). The
+     target's sink then joins the same group on endpoint 242, so the
+     proxies' existing groupcast reaches it and no new proxy pairing is
+     needed; "send GP Pairing" is set so proxies that miss the pairing
+     learn it.
+  2. `GP_TRANSLATION_UPDATE{dst, action: replace, gpd_id, translations:
+     [{gpd_command, endpoint, profile, cluster, zcl_command, payload}]}`;
+     all bindings of one GPD on one target travel together (at most 7 per
+     update, 16 per target on a zigbee-rs combo).
+  3. Verify with `GP_TRANSLATION_REQUEST` (and
+     `GP_REMOTE_SINK_TABLE_REQUEST` by GPD ID): the binding becomes
+     `active` only when the target's table holds it.
+- *Groups*: an on-device group binding programs every member that
+  qualifies (one Pairing Configuration + Translation Update each, the
+  translation's endpoint being the member's endpoint in the group). If any
+  member does not qualify, the whole group binding is hub-side (one
+  groupcast) instead of mixing executors.
+- *Removal*: `GP_TRANSLATION_UPDATE{remove}` for the binding's
+  translations; when it was the GPD's last binding on that target,
+  `GP_PAIRING_CONFIGURATION{remove pairing | send GP Pairing}` with the
+  same communication mode and groups. Removing the GPD from the hub
+  (13.7) removes its on-device bindings first. An unreachable target leaves
+  the binding in `removing` and is retried at its next announcement.
+- *Drift*: at NCP start, daily, and when a target announces itself
+  (`Device_annce`, a rejoin or a factory reset), the hub reads the
+  target's Translation Table and reprograms missing or different entries
+  (`drift` state while it does). The GPD's frame counter is re-sent with
+  every reprogramming, so a reset target never accepts replays.
+
+**(b) Hub-side virtual bindings.** The hub executes the binding on
+`EVT_GP_FRAME` (`result` 1): it sends the ZCL command with
+`APS_DATA_REQUEST` (unicast with APS ACK to a device endpoint, groupcast to
+a group, source endpoint 1, Default Response disabled for groups). Any
+Zigbee light or group qualifies, including lamps that are only GP proxies
+or not GP-capable at all.
+
+- *Latency budget* (press to the target's radio, 95th percentile,
+  single-hop target): GP tunnelling at the proxy (gpp tunnelling delay
+  plus the Notification, ≤ 100 ms; a GPDF heard directly by the NCP: 0),
+  NCP sink processing and the host link (≤ 15 ms), hub binding lookup and
+  encode (≤ 5 ms), NCP APS queue and transmission (≤ 30 ms): **≤ 150 ms**,
+  verified in hardware tests (18.6). A binding over a multi-hop route adds
+  the route's delay.
+- Frames the NCP drops (duplicates from several proxies, stale counters)
+  never trigger a binding: `EVT_GP_FRAME` is emitted only for accepted
+  frames (ZRHP 7.11).
+- No effect while the hub is down; the UI shows hub-side bindings as
+  "needs the hub".
+
+**Choice of executor.** `auto` (default): on-device when every target
+qualifies, else hub-side. The user can force `hub` (for example to keep
+the logic visible) or `device` (rejected with `unsupported` when a target
+does not qualify). Changing the executor removes the binding from the old
+executor before the new one is active, so a press never runs twice.
+
+**Interaction with entities and Home Assistant automations.**
+
+- GP event entities always fire, bound or not (4.7); a binding never
+  swallows an event. The event carries `bindings: [ids]` and
+  `executor: device|hub` so HA automations can add a condition.
+- The hub cannot see HA automations. When a binding is created for a
+  trigger, the UI warns that HA automations on the same event entity will
+  run as well, and the HA integration (15) exposes the `bindings` attribute
+  on the event entity. A user who wants HA to own a button simply does not
+  bind it.
+- On-device bindings report `result` 0 only if the NCP itself translated a
+  frame, which it never does (13.1); a target's translation is not visible
+  to the hub except through the light's own attribute reports.
+
+**Persistence.** Bindings live in the host store journal in `hubdata`
+(16.1): `gp_binding {id, gpd_id, trigger{command_id, contact_mask?,
+contact_value?}, target{device_ieee, endpoint | group}, action{profile,
+cluster, command, payload_mode, payload}, executor, state (pending |
+active | drift | removing | failed), targets[{device_ieee, last_verified,
+error}]}`; at most 64 bindings, about 96 bytes each (6 KiB of the
+128 KiB host store). A restore of a hub backup reprograms on-device
+bindings as drift.
+
+**Status.** The zigbee-rs side exists and is host-tested only: ZRHP
+remote GP provisioning on the NCP and the combo's Pairing Configuration
+and Translation Table (zigbee-rs `gp-translation`, GP doc §3.8, ZRHP
+7.11). The hub side is specification only.
 
 ---
 
@@ -1820,9 +1955,11 @@ which keeps a YAML parser and the compiler out of the 1.5 MiB app.
 ### 14.5 Green Power
 
 See 13.7 (`gp/commissioning/open|close`, `gp/devices/list|remove`,
-`gp/config`, events `gp/commissioning`, `gp/pending`, `gp/commissioned`,
-`gp/failed`). GP devices also appear in `devices/*` and `entities/*` like
-Zigbee devices.
+`gp/config`, `gp/bindings/list|create|update|delete|verify`,
+`gp/targets/probe`, events `gp/commissioning`, `gp/pending`,
+`gp/commissioned`, `gp/failed`, `gp/binding`) and 13.8 for bindings. GP
+devices also appear in `devices/*` and `entities/*` like Zigbee devices;
+binding management is admin only.
 
 ## 15. Boundary to a Home Assistant integration
 
@@ -1858,7 +1995,7 @@ API.
 
 | Area | Size | Content |
 |---|---:|---|
-| Host store journal | 128 KiB | ZRHP host tables, device registry, resolution records (3.4), GP registry, entity states worth persisting |
+| Host store journal | 128 KiB | ZRHP host tables, device registry, resolution records (3.4), GP registry and GP bindings (13.8, ≤ 6 KiB), entity states worth persisting |
 | Configuration | 32 KiB | hub settings, active-bank record (9.1), trusted keys, anti-rollback counter |
 | Converter bank A | 256 KiB | catalog (9.1) |
 | Converter bank B | 256 KiB | staged catalog |
@@ -2176,6 +2313,13 @@ For every generated definition the generator also emits test vectors:
   frames; FlowerX GP with every combination of model bits (entity sets);
   BGT1 GP identical reports producing a state refresh each time; the
   `gp_unsecured` warning for level-0 commissioning.
+- GP bindings (13.8): capability probe outcomes (zigbee-rs combo, a
+  proxy-only lamp, UNSUPPORTED_ATTRIBUTE); the on-device programming
+  sequence against recorded `EVT_GP_REMOTE_*` answers, including a
+  FAILURE status, a timeout and a target factory reset (drift repair);
+  hub-side execution with duplicate frames from two proxies (one command);
+  executor change without a double execution; removal of a GPD removing
+  its on-device bindings first.
 
 ### 18.5 Budgets in CI
 
@@ -2190,7 +2334,10 @@ On the Thread BR board with the H2 NCP: one device per class (plug with
 metering, bulb with color, Aqara sensor, Tuya TRV, Philips remote, IKEA
 remote, IAS contact sensor, a zigbee-rs self-describing device, EnOcean or
 Hue GP switch, zigbee-rs MG22 GPD sensor), interview to entities to commands,
-catalog OTA with a forced failure and rollback.
+catalog OTA with a forced failure and rollback. GP bindings: an MG22 GP
+switch bound on-device to a zigbee-rs combo light (press with the hub
+stopped) and hub-side to a non-GP bulb, with the press-to-light latency
+measured against the 150 ms budget (13.8).
 
 ## 19. Open questions
 
