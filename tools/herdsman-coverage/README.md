@@ -11,6 +11,7 @@ budget derived from it is section 16.3.
 |---|---|
 | `measure.cjs` | Loads a zhc build with instrumentation, classifies every definition into tiers A–D, writes `stats.json`, `results.json`, `proxy.json`, prints a Markdown summary |
 | `proxy_size.py` | Encodes `proxy.json` like a bank (integer keys, shared string table, 4 KiB deflate blocks) and prints the size per tier |
+| `popularity.py` | Ranks definitions by how many Zigbee2MQTT / ZHA GitHub issues mention their identifiers (popularity for the 4 MB bank, decision D18); caches issue texts as JSONL |
 
 ## Run
 
@@ -24,7 +25,16 @@ node <hub>/tools/herdsman-coverage/measure.cjs \
      node_modules/zigbee-herdsman-converters/dist /tmp/zhc/out
 pip install cbor2
 python3 <hub>/tools/herdsman-coverage/proxy_size.py /tmp/zhc/out
+python3 <hub>/tools/herdsman-coverage/popularity.py /tmp/zhc/out   # needs a logged-in `gh`
 ```
+
+`popularity.py` fetches every issue and pull request of the four repositories
+once (about 500 `gh api` requests, a few minutes) into
+`/tmp/zhc/out/issues-*.jsonl`; later runs fetch only what changed. Its method
+is in its docstring and in spec 17.2. First run (2026-11-19): 46 758 issues and pull
+requests scanned in ~13 min; 4 266 of 4 664 definitions mentioned at least
+once. Coordinator/adapter definitions (SLZB-06M) top the raw list because
+Z2M's issue template asks for the adapter; the catalog builder drops them.
 
 A run takes about 10 s. Results for 26.130.0 (2026-11-19):
 

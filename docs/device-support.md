@@ -1,7 +1,7 @@
 # Device support: generic ZCL, declarative definitions, self-description, Green Power
 
-Design specification, draft of 2026-11-19, updated the same day with the
-user's second batch of decisions (D8–D16) (branch `device-model-spec`).
+Design specification of 2026-11-19, with the user's decisions D1–D21 of the
+same day. All open questions of the drafts are decided.
 Documentation only; nothing here is implemented yet. Code fragments are
 illustrations, not APIs.
 
@@ -73,7 +73,7 @@ questions:
 
 | # | Decision | Where |
 |---|---|---|
-| D8 | **Manufacturer code 0x6D6B for everything zigbee-rs**: Zigbee devices (Node descriptor, manufacturer-specific frames), Green Power devices (Manufacturer ID), the self-description and settings clusters. It replaces the 0x1234 placeholder of the zigbee-rs products. 0x6D6B is **not registered with the CSA** (it is not in zigbee-herdsman's `ManufacturerCode` table, checked 2026-11-19); it is already used as GP Manufacturer ID by DIYRuZ FlowerX GP and EfektaLab BGT1 GP. Caveat: the CSA could assign 0x6D6B to another member at any time; frames with this code would then be ambiguous for stacks that key behaviour on the code. Registering a code before shipping products in volume stays advisable; a later move is one constant plus a catalog entry per old firmware. Cluster IDs: Device Schema **0xFC6B**, zigbee-rs Settings **0xFC6C** (12.2). | 12, 13.3 |
+| D8 | **Manufacturer code 0x6D6B for everything zigbee-rs**: Zigbee devices (Node descriptor, manufacturer-specific frames), Green Power devices (Manufacturer ID), the self-description and settings clusters. It replaces the 0x1234 placeholder of the zigbee-rs products. 0x6D6B is **not registered with the CSA** (it is not in zigbee-herdsman's `ManufacturerCode` table, checked 2026-11-19); it is already used as GP Manufacturer ID by DIYRuZ FlowerX GP and EfektaLab BGT1 GP. **CSA registration is not planned** (D17). Caveat that remains: the CSA could assign 0x6D6B to another member at any time; frames with this code would then be ambiguous for stacks that key behaviour on the code (the hub itself keys self-description on cluster 0xFC6B plus a valid SchemaFormat, 12.3, and GP models on Manufacturer ID + Model ID, so it would only need catalog entries for such a device). Cluster IDs: Device Schema **0xFC6B**, zigbee-rs Settings **0xFC6C** (12.2). | 12, 13.3 |
 | D9 | **Definitions repository `faronov/zigbee-rs-definitions`**, separate from the hub. The catalog (bank files, manifest, index shards) is published as **GitHub Releases** assets. The Ed25519 signing key lives in that repository's **GitHub Actions secrets**; the user owns it. | 9.3, 9.4 |
 | D10 | **64 KiB local-definition area** on 4 MB boards (user uploads, fetched definitions, self-description schemas); free space in `hubdata` becomes 160 KiB. | 9.2, 16.1 |
 | D11 | **Self-description above the catalog**; a catalog definition can still demote a known-buggy firmware (`self_description: under` / `ignore`). | 3.3, 12.5 |
@@ -82,6 +82,16 @@ questions:
 | D14 | **GP sink security level stays 0x00**, with a UI warning on every GPD that is commissioned unsecured (or below its definition's `security_min`). | 13.1, 13.7 |
 | D15 | **YAML is compiled client-side** (`zdefc` CLI and its WebAssembly build in the UI); **the hub accepts CBOR only**. | 14.4 |
 | D16 | GP facts from the user's ZHA quirks become definitions (FlowerX GP, BGT1 GP, zigbee-rs GP sensor and switch), and the **GP model-ID space under 0x6D6B** is tracked in an allocation table. Every accepted GP report refreshes `last_seen` and the entity states even if the values are unchanged. | 13.3, 13.6 |
+
+User decisions (2026-11-19, third batch), closing the remaining questions:
+
+| # | Decision | Where |
+|---|---|---|
+| D17 | **No CSA registration of 0x6D6B is planned.** The collision caveat of D8 stays documented. | D8, 12.2 |
+| D18 | **Popularity for the 4 MB curation = model mentions in Zigbee2MQTT / ZHA GitHub issues**, counted by `tools/herdsman-coverage/popularity.py` (method in 17.2). | 17.2 |
+| D19 | **FlowerX GP / BGT1 GP report intervals are unknown**: they keep the 25 h unavailability default for GP sensors; any definition can set `gp.report_interval_s` or `device.availability.timeout_s` to change it. | 4.6, 13.6 |
+| D20 | **8 MB layout approved**: banks 2 × 576 KiB, local definitions 128 KiB. | 16.2 |
+| D21 | The other proposals of the drafts are accepted: on-demand fetch on by default (with a setting); availability defaults of 4.6; zhc expose property names as entity keys; the HA integration's domain and distribution are decided when it is built. | 4.6, 9.3, 15, 17.2 |
 
 Design goals derived from these:
 
@@ -404,7 +414,8 @@ State message (WebSocket, 14.3):
 | Mains Zigbee (router, RxOnWhenIdle) | Unavailable after 10 min without any frame **and** a failed active check (read Basic 0x0000 ZCLVersion, 3 tries over 30 s). Checks start after 10 min of silence. |
 | Battery Zigbee | Unavailable after `max(2.5 × longest configured max reporting interval, 2.5 × check-in interval, 25 h)` without any frame. No active checks. |
 | GP sensor with a known report interval | Unavailable after 3 × `gp.report_interval_s` without an accepted GPDF (13.6). |
-| GP sensor without a known interval | Unavailable after 25 h without an accepted GPDF. |
+| GP sensor without a known interval | Unavailable after 25 h without an accepted GPDF (D19; FlowerX GP and BGT1 GP today). |
+| Any device, per definition | `device.availability.timeout_s` replaces the computed timeout; `gp.report_interval_s` sets 3 × that for GP sensors. |
 | GP switch or energy harvesting | Never unavailable. `last_seen` only. |
 
 `available` is per device; HA marks all its entities. `last_seen`, `lqi` and
@@ -1121,7 +1132,7 @@ evicted; an upload that does not fit fails with `NO_SPACE`.
 ### 9.3 On-demand fetch
 
 When a device resolves to "generic only" and the hub has Internet access
-(opt-in setting, default on), the hub asks the definitions repository:
+(setting, default on, D21), the hub asks the definitions repository:
 
 ```text
 {base} = https://github.com/faronov/zigbee-rs-definitions/releases/latest/download
@@ -1676,8 +1687,8 @@ Manufacturer-specific frames (no example device uses them yet; illustrative):
 - GPDs are never polled and never asked for anything (unidirectional), so
   availability is passive only: 4.6.
 - A GP sensor with `report_interval_s` is unavailable after 3 missed
-  intervals (25 h without a known interval); its last values stay (HA shows
-  them as unavailable).
+  intervals (25 h without a known interval, D19; both configurable per
+  definition, 4.6); its last values stay (HA shows them as unavailable).
 - **Every accepted report refreshes** `last_seen` and publishes an
   `entity_state` for each entity in it, even when the value is unchanged
   (D16, the BGT1 GP requirement; 4.5). The NCP already drops duplicates of
@@ -1844,7 +1855,7 @@ API.
 | Local definitions (D10) | 64 KiB | user definitions, fetched definitions, self-description schemas (9.2) |
 | Free | 160 KiB (17.9 %) | LittleFS copy-on-write and wear levelling (224 KiB before the local area) |
 
-### 16.2 Flash: 8 MB S3 (`hubdata` 1 920 KiB), proposal
+### 16.2 Flash: 8 MB S3 (`hubdata` 1 920 KiB), approved (D20)
 
 | Area | Size |
 |---|---:|
@@ -1981,10 +1992,39 @@ compile YAML with zdefc; run golden tests (18.1); build banks
   never put into a bank (D12); they are only served on demand.
 - **Curation of the 4 MB bank** (D12): fully translated definitions only
   (tiers A and B, and C once its vendor template exists), ordered by
-  popularity until the bank is full (~2 000, 16.3). The popularity source is
-  still open (Q2); definitions that the generic tier already handles
-  identically (most of the 1 282 "naming only" ones) rank last, because
-  without them the device still works, only its display name is generic.
+  popularity until the bank is full (~2 000, 16.3); definitions that the
+  generic tier already handles identically (most of the 1 282 "naming only"
+  ones) rank last, because without them the device still works, only its
+  display name is generic.
+- **Popularity** (D18, `tools/herdsman-coverage/popularity.py`): zhc has no
+  public usage statistics, so popularity is the number of distinct GitHub
+  issues and pull requests in `Koenkk/zigbee2mqtt`,
+  `Koenkk/zigbee-herdsman-converters`, `zigpy/zha-device-handlers` and
+  `zigpy/zha` whose title or body (first 20 000 characters) mentions one of
+  the definition's identifiers as a whole word, case-insensitively.
+  Identifiers: the model, every `zigbeeModel` string, every fingerprint model
+  ID and manufacturer name; only those with ≥ 4 characters and a digit, `.`
+  or `_` (zhc has `zigbeeModel` strings such as "Switch" or "motion"), and
+  only those that belong to exactly one definition (TS0601 and other shared
+  IDs cannot tell definitions apart, so a Tuya device is counted through its
+  `_TZE…` names). Issue texts are cached as JSONL and refreshed
+  incrementally; the release workflow of the definitions repository reruns
+  it for every catalog. Bias to keep in mind: devices with many problems get
+  many issues; the score ranks what people own and talk about, which is the
+  point, but it is not a market share.
+  First run (2026-11-19, ~13 min): 46 758 issues and pull requests (Z2M
+  26 313, zhc 13 830, zha-device-handlers 5 594, zha 1 021); 4 266 of the
+  4 664 definitions are mentioned at least once, 2 340 of the 2 569 fully
+  translated ones. Top of the list: Xiaomi WSDCGQ01LM (208), Tuya
+  TS011F_plug_1 (202), Aqara WSDCGQ11LM (189), RTCGQ11LM (183); the two Tuya
+  examples of this spec rank 12 (TS0601 T/H sensor, 134) and 14 (ME167 TRV,
+  127). Among the fully translated definitions the 1 600th has 2 mentions and
+  the 2 000th has 1, so the bank's tail is ordered by small numbers and the
+  tie-break (tier A before B, then fewer bytes) matters. Noise: coordinator
+  and adapter definitions (SMLIGHT SLZB-06M, 1 083; "Silabs series 2
+  router", 186) top the raw list because Z2M's issue template asks for the
+  adapter; the catalog builder excludes definitions of coordinator/NCP
+  hardware from the ranking.
 - **Coverage report** (Markdown + JSON per generator run): per vendor file and
   overall counts per tier, the list of untranslated items ranked by how many
   definitions they block (this ranks the next named codec or vendor template to
@@ -2144,24 +2184,9 @@ catalog OTA with a forced failure and rollback.
 
 ## 19. Open questions
 
-Decided on 2026-11-19 (section 1): manufacturer code and cluster IDs (D8),
-definitions repository, hosting and signing key (D9), local-definition area
-(D10), self-description precedence (D11), bank curation (D12), vendor
-template order (D13), GP security level (D14), client-side YAML (D15), and
-the FlowerX/BGT1 facts (D16).
-
-Still open:
-
-| # | Question | Proposal |
-|---|---|---|
-| Q1 | When to register a CSA manufacturer code (D8 caveat), and whether to move zigbee-rs Zigbee devices to it then | before the first product sold in volume; GP model IDs stay under 0x6D6B |
-| Q2 | Popularity data for the 4 MB curation (D12): zhc has no public usage statistics | rank by Zigbee2MQTT and ZHA GitHub issue/discussion mentions per model, plus the brands of devices users report through the hub's opt-in "unknown device" fetches |
-| Q3 | On-demand fetch on by default (only the 1/256 shard is revealed to GitHub) | on, with a setting |
-| Q4 | Availability defaults (mains 10 min + active check; battery max(2.5 × max interval, 25 h); GP 3 report intervals, else 25 h) | accept |
-| Q5 | Use zhc expose property names as entity keys (eases Z2M migration) | yes |
-| Q6 | Report intervals of FlowerX GP and BGT1 GP (for GP availability; their definitions leave `report_interval_s` unset today) | user to give the firmware's intervals |
-| Q7 | 8 MB `hubdata` layout (16.2: banks 2 × 576 KiB, local 128 KiB) | accept |
-| Q8 | HA integration domain name and distribution (HACS) | later |
+None. The questions of the drafts were decided on 2026-11-19 (D8–D21,
+section 1). New questions will come from implementation and are tracked as
+issues of `faronov/zigbee-rs-hub` and `faronov/zigbee-rs-definitions`.
 
 ## 20. Appendix: measured sizes of the examples
 

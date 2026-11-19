@@ -24,6 +24,8 @@ device:
   power: battery
 gp:
   security_min: 3
+  # report_interval_s unknown (D19): the 25 h GP default applies; set it here
+  # (or device.availability.timeout_s) once the firmware's interval is known.
 generic:
   disable: true
 entities:
