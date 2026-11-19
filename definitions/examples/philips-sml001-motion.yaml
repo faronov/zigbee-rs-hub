@@ -1,0 +1,41 @@
+# IKEA/Philips-style device with manufacturer-specific attributes.
+#
+# Philips Hue motion sensor SML001 (9290012607); zigbee-herdsman-converters
+# `devices/philips.ts` + `lib/philips.ts` (zhc 26.134.0). Endpoint 2 carries
+# the sensors (endpoint 1 is a ZLL controller endpoint). Occupancy, temperature,
+# illuminance, battery and the standard occupancy timeout (0x0406/0x0010
+# PIROccupiedToUnoccupiedDelay) all come from the generic tier. Signify adds
+# two attributes with manufacturer code 0x100B, on *standard* clusters:
+#
+# - 0x0406/0x0030 motion sensitivity (uint8 / enum, written as type 0x20);
+# - 0x0000/0x0033 LED indication (boolean).
+zdef: 1
+id: philips/sml001
+revision: 1
+vendor: Philips
+model: "9290012607"
+description: Hue motion sensor
+match:
+  - {model: SML001}
+device:
+  power: battery
+  sleepy: true
+generic:
+  only_endpoints: [2]
+  patch:
+    occupancy_timeout: {max: 65535}
+configure:
+  - read: {ep: 2, cluster: 0x0406, attrs: [0x0030], mfr: 0x100B}
+  - read: {ep: 2, cluster: 0x0000, attrs: [0x0033], mfr: 0x100B}
+entities:
+  - key: motion_sensitivity
+    platform: select
+    category: config
+    ep: 2
+    zcl: {cluster: 0x0406, attr: 0x0030, type: u8, mfr: 0x100B}
+    map: {0: low, 1: medium, 2: high}
+  - key: led_indication
+    platform: switch
+    category: config
+    ep: 2
+    zcl: {cluster: 0x0000, attr: 0x0033, type: bool, mfr: 0x100B}

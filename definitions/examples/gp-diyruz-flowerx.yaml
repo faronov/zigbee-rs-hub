@@ -1,0 +1,104 @@
+# DIYRuZ FlowerX GP: Green Power plant sensor with optional sensors.
+#
+# Facts from the user's ZHA quirk (2026-11-19): DeviceID 0x33, manufacturer ID
+# 0x6D6B, model ID 0xF100 | sensors, where bit 0 = BME280 fitted and bit 1 =
+# DS18B20 fitted. Unsecured (security level 0) Multi-Cluster Reporting (0xA2)
+# with ZCL MeasuredValue encodings.
+#
+# The low bits of the model ID decide which entities exist: one masked match
+# clause covers the whole family, and `present_if` over `gpd.model_id` creates
+# only the entities the board has, from commissioning on (the generic GP tier
+# would only create them on a first report, and could never know that
+# 0x0402/0x5000 is the soil temperature).
+#
+# The sink accepts level-0 GPDs (spec decision D14); the UI shows a warning
+# for this device because anyone in range can spoof its reports.
+zdef: 1
+id: diyruz/flowerx-gp
+revision: 1
+vendor: DIYRuZ
+model: FlowerX GP
+description: Green Power soil moisture sensor
+match:
+  - gp: {device_id: 0x33, manufacturer_id: 0x6D6B, model_id: {value: 0xF100, mask: 0xFF00}}
+device:
+  power: battery
+gp:
+  security_min: 0
+  # report_interval_s unknown (D19): the 25 h GP default applies; set it here
+  # (or device.availability.timeout_s) once the firmware's interval is known.
+generic:
+  disable: true              # the definition lists every entity (some are conditional)
+entities:
+  - key: soil_moisture
+    platform: sensor
+    device_class: moisture
+    unit: "%"
+    state_class: measurement
+    gp: {report: {cluster: 0x0408, attr: 0x0000, type: u16}}
+    invalid: 0xFFFF
+    div: 100
+  # The chip temperature, or the DS18B20 probe when that is the only extra sensor.
+  - key: temperature
+    platform: sensor
+    device_class: temperature
+    unit: °C
+    state_class: measurement
+    gp: {report: {cluster: 0x0402, attr: 0x0000, type: i16}}
+    invalid: -32768          # -0x8000
+    div: 100
+  - key: illuminance
+    platform: sensor
+    device_class: illuminance
+    unit: lx
+    state_class: measurement
+    gp: {report: {cluster: 0x0400, attr: 0x0000, type: u16}}
+    invalid: 0xFFFF
+    from: "x == 0 ? 0 : round(pow10((x - 1) / 10000))"   # x = 10000 * log10(lx) + 1
+  - key: battery
+    platform: sensor
+    device_class: battery
+    unit: "%"
+    state_class: measurement
+    category: diagnostic
+    gp: {report: {cluster: 0x0001, attr: 0x0021, type: u8}}
+    invalid: 0xFF
+    div: 2
+  - key: battery_voltage
+    platform: sensor
+    device_class: voltage
+    unit: V
+    state_class: measurement
+    category: diagnostic
+    gp: {report: {cluster: 0x0001, attr: 0x0020, type: u8}}
+    invalid: 0xFF
+    div: 10
+  # BME280 fitted (model bit 0).
+  - key: humidity
+    platform: sensor
+    device_class: humidity
+    unit: "%"
+    state_class: measurement
+    present_if: bit(gpd.model_id, 0)
+    gp: {report: {cluster: 0x0405, attr: 0x0000, type: u16}}
+    invalid: 0xFFFF
+    div: 100
+  - key: pressure
+    platform: sensor
+    device_class: atmospheric_pressure
+    unit: hPa
+    state_class: measurement
+    present_if: bit(gpd.model_id, 0)
+    gp: {report: {cluster: 0x0403, attr: 0x0000, type: i16}}   # 0.1 kPa = 1 hPa
+    invalid: -32768
+  # BME280 and DS18B20 fitted (model bits 0 and 1): the probe reports as a
+  # second temperature attribute.
+  - key: soil_temperature
+    platform: sensor
+    device_class: temperature
+    unit: °C
+    state_class: measurement
+    present_if: bit(gpd.model_id, 0) && bit(gpd.model_id, 1)
+    gp: {report: {cluster: 0x0402, attr: 0x5000, type: i16}}
+    invalid: -32768
+    div: 100

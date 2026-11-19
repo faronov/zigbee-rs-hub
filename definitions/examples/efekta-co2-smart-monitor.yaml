@@ -1,0 +1,115 @@
+# Efekta-style sensor with many configuration attributes.
+#
+# EFEKTA CO2 Smart Monitor (zigbee-herdsman-converters `devices/efekta.ts`,
+# model "EFEKTA_CO2_Smart_Monitor", checked at zhc 26.134.0). Efekta puts its
+# settings as extra attributes into the *standard* measurement clusters,
+# without a manufacturer code, so every binding below is a plain ZCL
+# attribute. herdsman expresses the same with m.numeric / m.binary; the
+# generator translates those one to one.
+#
+# CO2, temperature and humidity themselves come from the generic tier
+# (0x040D, 0x0402, 0x0405); the definition only changes their reporting.
+# herdsman marks the settings STATE_SET (never read). The hub reads them once
+# at configure and tolerates UNSUPPORTED_ATTRIBUTE, so the UI shows real
+# values where the firmware allows it.
+zdef: 1
+id: efekta/co2-smart-monitor
+revision: 1
+vendor: EFEKTA
+model: EFEKTA_CO2_Smart_Monitor
+description: CO2 monitor with RGB indicator and relay control
+match:
+  - {model: EFEKTA_CO2_Smart_Monitor}
+generic:
+  patch:
+    co2: {report: [10, 600, 0.000001]}   # MeasuredValue is a single (fraction); 1e-6 = 1 ppm
+    temperature: {report: [30, 1800, 10]} # raw 0.01 degC
+    humidity: {report: [30, 1800, 10]}    # raw 0.01 %
+entities:
+  - key: reading_interval
+    platform: number
+    category: config
+    unit: s
+    zcl: {cluster: 0x040D, attr: 0x0201, type: u16}
+    min: 15
+    max: 300
+  - key: light_indicator
+    platform: switch
+    category: config
+    zcl: {cluster: 0x040D, attr: 0x0211, type: bool}
+  - key: light_indicator_level
+    platform: number
+    category: config
+    unit: "%"
+    zcl: {cluster: 0x040D, attr: 0x0209, type: u8}
+    min: 0
+    max: 100
+  - key: set_altitude
+    platform: number
+    category: config
+    unit: m
+    zcl: {cluster: 0x040D, attr: 0x0205, type: u16}
+    min: 0
+    max: 3000
+  - key: temperature_offset
+    platform: number
+    category: config
+    device_class: temperature
+    unit: °C
+    zcl: {cluster: 0x0402, attr: 0x0410, type: i16}
+    div: 10
+    min: -50
+    max: 50
+    step: 0.1
+  - key: humidity_offset
+    platform: number
+    category: config
+    unit: "%"
+    zcl: {cluster: 0x0405, attr: 0x0210, type: i16}
+    min: -50
+    max: 50
+  - key: automatic_calibrations
+    platform: switch
+    category: config
+    zcl: {cluster: 0x040D, attr: 0x0402, type: bool}
+  # herdsman exposes the two one-shot triggers as ON/OFF switches; they are
+  # actions, so they become HA buttons that write `true`.
+  - key: forced_recalibration
+    platform: button
+    category: config
+    press: {write: {cluster: 0x040D, attr: 0x0202, type: bool, value: true}}
+  - key: factory_reset_co2
+    platform: button
+    category: config
+    device_class: restart
+    press: {write: {cluster: 0x040D, attr: 0x0206, type: bool, value: true}}
+  - key: manual_forced_recalibration
+    platform: number
+    category: config
+    unit: ppm
+    zcl: {cluster: 0x040D, attr: 0x0207, type: u16}
+    min: 0
+    max: 5000
+    mode: box
+  - key: enable_gas
+    platform: switch
+    category: config
+    zcl: {cluster: 0x040D, attr: 0x0220, type: bool}
+  - key: invert_logic_gas
+    platform: switch
+    category: config
+    zcl: {cluster: 0x040D, attr: 0x0225, type: bool}
+  - key: high_gas
+    platform: number
+    category: config
+    unit: ppm
+    zcl: {cluster: 0x040D, attr: 0x0221, type: u16}
+    min: 400
+    max: 5000
+  - key: low_gas
+    platform: number
+    category: config
+    unit: ppm
+    zcl: {cluster: 0x040D, attr: 0x0222, type: u16}
+    min: 400
+    max: 5000
