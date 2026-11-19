@@ -92,6 +92,7 @@ User decisions (2026-11-19, third batch), closing the remaining questions:
 | D19 | **FlowerX GP / BGT1 GP report intervals are unknown**: they keep the 25 h unavailability default for GP sensors; any definition can set `gp.report_interval_s` or `device.availability.timeout_s` to change it. | 4.6, 13.6 |
 | D20 | **8 MB layout approved**: banks 2 × 576 KiB, local definitions 128 KiB. | 16.2 |
 | D21 | The other proposals of the drafts are accepted: on-demand fetch on by default (with a setting); availability defaults of 4.6; zhc expose property names as entity keys; the HA integration's domain and distribution are decided when it is built. | 4.6, 9.3, 15, 17.2 |
+| D22 | **Source formats (2026-11-19):** the canonical form in the definitions repository is **strict YAML 1.2** (core schema); `zdefc` also accepts **JSON, JSONC and JSON5** (one data model, one JSON Schema, identical CBOR). JSON5 is the alternative for authors who prefer explicit typing: it has comments, hexadecimal numbers and no implicit booleans. Catalog CI normalises contributed JSON/JSON5 files to the canonical YAML. | 6.1, 14.4 |
 
 Design goals derived from these:
 
@@ -582,6 +583,14 @@ generic:
 ## 6. Tier b: declarative definitions
 
 ### 6.1 File and top-level structure
+
+Source formats (D22): the canonical form is one YAML document per
+definition; `zdefc` also accepts the same structure as JSON, JSONC or JSON5
+(`.json`, `.jsonc`, `.json5`). All of them are parsed into one data model,
+validated by one JSON Schema and compiled to identical CBOR. JSON5 keeps
+comments and hexadecimal numbers (`0x0402`) without YAML's implicit typing;
+multi-line expressions are written with `\` line continuations there.
+The rules below apply to the YAML form.
 
 One YAML document per definition (YAML 1.2 core schema; `on`, `off`, `yes`,
 `no` must be quoted where they are values, and are never keys; the core
@@ -1787,8 +1796,9 @@ Events (topic `entities`): `entity_added`, `entity_updated`,
 
 ### 14.4 Definitions and catalog
 
-The hub stores, accepts and returns **CBOR only** (D15). YAML is compiled by
-`zdefc` on the client: the CLI, or its WebAssembly build inside the web UI.
+The hub stores, accepts and returns **CBOR only** (D15). YAML (or JSON,
+JSONC, JSON5 — D22) is compiled by `zdefc` on the client: the CLI, or its
+WebAssembly build inside the web UI.
 The UI decompiles CBOR back to YAML for editing (lossless except comments,
 which the UI keeps with the user's own copy). The hub never parses YAML,
 which keeps a YAML parser and the compiler out of the 1.5 MiB app.
