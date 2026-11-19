@@ -1,5 +1,7 @@
 # zigbee-rs-hub
 
+[Русская версия](README.ru.md)
+
 A standalone Zigbee hub in Rust for the **Espressif Thread Border Router /
 Zigbee Gateway board** (ESP32-S3 host + ESP32-H2 radio). The H2 runs the
 [zigbee-rs](https://github.com/faronov/zigbee-rs) NCP; the S3 runs the hub and
