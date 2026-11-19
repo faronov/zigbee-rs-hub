@@ -7,8 +7,10 @@
 //! - USB CDC-ACM 1: control console (`help`).
 
 mod console;
+mod diag;
 mod h2;
 mod recovery;
+mod reserved;
 mod stats;
 mod uart;
 mod usb;
@@ -18,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use log::{info, warn};
+
+use crate::diag::Site;
 
 fn spawn(name: &'static core::ffi::CStr, prio: u8, stack: usize, f: impl FnOnce() + Send + 'static) {
     ThreadSpawnConfiguration { name: Some(name), priority: prio, stack_size: stack, ..Default::default() }
@@ -30,11 +34,22 @@ fn spawn(name: &'static core::ffi::CStr, prio: u8, stack: usize, f: impl FnOnce(
 fn uart_to_usb() {
     let mut buf = [0u8; 1024];
     loop {
+        diag::mark(Site::Uart2Usb, 1);
         let n = uart::read(&mut buf, 100);
+        diag::mark(Site::Uart2Usb, 2);
         if n == 0 {
             continue;
         }
-        let sent = if usb::mounted() { usb::write(usb::BRIDGE, &buf[..n], 50) } else { 0 };
+        // With flow control and the host port open, wait for the host instead
+        // of dropping: the UART ring then fills, RTS deasserts and the H2
+        // pauses. With the port closed the data is dropped as before.
+        let mut sent = 0;
+        while sent < n && usb::mounted() {
+            sent += usb::write(usb::BRIDGE, &buf[sent..n], 50);
+            if !(uart::flow() && usb::bridge_open()) {
+                break;
+            }
+        }
         stats::add(&stats::UART_TO_USB, sent);
         stats::add(&stats::UART_TO_USB_DROPPED, n - sent);
     }
@@ -43,8 +58,10 @@ fn uart_to_usb() {
 fn usb_to_uart() {
     let mut buf = [0u8; 512];
     loop {
+        diag::mark(Site::Usb2Uart, 1);
         let n = usb::read_wait(usb::BRIDGE, &mut buf, 100);
         if n > 0 {
+            diag::mark(Site::Usb2Uart, 2);
             stats::add(&stats::USB_TO_UART, uart::write(&buf[..n]));
         }
     }
@@ -70,7 +87,9 @@ fn main() {
 
     spawn(c"uart2usb", 20, 6144, uart_to_usb);
     spawn(c"usb2uart", 19, 6144, usb_to_uart);
+    diag::mark(Site::Console, 0);
     spawn(c"console", 5, 8192, || console::run());
+    spawn(c"supervise", 22, 6144, || diag::supervise());
 
     let boot = Instant::now();
     loop {

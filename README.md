@@ -15,7 +15,7 @@ interface will be a WebSocket JSON API.
 
 | Phase | Content | Status |
 |---|---|---|
-| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.1.3 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons (see Status) |
+| **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
 | **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | planned |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
@@ -75,6 +75,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb) |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF) |
+| `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`, `s3_reflash.sh`) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
 | `definitions/examples/` | Example device definitions (YAML source form) |
 | `tools/herdsman-coverage/` | Coverage and size measurement of zigbee-herdsman-converters definitions (Node + Python) |
@@ -108,7 +109,7 @@ board schematic v1.3 (`esp_thread_br_zigbee_gw_schematics_v1.3.pdf`,
 | H2 reset | GPIO7 | R14 | EN (R2 10 kΩ pull-up, C5 1 µF) |
 | H2 boot strap | GPIO8 | R15 | GPIO9 (button + internal pull-up; GPIO8 has R3 10 kΩ pull-up) |
 | PTA request / priority / grant / tx_line | GPIO12 / 10 / 13 / 11 | R23 / R21 / R24 / R22 | GPIO0 / 2 / 1 / 3 |
-| Reserved | GPIO6 / 5 / 4 | R18 / R19 / R20 | GPIO12 / 4 / 5 |
+| Reserved (fitted, verified both ways; used for RTS/CTS) | GPIO6 / 5 / 4 | R18 / R19 / R20 | GPIO12 / 4 / 5 |
 | W5500 (daughter board, SPI2) | SCLK 21, MOSI 45, MISO 38, CS 41, INT 39, RST 40 | | |
 
 Measured on the hwlab board (early sample):
@@ -121,6 +122,9 @@ Measured on the hwlab board (early sample):
 - H2: ESP32-H2 **rev v0.1**, flash **4 MB** (GigaDevice c84016). This answers
   the spec's open 2 MB/4 MB question for this board; the NCP still detects
   the size at runtime (spec decision N4).
+- R18, R19 and R20 are fitted (2026-11-19, `tools/flow/reserved_lines.py`):
+  each S3 pin driven low/high was read on the H2 (ROM loader, `GPIO_IN`),
+  and each H2 pin driven high/low was read on the S3.
 - Stock firmware: `esp_ot_br` in S3 ota_0; `esp_ot_rcp` (OpenThread RCP,
   built for 2 MB) on the H2 and a copy in the S3 `rcp_fw` partition.
 
@@ -222,13 +226,72 @@ CDC 0:
   buttons. Disable the mapping with console `lines off` if a host toggles
   modem lines for other reasons.
 - After every reset the H2 ROM prints its boot log at 115 200; the stock RCP
-  and the ZRHP NCP then use 460 800 8N1 without flow control.
+  and the ZRHP NCP then use 460 800 8N1.
+- Hardware flow control (RTS/CTS) is **on by default** since 0.2.0; see
+  "UART flow control". With it on and the host port open, H2 → host data is
+  never dropped: the bridge waits for the host and RTS pauses the H2.
 
 Console (CDC 1): `help`, `info` (rate, framing, EN/BOOT levels, byte and
 drop counters), `h2 reset`, `h2 boot` (ROM loader: BOOT low, EN pulse 20 ms,
 BOOT released 100 ms after EN), `h2 hold` / `h2 release`, `baud <rate>`,
-`lines on|off`, `s3 usj` (alias `s3 download`: hand the USB PHY back to
-USB-Serial-JTAG, app keeps running with the bridge off), `s3 reset`.
+`lines on|off`, `flow on|off`, `stats reset`, `gpio` / `gpio <4|5|6>
+high|low|in|pu|pd` (test access to the reserved lines; turns flow off),
+`diag` (thread breadcrumbs and the last supervisor restart), `s3 usj` (alias
+`s3 download`: hand the USB PHY back to USB-Serial-JTAG, app keeps running
+with the bridge off), `s3 reset`. `info` also shows the flow-control pins and
+the UART RX FIFO overflow, ring-full, frame and parity error counters.
+
+A supervisor thread restarts the S3 if the console loop stops for 15 s or a
+TinyUSB callback is stuck in bridge code for 5 s; it first saves the
+breadcrumbs and FreeRTOS task states to RTC memory for `diag`.
+
+### UART flow control (RTS/CTS)
+
+The "reserved" 0 Ω links carry hardware flow control (all fitted, see Board
+facts):
+
+| Signal | S3 | Link | H2 |
+|---|---|---|---|
+| S3 RTS → H2 CTS | GPIO4 (UART1 RTS) | R20 | GPIO5 (U0CTS via GPIO matrix, pull-down) |
+| H2 RTS → S3 CTS | GPIO5 (UART1 CTS, pull-down) | R19 | GPIO4 (U0RTS via GPIO matrix) |
+| spare | GPIO6 | R18 | GPIO12 |
+
+- S3: ESP-IDF `uart_set_hw_flow_ctrl(CTS_RTS)`, RTS deasserted at 100 of the
+  128 RX FIFO bytes. CTS has a pull-down, so an H2 image without flow control
+  (pin undriven) never blocks the S3. `flow off` holds S3 RTS low ("ready")
+  and ignores CTS.
+- H2 (what the NCP's BR variant configures): U0RTS on GPIO4, U0CTS on GPIO5
+  with a pull-down, `rx_flow_en` with a threshold of about 96 bytes,
+  `tx_flow_en`. Both GPIOs are inputs in the H2 ROM loader and neither is a
+  strapping pin (ESP32-H2 datasheet v1.3: GPIO8, GPIO9, GPIO25), so esptool
+  through the bridge is unaffected. GPIO4/5 are the MTCK/MTDI pads; pad JTAG
+  is not selected by default (USB-JTAG is), so using them as GPIO costs
+  nothing.
+
+**Measurements** (2026-11-19, bridge 0.2.2, `tools/flow/flow_test.py`; the H2
+runs a RAM-only test program loaded through the ROM loader, nothing written to
+its flash; 256 KiB bulk transfers, 128 KiB for the stall case):
+
+| Baud | Flow | S3→H2 bulk | S3→H2, H2 stalls 30 ms every 4 KiB (interrupts off) | H2→S3 bulk | H2→S3, host pauses 1 s every 32 KiB |
+|---:|---|---:|---|---:|---|
+| 460 800 | off | 43.8 KiB/s, 0 lost | **30 018 B lost** (27 FIFO overflows) | 45.1 KiB/s, 0 lost | 0 lost |
+| 460 800 | on | 43.9 KiB/s, 0 lost | **0 lost**, 33.9 KiB/s | 45.1 KiB/s, 0 lost | 0 lost |
+| 921 600 | off | 87.8 KiB/s, 0 lost | **50 063 B lost** (20 overflows) | 90.2 KiB/s, 0 lost | 0 lost |
+| 921 600 | on | 87.6 KiB/s, 0 lost | **0 lost**, 50.5 KiB/s | 90.2 KiB/s, 0 lost | 0 lost |
+| 2 000 000 | off | 176.0 KiB/s, 0 lost | **76 296 B lost** (13 overflows) | 196.0 KiB/s, 0 lost | 0 lost |
+| 2 000 000 | on | 176.0 KiB/s, 0 lost | **0 lost**, 77.3 KiB/s | 196.0 KiB/s, 0 lost | 0 lost |
+
+- Bulk runs at about 95 % (H2→S3) and 88 % (S3→H2, USB scheduling) of the
+  line rate; the S3 UART never overflowed (`info`: 0 FIFO overflows, 0
+  dropped, 0 frame errors over all runs).
+- Without flow control an H2 that stops reading for 30 ms loses data at every
+  rate (its RX FIFO is 128 bytes: 2.8 ms at 460 800, 0.64 ms at 2 Mbaud).
+  With RTS/CTS nothing is lost and the S3 simply waits.
+- The host-pause case shows no loss either way: macOS keeps reading the CDC
+  endpoint into its tty buffer while the application sleeps, so it does not
+  reach the S3. An S3-side stall is covered by design (the bridge waits for
+  the host, the 16 KiB ring fills, RTS pauses the H2) but was not measured.
+
 
 ### Flashing the H2 through the bridge (for the zrhp-ncp work)
 
@@ -341,13 +404,22 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   `DP_PULLUP` bit at 0 (reset value 1). Fixed in 0.1.2, verified: the USJ is
   back within about 1 s.
 - 0.1.2's `s3 download` left `FORCE_DOWNLOAD_BOOT` set (see "Flashing the
-  S3"). In **0.1.3** (`b3406de0…`, current on the board) `s3 download` is a
+  S3"). In **0.1.3** (`b3406de0…`) `s3 download` is a
   plain hand-back. Verified without buttons: hand-back → hwlab backup and
   program in app mode → RTS reset → bridge → hand-back → RTS reset → bridge;
   `esptool flash-id` on the H2 afterwards.
 - Buttons are only needed for a stuck boot strap (after BOOT + RESET: plain
   RESET), or if the bridge firmware itself no longer runs (BOOT + RESET for
   ROM download).
+- **0.2.x** (2026-11-19): RTS/CTS on the reserved lines, `gpio` test command,
+  UART error counters, `diag` and the hang supervisor. 0.2.0 hung in
+  `h2 boot`: the console called `uart_flush_input`, which waits for
+  the UART driver's RX mutex, and the priority-20 reader thread re-took that
+  mutex every time it released it (a FreeRTOS mutex is not handed to a
+  waiting lower-priority task), so the console starved. The 0.2.1 supervisor
+  caught it (`console loop stalled`, console blocked in a command); 0.2.2
+  lets the reader thread do the flush on request. **0.2.2** (`7797265d…`) is
+  on the board, flashed without buttons.
 
 ## License
 

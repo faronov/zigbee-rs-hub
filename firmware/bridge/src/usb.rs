@@ -6,6 +6,7 @@
 //! SET_LINE_CODING as callbacks and has no 64-byte FIFO limit.
 
 use std::ffi::{CString, c_char, c_int};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -13,7 +14,15 @@ use esp_idf_svc::sys::{self, EspError, esp};
 use hub_core::lines::esptool_lines;
 use log::info;
 
+use crate::diag::{self, Site};
 use crate::{h2, recovery, stats, uart};
+
+/// Host DTR on the bridge port: a terminal has the port open.
+static BRIDGE_DTR: AtomicBool = AtomicBool::new(false);
+
+pub fn bridge_open() -> bool {
+    BRIDGE_DTR.load(Ordering::Relaxed)
+}
 
 pub const BRIDGE: sys::tinyusb_cdcacm_itf_t = sys::tinyusb_cdcacm_itf_t_TINYUSB_CDC_ACM_0;
 pub const CONSOLE: sys::tinyusb_cdcacm_itf_t = sys::tinyusb_cdcacm_itf_t_TINYUSB_CDC_ACM_1;
@@ -72,10 +81,12 @@ pub fn mounted() -> bool {
 }
 
 unsafe extern "C" fn on_rx(itf: c_int, _ev: *mut sys::cdcacm_event_t) {
+    diag::mark(Site::CbRx, 1);
     if let Ok(mut p) = RX.pending.lock() {
         p[itf as usize & 1] = true;
         RX.cv.notify_all();
     }
+    diag::mark(Site::CbRx, 0);
 }
 
 unsafe extern "C" fn on_line_state(itf: c_int, ev: *mut sys::cdcacm_event_t) {
@@ -83,8 +94,11 @@ unsafe extern "C" fn on_line_state(itf: c_int, ev: *mut sys::cdcacm_event_t) {
         return;
     }
     let d = unsafe { (*ev).__bindgen_anon_1.line_state_changed_data };
+    diag::mark(Site::CbLineState, 1);
+    BRIDGE_DTR.store(d.dtr, Ordering::Relaxed);
     stats::add(&stats::LINE_STATE_EVENTS, 1);
     h2::apply(esptool_lines(d.dtr, d.rts));
+    diag::mark(Site::CbLineState, 0);
 }
 
 unsafe extern "C" fn on_line_coding(itf: c_int, ev: *mut sys::cdcacm_event_t) {
@@ -96,8 +110,10 @@ unsafe extern "C" fn on_line_coding(itf: c_int, ev: *mut sys::cdcacm_event_t) {
         }
         return;
     }
+    diag::mark(Site::CbLineCoding, 1);
     stats::add(&stats::LINE_CODING_EVENTS, 1);
     uart::set_line_coding(rate, stop, parity, bits);
+    diag::mark(Site::CbLineCoding, 0);
 }
 
 /// Wait up to `timeout_ms` for data on `itf`, then read what is available.

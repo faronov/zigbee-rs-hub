@@ -7,7 +7,8 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::{h2, recovery, stats, uart, usb};
+use crate::diag::{self, Site};
+use crate::{h2, recovery, reserved, stats, uart, usb};
 
 const HELP: &str = "\
 commands:\r
@@ -18,6 +19,12 @@ commands:\r
   h2 hold | h2 release hold the H2 in reset / let it run\r
   baud <rate>          set the H2 UART rate (also follows CDC0 line coding)\r
   lines on|off         map CDC0 DTR/RTS to H2 EN/BOOT (esptool auto-reset)\r
+  flow on|off          UART RTS/CTS on the reserved lines (S3 RTS GPIO4 -> H2\r
+                       GPIO5, S3 CTS GPIO5 <- H2 GPIO4)\r
+  stats reset          clear the counters\r
+  diag                 thread breadcrumbs now and the last supervisor restart\r
+  gpio                 levels of the reserved lines S3 GPIO4/5/6\r
+  gpio <4|5|6> high|low|in|pu|pd  drive or sense a reserved line (flow off)\r
   s3 usj | s3 download hand the USB PHY back to USB-Serial-JTAG (app keeps\r
                        running, bridge off; hwlab can flash, an RTS reset reboots)\r
   s3 reset             reboot the S3 (bridge restarts)\r
@@ -32,7 +39,9 @@ pub fn run() -> ! {
             std::thread::sleep(Duration::from_millis(50));
             recovery::switch_to_usj("1200 bps touch");
         }
+        diag::mark(Site::Console, 1);
         let n = usb::read_wait(usb::CONSOLE, &mut buf, 100);
+        diag::mark(Site::Console, 2);
         for &c in &buf[..n] {
             match c {
                 b'\r' | b'\n' => {
@@ -70,6 +79,13 @@ fn execute(cmd: &str) {
     match words.as_slice() {
         ["help"] | ["?"] => reply(HELP),
         ["info"] => reply(&info()),
+        ["diag"] => {
+            reply(&diag::current());
+            match diag::last_record() {
+                Some(r) => reply(&format!("last supervisor restart: {r}")),
+                None => reply("no supervisor restart recorded\r\n"),
+            }
+        }
         ["h2", "reset"] | ["h2", "run"] => {
             h2::reset();
             reply("ok: H2 reset\r\n");
@@ -94,6 +110,19 @@ fn execute(cmd: &str) {
             }
             _ => reply("error: baud 300..5000000\r\n"),
         },
+        ["flow", v @ ("on" | "off")] => {
+            uart::set_flow(*v == "on");
+            reply(&format!("ok: RTS/CTS {}\r\n", v));
+        }
+        ["stats", "reset"] => {
+            stats::reset();
+            reply("ok: counters cleared\r\n");
+        }
+        ["gpio"] => reply(&format!("{}\r\n", reserved::levels())),
+        ["gpio", pin, mode] => match pin.parse::<i32>().map_err(|_| "pin").and_then(|p| reserved::set(p, mode)) {
+            Ok(()) => reply(&format!("ok: {}\r\n", reserved::levels())),
+            Err(e) => reply(&format!("error: {}\r\n", e)),
+        },
         ["lines", v @ ("on" | "off")] => {
             h2::AUTO_LINES.store(*v == "on", Ordering::Relaxed);
             reply(&format!("ok: DTR/RTS auto-reset {}\r\n", v));
@@ -114,22 +143,34 @@ fn execute(cmd: &str) {
 
 fn info() -> String {
     let (en, boot) = h2::levels();
+    let (rts, cts) = uart::flow_levels();
     let s = stats::snapshot();
     format!(
         "tbr-bridge {} (zigbee-rs-hub phase 0)\r\n\
          uart: {} {} (S3 TX GPIO18 -> H2 GPIO23, RX GPIO17 <- H2 GPIO24)\r\n\
+         flow: RTS/CTS {} (RTS GPIO{}={}, CTS GPIO{}={})\r\n\
          h2: EN={} BOOT={} auto-reset={}\r\n\
          uart->usb: {} B, dropped {} B; usb->uart: {} B\r\n\
+         uart rx: fifo overflows {}, buffer full {}, frame errors {}, parity errors {}\r\n\
          line-state events: {}, line-coding events: {}\r\n",
         env!("CARGO_PKG_VERSION"),
         uart::BAUD.load(Ordering::Relaxed),
         uart::framing(),
+        if uart::flow() { "on" } else { "off" },
+        uart::RTS_PIN,
+        rts as u8,
+        uart::CTS_PIN,
+        cts as u8,
         if en { "high" } else { "LOW" },
         if boot { "high" } else { "LOW" },
         if h2::AUTO_LINES.load(Ordering::Relaxed) { "on" } else { "off" },
         s.uart_to_usb,
         s.uart_to_usb_dropped,
         s.usb_to_uart,
+        s.rx_fifo_ovf,
+        s.rx_buffer_full,
+        s.frame_err,
+        s.parity_err,
         s.line_state_events,
         s.line_coding_events,
     )
