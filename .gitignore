@@ -4,3 +4,7 @@
 **/dependencies.lock
 *.bin
 *.elf
+
+# zdef signing keys (never commit; see crates/zdefc)
+*.key
+zdef-signing*
