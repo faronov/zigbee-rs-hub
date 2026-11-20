@@ -623,7 +623,7 @@ CI собирает обе прошивки и проверяет `tbr-hub` на
 `ApiServer::pump_events`; в `hub-ncp` — записи ключ/значение, PTA
 `coex_enable` вслед за состоянием Wi-Fi (решение N7, повторяется при
 восстановлении), `group_membership`, `remove_device`, `permit_join_on`. Все
-крейты zigbee-rs закреплены на одной ревизии (master `7c4f96c`).
+крейты zigbee-rs закреплены на одной ревизии (master `c18875b`).
 
 **Компьютер.** `hubctl --serial … --store hubdata.bin serve [--listen
 127.0.0.1:8099] [--token T]` запускает приложение с WebSocket JSON API

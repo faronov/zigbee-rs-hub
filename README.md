@@ -612,7 +612,7 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 `ApiServer::pump_events`; `hub-ncp` gained key/value records, PTA
 `coex_enable` following the Wi-Fi state (decision N7, replayed on resume),
 `group_membership`, `remove_device`, `permit_join_on`. All zigbee-rs crates
-are pinned to one revision (master `7c4f96c`).
+are pinned to one revision (master `c18875b`).
 
 **Desktop.** `hubctl --serial … --store hubdata.bin serve [--listen
 127.0.0.1:8099] [--token T]` runs the application with its WebSocket JSON
