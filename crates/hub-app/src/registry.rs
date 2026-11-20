@@ -2,7 +2,9 @@
 //! 16.1: the registry lives in the 128 KiB host store journal in
 //! `hubdata`).
 //!
-//! Keys: `dev/<device id>` → deflated JSON [`DeviceSnapshot`];
+//! Keys: `dev/<device id>` → JSON [`DeviceSnapshot`] (plain: a deflate
+//! compressor needs ~250 KB of RAM, which a hub without PSRAM does not
+//! have; deflated values written by earlier builds are still read);
 //! `udef/<definition id>` → zdef CBOR of a user definition. A device is
 //! written when the engine reports it added or changed, and in a sweep
 //! every [`SWEEP_MS`]; the store skips identical values, and a snapshot
@@ -30,11 +32,14 @@ pub const FLUSH_MS: Millis = 2_000;
 
 /// Snapshot bytes as stored.
 pub fn encode(s: &DeviceSnapshot) -> Vec<u8> {
-    miniz_oxide::deflate::compress_to_vec(&s.to_bytes(), 6)
+    s.to_bytes()
 }
 
-/// Stored bytes → snapshot.
+/// Stored bytes → snapshot (plain JSON, or raw deflate from earlier builds).
 pub fn decode(b: &[u8]) -> Result<DeviceSnapshot, String> {
+    if b.first() == Some(&b'{') {
+        return DeviceSnapshot::from_bytes(b);
+    }
     let json = miniz_oxide::inflate::decompress_to_vec_with_limit(b, 256 * 1024).map_err(|e| format!("inflate: {e:?}"))?;
     DeviceSnapshot::from_bytes(&json)
 }

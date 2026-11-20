@@ -40,6 +40,12 @@ pub static BAUD: AtomicU32 = AtomicU32::new(board::ROM_BAUD);
 pub static FRAMING: AtomicU32 = AtomicU32::new(u32::from_le_bytes(*b"8N1\0"));
 
 pub fn init(baud: u32) -> Result<(), EspError> {
+    init_with_rings(baud, RX_RING, TX_RING)
+}
+
+/// [`init`] with other ring sizes (the hub mode, whose host link has flow
+/// control and credits, needs far less than the transparent bridge).
+pub fn init_with_rings(baud: u32, rx_ring: i32, tx_ring: i32) -> Result<(), EspError> {
     unsafe {
         let mut cfg: sys::uart_config_t = core::mem::zeroed();
         cfg.baud_rate = baud as i32;
@@ -51,8 +57,8 @@ pub fn init(baud: u32) -> Result<(), EspError> {
         let mut queue: sys::QueueHandle_t = core::ptr::null_mut();
         esp!(sys::uart_driver_install(
             PORT,
-            RX_RING,
-            TX_RING,
+            rx_ring,
+            tx_ring,
             32,
             &mut queue,
             sys::ESP_INTR_FLAG_IRAM as i32,
