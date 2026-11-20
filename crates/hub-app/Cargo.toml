@@ -9,6 +9,7 @@ description = "zigbee-rs-hub application runtime: the device engine on the ZRHP 
 publish = false
 
 [dependencies]
+hub-core = { workspace = true }
 hub-devices = { workspace = true }
 hub-ncp = { workspace = true }
 zigbee-zrhp = { workspace = true, features = ["std"] }

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use hub_core::profile::BoardProfile;
 use hub_devices::api::{ApiServer, SessionId};
 use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubConfig};
@@ -82,6 +83,22 @@ impl Default for AppConfig {
         }
     }
 }
+
+impl AppConfig {
+    /// Settings for a board: the hub name carries the board id, and the app
+    /// thread stack fits the host's internal RAM (thread stacks cannot live
+    /// in PSRAM: the registry writes flash from this thread).
+    pub fn for_board(board: &BoardProfile, version: &str) -> Self {
+        Self {
+            hub_name: format!("zigbee-rs-hub {version} ({})", board.id),
+            stack_size: APP_STACK_ESP,
+            ..Self::default()
+        }
+    }
+}
+
+/// App thread stack on the ESP32 and ESP32-S3 boards (release build).
+pub const APP_STACK_ESP: usize = 64 * 1024;
 
 /// The definition examples of the repository (`definitions/examples`, as
 /// compiled by zdefc), until the catalog banks exist.
