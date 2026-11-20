@@ -45,7 +45,9 @@ pub fn schedule_day_decode(b: &[u8], transitions: u8) -> Option<String> {
         return None;
     }
     let parts: Vec<String> = body
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .take(n)
         .map(|c| {
             format!(

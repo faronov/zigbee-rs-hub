@@ -1,7 +1,6 @@
 //! WebSocket API flows over the engine (no socket: text frames in, text
 //! frames out).
 
-use base64::Engine as _;
 use serde_json::{Value as J, json};
 
 use super::*;
