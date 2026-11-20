@@ -18,8 +18,8 @@ base64 = "0.22"
 # Definition model, canonical CBOR, expression VM and matching (branch zdef).
 zdef = { path = "../zdef", features = ["std"] }
 # Green Power commissioning payload decoder and the GP default translation
-# (shared with the zigbee-rs NCP/sink), spec 13.2 and 13.8.
-zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "0580bc1a402d4028ee093a2baa28dee72960149c", features = ["sink"] }
+# (shared with the zigbee-rs NCP/sink), spec 13.2 and 13.8; workspace rev.
+zigbee-gp = { workspace = true }
 
 [dev-dependencies]
 zdefc = { path = "../zdefc" }

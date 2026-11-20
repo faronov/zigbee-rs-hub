@@ -15,9 +15,11 @@ rust-version = "1.90"
 [workspace.dependencies]
 hub-core = { path = "crates/hub-core" }
 hub-ncp = { path = "crates/hub-ncp" }
-# ZRHP v1 protocol crate from zigbee-rs (batch merge 2026-11-20: RTS/CTS NCP,
-# GP translation commands 0x0A08-0x0A0D; 2ab8ac0).
-zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "2ab8ac0400a437717e3ad3a99229b31ada8646e7", default-features = false }
+# zigbee-rs crates, all at one master revision (7c4f96c, 2026-11-20):
+# ZRHP v1 protocol crate and the Green Power commissioning decoder and
+# default translation used by the device engine.
+zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "7c4f96c2328d778169344592f8f50b1ab24ea6b4", default-features = false }
+zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "7c4f96c2328d778169344592f8f50b1ab24ea6b4", features = ["sink"] }
 
 [profile.release]
 opt-level = "s"

@@ -37,7 +37,7 @@ everything incoming is a method call with the current time.
 | Engine | `hub-ncp` (phase1, 5af686b) |
 |---|---|
 | `aps_send(ApsRequest)` | `APS_DATA_REQUEST` through `Client::start` (non-blocking); `Hub::send_aps` blocks on the confirm, so an adapter must run it off the engine thread or use `start` |
-| `gp_request(GpRequest) -> Option<zcl_tsn>` | `Client::call(&GpPairingConfiguration / GpTranslationUpdate / GpTranslationRequest / GpRemoteSinkTableRequest / GpRemoteProxyTableRequest / GpSinkCommissioning / GpSinkRemove / GpSinkConfig)`, `zcl_tsn` from `GpRemoteRsp`. Needs `zigbee-zrhp` ≥ `2ab8ac0` (the workspace pins `c0c7d97`, which has no 0x0A08–0x0A0D) |
+| `gp_request(GpRequest) -> Option<zcl_tsn>` | `Client::call(&GpPairingConfiguration / GpTranslationUpdate / GpTranslationRequest / GpRemoteSinkTableRequest / GpRemoteProxyTableRequest / GpSinkCommissioning / GpSinkRemove / GpSinkConfig)`, `zcl_tsn` from `GpRemoteRsp` (0x0A08–0x0A0D are in the pinned `zigbee-zrhp`) |
 | `group_add(ep, group)` | `NWK_GROUP_MEMBERSHIP` (no `hub-ncp` helper yet) |
 | `remove_device(ieee)` | `NWK_REMOVE_DEVICE` (no helper yet) |
 | `permit_join(duration, target)` | `Hub::permit_join(secs)` (whole network; per-router targets are not in phase1) |
@@ -92,7 +92,7 @@ with all of `HubFeatures::v1()`; `fp.manufacturer`/`fp.model` in
   reused: device-side (server) code with 32 B string and 128 B payload
   `heapless` buffers, no `int24`/`uint40`/`int48` or composite types, no
   client-side builders or response parsers. `zigbee-gp` is reused (git
-  dependency, master `0580bc1`): the commissioning payload decoder and the
+  dependency, the workspace's zigbee-rs revision): the commissioning payload decoder and the
   GP default translation (`Derived` payloads of hub-side bindings).
 - **API parameter names.** The envelope's `id` is the request ID, so the
   spec's `id` parameters are named `device`, `definition` and `binding`.
