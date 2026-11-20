@@ -2,16 +2,20 @@
 //! restart, as a serde record, and the engine side of saving/restoring it.
 //!
 //! Kept: identity and kind, the fingerprint, node descriptor and endpoints,
-//! the attribute knowledge the resolution depends on, the self-description
-//! fragment (as zdef CBOR, decoded again on restore), user settings (name,
-//! disabled, pinned definition, hub options, entity name/enable overrides),
-//! the configure hash and results (so a restart does not reconfigure), GP
-//! sink record and frame counter, radio quality and the Tuya sequence.
+//! attribute support, the attribute values the resolution reads (Basic,
+//! descriptions, colour capabilities, thermostat limits, metering and
+//! electrical scaling: [`persistent_value`]), the self-description fragment
+//! (as zdef CBOR, decoded again on restore), user settings (name, disabled,
+//! pinned definition, hub options, entity name/enable overrides), the
+//! configure hash and results (so a restart does not reconfigure) and the GP
+//! sink record.
 //!
-//! Not kept: entity states and runtime queues (states come back with the
-//! next report or refresh), orphaned entities, diagnostics. A restored
-//! device starts available with `last_seen` = restore time; its
-//! availability timers run from there.
+//! Not kept, so that a snapshot only changes when the device's structure or
+//! settings do (no flash write per report): entity states and measured
+//! attribute values (they come back with the next report or refresh),
+//! LQI/RSSI, frame counters, the Tuya sequence, runtime queues, orphaned
+//! entities, diagnostics. A restored device starts available with
+//! `last_seen` = restore time; its availability timers run from there.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,6 +36,21 @@ use crate::zdo::NodeDescriptor;
 
 /// Format version of [`DeviceSnapshot`].
 pub const SNAPSHOT_VERSION: u8 = 1;
+
+/// Attribute values a snapshot keeps (the ones resolution and the generic
+/// tier read); everything else keeps only its support flag.
+pub fn persistent_value(cluster: u16, attr: u16) -> bool {
+    match cluster {
+        0x0000 => true,
+        0x0001 => (0x0031..=0x0036).contains(&attr),
+        0x0201 => matches!(attr, 0x0015 | 0x0016 | 0x001B),
+        0x0202 => attr == 0x0001,
+        0x0300 => (0x400A..=0x400C).contains(&attr),
+        0x0702 => (0x0300..=0x0306).contains(&attr),
+        0x0B04 => (0x0600..=0x0605).contains(&attr),
+        _ => attr == 0x001C,
+    }
+}
 
 /// One cached attribute: `(ep, cluster, attr, mfr, supported, value)`.
 pub type AttrSnap = (u8, u16, u16, Option<u16>, bool, Option<ZclValue>);
@@ -54,8 +73,6 @@ pub struct EntitySnap {
 pub struct GpSnap {
     /// Sink record.
     pub sink: Option<GpSinkRecord>,
-    /// Last accepted frame counter.
-    pub frame_counter: u32,
     /// Security level of the last frame.
     pub security_level: u8,
 }
@@ -112,12 +129,6 @@ pub struct DeviceSnapshot {
     pub schema: Option<SchemaSnap>,
     /// Entity user overrides.
     pub entities: Vec<EntitySnap>,
-    /// LQI.
-    pub lqi: Option<u8>,
-    /// RSSI.
-    pub rssi: Option<i8>,
-    /// Tuya sequence number.
-    pub tuya_seq: u16,
 }
 
 impl DeviceSnapshot {
@@ -128,7 +139,10 @@ impl DeviceSnapshot {
             .map
             .iter()
             .filter(|(_, e)| e.support != Support::Unknown)
-            .map(|(&(ep, cl, at, mfr), e)| (ep, cl, at, mfr, e.support == Support::Supported, e.value.clone()))
+            .map(|(&(ep, cl, at, mfr), e)| {
+                let value = if persistent_value(cl, at) { e.value.clone() } else { None };
+                (ep, cl, at, mfr, e.support == Support::Supported, value)
+            })
             .collect();
         let schema = match (&d.schema.hash, &d.schema.fragment) {
             (Some(hash), Some(frag)) => frag.zdef.as_ref().and_then(|z| z.encode().ok()).map(|cbor| SchemaSnap {
@@ -157,7 +171,6 @@ impl DeviceSnapshot {
             warnings: d.warnings.clone(),
             gp: d.gp.as_ref().map(|g| GpSnap {
                 sink: g.sink.clone(),
-                frame_counter: g.frame_counter,
                 security_level: g.security_level,
             }),
             schema,
@@ -167,9 +180,6 @@ impl DeviceSnapshot {
                 .filter(|e| !e.orphaned && (e.user_name.is_some() || e.user_enabled.is_some()))
                 .map(|e| EntitySnap { uid: e.uid.clone(), name: e.user_name.clone(), enabled: e.user_enabled })
                 .collect(),
-            lqi: d.lqi,
-            rssi: d.rssi,
-            tuya_seq: d.tuya_seq,
         }
     }
 
@@ -221,8 +231,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.configure.unreportable = s.unreportable;
         d.warnings = s.warnings;
         d.gp = s.gp.map(|g| GpState {
+            frame_counter: g.sink.as_ref().map_or(0, |s| s.frame_counter),
             sink: g.sink,
-            frame_counter: g.frame_counter,
             security_level: g.security_level,
             contacts: 0,
             recent: Default::default(),
@@ -241,9 +251,6 @@ impl<T: ZigbeeTransport> Hub<T> {
                 Err(e) => d.schema.error = Some(format!("restore: {e}")),
             }
         }
-        d.lqi = s.lqi;
-        d.rssi = s.rssi;
-        d.tuya_seq = s.tuya_seq;
         let id = s.id.clone();
         let nwk = d.nwk();
         let interviewed = s.interviewed;
@@ -286,6 +293,11 @@ mod tests {
         let back = DeviceSnapshot::from_bytes(&s.to_bytes()).unwrap();
         assert_eq!(back, s);
         assert_eq!(back.attrs.len(), 2);
-        assert!(back.attrs.iter().any(|a| a.2 == 0x0005 && a.4));
+        assert!(back.attrs.iter().any(|a| a.2 == 0x0005 && a.4 && a.5.is_some()));
+        // Measured values are not kept: a report does not change the snapshot.
+        d.attrs.set(1, 0x0402, 0x0000, None, Some(ZclValue::Int(2137)));
+        let with_value = DeviceSnapshot::of(&d);
+        d.attrs.set(1, 0x0402, 0x0000, None, Some(ZclValue::Int(2250)));
+        assert_eq!(DeviceSnapshot::of(&d), with_value);
     }
 }

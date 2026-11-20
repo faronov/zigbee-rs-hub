@@ -85,13 +85,15 @@ pub struct SimState {
     pub gp_tsn: u8,
 }
 
+type Injected = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
+
 /// Handle to a running simulated NCP.
 #[derive(Clone)]
 pub struct SimNcp {
     state: Arc<Mutex<SimState>>,
     reboot: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
-    inject: Arc<Mutex<Vec<(u16, Vec<u8>)>>>,
+    inject: Injected,
 }
 
 impl SimNcp {

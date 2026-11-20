@@ -1065,6 +1065,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hub-app"
+version = "0.1.0"
+dependencies = [
+ "hub-devices",
+ "hub-ncp",
+ "log",
+ "miniz_oxide",
+ "serde_json",
+ "zigbee-zrhp",
+]
+
+[[package]]
 name = "hub-core"
 version = "0.1.0"
 dependencies = [
