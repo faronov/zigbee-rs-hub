@@ -28,7 +28,9 @@ pub struct Line {
 impl Line {
     /// Thread BR board default (spec 4.1, decision N10).
     pub const BR_DEFAULT: Line = Line { baud: 921_600, flow: true };
-    /// Fallback for NCP images without flow control (spec 11.5).
+    /// Fallback for NCP images without flow control (spec 11.5), and the
+    /// default of boards without RTS/CTS (SONOFF Dongle-M): ZRHP's ARQ
+    /// recovers what an overrun loses.
     pub const BR_FALLBACK: Line = Line { baud: 460_800, flow: false };
 }
 
@@ -59,9 +61,11 @@ pub trait NcpControl: Send {
     /// Normal reset: BOOT released, EN pulsed low (≥ 10 ms).
     fn reset(&mut self) -> io::Result<()>;
 
-    /// Reset into the ESP ROM serial loader (spec 11.5, recovery path steps
-    /// 1–3). Manual/development path only: the hub never does this on its
-    /// own, and after it the byte stream belongs to the operator's flasher.
+    /// Reset into the NCP's serial loader: the ESP ROM loader of an H2
+    /// (spec 11.5, recovery path steps 1–3; manual/development path only,
+    /// after it the byte stream belongs to the operator's flasher), or the
+    /// Gecko bootloader of an EFR32 (BOOT asserted across a reset), used by
+    /// [`gecko::install`](crate::gecko::install).
     fn enter_rom_loader(&mut self) -> io::Result<()>;
 }
 
