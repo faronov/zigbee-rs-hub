@@ -40,13 +40,12 @@ pub struct AttrCache {
 }
 
 impl AttrCache {
-    /// Records a value; returns `true` when the support state or value
-    /// changed.
-    pub fn set(&mut self, ep: u8, cluster: u16, attr: u16, mfr: Option<u16>, v: Option<ZclValue>) -> bool {
+    /// Records a value; returns `(support changed, value changed)`.
+    pub fn set(&mut self, ep: u8, cluster: u16, attr: u16, mfr: Option<u16>, v: Option<ZclValue>) -> (bool, bool) {
         let support = if v.is_some() { Support::Supported } else { Support::Unsupported };
         let e = AttrEntry { support, value: v };
         let old = self.map.insert((ep, cluster, attr, mfr), e.clone());
-        old.as_ref() != Some(&e)
+        (old.as_ref().map(|o| o.support) != Some(support), old.as_ref().map(|o| &o.value) != Some(&e.value))
     }
 }
 

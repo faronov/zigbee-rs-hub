@@ -742,6 +742,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let old_layers = d.resolution.layers.clone();
         let mut old: BTreeMap<String, Entity> = d.entities.drain(..).map(|e| (e.uid.clone(), e)).collect();
         let mut added = Vec::new();
+        let mut revived = Vec::new();
         let mut updated = Vec::new();
         let mut entities = Vec::new();
         for r in &res.entities {
@@ -749,6 +750,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             match old.remove(&uid) {
                 Some(mut e) => {
                     let before = e.record(&d.id);
+                    if e.orphaned {
+                        revived.push(uid.clone());
+                    }
                     e.r = r.clone();
                     e.orphaned = false;
                     if e.record(&d.id) != before {
@@ -795,7 +799,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let d = &self.devices[id];
         let mut work = Vec::new();
         for (i, e) in d.entities.iter().enumerate() {
-            if !added.contains(&e.uid) {
+            if !added.contains(&e.uid) && !revived.contains(&e.uid) {
                 continue;
             }
             let vals = std::iter::once((None, &e.r.def.value)).chain(e.r.def.parts.iter().enumerate().map(|(k, p)| (Some(k), &p.1)));
@@ -916,11 +920,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                     for r in &recs {
                         match (&r.value, r.status) {
                             (Some(v), _) => {
-                                structural |= d.attrs.set(ep, ind.cluster, r.attr, h.mfr, Some(v.value.clone())) && is_structural(ind.cluster, r.attr);
+                                let (sc, vc) = d.attrs.set(ep, ind.cluster, r.attr, h.mfr, Some(v.value.clone()));
+                                structural |= sc || (vc && is_structural(ind.cluster, r.attr));
                                 values.push((r.attr, v.clone()));
                             }
                             (None, Status::UNSUPPORTED_ATTRIBUTE) => {
-                                structural |= d.attrs.set(ep, ind.cluster, r.attr, h.mfr, None);
+                                structural |= d.attrs.set(ep, ind.cluster, r.attr, h.mfr, None).0;
                             }
                             _ => {}
                         }
@@ -942,7 +947,8 @@ impl<T: ZigbeeTransport> Hub<T> {
                 let mut structural = false;
                 if let Some(d) = self.devices.get_mut(id) {
                     for (a, v) in &recs {
-                        structural |= d.attrs.set(ep, ind.cluster, *a, h.mfr, Some(v.value.clone())) && is_structural(ind.cluster, *a);
+                        let (sc, vc) = d.attrs.set(ep, ind.cluster, *a, h.mfr, Some(v.value.clone()));
+                        structural |= sc || (vc && is_structural(ind.cluster, *a));
                     }
                 }
                 self.dispatch_attrs(id, ep, ind.cluster, h.mfr, &recs, now);
