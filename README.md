@@ -16,7 +16,7 @@ interface will be a WebSocket JSON API.
 | Phase | Content | Status |
 |---|---|---|
 | **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
-| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode) builds at 709 KiB (46 % of the 1.5 MiB slot); hardware runs pending (see "Phase 1") |
+| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode) builds at 721 KiB (47 % of the 1.5 MiB slot); hardware runs pending (see "Phase 1") |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
 ## Device support
@@ -507,7 +507,7 @@ slot of the 4 MB layout.
 | Image | App image | Slot | Use |
 |---|---:|---:|---:|
 | `tbr-bridge` 0.2.3 | 501 744 B | 1 572 864 B | 32 % |
-| `tbr-hub` 0.1.0 | 725 888 B | 1 572 864 B | 46 % |
+| `tbr-hub` 0.1.0 | 738 416 B | 1 572 864 B | 47 % |
 
 The stock table's `ota_0` (1.6 MB) holds either.
 
