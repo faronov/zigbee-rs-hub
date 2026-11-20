@@ -67,7 +67,7 @@ mod tests {
     fn manifests_from_other_keys_are_refused_by_kid() {
         let kp = ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new([9; 32]));
         let public: [u8; 32] = *kp.pk;
-        let manifest = Manifest { catalog_date: 20261120, catalog_serial: 1, requires: vec![], banks: vec![], shards: vec![None; 256] };
+        let manifest = Manifest { catalog_date: 20261120, catalog_serial: 1, requires: vec![], banks: vec![], shards: vec![None; 256], ..Default::default() };
         let payload = manifest.encode();
         let sig = kp.sk.sign(to_be_signed(&protected_header(), &payload), None);
         let cose = cose_sign1(&key_id(&public), Some(&payload), &sig);
