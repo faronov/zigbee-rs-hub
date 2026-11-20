@@ -35,7 +35,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use zigbee_zrhp::codec::{Bytes8, Reader, Wire};
 use zigbee_zrhp::frame::{ResetReason, TX_BUFFER_LEN};
 use zigbee_zrhp::link::{Link, LinkConfig, LinkCounters, LinkEvent, LinkState, PeerChange, SessionInfo, TxFailure};
@@ -800,6 +800,7 @@ impl<T: PortTx> Driver<T> {
     fn transmit(&mut self) {
         let now = self.now_us();
         while let Some(n) = self.link.poll_transmit(now, &mut self.out, &mut self.buf) {
+            trace!("zrhp: tx {n} B");
             if let Err(e) = self.tx.write_all(&self.buf[..n]) {
                 warn!("zrhp: write error: {e}");
             }
@@ -814,6 +815,7 @@ impl<T: PortTx> Driver<T> {
     }
 
     fn feed(&mut self, bytes: &[u8]) {
+        trace!("zrhp: rx {} B", bytes.len());
         let now = self.now_us();
         let mut off = 0;
         while off < bytes.len() {

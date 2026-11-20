@@ -31,7 +31,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim) [--store FILE] [--read-only] [-v] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim) [--store FILE] [--read-only] [-v|-vv] COMMAND
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -362,7 +362,13 @@ fn main() -> ExitCode {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
-    let level = if args.flag("-v") { log::LevelFilter::Debug } else { log::LevelFilter::Info };
+    let level = if args.flag("-vv") {
+        log::LevelFilter::Trace
+    } else if args.flag("-v") {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
     let _ = log::set_logger(Box::leak(Box::new(Logger(Instant::now(), level))));
     log::set_max_level(level);
 
