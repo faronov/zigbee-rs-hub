@@ -300,7 +300,7 @@ const sanitize = (v, depth = 0) => {
     results.push({ file, vendor: d.vendor, model: d.model, tier, cats: [...cats], reasons, std: [...std], m: [...mfn],
       vendorItems: [...vendor], customSrc, nExposes, nDp: (dps || []).length });
     proxy.push({ tier, file, zm: d.zigbeeModel, fp: Array.isArray(d.fingerprint) ? d.fingerprint.map((f) => [f.modelID, f.manufacturerName]) : null,
-      vendor: d.vendor, model: d.model,
+      vendor: d.vendor, model: d.model, ds: d.description,
       x: (d.extend || []).map((e) => (callArgs.has(e) ? sanitize(e) : null)),
       fz: (d.fromZigbee || []).map((c) => named.get(c) || null), tz: (d.toZigbee || []).map((c) => named.get(c) || null),
       ex: Array.isArray(d.exposes) ? d.exposes.map((e) => ({ n: e.name, t: e.type, a: e.access, u: e.unit, mi: e.value_min,

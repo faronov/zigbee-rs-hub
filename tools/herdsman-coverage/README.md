@@ -33,8 +33,16 @@ once (about 500 `gh api` requests, a few minutes) into
 `/tmp/zhc/out/issues-*.jsonl`; later runs fetch only what changed. Its method
 is in its docstring and in spec 17.2. First run (2026-11-19): 46 758 issues and pull
 requests scanned in ~13 min; 4 266 of 4 664 definitions mentioned at least
-once. Coordinator/adapter definitions (SLZB-06M) top the raw list because
-Z2M's issue template asks for the adapter; the catalog builder drops them.
+once. Coordinator/adapter definitions (SLZB-06M 1 083, "Silabs series 2
+router" 187, Sonoff dongles, CC2530/EFR32 router firmwares, TubesZB: 13 in
+zhc 26.130.0) top the raw list because Z2M's issue template asks for the
+adapter; `popularity.py` gives them score 0 and lists them separately
+(`is_adapter`, the same rule as the definitions repository's generator).
+
+The generator itself (zhc → canonical YAML, coverage report, catalog build)
+lives in [faronov/zigbee-rs-definitions](https://github.com/faronov/zigbee-rs-definitions)
+(`generator/`, spec 17.2); these scripts remain the measurement that produced
+the spec's estimates.
 
 A run takes about 10 s. Results for 26.130.0 (2026-11-19):
 

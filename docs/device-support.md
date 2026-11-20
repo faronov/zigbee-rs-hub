@@ -2382,6 +2382,37 @@ A template is hub code (like a named codec) parametrised by definition data
 After that, the coverage report's ranking decides (Ledvance light 105,
 IKEA 89 + 66 are next).
 
+### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
+
+The generator is implemented in `faronov/zigbee-rs-definitions` (`generator/`,
+TypeScript), next to the catalog CI, as 17.2 proposed. It records the zhc
+calls like `measure.cjs`, translates extends, named converters, Tuya DP tables
+and replayed `configure` functions, and counts a definition as fully
+translated only if **every zhc expose** is claimed by a translated item
+(stricter than 17.3, which classified by item kind). Results on 26.130.0
+(2026-11-20), from its `coverage/COVERAGE.md`:
+
+| Tier (achieved) | Definitions | Share |
+|---|---:|---:|
+| A generic declarative | 1 861 | 39.9 % |
+| B Tuya declarative | 421 | 9.0 % |
+| C with a vendor template (`hue_light` 582, `lumi`, `tuya` families) | 917 | 19.7 % |
+| **Fully translated** | **3 199** | **68.6 %** |
+| Partial (served on demand only) | 1 465 | 31.4 % |
+
+Catalog built from it with the Python compiler (Rust `zdefc` pending): with
+no vendor template in the hub yet, the 4 MB bank holds all 2 284 eligible
+A+B and hand-written definitions in 231.6 KiB (index 41.8 KiB, string table
+8.2 KiB, blocks 181.2 KiB); with all templates (projection) the 4 MB bank
+holds the 2 344 most popular of 3 199 (cut at 2 issue mentions) in 255.9 KiB
+and the 8 MB bank all 3 199 in 320.2 KiB. 256 shards total 3.0 MiB (largest
+24.6 KiB). Formats fixed there: `docs/catalog-format.md`. The origin of a
+generated definition is the v1 key `source` (`zhc devices/<file>.ts`, without
+the zhc version and line, so a zhc bump does not change an unchanged
+definition's revision or hash); version and line are in the YAML header
+comment. Popularity excludes the 13 adapter definitions (`is_adapter` in
+`popularity.py`).
+
 ## 18. Testing strategy
 
 ### 18.1 Golden tests from herdsman

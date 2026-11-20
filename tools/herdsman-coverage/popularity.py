@@ -22,11 +22,17 @@ Method:
    identifiers with spaces are matched as phrases.
 4. Score = number of distinct issues (over all repositories) mentioning at
    least one identifier of the definition.
+5. Coordinator/adapter definitions (USB/network adapters with router
+   firmware: SLZB-06M, Sonoff dongles, "Silabs series 2 router", ...) get score
+   0 and are listed separately: Zigbee2MQTT's issue template asks every
+   reporter for the adapter, so they top the raw counts (SLZB-06M: 1 083).
+   The rule (`is_adapter`) is the same as `ADAPTER_*` in
+   faronov/zigbee-rs-definitions generator/src/translate.ts.
 
 usage: python3 popularity.py <out dir of measure.cjs> [--max-pages N]
 needs: the GitHub CLI `gh`, logged in (it makes the API calls; ~500 requests
        for a first full run, a few for later incremental runs)
-output: <out>/popularity.json ([{file, vendor, model, tier, score}], sorted),
+output: <out>/popularity.json ([{file, vendor, model, tier, score, adapter}], sorted),
         Markdown summary on stdout
 """
 import json
@@ -39,6 +45,19 @@ REPOS = ['Koenkk/zigbee2mqtt', 'Koenkk/zigbee-herdsman-converters', 'zigpy/zha-d
          'zigpy/zha']
 BODY_LIMIT = 20000
 WORD = re.compile(r'[A-Za-z0-9_.+-]+')
+
+
+ADAPTER_DESCRIPTION = re.compile(r'\b(coordinator|with router firmware|adapter with router|usb (stick|dongle|adapter)|zigbee (usb )?(stick|dongle)|'
+                                 r'dongle (plus|max|lite)|zigbee-ethernet|ethernet router|bridge router)\b', re.I)
+ADAPTER_MODEL = re.compile(r'^(SLZB-|ZBDongle|Dongle-|tubeszb|CC2530\.ROUTER|CC2531|EFR32MG21\.Router|Silabs series 2 router|ZREL$|SkyConnect|'
+                           r'ZBT-1$|ConBee|RaspBee|UZG-|XZG)', re.I)
+
+
+def is_adapter(d):
+    """Coordinator / NCP / adapter hardware (not a router product such as a repeater)."""
+    if ADAPTER_DESCRIPTION.search(d.get('ds') or ''):
+        return True
+    return any(ADAPTER_MODEL.search(str(x)) for x in [d.get('model') or ''] + list(d.get('zm') or []))
 
 
 JQ = '.[] | {n: .number, u: .updated_at, t: ((.title // "") + "\\n" + ((.body // "")[:%d]))}' % BODY_LIMIT
@@ -120,13 +139,18 @@ def main(argv):
         for i in seen:
             score[i] += 1
 
+    adapters = {i for i, d in enumerate(defs) if is_adapter(d)}
     ranked = sorted(({'file': d['file'], 'vendor': d['vendor'], 'model': d['model'], 'tier': d['tier'],
-                      'score': s} for d, s in zip(defs, score)), key=lambda r: -r['score'])
+                      'score': 0 if i in adapters else s, 'raw': s, 'adapter': i in adapters}
+                     for i, (d, s) in enumerate(zip(defs, score))), key=lambda r: -r['score'])
     json.dump(ranked, open(f'{out}/popularity.json', 'w', encoding='utf-8'), indent=0)
     ab = [r for r in ranked if r['tier'] in 'AB']
     print(f'issues scanned: {len(texts)}; definitions with a unique identifier: '
           f'{len(set(unique.values()))} of {len(defs)}; mentioned at least once: {sum(1 for s in score if s)}')
-    print(f'fully translated (A+B) mentioned at least once: {sum(1 for r in ab if r["score"])} of {len(ab)}\n')
+    print(f'fully translated (A+B) mentioned at least once: {sum(1 for r in ab if r["score"])} of {len(ab)}')
+    excl = sorted((r for r in ranked if r['adapter']), key=lambda r: -r['raw'])
+    print(f'adapters excluded from the ranking: {len(excl)} ('
+          + ', '.join(f"{r['vendor']} {r['model']} {r['raw']}" for r in excl[:5]) + ')\n')
     print('| Rank | Vendor | Model | Tier | Issues |')
     print('|---:|---|---|---|---:|')
     for n, r in enumerate(ranked[:20], 1):
