@@ -11,6 +11,10 @@ talks to it with **ZRHP v1** (zigbee-rs host protocol, spec:
 ZRHP stays a USB/UART protocol (no network transport). The hub's own external
 interface will be a WebSocket JSON API.
 
+The same hub also runs on classic-ESP32 LAN gateways with an EFR32MG24
+radio, first the **SONOFF Dongle Max (Dongle-M)**, and on an ESP32-S3
+SuperMini + EFR32MG24 bench setup; see "Supported hardware".
+
 ## Phases
 
 | Phase | Content | Status |
@@ -18,6 +22,25 @@ interface will be a WebSocket JSON API.
 | **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
 | **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode); hardware runs pending (see "Phase 1") |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | **in progress** (branch `stage2`): engine on the host core, device registry in `hubdata`, WebSocket JSON API on a desktop (`hubctl serve`) and on the S3 over Wi-Fi, catalog verifier, 8 MB production / 4 MB dev layouts; the S3 application build is 2.1 MiB, see "Stage 2" |
+
+## Supported hardware
+
+| Board | Host | NCP | Uplink | Console | Flash / PSRAM | NCP firmware update | Firmware | Status |
+|---|---|---|---|---|---|---|---|---|
+| Espressif Thread BR / Zigbee Gateway | ESP32-S3 | ESP32-H2 | Wi-Fi (W5500 daughter board not driven yet) | TinyUSB CDC | 8 MB (4 MB early samples) / 2 MB | `FW_*` into the H2's A/B slots | `firmware/hub` (`tbr-hub`) | on the hwlab bench |
+| SONOFF Dongle Max (Dongle-M) | ESP32-D0WDR2-V3 (classic Xtensa LX6) | EFR32MG24 | Ethernet (IP101 RMII) + Wi-Fi | UART0 through the CP2102N | 16 MB / 2 MB | Gecko bootloader (UART XMODEM), images and the last-known-good one in `hubdata` | `firmware/donglem` (`zrh-donglem`) | builds in CI; hardware not yet received |
+| ESP32-S3 SuperMini + RF-star RF-BM-MG24B1 (dev) | ESP32-S3FH4R2 | EFR32MG24A410F1536IM48 | Wi-Fi | USB-Serial-JTAG | 4 MB / 2 MB | J-Link SWD | `firmware/s3-mg24` (`zrh-s3-mg24`) | builds in CI; wiring to be confirmed |
+
+Every board is a `hub_core::profile::BoardProfile` (`THREAD_BR`, `DONGLE_M`,
+`S3_MG24_DEV`): NCP UART pins, rate and flow control, NCP reset and
+serial-loader lines with polarity and open drain, Ethernet, LEDs, button,
+console, flash and PSRAM, checked on the host (pin conflicts, flash/PSRAM
+and USB pins, input-only pins, strapping pins). The gateway firmware
+(`firmware/gateway`, a library; `firmware/donglem` and `firmware/s3-mg24`
+are its two binaries) runs the same ZRHP host, application and WebSocket
+API as `tbr-hub`, from the profile. ZRHP gets no network transport and
+there is no serial-over-TCP stream server: the NCP is only reachable
+through the hub (decided). Details: "Gateway firmware" below.
 
 ## Device support
 
@@ -83,13 +106,15 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | Path | What |
 |---|---|
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
-| `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
+| `crates/hub-core` | Portable `no_std` core: Thread BR board wiring (`board`), board profiles (`profile`), flash layouts and their boot check (`layout`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `crates/hub-app` | Stage 2: the engine on the host core: event/request conversion, transport, device registry in the host store, app thread with the API sessions, catalog verifier (trusted keys) |
-| `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, host store journal, simulated NCP (`sim`) |
+| `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, Gecko bootloader client for EFR32 NCPs (`gecko`: GBL checker, XMODEM-CRC, radio image banks, update/rollback job, simulated bootloader), host store journal, simulated NCP (`sim`) |
 | `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim` |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
 | `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
-| `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF), optional size limit |
+| `firmware/gateway` | Gateway firmware library for board profiles (NCP UART and lines, Ethernet, Wi-Fi, WebSocket API, radio banks, LED/button, console); 16 MB partition table |
+| `firmware/donglem`, `firmware/s3-mg24` | Its binaries: `zrh-donglem` (classic ESP32, SONOFF Dongle-M), `zrh-s3-mg24` (ESP32-S3 SuperMini + MG24) |
+| `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF; `CHIP=esp32` for the Dongle-M), optional size limit |
 | `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`, `s3_reflash.sh`) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
 | `definitions/examples/` | Example device definitions (YAML source form) |
@@ -147,7 +172,10 @@ Measured on the hwlab board (early sample):
 
 The S3 stores **no NCP images**: NCP rollback lives on the H2 (A/B app
 slots, `FW_*` into the inactive slot, trial boot, `FW_CONFIRM`, H2 bootloader
-rollback; ZRHP decision N6 as amended 2026-11-18).
+rollback; ZRHP decision N6 as amended 2026-11-18). (The Dongle-M is different: its
+EFR32MG24 is updated through the Gecko bootloader, so the ESP32 keeps the
+staged and the last-known-good `.gbl` in `hubdata`; see "Gateway
+firmware".)
 
 **8 MB boards are the product** (decision 2026-11-20): two 3 MiB app slots
 with A/B OTA and one data partition. **4 MB early samples** (the hwlab
@@ -615,6 +643,243 @@ override restored, removal deletes the record), the catalog key slots
 `hub-devices`: snapshot round trip, measured values excluded, restore of a
 self-describing device without traffic. `hub-ncp`: multi-part values
 across compaction and a torn put.
+
+## Gateway firmware (`firmware/gateway`: Dongle-M, S3 SuperMini + MG24)
+
+One library, two binaries, selected by board profile and target:
+`firmware/donglem` → `zrh-donglem` (`xtensa-esp32-espidf`, profile
+`DONGLE_M`), `firmware/s3-mg24` → `zrh-s3-mg24` (`xtensa-esp32s3-espidf`,
+profile `S3_MG24_DEV`). Boot: NCP control lines released first (on the
+Dongle-M GPIO12 low, see "Strapping"), console, NVS, board overrides,
+strapping/eFuse report, partition-table check, a pending radio install
+through the Gecko bootloader, then the ZRHP host (`hub-ncp`, host store in
+`hubdata`), the application (`hub-app`, `AppConfig::for_board`), Ethernet
+and/or Wi-Fi with the WebSocket API on `ws://<ip>/api`, LED and button.
+
+Console commands (`help`): `info` (board, heap, layout, straps), `board`,
+`board set <k=v …>` (NCP wiring overrides, next boot), `hub status|echo|
+form|permit|ncp reset`, `radio`, `radio install [A|B]`, `radio check A|B`,
+`net`, `wifi set|clear`, `token`, `restart`.
+
+### SONOFF Dongle-M
+
+Sources: SONOFF's guide "Running ESPHome firmware on Dongle-M" (GPIO table,
+Ethernet block, MG24 bootloader script), the eWeLink forum post "ESPHome on
+SONOFF Dongle Max" (adds GPIO5 = PHY reset/power) and the Dongle-M port of
+esp-thread-br (`sdkconfig.defaults.sonoff_dongle_m`: IP101, RMII clock in
+on GPIO0, PHY address 1, the fixed RMII data pins; that port names GPIO12
+"reset" and GPIO15 "boot" — SONOFF's own table and bootloader script say the
+opposite, and the profile follows SONOFF).
+
+| Function | ESP32 GPIO | Notes |
+|---|---|---|
+| MG24 UART: ESP TX → MG24 RX | 17 | UART1; no RTS/CTS on this board |
+| MG24 UART: ESP RX ← MG24 TX | 13 | internal pull-up (MG24 TX floats in reset) |
+| MG24 RESET_N | 15 | active low, push-pull; MTDO strap (pull-up at reset = MG24 runs) |
+| MG24 bootloader entry | 12 | active high; MTDI = flash-voltage strap, see below |
+| Ethernet MDC / MDIO | 23 / 18 | IP101GA, PHY address 1 |
+| Ethernet REF_CLK in | 0 | external 50 MHz oscillator |
+| PHY reset / power (oscillator enable) | 5 | driven high only after boot |
+| RMII data | 19, 21, 22, 25, 26, 27 | fixed by the ESP32 EMAC |
+| RGB LED red / green / blue | 4 / 14 / 2 | active high |
+| Button | 34 | active low, input only (board pull-up) |
+| Console | UART0 | CP2102N USB bridge, 115 200 |
+
+**NCP line.** 460 800 8N1 without flow control by default (ZRHP's ARQ
+recovers what an overrun loses), 115 200 as the hunting fallback (stock
+images, bootloader rate); 921 600 only once it is verified on the hardware.
+The hub's lines: `board set baud=921600` etc.
+
+**Strapping.** GPIO12 (MTDI) selects VDD_SDIO at reset: high = 1.8 V, which
+does not boot the 3.3 V flash unless the eFuse forces the voltage. The
+firmware configures GPIO12 low before anything else, drives it high only
+for the ~0.7 s bootloader entry (BOOT high, 100 ms, RESET pulse 100 ms,
+500 ms, BOOT low), never across a reset it starts itself (`esp_restart`
+releases the pin), and reports the eFuse state at boot (`info`: forced
+3.3 V / 1.8 V / off, or "strap"). `espefuse.py set_flash_voltage 3.3V`
+removes the hazard for good; it is irreversible and optional — check the
+module's flash voltage and back up first. GPIO0 (download-mode strap) is
+the RMII clock input: the oscillator is enabled by GPIO5, which the firmware
+drives high only after boot. GPIO2, GPIO5, GPIO15 are released at reset.
+
+**Flash layout (16 MB, `firmware/gateway/partitions-16mb.csv`).** The hub
+checks it at boot (`hub_core::layout`, `Layout::Production16`).
+
+| Partition | Offset | Size |
+|---|---|---|
+| bootloader | 0x001000 | 28 KiB (classic ESP32: at 0x1000) |
+| partition table | 0x008000 | 4 KiB |
+| `nvs` | 0x009000 | 24 KiB |
+| `otadata` | 0x00F000 | 8 KiB |
+| `phy_init` | 0x011000 | 4 KiB |
+| core dump | 0x012000 | 56 KiB |
+| `ota_0`, `ota_1` (A/B) | 0x020000, 0x420000 | 4 MiB each |
+| `hubdata` | 0x820000 | 8 064 KiB |
+
+`hubdata` areas (`hub_core::layout::hubdata16`, offsets inside the
+partition):
+
+| Area | Offset | Size |
+|---|---|---|
+| Host store journal | 0x000000 | 256 KiB (128 KiB used today) |
+| Configuration | 0x040000 | 64 KiB |
+| Converter bank A / B | 0x050000 / 0x150000 | 1 MiB each (the full catalog with room) |
+| Local definitions | 0x250000 | 512 KiB |
+| Radio banks A + B | 0x2D0000 | 2 × 1 792 KiB (4 KiB header + `.gbl`) |
+| Free | 0x650000 | 1 600 KiB |
+
+**RAM (2 MB PSRAM).** `CONFIG_SPIRAM_USE_MALLOC` with allocations above
+4 KiB in PSRAM, Wi-Fi/lwIP buffers allowed in PSRAM, 48 KiB of internal RAM
+reserved for DMA (EMAC, UART) and stacks. Thread stacks must stay internal:
+ESP-IDF asserts on flash writes from a task whose stack is in PSRAM, and the
+store, registry and radio banks write flash. Measured static use (release
+ELF): IRAM 102.7 KiB, DRAM `.data` + `.bss` 32.7 KiB (S3 SuperMini build:
+92.6 KiB, 35.6 KiB). Internal stacks: console/main 8, ZRHP driver 32,
+lifecycle 12, app 64, HTTP server 8, Ethernet 4, Wi-Fi 6 (only with Wi-Fi),
+LED 3, UART events 3, radio verify 6 (after an install) KiB, about 146 KiB,
+plus ESP-IDF tasks (~16 KiB), EMAC DMA buffers (10 + 10 × 512 B), UART rings
+(12 KiB) and Wi-Fi static RX buffers (16 KiB, only with Wi-Fi): roughly
+200 KiB of the classic ESP32's ~270 KiB internal heap (estimate, to be
+measured: `info` prints free / minimum / largest internal block and
+PSRAM). PSRAM holds the engine (200 devices ≈ 100–300 KiB,
+device-support 16.4), the catalog index and API frames. If internal RAM is
+short on hardware: the ZRHP driver stack (`HubConfig.driver.stack_size`),
+the app stack (`hub_app::APP_STACK_ESP`), `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM`.
+
+**LED.** Blue blinking: no network; yellow: network, no NCP session; green:
+network and NCP session; white blinking: joining open; magenta fast blink:
+radio install; red: partition-table error or the last radio update failed.
+**Button:** a short press opens joining for 180 s.
+
+### Flashing the Dongle-M (back up the stock firmware first)
+
+The ESP32 is behind the CP2102N (macOS `/dev/cu.SLAB_USBtoUART` or
+`/dev/cu.usbserial-*`, Linux `/dev/ttyUSB0`). esptool v5 syntax; images from
+the CI artifact `gateway-firmware` or a local build.
+
+```sh
+PORT=/dev/cu.usbserial-XXXX
+# 1. Identify, record the eFuses (VDD_SDIO, chip revision) and back up all 16 MB.
+esptool --chip esp32 --port $PORT flash-id
+espefuse --chip esp32 --port $PORT summary > dongle-m-efuse.txt
+esptool --chip esp32 --port $PORT --baud 921600 read-flash 0 0x1000000 dongle-m-stock-16mb.bin
+esptool --chip esp32 --port $PORT --baud 921600 verify-flash 0 dongle-m-stock-16mb.bin
+shasum -a 256 dongle-m-stock-16mb.bin   # keep the file and the hash safe (it holds Wi-Fi credentials)
+
+# 2. Flash the hub (whole chip erased: the stock NVS/data do not belong to this layout).
+esptool --chip esp32 --port $PORT erase-flash
+esptool --chip esp32 --port $PORT --baud 921600 write-flash --flash-mode dio --flash-freq 80m --flash-size 16MB \
+  0x1000 bootloader-donglem.bin 0x8000 partitions-16mb.bin 0x20000 zrh-donglem-app.bin
+
+# 3. Console (115 200): wifi set <ssid> <password>, token, hub status, radio …
+python3 -m serial.tools.miniterm $PORT 115200
+
+# Restore the stock firmware at any time:
+esptool --chip esp32 --port $PORT --baud 921600 write-flash 0 dongle-m-stock-16mb.bin
+```
+
+`flash-id` first checks that esptool resets the ESP32 into its ROM loader
+through the bridge (SONOFF Dongle Flasher uses the same port and can always
+reinstall the current stock firmware). Do not continue without a verified
+backup.
+
+**Never remove the MG24 Gecko bootloader.** Without it the MG24 can only
+be recovered over SWD. The hub refuses images with a bootloader or Secure
+Engine upgrade; do not mass-erase the MG24 with Simplicity Commander. Keep a
+copy of SONOFF's stock MG24 `.gbl` (Zigbee NCP or Thread RCP) to go back:
+it installs through the same path as any other image.
+
+### Radio firmware through the Gecko bootloader (Dongle-M)
+
+The alternative to `FW_*` A/B for NCPs whose flash belongs to the Gecko
+bootloader (`hub_ncp::gecko`). Upload, then install:
+
+```sh
+TOKEN=…   # console: token
+curl -H "Authorization: Bearer $TOKEN" --data-binary @ncp.gbl http://<ip>/radio/gbl
+curl -X POST -H "Authorization: Bearer $TOKEN" http://<ip>/radio/install   # or the console: radio install
+curl http://<ip>/radio                                                    # banks, job, last result
+```
+
+1. **Upload** streams the image into the radio bank that is not the
+   last-known-good one, checks it (GBL header and end tag CRC-32, no
+   bootloader / Secure Engine upgrade, ≤ 1 788 KiB), reads it back and
+   records it as staged.
+2. **Install** stores the job in NVS and restarts the ESP32. Before the hub
+   opens the UART, the next boot switches the UART to 115 200, enters the
+   bootloader (GPIO12 high, GPIO15 pulse 100 ms, GPIO12 low after 500 ms),
+   probes the menu (`BL >`), sends `1`, uploads the image by XMODEM-CRC
+   (128-byte packets, stop-and-wait, retransmission on NAK or timeout, no
+   flow control needed), waits for `Serial upload complete` and sends `2`.
+3. **Verify:** the hub starts; within 90 s a ZRHP session must come up and
+   `SYS_NEGOTIATE.build_id` must match the image's zigbee-rs metadata. Then
+   the bank becomes last-known-good. An image without that metadata is
+   accepted on the session alone ("unverifiable", logged).
+4. **Rollback:** a failed install or verification marks the bank bad and
+   installs the last-known-good bank the same way (once; a failed rollback
+   ends the job with an error and the LED red). The first update over the
+   stock MG24 firmware has no last-known-good image: keep SONOFF's `.gbl`.
+
+Host tests run the client against a simulated bootloader
+(`hub_ncp::gecko::sim`: menu, `C` start, XMODEM with injected NAKs and lost
+ACKs, block-number wrap, rejected images, missing bootloader) and the
+bank/job logic on RAM flash.
+
+**What the hub expects from the MG24 NCP image** (to agree with the
+zigbee-rs MG24 port): ZRHP v1 on the MG24 USART wired to the ESP32 (Dongle-M:
+the pins of SONOFF's stock image), 460 800 8N1 without flow control as the
+default (115 200 accepted, the hub hunts both); `SYS_GET_INFO.transport = 2`,
+`uart_flow = 0`, `flash_size = 1 536 KiB` (no `FW_*` slots); a new `chip`
+value for EFR32MG24 (proposal: 12); the release `.gbl` with the application
+tag (version) and a metadata tag (`commander gbl create --metadata`) holding
+the record `"ZRHP", u8 1, [8] build_id, u8 n, [n] fw` with the `build_id` and
+`fw` the image reports in `SYS_NEGOTIATE` (`hub_ncp::gecko::gbl::ZrhpMeta`).
+
+### ESP32-S3 SuperMini + RF-BM-MG24B1 (bench)
+
+Default wiring (`S3_MG24_DEV`; `board set` changes it, checked against the
+S3's flash/PSRAM and USB pins, applied at the next boot):
+
+| S3 GPIO | MG24 (RF-BM-MG24B1) | Function |
+|---|---|---|
+| 4 | PA06 (RX) | S3 TX → MG24 RX |
+| 5 | PA05 (TX) | S3 RX ← MG24 TX |
+| 6 | RESET_N | open drain, active low |
+| 7 | PA08 (CTS) | S3 RTS (optional) |
+| 8 | PA07 (RTS) | S3 CTS (optional) |
+| 0 | — | BOOT button: opens joining |
+
+Default line 460 800 without flow control; with RTS/CTS wired:
+`board set flow=1 baud=921600 fallback=460800`. Example rewiring:
+`board set tx=10 rx=11 rts=none cts=none reset=12`. The MG24 is flashed with
+a J-Link over SWD (no Gecko bootloader needed). The S3 uses the 4 MB dev
+layout of the Thread BR board:
+
+```sh
+esptool --chip esp32s3 --port $PORT write-flash 0x0 bootloader-s3-mg24.bin 0x8000 partitions-4mb-dev.bin \
+  0x10000 zrh-s3-mg24-app.bin
+```
+
+### Building
+
+```sh
+. ~/export-esp.sh            # espup install --toolchain-version 1.90.0.0 --targets esp32,esp32s3 --std
+(cd firmware/donglem && cargo build --release)
+(cd firmware/s3-mg24 && cargo build --release)
+CHIP=esp32 FLASH_SIZE=16MB MIN_REV_FULL=300 MAX_APP_BYTES=4194304 \
+  tools/make-app-image.sh release target/zrh-donglem-app.bin zrh-donglem
+CHIP=esp32s3 FLASH_SIZE=4MB MAX_APP_BYTES=3014656 \
+  tools/make-app-image.sh release target/zrh-s3-mg24-app.bin zrh-s3-mg24
+tools/make-partition-table.sh firmware/gateway/partitions-16mb.csv target/partitions-16mb.bin 16MB
+```
+
+Sizes (release, ESP-IDF v5.5.1, 2026-11-20): `zrh-donglem` 2 274 016 B
+(2.17 MiB of the 4 MiB slot), `zrh-s3-mg24` 2 218 064 B (of the 2 944 KiB
+dev slot). CI (`gateway` job) builds both, checks them against their slots
+and uploads images, bootloaders and partition tables. Dongle-M build:
+flash DIO 80 MHz and PSRAM 80 MHz as in SONOFF's ESPHome configuration
+(GPIO9/10 carry the in-package PSRAM, so no QIO), `CONFIG_ESP32_REV_MIN_3`
+(V3 silicon: no PSRAM cache workaround), console on UART0.
 
 ## License
 
