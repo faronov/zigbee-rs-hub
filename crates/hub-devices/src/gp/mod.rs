@@ -59,7 +59,12 @@ pub struct GpHubState {
     pub commissioning: bool,
 }
 
-fn fp_from_payload(gpd_id: GpdId, device_id: u8, payload: Option<&[u8]>, level: u8) -> GpFingerprint {
+fn fp_from_payload(
+    gpd_id: GpdId,
+    device_id: u8,
+    payload: Option<&[u8]>,
+    level: u8,
+) -> GpFingerprint {
     let mut g = GpFingerprint {
         gpd_id,
         device_id,
@@ -72,7 +77,9 @@ fn fp_from_payload(gpd_id: GpdId, device_id: u8, payload: Option<&[u8]>, level: 
         security_level: level,
         rx_on_capability: false,
     };
-    if let Some(cp) = payload.and_then(|p| zigbee_gp::commissioning::CommissioningPayload::decode(p).ok()) {
+    if let Some(cp) =
+        payload.and_then(|p| zigbee_gp::commissioning::CommissioningPayload::decode(p).ok())
+    {
         g.device_id = cp.device_id;
         g.rx_on_capability = cp.rx_on_capability;
         if let Some(ai) = cp.app_info {
@@ -98,7 +105,11 @@ impl<T: ZigbeeTransport> Hub<T> {
     pub fn on_gp_event(&mut self, ev: GpEvent, now: Millis) {
         match ev {
             GpEvent::Frame(f) => self.gp_frame(f, now),
-            GpEvent::Commissioning { state, window_s, exit_reason } => {
+            GpEvent::Commissioning {
+                state,
+                window_s,
+                exit_reason,
+            } => {
                 self.gp.commissioning = state == 1;
                 let reason = match exit_reason {
                     1 => "explicit",
@@ -111,9 +122,17 @@ impl<T: ZigbeeTransport> Hub<T> {
                     body: json!({"state": if state == 1 { "open" } else { "closed" }, "remaining_s": window_s, "exit_reason": reason}),
                 });
             }
-            GpEvent::Commissioned { gpd_id, device_id, flags, record } => self.gp_commissioned(gpd_id, device_id, flags, record, now),
+            GpEvent::Commissioned {
+                gpd_id,
+                device_id,
+                flags,
+                record,
+            } => self.gp_commissioned(gpd_id, device_id, flags, record, now),
             GpEvent::CommissioningFailed { gpd_id, reason } => {
-                self.emit(HubEvent::Gp { kind: "gp/failed".into(), body: json!({"gpd": gpd_id.device_id(), "reason": sink_drop_reason(reason)}) });
+                self.emit(HubEvent::Gp {
+                    kind: "gp/failed".into(),
+                    body: json!({"gpd": gpd_id.device_id(), "reason": sink_drop_reason(reason)}),
+                });
             }
             GpEvent::Decommissioned { gpd_id } => {
                 let id = gpd_id.device_id();
@@ -121,16 +140,41 @@ impl<T: ZigbeeTransport> Hub<T> {
                     let _ = self.remove_gp_device_local(&id);
                 }
             }
-            GpEvent::RemoteStatus { src_nwk, zcl_tsn, command_id, zcl_status } => self.gp_remote_status(src_nwk, zcl_tsn, command_id, zcl_status, now),
-            GpEvent::RemoteSinkTable { src_nwk, zcl_tsn, status, records } => self.gp_remote_sink_table(src_nwk, zcl_tsn, status, &records, now),
-            GpEvent::RemoteTranslationTable { src_nwk, zcl_tsn, status, records } => {
-                self.gp_remote_translation_table(src_nwk, zcl_tsn, status, &records, now)
-            }
+            GpEvent::RemoteStatus {
+                src_nwk,
+                zcl_tsn,
+                command_id,
+                zcl_status,
+            } => self.gp_remote_status(src_nwk, zcl_tsn, command_id, zcl_status, now),
+            GpEvent::RemoteSinkTable {
+                src_nwk,
+                zcl_tsn,
+                status,
+                records,
+            } => self.gp_remote_sink_table(src_nwk, zcl_tsn, status, &records, now),
+            GpEvent::RemoteTranslationTable {
+                src_nwk,
+                zcl_tsn,
+                status,
+                records,
+            } => self.gp_remote_translation_table(src_nwk, zcl_tsn, status, &records, now),
         }
     }
 
-    fn gp_commissioned(&mut self, gpd_id: GpdId, device_id: u8, flags: u8, record: GpSinkRecord, now: Millis) {
-        let payload = self.gp.payloads.remove(&gpd_id).filter(|(t, _)| now.saturating_sub(*t) <= 30_000).map(|(_, p)| p);
+    fn gp_commissioned(
+        &mut self,
+        gpd_id: GpdId,
+        device_id: u8,
+        flags: u8,
+        record: GpSinkRecord,
+        now: Millis,
+    ) {
+        let payload = self
+            .gp
+            .payloads
+            .remove(&gpd_id)
+            .filter(|(t, _)| now.saturating_sub(*t) <= 30_000)
+            .map(|(_, p)| p);
         let id = gpd_id.device_id();
         let fresh = !self.devices.contains_key(&id);
         let level = record.security_level;
@@ -138,10 +182,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         if payload.is_none() {
             if let Some(old) = self.devices.get(&id).and_then(|d| d.fp.gp.clone()) {
                 // Re-commissioning without a payload keeps the known identity.
-                g = GpFingerprint { security_level: level, ..old };
+                g = GpFingerprint {
+                    security_level: level,
+                    ..old
+                };
             }
         }
-        let d = self.devices.entry(id.clone()).or_insert_with(|| Device::new(id.clone(), DeviceKind::Gp { gpd_id }, now));
+        let d = self
+            .devices
+            .entry(id.clone())
+            .or_insert_with(|| Device::new(id.clone(), DeviceKind::Gp { gpd_id }, now));
         d.fp.gp = Some(g);
         d.fp.endpoints = vec![EndpointFp {
             ep: GP_ENDPOINT,
@@ -152,7 +202,13 @@ impl<T: ZigbeeTransport> Hub<T> {
         }];
         d.interview = crate::device::InterviewStep::Done;
         d.last_seen = Some(now);
-        d.gp = Some(GpState { frame_counter: record.frame_counter, security_level: level, sink: Some(record), contacts: 0, recent: Default::default() });
+        d.gp = Some(GpState {
+            frame_counter: record.frame_counter,
+            security_level: level,
+            sink: Some(record),
+            contacts: 0,
+            recent: Default::default(),
+        });
         if fresh {
             self.emit(HubEvent::DeviceAdded(id.clone()));
         }
@@ -161,13 +217,23 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.gp_device_fields(&id, now);
         let rec = self.devices[&id].record();
         let layers = serde_json::to_value(&self.devices[&id].resolution.layers).unwrap_or_default();
-        self.emit(HubEvent::Gp { kind: "gp/commissioned".into(), body: json!({"device": rec, "bidirectional": flags & 1 != 0, "layers": layers}) });
+        self.emit(HubEvent::Gp {
+            kind: "gp/commissioned".into(),
+            body: json!({"device": rec, "bidirectional": flags & 1 != 0, "layers": layers}),
+        });
     }
 
     fn gp_update_warnings(&mut self, id: &str) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let level = d.gp.as_ref().map_or(0, |g| g.security_level);
-        let min = d.resolution.gp.as_ref().and_then(|g| g.security_min).unwrap_or(0);
+        let min = d
+            .resolution
+            .gp
+            .as_ref()
+            .and_then(|g| g.security_min)
+            .unwrap_or(0);
         d.warnings.retain(|w| w != "gp_unsecured");
         if level == 0 || level < min {
             d.warnings.push("gp_unsecured".into());
@@ -175,13 +241,19 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn gp_device_fields(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let Some(g) = d.gp.clone() else { return };
         let mut touched = Vec::new();
         for i in 0..d.entities.len() {
             let v = match d.entities[i].r.def.value.binding {
-                Binding::DeviceField(DeviceField::FrameCounter) => Value::Int(i64::from(g.frame_counter)),
-                Binding::DeviceField(DeviceField::SecurityLevel) => Value::Int(i64::from(g.security_level)),
+                Binding::DeviceField(DeviceField::FrameCounter) => {
+                    Value::Int(i64::from(g.frame_counter))
+                }
+                Binding::DeviceField(DeviceField::SecurityLevel) => {
+                    Value::Int(i64::from(g.security_level))
+                }
                 _ => continue,
             };
             if d.entities[i].state.value != v {
@@ -196,11 +268,21 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     fn gp_frame(&mut self, f: GpFrame, now: Millis) {
         if f.command_id == 0xE0 || f.command_id == 0xE3 {
-            if f.command_id == 0xE0 && matches!(f.result, frame_result::COMMISSIONED | frame_result::COMMISSIONING_REPLY_SENT) {
-                self.gp.payloads.retain(|_, (t, _)| now.saturating_sub(*t) <= 30_000);
+            if f.command_id == 0xE0
+                && matches!(
+                    f.result,
+                    frame_result::COMMISSIONED | frame_result::COMMISSIONING_REPLY_SENT
+                )
+            {
+                self.gp
+                    .payloads
+                    .retain(|_, (t, _)| now.saturating_sub(*t) <= 30_000);
                 self.gp.payloads.insert(f.gpd_id, (now, f.payload.clone()));
             }
-            if matches!(f.result, frame_result::COMMISSIONING_REPLY_SENT | frame_result::COMMISSIONING_STEP) {
+            if matches!(
+                f.result,
+                frame_result::COMMISSIONING_REPLY_SENT | frame_result::COMMISSIONING_STEP
+            ) {
                 self.emit(HubEvent::Gp {
                     kind: "gp/pending".into(),
                     body: json!({"gpd": f.gpd_id.device_id(), "command_id": f.command_id, "result": f.result}),
@@ -208,7 +290,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             return;
         }
-        if !matches!(f.result, frame_result::TRANSLATED | frame_result::PASSED_THROUGH) {
+        if !matches!(
+            f.result,
+            frame_result::TRANSLATED | frame_result::PASSED_THROUGH
+        ) {
             return;
         }
         let id = f.gpd_id.device_id();
@@ -233,16 +318,29 @@ impl<T: ZigbeeTransport> Hub<T> {
         // Hub-side de-duplication (the NCP already filters proxies' copies).
         {
             let d = self.devices.get_mut(&id).unwrap();
-            let g = d.gp.get_or_insert_with(|| GpState { sink: None, frame_counter: 0, security_level: 0, contacts: 0, recent: Default::default() });
+            let g = d.gp.get_or_insert_with(|| GpState {
+                sink: None,
+                frame_counter: 0,
+                security_level: 0,
+                contacts: 0,
+                recent: Default::default(),
+            });
             g.recent.retain(|(t, _, _)| now.saturating_sub(*t) < 2_000);
-            if g.recent.iter().any(|(_, c, cmd)| *c == f.frame_counter && *cmd == f.command_id) {
+            if g.recent
+                .iter()
+                .any(|(_, c, cmd)| *c == f.frame_counter && *cmd == f.command_id)
+            {
                 d.diag.count("gp_duplicate");
                 return;
             }
             g.recent.push_back((now, f.frame_counter, f.command_id));
             g.frame_counter = g.frame_counter.max(f.frame_counter);
             g.security_level = f.security_level;
-            if d.resolution.gp.as_ref().is_some_and(|x| x.ignore_commands.contains(&f.command_id)) {
+            if d.resolution
+                .gp
+                .as_ref()
+                .is_some_and(|x| x.ignore_commands.contains(&f.command_id))
+            {
                 return;
             }
         }
@@ -252,7 +350,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             0xA0..=0xA3 => self.gp_report(&id, &f, now),
             0xA8 => {
                 if let Some(d) = self.devices.get_mut(&id) {
-                    d.diag.gp_data.insert(f.command_id, crate::expr::hex(&f.payload));
+                    d.diag
+                        .gp_data
+                        .insert(f.command_id, crate::expr::hex(&f.payload));
                 }
             }
             _ => self.gp_command(&id, &f, now),
@@ -263,7 +363,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Ok(recs) = generic::decode_report(f.command_id, &f.payload) else {
             if let Some(d) = self.devices.get_mut(id) {
                 d.diag.count("gp_malformed_report");
-                d.diag.gp_data.insert(f.command_id, crate::expr::hex(&f.payload));
+                d.diag
+                    .gp_data
+                    .insert(f.command_id, crate::expr::hex(&f.payload));
             }
             return;
         };
@@ -278,13 +380,22 @@ impl<T: ZigbeeTransport> Hub<T> {
         if new_attr {
             self.resolve_device(id, now);
         }
-        let Some(table) = self.dispatch.get(id) else { return };
+        let Some(table) = self.dispatch.get(id) else {
+            return;
+        };
         let mut work = Vec::new();
         let mut unbound = Vec::new();
         for (c, a, m, v) in &recs {
             match table.get(&DKey::GpAttr(*c, *a, *m)) {
-                Some(list) => work.extend(list.iter().map(|&(i, p)| (i, p, crate::values::from_zcl(&v.value)))),
-                None => unbound.push(format!("0x{c:04x}/0x{a:04x}{}={:?}", m.map_or(String::new(), |m| format!("@{m:04x}")), v.value)),
+                Some(list) => work.extend(
+                    list.iter()
+                        .map(|&(i, p)| (i, p, crate::values::from_zcl(&v.value))),
+                ),
+                None => unbound.push(format!(
+                    "0x{c:04x}/0x{a:04x}{}={:?}",
+                    m.map_or(String::new(), |m| format!("@{m:04x}")),
+                    v.value
+                )),
             }
         }
         if let Some(d) = self.devices.get_mut(id) {
@@ -300,10 +411,24 @@ impl<T: ZigbeeTransport> Hub<T> {
     fn gp_command(&mut self, id: &str, f: &GpFrame, now: Millis) {
         // Remember the command (the generic tier grows its event types).
         let new_cmd = self.devices.get_mut(id).is_some_and(|d| {
-            let k = (GP_ENDPOINT, generic::SEEN_COMMANDS, u16::from(f.command_id), None);
-            let known_list = d.fp.gp.as_ref().is_some_and(|g| g.commands.contains(&f.command_id));
+            let k = (
+                GP_ENDPOINT,
+                generic::SEEN_COMMANDS,
+                u16::from(f.command_id),
+                None,
+            );
+            let known_list =
+                d.fp.gp
+                    .as_ref()
+                    .is_some_and(|g| g.commands.contains(&f.command_id));
             let new = !d.attrs.map.contains_key(&k) && !known_list;
-            d.attrs.map.insert(k, crate::device::AttrEntry { support: crate::generic::Support::Supported, value: None });
+            d.attrs.map.insert(
+                k,
+                crate::device::AttrEntry {
+                    support: crate::generic::Support::Supported,
+                    value: None,
+                },
+            );
             new && generic::command_event(f.command_id).is_some()
         });
         if new_cmd {
@@ -314,21 +439,37 @@ impl<T: ZigbeeTransport> Hub<T> {
             .dispatch
             .get(id)
             .and_then(|t| t.get(&DKey::GpCmd(f.command_id)))
-            .map(|l| l.iter().map(|&(i, p)| (i, p, Value::Bytes(f.payload.clone()))).collect())
+            .map(|l| {
+                l.iter()
+                    .map(|&(i, p)| (i, p, Value::Bytes(f.payload.clone())))
+                    .collect()
+            })
             .unwrap_or_default();
         let mut fired = Vec::new();
         let contacts_before = d.gp.as_ref().map_or(0, |g| g.contacts);
         {
-            let env = DevEnv { dev: d, now, tz: self.cfg.tz_offset_s };
+            let env = DevEnv {
+                dev: d,
+                now,
+                tz: self.cfg.tz_offset_s,
+            };
             for (i, e) in d.entities.iter().enumerate() {
                 if e.orphaned {
                     continue;
                 }
                 // Generic per-contact entities (0x69/0x6A with switch information).
-                if let Some(bit) = e.r.def.capabilities.get("contact_bit").and_then(serde_json::Value::as_u64) {
+                if let Some(bit) =
+                    e.r.def
+                        .capabilities
+                        .get("contact_bit")
+                        .and_then(serde_json::Value::as_u64)
+                {
                     if matches!(f.command_id, 0x69 | 0x6A) {
                         let now_bits = f.payload.first().copied().unwrap_or(0);
-                        let (was, is) = ((contacts_before >> bit) & 1 == 1, (now_bits >> bit) & 1 == 1);
+                        let (was, is) = (
+                            (contacts_before >> bit) & 1 == 1,
+                            (now_bits >> bit) & 1 == 1,
+                        );
                         if is && !was {
                             fired.push((i, "press".to_string(), serde_json::Map::new()));
                         } else if !is && was {
@@ -341,7 +482,9 @@ impl<T: ZigbeeTransport> Hub<T> {
                     if t.source != TriggerSource::GpCmd(f.command_id) {
                         continue;
                     }
-                    if let Some(ev) = eval_trigger(t, &f.payload, e.state.last_event.as_deref(), &env) {
+                    if let Some(ev) =
+                        eval_trigger(t, &f.payload, e.state.last_event.as_deref(), &env)
+                    {
                         fired.push((i, ev.0, ev.1));
                         break;
                     }
@@ -355,7 +498,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         if work.is_empty() && fired.is_empty() && matches!(f.command_id, 0xB0..=0xBF) {
             if let Some(d) = self.devices.get_mut(id) {
-                d.diag.gp_data.insert(f.command_id, crate::expr::hex(&f.payload));
+                d.diag
+                    .gp_data
+                    .insert(f.command_id, crate::expr::hex(&f.payload));
             }
         }
         self.apply_raw(id, work, now);
@@ -372,7 +517,10 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn remove_gp_device_local(&mut self, id: &str) -> Result<(), ApiError> {
-        let d = self.devices.remove(id).ok_or_else(|| ApiError::new("not_found", id.to_string()))?;
+        let d = self
+            .devices
+            .remove(id)
+            .ok_or_else(|| ApiError::new("not_found", id.to_string()))?;
         for e in &d.entities {
             self.emit(HubEvent::EntityRemoved(e.uid.clone()));
         }
@@ -383,25 +531,48 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Removes a GPD: its on-device bindings first, then the Sink Table
     /// entry (`gp/devices/remove`).
-    pub(crate) fn gp_remove(&mut self, gpd_id: GpdId, send_remove: bool, now: Millis) -> Result<(), ApiError> {
-        let ids: Vec<u32> = self.gp.bindings.iter().filter(|b| b.gpd == gpd_id).map(|b| b.id).collect();
+    pub(crate) fn gp_remove(
+        &mut self,
+        gpd_id: GpdId,
+        send_remove: bool,
+        now: Millis,
+    ) -> Result<(), ApiError> {
+        let ids: Vec<u32> = self
+            .gp
+            .bindings
+            .iter()
+            .filter(|b| b.gpd == gpd_id)
+            .map(|b| b.id)
+            .collect();
         for b in ids {
             let _ = self.delete_binding(b, now);
         }
         self.transport
-            .gp_request(GpRequest::SinkRemove { gpd_id, flags: u8::from(send_remove) })
+            .gp_request(GpRequest::SinkRemove {
+                gpd_id,
+                flags: u8::from(send_remove),
+            })
             .map_err(|e| ApiError::new("busy", e.to_string()))?;
         Ok(())
     }
 
     /// `gp/commissioning/open`.
-    pub fn gp_commissioning_open(&mut self, duration_s: u16, involve_proxies: bool, exit_on_first_pairing: bool) -> Result<(), ApiError> {
+    pub fn gp_commissioning_open(
+        &mut self,
+        duration_s: u16,
+        involve_proxies: bool,
+        exit_on_first_pairing: bool,
+    ) -> Result<(), ApiError> {
         if duration_s > 600 {
             return Err(ApiError::new("invalid_value", "duration_s must be ≤ 600"));
         }
         let flags = u8::from(involve_proxies) | (u8::from(exit_on_first_pairing) << 1);
         self.transport
-            .gp_request(GpRequest::SinkCommissioning { action: 1, flags, window_s: duration_s })
+            .gp_request(GpRequest::SinkCommissioning {
+                action: 1,
+                flags,
+                window_s: duration_s,
+            })
             .map_err(|e| ApiError::new("busy", e.to_string()))?;
         Ok(())
     }
@@ -409,7 +580,11 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// `gp/commissioning/close`.
     pub fn gp_commissioning_close(&mut self) -> Result<(), ApiError> {
         self.transport
-            .gp_request(GpRequest::SinkCommissioning { action: 0, flags: 0, window_s: 0 })
+            .gp_request(GpRequest::SinkCommissioning {
+                action: 0,
+                flags: 0,
+                window_s: 0,
+            })
             .map_err(|e| ApiError::new("busy", e.to_string()))?;
         Ok(())
     }

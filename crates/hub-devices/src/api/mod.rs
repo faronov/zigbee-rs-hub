@@ -42,7 +42,9 @@ pub struct ApiServer {
 }
 
 fn b64(s: &str) -> Result<Vec<u8>, ApiError> {
-    base64::engine::general_purpose::STANDARD.decode(s.trim()).map_err(|e| ApiError::new("invalid_format", format!("base64: {e}")))
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .map_err(|e| ApiError::new("invalid_format", format!("base64: {e}")))
 }
 
 fn missing(id: &str) -> ApiError {
@@ -63,13 +65,27 @@ fn def_summary(d: &Definition) -> J {
 }
 
 fn uids_of<T: ZigbeeTransport>(hub: &Hub<T>, dev: &str) -> Vec<String> {
-    hub.device(dev).map(|x| x.entities.iter().filter(|e| !e.orphaned).map(|e| e.uid.clone()).collect()).unwrap_or_default()
+    hub.device(dev)
+        .map(|x| {
+            x.entities
+                .iter()
+                .filter(|e| !e.orphaned)
+                .map(|e| e.uid.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl ApiServer {
     /// A server for hub `hub_name` accepting `token`.
     pub fn new(hub_name: impl Into<String>, token: impl Into<String>) -> Self {
-        Self { hub_name: hub_name.into(), token: token.into(), sessions: BTreeMap::new(), next_session: 1, seq: 0 }
+        Self {
+            hub_name: hub_name.into(),
+            token: token.into(),
+            sessions: BTreeMap::new(),
+            next_session: 1,
+            seq: 0,
+        }
     }
 
     /// A new connection; returns its ID and the `auth_required` frame.
@@ -77,7 +93,14 @@ impl ApiServer {
         let id = self.next_session;
         self.next_session += 1;
         self.sessions.insert(id, Session::default());
-        (id, ServerMessage::AuthRequired { hub: self.hub_name.clone(), api_version: API_VERSION.into() }.to_text())
+        (
+            id,
+            ServerMessage::AuthRequired {
+                hub: self.hub_name.clone(),
+                api_version: API_VERSION.into(),
+            }
+            .to_text(),
+        )
     }
 
     /// A closed connection.
@@ -91,8 +114,16 @@ impl ApiServer {
     }
 
     /// Handles one text frame; returns the frames to send back.
-    pub fn handle_text<T: ZigbeeTransport>(&mut self, hub: &mut Hub<T>, s: SessionId, text: &str, now: Millis) -> Vec<String> {
-        let Some(sess) = self.sessions.get_mut(&s) else { return Vec::new() };
+    pub fn handle_text<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        text: &str,
+        now: Millis,
+    ) -> Vec<String> {
+        let Some(sess) = self.sessions.get_mut(&s) else {
+            return Vec::new();
+        };
         if !sess.authed {
             return match serde_json::from_str::<Auth>(text) {
                 Ok(a) if a.token == self.token => {
@@ -107,47 +138,97 @@ impl ApiServer {
                         .to_text(),
                     ]
                 }
-                _ => vec![ServerMessage::AuthInvalid { message: "unauthorized".into() }.to_text()],
+                _ => vec![
+                    ServerMessage::AuthInvalid {
+                        message: "unauthorized".into(),
+                    }
+                    .to_text(),
+                ],
             };
         }
         let env: Envelope = match serde_json::from_str(text) {
             Ok(e) => e,
             Err(e) => {
-                let id = serde_json::from_str::<J>(text).ok().and_then(|v| v["id"].as_u64()).unwrap_or(0);
-                return vec![ServerMessage::err(id, ApiError::new("invalid_format", e.to_string())).to_text()];
+                let id = serde_json::from_str::<J>(text)
+                    .ok()
+                    .and_then(|v| v["id"].as_u64())
+                    .unwrap_or(0);
+                return vec![
+                    ServerMessage::err(id, ApiError::new("invalid_format", e.to_string()))
+                        .to_text(),
+                ];
             }
         };
-        self.handle(hub, s, env, now).into_iter().map(|m| m.to_text()).collect()
+        self.handle(hub, s, env, now)
+            .into_iter()
+            .map(|m| m.to_text())
+            .collect()
     }
 
     /// Handles one typed request.
-    pub fn handle<T: ZigbeeTransport>(&mut self, hub: &mut Hub<T>, s: SessionId, env: Envelope, now: Millis) -> Vec<ServerMessage> {
+    pub fn handle<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        env: Envelope,
+        now: Millis,
+    ) -> Vec<ServerMessage> {
         let id = env.id;
         if let Request::Subscribe { topics } = &env.request {
-            let bad: Vec<&String> = topics.iter().filter(|t| !TOPICS.contains(&t.as_str())).collect();
+            let bad: Vec<&String> = topics
+                .iter()
+                .filter(|t| !TOPICS.contains(&t.as_str()))
+                .collect();
             if !bad.is_empty() {
-                return vec![ServerMessage::err(id, ApiError::new("invalid_value", format!("unknown topics {bad:?}")))];
+                return vec![ServerMessage::err(
+                    id,
+                    ApiError::new("invalid_value", format!("unknown topics {bad:?}")),
+                )];
             }
             if let Some(sess) = self.sessions.get_mut(&s) {
                 sess.subs.insert(id, topics.iter().cloned().collect());
             }
             // Snapshot first, then deltas with increasing seq (14.1).
             let snap = self.snapshot(hub, topics);
-            return vec![ServerMessage::ok(id, json!({"seq": self.seq})), ServerMessage::Event { id, seq: self.seq, event: snap }];
+            return vec![
+                ServerMessage::ok(id, json!({"seq": self.seq})),
+                ServerMessage::Event {
+                    id,
+                    seq: self.seq,
+                    event: snap,
+                },
+            ];
         }
         if let Request::Unsubscribe { subscription } = env.request {
-            let found = self.sessions.get_mut(&s).is_some_and(|x| x.subs.remove(&subscription).is_some());
-            return vec![if found { ServerMessage::ok(id, J::Null) } else { ServerMessage::err(id, ApiError::new("not_found", "no subscription")) }];
+            let found = self
+                .sessions
+                .get_mut(&s)
+                .is_some_and(|x| x.subs.remove(&subscription).is_some());
+            return vec![if found {
+                ServerMessage::ok(id, J::Null)
+            } else {
+                ServerMessage::err(id, ApiError::new("not_found", "no subscription"))
+            }];
         }
-        if let Request::EntitiesCommand { uid, command, params } = &env.request {
+        if let Request::EntitiesCommand {
+            uid,
+            command,
+            params,
+        } = &env.request
+        {
             return match hub.entity_command(uid, command, params, now) {
-                Ok(ack) if ack.status == "ok" => vec![ServerMessage::ok(id, json!({"status": "ok"}))],
+                Ok(ack) if ack.status == "ok" => {
+                    vec![ServerMessage::ok(id, json!({"status": "ok"}))]
+                }
                 Ok(ack) => {
                     if let Some(sess) = self.sessions.get_mut(&s) {
                         sess.tickets.insert(ack.ticket, id);
                     }
                     if ack.status == "queued" {
-                        vec![ServerMessage::ok(id, json!({"status": "queued", "ticket": ack.ticket}))]
+                        vec![ServerMessage::ok(
+                            id,
+                            json!({"status": "queued", "ticket": ack.ticket}),
+                        )]
                     } else {
                         Vec::new() // the result follows when the device confirms
                     }
@@ -167,8 +248,14 @@ impl ApiServer {
             snap["devices"] = hub.devices().map(|d| d.record()).collect();
         }
         if topics.iter().any(|t| t == "entities") {
-            snap["entities"] = hub.devices().flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id))).collect();
-            snap["states"] = hub.devices().flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available))).collect();
+            snap["entities"] = hub
+                .devices()
+                .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id)))
+                .collect();
+            snap["states"] = hub
+                .devices()
+                .flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available)))
+                .collect();
         }
         if topics.iter().any(|t| t == "gp") {
             snap["bindings"] = J::Array(hub.list_bindings(None, None));
@@ -176,16 +263,31 @@ impl ApiServer {
         snap
     }
 
-    fn dispatch<T: ZigbeeTransport>(&mut self, hub: &mut Hub<T>, req: Request, now: Millis) -> Result<J, ApiError> {
+    fn dispatch<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        req: Request,
+        now: Millis,
+    ) -> Result<J, ApiError> {
         use Request as R;
         Ok(match req {
             R::Subscribe { .. } | R::Unsubscribe { .. } | R::EntitiesCommand { .. } => J::Null,
-            R::PermitJoin { duration_s, target, include_gp } => {
+            R::PermitJoin {
+                duration_s,
+                target,
+                include_gp,
+            } => {
                 let nwk = match target.as_deref() {
                     None | Some("all") => None,
-                    Some(t) => Some(hub.device(t).and_then(|d| d.nwk()).ok_or_else(|| missing(t))?),
+                    Some(t) => Some(
+                        hub.device(t)
+                            .and_then(|d| d.nwk())
+                            .ok_or_else(|| missing(t))?,
+                    ),
                 };
-                hub.transport.permit_join(duration_s, nwk).map_err(|e| ApiError::new("busy", e.to_string()))?;
+                hub.transport
+                    .permit_join(duration_s, nwk)
+                    .map_err(|e| ApiError::new("busy", e.to_string()))?;
                 if include_gp {
                     hub.gp_commissioning_open(u16::from(duration_s), true, false)?;
                 }
@@ -250,7 +352,12 @@ impl ApiServer {
                 hub.refresh(&uid, now)?;
                 J::Null
             }
-            R::EntitiesUpdate { uid, name, enabled, value } => hub.update_entity(&uid, name, enabled, value.as_ref(), now)?,
+            R::EntitiesUpdate {
+                uid,
+                name,
+                enabled,
+                value,
+            } => hub.update_entity(&uid, name, enabled, value.as_ref(), now)?,
             R::EntitiesDelete { uid } => {
                 hub.delete_entity(&uid)?;
                 J::Null
@@ -258,14 +365,21 @@ impl ApiServer {
             R::DefinitionsValidate { cbor } => Self::validate(hub, &b64(&cbor)?),
             R::DefinitionsUpload { cbor, replace } => {
                 let bytes = b64(&cbor)?;
-                let d = crate::zdef_adapter::load_cbor(&bytes, LayerSource::User).map_err(|e| ApiError::new("verification_failed", e.0))?;
+                let d = crate::zdef_adapter::load_cbor(&bytes, LayerSource::User)
+                    .map_err(|e| ApiError::new("verification_failed", e.0))?;
                 if d.source == LayerSource::SelfDescription {
-                    return Err(ApiError::new("invalid_value", "fragments are device data, not uploads"));
+                    return Err(ApiError::new(
+                        "invalid_value",
+                        "fragments are device data, not uploads",
+                    ));
                 }
                 if let Some(r) = replace.filter(|r| *r != d.id) {
                     hub.delete_user_definition(&r, now)?;
                 }
-                let before: BTreeMap<String, Vec<String>> = hub.devices().map(|x| (x.id.clone(), uids_of(hub, &x.id))).collect();
+                let before: BTreeMap<String, Vec<String>> = hub
+                    .devices()
+                    .map(|x| (x.id.clone(), uids_of(hub, &x.id)))
+                    .collect();
                 let id = d.id.clone();
                 let matched = hub.upload_user_definition(d, now)?;
                 let diffs: Vec<J> = matched
@@ -287,23 +401,45 @@ impl ApiServer {
                 J::Null
             }
             R::DefinitionsList { source, device } => {
-                let fp = device.as_ref().map(|d| hub.device(d).map(|x| x.fp.clone()).ok_or_else(|| missing(d))).transpose()?;
+                let fp = device
+                    .as_ref()
+                    .map(|d| {
+                        hub.device(d)
+                            .map(|x| x.fp.clone())
+                            .ok_or_else(|| missing(d))
+                    })
+                    .transpose()?;
                 let mut all: Vec<std::sync::Arc<Definition>> = hub.catalog().all();
                 all.extend(hub.user_definitions().all());
                 all.into_iter()
-                    .filter(|d| source.as_deref().is_none_or(|s| serde_json::to_value(d.source).ok().is_some_and(|v| v == s)))
-                    .filter(|d| fp.as_ref().is_none_or(|f| crate::resolve::score(d, f).is_some()))
+                    .filter(|d| {
+                        source.as_deref().is_none_or(|s| {
+                            serde_json::to_value(d.source).ok().is_some_and(|v| v == s)
+                        })
+                    })
+                    .filter(|d| {
+                        fp.as_ref()
+                            .is_none_or(|f| crate::resolve::score(d, f).is_some())
+                    })
                     .map(|d| def_summary(&d))
                     .collect()
             }
-            R::DefinitionsGet { id, content_hash, format } => {
+            R::DefinitionsGet {
+                id,
+                content_hash,
+                format,
+            } => {
                 let mut all = hub.catalog().all();
                 all.extend(hub.user_definitions().all());
                 let d = all
                     .into_iter()
                     .find(|d| {
                         id.as_ref().is_some_and(|i| *i == d.id)
-                            || content_hash.as_ref().is_some_and(|h| d.content_hash.as_deref().is_some_and(|x| x.starts_with(h.as_str())))
+                            || content_hash.as_ref().is_some_and(|h| {
+                                d.content_hash
+                                    .as_deref()
+                                    .is_some_and(|x| x.starts_with(h.as_str()))
+                            })
                     })
                     .ok_or_else(|| ApiError::new("not_found", "no such definition"))?;
                 let mut r = def_summary(&d);
@@ -314,23 +450,39 @@ impl ApiServer {
                         .map(|e| json!({"key": e.key, "platform": e.platform, "device_class": e.device_class, "unit": e.unit, "parts": e.parts.iter().map(|p| p.0.clone()).collect::<Vec<_>>()}))
                         .collect();
                 } else {
-                    let bytes = d.zdef.as_ref().and_then(|z| z.encode().ok()).ok_or_else(|| ApiError::new("unsupported", "no CBOR form"))?;
-                    r["cbor"] = base64::engine::general_purpose::STANDARD.encode(bytes).into();
+                    let bytes = d
+                        .zdef
+                        .as_ref()
+                        .and_then(|z| z.encode().ok())
+                        .ok_or_else(|| ApiError::new("unsupported", "no CBOR form"))?;
+                    r["cbor"] = base64::engine::general_purpose::STANDARD
+                        .encode(bytes)
+                        .into();
                 }
                 r
             }
             R::DefinitionsPreview { device, cbor } => {
-                let d = crate::zdef_adapter::load_cbor(&b64(&cbor)?, LayerSource::User).map_err(|e| ApiError::new("verification_failed", e.0))?;
+                let d = crate::zdef_adapter::load_cbor(&b64(&cbor)?, LayerSource::User)
+                    .map_err(|e| ApiError::new("verification_failed", e.0))?;
                 Self::preview(hub, &device, d)?
             }
             R::DefinitionsScaffold { device } => Self::scaffold(hub, &device)?,
-            R::DefinitionsFetch { .. } => return Err(ApiError::new("unsupported", "on-demand fetch is done by the definition store (spec 9.3)")),
+            R::DefinitionsFetch { .. } => {
+                return Err(ApiError::new(
+                    "unsupported",
+                    "on-demand fetch is done by the definition store (spec 9.3)",
+                ));
+            }
             R::CatalogStatus => json!({
                 "definitions": hub.catalog().all().len(),
                 "user_definitions": hub.user_definitions().all().len(),
                 "features": hub.features,
             }),
-            R::GpCommissioningOpen { duration_s, involve_proxies, exit_on_first_pairing } => {
+            R::GpCommissioningOpen {
+                duration_s,
+                involve_proxies,
+                exit_on_first_pairing,
+            } => {
                 hub.gp_commissioning_open(duration_s, involve_proxies, exit_on_first_pairing)?;
                 J::Null
             }
@@ -360,7 +512,10 @@ impl ApiServer {
                 hub.remove_device_entry(&id);
                 J::Null
             }
-            R::GpConfig { security_level, communication_mode } => {
+            R::GpConfig {
+                security_level,
+                communication_mode,
+            } => {
                 let req = GpRequest::SinkConfig {
                     mode: 1,
                     communication_mode,
@@ -370,12 +525,21 @@ impl ApiServer {
                     security_level,
                     groupcast_radius: 0,
                 };
-                hub.transport.gp_request(req).map_err(|e| ApiError::new("busy", e.to_string()))?;
+                hub.transport
+                    .gp_request(req)
+                    .map_err(|e| ApiError::new("busy", e.to_string()))?;
                 json!({"security_level": security_level, "warning": (security_level > 0).then_some("GPDs below this level (e.g. FlowerX GP) are rejected")})
             }
-            R::GpBindingsList { gpd, target } => J::Array(hub.list_bindings(gpd.as_deref(), target.as_deref())),
+            R::GpBindingsList { gpd, target } => {
+                J::Array(hub.list_bindings(gpd.as_deref(), target.as_deref()))
+            }
             R::GpBindingsCreate(c) => hub.create_binding(c, now)?,
-            R::GpBindingsUpdate { binding_id, executor, action, trigger } => hub.update_binding(binding_id, executor, action, trigger, now)?,
+            R::GpBindingsUpdate {
+                binding_id,
+                executor,
+                action,
+                trigger,
+            } => hub.update_binding(binding_id, executor, action, trigger, now)?,
             R::GpBindingsDelete { binding_id } => {
                 hub.delete_binding(binding_id, now)?;
                 J::Null
@@ -400,8 +564,12 @@ impl ApiServer {
     }
 
     fn validate<T: ZigbeeTransport>(hub: &Hub<T>, bytes: &[u8]) -> J {
-        match zdef::load(bytes, &zdef::HubFeatures::v1()) {
-            Ok(zd) => match crate::zdef_adapter::adapt(zd, LayerSource::User, Some(format!("{}", zdef::ContentHash::of(bytes)))) {
+        match zdef::load(bytes, &crate::zdef_adapter::hub_features()) {
+            Ok(zd) => match crate::zdef_adapter::adapt(
+                zd,
+                LayerSource::User,
+                Some(format!("{}", zdef::ContentHash::of(bytes))),
+            ) {
                 Ok(d) => json!({
                     "ok": true,
                     "errors": [],
@@ -411,7 +579,9 @@ impl ApiServer {
                     "size": bytes.len(),
                     "matches": hub.devices().filter(|x| crate::resolve::score(&d, &x.fp).is_some()).map(|x| x.id.clone()).collect::<Vec<_>>(),
                 }),
-                Err(e) => json!({"ok": false, "errors": [{"path": "", "message": e.0}], "warnings": [], "size": bytes.len()}),
+                Err(e) => {
+                    json!({"ok": false, "errors": [{"path": "", "message": e.0}], "warnings": [], "size": bytes.len()})
+                }
             },
             Err(zdef::LoadError::Invalid(v)) => json!({
                 "ok": false,
@@ -419,11 +589,17 @@ impl ApiServer {
                 "warnings": [],
                 "size": bytes.len(),
             }),
-            Err(e) => json!({"ok": false, "errors": [{"path": "", "message": e.to_string()}], "warnings": [], "size": bytes.len()}),
+            Err(e) => {
+                json!({"ok": false, "errors": [{"path": "", "message": e.to_string()}], "warnings": [], "size": bytes.len()})
+            }
         }
     }
 
-    fn preview<T: ZigbeeTransport>(hub: &Hub<T>, device: &str, d: Definition) -> Result<J, ApiError> {
+    fn preview<T: ZigbeeTransport>(
+        hub: &Hub<T>,
+        device: &str,
+        d: Definition,
+    ) -> Result<J, ApiError> {
         let dev = hub.device(device).ok_or_else(|| missing(device))?;
         if crate::resolve::score(&d, &dev.fp).is_none() {
             return Ok(json!({"matches": false}));
@@ -433,9 +609,12 @@ impl ApiServer {
         user.insert(d);
         let fp = dev.fp.clone();
         let attrs = &dev.attrs;
-        let gen_zb = |power| crate::generic::generic_entities(&fp, &crate::generic::GenericInput { attrs, power });
+        let gen_zb = |power| {
+            crate::generic::generic_entities(&fp, &crate::generic::GenericInput { attrs, power })
+        };
         let gen_gp = |_| crate::gp::generic::gp_generic_entities(&fp, attrs);
-        let generic: &dyn Fn(crate::model::PowerKind) -> Vec<crate::model::EntityDef> = if dev.gp.is_some() { &gen_gp } else { &gen_zb };
+        let generic: &dyn Fn(crate::model::PowerKind) -> Vec<crate::model::EntityDef> =
+            if dev.gp.is_some() { &gen_gp } else { &gen_zb };
         let res = resolve(&ResolveInput {
             fp: &fp,
             generic,
@@ -445,8 +624,17 @@ impl ApiServer {
             pinned: dev.pinned.as_deref(),
             features: &hub.features,
         });
-        let new: Vec<String> = res.entities.iter().map(|e| format!("{}:{}:{}", dev.id, e.ep, e.def.key)).collect();
-        let old: Vec<String> = dev.entities.iter().filter(|e| !e.orphaned).map(|e| e.uid.clone()).collect();
+        let new: Vec<String> = res
+            .entities
+            .iter()
+            .map(|e| format!("{}:{}:{}", dev.id, e.ep, e.def.key))
+            .collect();
+        let old: Vec<String> = dev
+            .entities
+            .iter()
+            .filter(|e| !e.orphaned)
+            .map(|e| e.uid.clone())
+            .collect();
         let changed: Vec<String> = res
             .entities
             .iter()
@@ -508,24 +696,53 @@ impl ApiServer {
                 continue;
             }
             let (topic, body) = match ev {
-                HubEvent::DeviceAdded(id) => ("devices", json!({"topic": "device_added", "device": hub.device(&id).map(|d| d.record())})),
-                HubEvent::DeviceUpdated(id) => ("devices", json!({"topic": "device_updated", "device": hub.device(&id).map(|d| d.record())})),
-                HubEvent::DeviceRemoved(id) => ("devices", json!({"topic": "device_removed", "id": id})),
-                HubEvent::InterviewProgress { device, step } => ("devices", json!({"topic": "interview_progress", "device": device, "step": step})),
-                HubEvent::ResolutionChanged { device, added, orphaned } => (
+                HubEvent::DeviceAdded(id) => (
+                    "devices",
+                    json!({"topic": "device_added", "device": hub.device(&id).map(|d| d.record())}),
+                ),
+                HubEvent::DeviceUpdated(id) => (
+                    "devices",
+                    json!({"topic": "device_updated", "device": hub.device(&id).map(|d| d.record())}),
+                ),
+                HubEvent::DeviceRemoved(id) => {
+                    ("devices", json!({"topic": "device_removed", "id": id}))
+                }
+                HubEvent::InterviewProgress { device, step } => (
+                    "devices",
+                    json!({"topic": "interview_progress", "device": device, "step": step}),
+                ),
+                HubEvent::ResolutionChanged {
+                    device,
+                    added,
+                    orphaned,
+                } => (
                     "devices",
                     json!({"topic": "resolution_changed", "device": device, "added": added, "orphaned": orphaned, "layers": hub.device(&device).map(|d| d.resolution.layers.clone())}),
                 ),
-                HubEvent::EntityAdded(uid) => ("entities", json!({"topic": "entity_added", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id))})),
-                HubEvent::EntityUpdated(uid) => ("entities", json!({"topic": "entity_updated", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id))})),
-                HubEvent::EntityRemoved(uid) => ("entities", json!({"topic": "entity_removed", "uid": uid})),
+                HubEvent::EntityAdded(uid) => (
+                    "entities",
+                    json!({"topic": "entity_added", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id))}),
+                ),
+                HubEvent::EntityUpdated(uid) => (
+                    "entities",
+                    json!({"topic": "entity_updated", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id))}),
+                ),
+                HubEvent::EntityRemoved(uid) => {
+                    ("entities", json!({"topic": "entity_removed", "uid": uid}))
+                }
                 HubEvent::EntityState(mut s) => {
                     s["topic"] = "entity_state".into();
                     ("entities", s)
                 }
-                HubEvent::EntityEvent { uid, event_type, attributes, time } => {
-                    ("events", json!({"topic": "entity_event", "uid": uid, "event_type": event_type, "attributes": attributes, "time": time}))
-                }
+                HubEvent::EntityEvent {
+                    uid,
+                    event_type,
+                    attributes,
+                    time,
+                } => (
+                    "events",
+                    json!({"topic": "entity_event", "uid": uid, "event_type": event_type, "attributes": attributes, "time": time}),
+                ),
                 HubEvent::Gp { kind, mut body } => {
                     if let Some(o) = body.as_object_mut() {
                         o.insert("topic".into(), kind.into());
@@ -540,7 +757,15 @@ impl ApiServer {
             for (sid, sess) in &self.sessions {
                 for (sub, topics) in &sess.subs {
                     if topics.contains(topic) {
-                        out.push((*sid, ServerMessage::Event { id: *sub, seq: self.seq, event: body.clone() }.to_text()));
+                        out.push((
+                            *sid,
+                            ServerMessage::Event {
+                                id: *sub,
+                                seq: self.seq,
+                                event: body.clone(),
+                            }
+                            .to_text(),
+                        ));
                     }
                 }
             }

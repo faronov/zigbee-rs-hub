@@ -21,7 +21,9 @@ use crate::resolve::{Catalog, FpEnv, HUB_FEATURES, MemoryCatalog, ResolveInput, 
 use crate::transport::{ApsDst, ApsIndication, ApsRequest, TxOptions, ZigbeeTransport};
 use crate::values;
 use crate::zcl::frame::{self as zf, global};
-use crate::zcl::{Direction, FrameType, Status, TypedValue, ZclFrame, ZclHeader, ZclType, ZclValue, cluster as cl};
+use crate::zcl::{
+    Direction, FrameType, Status, TypedValue, ZclFrame, ZclHeader, ZclType, ZclValue, cluster as cl,
+};
 use crate::zdo::{self, ZdoMessage};
 
 /// Hub configuration.
@@ -39,7 +41,12 @@ pub struct HubConfig {
 
 impl Default for HubConfig {
     fn default() -> Self {
-        Self { coordinator_ieee: 0x00124b0000000001, hub_endpoint: 1, tz_offset_s: 0, gp_group: 0x0B84 }
+        Self {
+            coordinator_ieee: 0x00124b0000000001,
+            hub_endpoint: 1,
+            tz_offset_s: 0,
+            gp_group: 0x0B84,
+        }
     }
 }
 
@@ -58,11 +65,19 @@ pub struct ApiError {
 impl ApiError {
     /// A new error.
     pub fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), zcl_status: None }
+        Self {
+            code: code.into(),
+            message: message.into(),
+            zcl_status: None,
+        }
     }
     /// A ZCL status error.
     pub fn zcl(st: Status) -> Self {
-        Self { code: "zcl_status".into(), message: format!("device answered {}", st.name()), zcl_status: Some(st.name().into()) }
+        Self {
+            code: "zcl_status".into(),
+            message: format!("device answered {}", st.name()),
+            zcl_status: Some(st.name().into()),
+        }
     }
 }
 
@@ -327,7 +342,13 @@ impl ExprEnv for DevEnv<'_> {
         FpEnv(&self.dev.fp).fp(f)
     }
     fn battery_percent(&self, mv: f64) -> Value {
-        let curve = self.dev.resolution.device.battery.clone().unwrap_or(BatteryCurve::Linear(2100.0, 3000.0));
+        let curve = self
+            .dev
+            .resolution
+            .device
+            .battery
+            .clone()
+            .unwrap_or(BatteryCurve::Linear(2100.0, 3000.0));
         Value::Float(curve.percent(mv))
     }
     fn now(&self) -> i64 {
@@ -427,9 +448,19 @@ impl<T: ZigbeeTransport> Hub<T> {
     // Sending.
 
     /// Builds a ZCL request from the hub to a device endpoint.
-    pub(crate) fn zcl_request(&self, dev: &Device, ep: u8, cluster: u16, frame: &ZclFrame) -> ApsRequest {
+    pub(crate) fn zcl_request(
+        &self,
+        dev: &Device,
+        ep: u8,
+        cluster: u16,
+        frame: &ZclFrame,
+    ) -> ApsRequest {
         let profile = dev.fp.endpoint(ep).map_or(crate::zcl::PROFILE_HA, |e| {
-            if e.profile == crate::zcl::PROFILE_ZLL { crate::zcl::PROFILE_HA } else { e.profile }
+            if e.profile == crate::zcl::PROFILE_ZLL {
+                crate::zcl::PROFILE_HA
+            } else {
+                e.profile
+            }
         });
         ApsRequest {
             dst: ApsDst::Nwk(dev.nwk().unwrap_or(0xFFFE)),
@@ -438,13 +469,26 @@ impl<T: ZigbeeTransport> Hub<T> {
             profile,
             cluster,
             payload: frame.encode(),
-            options: TxOptions { ack: true, extended_timeout: dev.sleepy() },
+            options: TxOptions {
+                ack: true,
+                extended_timeout: dev.sleepy(),
+            },
         }
     }
 
     /// Sends (or queues for a sleepy device) and tracks the response.
-    pub(crate) fn send_tracked(&mut self, dev_id: &str, req: ApsRequest, purpose: Purpose, tsn: u8, zdo: bool, now: Millis) {
-        let Some(dev) = self.devices.get_mut(dev_id) else { return };
+    pub(crate) fn send_tracked(
+        &mut self,
+        dev_id: &str,
+        req: ApsRequest,
+        purpose: Purpose,
+        tsn: u8,
+        zdo: bool,
+        now: Millis,
+    ) {
+        let Some(dev) = self.devices.get_mut(dev_id) else {
+            return;
+        };
         if dev.sleepy() && now > dev.awake_until {
             dev.queue.push_back(Queued { req, purpose, tsn });
             return;
@@ -452,26 +496,67 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.transmit(dev_id, req, purpose, tsn, zdo, now);
     }
 
-    fn transmit(&mut self, dev_id: &str, req: ApsRequest, purpose: Purpose, tsn: u8, zdo: bool, now: Millis) {
+    fn transmit(
+        &mut self,
+        dev_id: &str,
+        req: ApsRequest,
+        purpose: Purpose,
+        tsn: u8,
+        zdo: bool,
+        now: Millis,
+    ) {
         if self.transport.aps_send(req.clone()).is_err() {
-            self.fail_purpose(dev_id, &purpose, ApiError::new("busy", "transport refused the request"), now);
+            self.fail_purpose(
+                dev_id,
+                &purpose,
+                ApiError::new("busy", "transport refused the request"),
+                now,
+            );
             return;
         }
         if purpose != Purpose::None {
-            self.pending.insert((zdo, tsn), Pending { device: dev_id.to_string(), purpose, sent_at: now, retries: 0, req });
+            self.pending.insert(
+                (zdo, tsn),
+                Pending {
+                    device: dev_id.to_string(),
+                    purpose,
+                    sent_at: now,
+                    retries: 0,
+                    req,
+                },
+            );
         }
     }
 
     /// Sends a ZCL frame to a device endpoint.
-    pub(crate) fn send_zcl(&mut self, dev_id: &str, ep: u8, cluster: u16, frame: ZclFrame, purpose: Purpose, now: Millis) {
-        let Some(dev) = self.devices.get(dev_id) else { return };
+    pub(crate) fn send_zcl(
+        &mut self,
+        dev_id: &str,
+        ep: u8,
+        cluster: u16,
+        frame: ZclFrame,
+        purpose: Purpose,
+        now: Millis,
+    ) {
+        let Some(dev) = self.devices.get(dev_id) else {
+            return;
+        };
         let req = self.zcl_request(dev, ep, cluster, &frame);
         let tsn = frame.header.tsn;
         self.send_tracked(dev_id, req, purpose, tsn, false, now);
     }
 
-    pub(crate) fn send_zdo(&mut self, dev_id: &str, cluster: u16, payload: Vec<u8>, purpose: Purpose, now: Millis) {
-        let Some(dev) = self.devices.get(dev_id) else { return };
+    pub(crate) fn send_zdo(
+        &mut self,
+        dev_id: &str,
+        cluster: u16,
+        payload: Vec<u8>,
+        purpose: Purpose,
+        now: Millis,
+    ) {
+        let Some(dev) = self.devices.get(dev_id) else {
+            return;
+        };
         let tsn = payload[0];
         let req = ApsRequest {
             dst: ApsDst::Nwk(dev.nwk().unwrap_or(0xFFFE)),
@@ -480,19 +565,39 @@ impl<T: ZigbeeTransport> Hub<T> {
             profile: 0,
             cluster,
             payload,
-            options: TxOptions { ack: true, extended_timeout: dev.sleepy() || dev.node_desc.is_none() },
+            options: TxOptions {
+                ack: true,
+                extended_timeout: dev.sleepy() || dev.node_desc.is_none(),
+            },
         };
         self.send_tracked(dev_id, req, purpose, tsn, true, now);
     }
 
-    pub(crate) fn read_attrs(&mut self, dev_id: &str, ep: u8, cluster: u16, mfr: Option<u16>, attrs: &[u16], purpose: Purpose, now: Millis) {
+    pub(crate) fn read_attrs(
+        &mut self,
+        dev_id: &str,
+        ep: u8,
+        cluster: u16,
+        mfr: Option<u16>,
+        attrs: &[u16],
+        purpose: Purpose,
+        now: Millis,
+    ) {
         let tsn = self.next_zcl_tsn();
-        let f = ZclFrame::command(FrameType::Global, tsn, global::READ_ATTRIBUTES, mfr, zf::read_attributes(attrs));
+        let f = ZclFrame::command(
+            FrameType::Global,
+            tsn,
+            global::READ_ATTRIBUTES,
+            mfr,
+            zf::read_attributes(attrs),
+        );
         self.send_zcl(dev_id, ep, cluster, f, purpose, now);
     }
 
     fn flush_queue(&mut self, dev_id: &str, now: Millis) {
-        let Some(dev) = self.devices.get_mut(dev_id) else { return };
+        let Some(dev) = self.devices.get_mut(dev_id) else {
+            return;
+        };
         let q: Vec<Queued> = dev.queue.drain(..).collect();
         for item in q {
             let zdo = item.req.profile == 0;
@@ -525,9 +630,15 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Restarts the interview (`devices/reinterview`).
     pub fn reinterview(&mut self, id: &str, now: Millis) -> Result<(), ApiError> {
-        let d = self.devices.get_mut(id).ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
+        let d = self
+            .devices
+            .get_mut(id)
+            .ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
         if d.gp.is_some() {
-            return Err(ApiError::new("unsupported", "GP devices are not interviewed"));
+            return Err(ApiError::new(
+                "unsupported",
+                "GP devices are not interviewed",
+            ));
         }
         d.interview_partial = false;
         d.fp.endpoints.clear();
@@ -537,9 +648,15 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn on_rejoin(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get(id) else { return };
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         let interview = d.interview;
-        let tuya_announce = d.resolution.tuya.as_ref().is_some_and(|t| t.query_on_announce);
+        let tuya_announce = d
+            .resolution
+            .tuya
+            .as_ref()
+            .is_some_and(|t| t.query_on_announce);
         let schema_ep = schema_endpoint(d);
         if interview != InterviewStep::Done && interview != InterviewStep::Configure {
             self.interview_step(id, interview, now);
@@ -549,7 +666,15 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.tuya_query(id, now);
         }
         if let Some(ep) = schema_ep {
-            self.read_attrs(id, ep, cl::ZRS_SCHEMA, Some(0x6D6B), &[0x0000, 0x0001, 0x0002, 0x0003], Purpose::Interview(InterviewStep::SchemaHeader), now);
+            self.read_attrs(
+                id,
+                ep,
+                cl::ZRS_SCHEMA,
+                Some(0x6D6B),
+                &[0x0000, 0x0001, 0x0002, 0x0003],
+                Purpose::Interview(InterviewStep::SchemaHeader),
+                now,
+            );
         }
 
         self.gp_target_announced(id, now);
@@ -570,38 +695,81 @@ impl<T: ZigbeeTransport> Hub<T> {
             InterviewStep::Configure => "configure".into(),
             InterviewStep::Done => "done".into(),
         };
-        self.emit(HubEvent::InterviewProgress { device: id.to_string(), step: name });
+        self.emit(HubEvent::InterviewProgress {
+            device: id.to_string(),
+            step: name,
+        });
     }
 
-    const BASIC_BATCHES: [&'static [u16]; 2] = [&[0x0004, 0x0005, 0x0007, 0x0000, 0x0001], &[0x0002, 0x0003, 0x0006, 0x4000]];
+    const BASIC_BATCHES: [&'static [u16]; 2] = [
+        &[0x0004, 0x0005, 0x0007, 0x0000, 0x0001],
+        &[0x0002, 0x0003, 0x0006, 0x4000],
+    ];
 
     fn interview_step(&mut self, id: &str, step: InterviewStep, now: Millis) {
         self.progress(id, step);
-        let Some(d) = self.devices.get(id) else { return };
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         let nwk = d.nwk().unwrap_or(0);
         match step {
             InterviewStep::NodeDesc => {
                 let tsn = self.next_zdo_tsn();
-                self.send_zdo(id, zdo::cluster::NODE_DESC_REQ, zdo::nwk_req(tsn, nwk), Purpose::Interview(step), now);
+                self.send_zdo(
+                    id,
+                    zdo::cluster::NODE_DESC_REQ,
+                    zdo::nwk_req(tsn, nwk),
+                    Purpose::Interview(step),
+                    now,
+                );
             }
             InterviewStep::ActiveEp => {
                 let tsn = self.next_zdo_tsn();
-                self.send_zdo(id, zdo::cluster::ACTIVE_EP_REQ, zdo::nwk_req(tsn, nwk), Purpose::Interview(step), now);
+                self.send_zdo(
+                    id,
+                    zdo::cluster::ACTIVE_EP_REQ,
+                    zdo::nwk_req(tsn, nwk),
+                    Purpose::Interview(step),
+                    now,
+                );
             }
             InterviewStep::SimpleDesc(i) => {
-                let eps: Vec<u8> = d.active_eps.iter().copied().filter(|e| *e != crate::gp::GP_ENDPOINT).collect();
+                let eps: Vec<u8> = d
+                    .active_eps
+                    .iter()
+                    .copied()
+                    .filter(|e| *e != crate::gp::GP_ENDPOINT)
+                    .collect();
                 match eps.get(i) {
                     Some(&ep) => {
                         let tsn = self.next_zdo_tsn();
-                        self.send_zdo(id, zdo::cluster::SIMPLE_DESC_REQ, zdo::simple_desc_req(tsn, nwk, ep), Purpose::Interview(step), now);
+                        self.send_zdo(
+                            id,
+                            zdo::cluster::SIMPLE_DESC_REQ,
+                            zdo::simple_desc_req(tsn, nwk, ep),
+                            Purpose::Interview(step),
+                            now,
+                        );
                     }
                     None => self.interview_step(id, InterviewStep::Basic(0), now),
                 }
             }
             InterviewStep::Basic(i) => {
-                let ep = d.fp.endpoints.iter().find(|e| e.in_clusters.contains(&cl::BASIC)).map(|e| e.ep);
+                let ep =
+                    d.fp.endpoints
+                        .iter()
+                        .find(|e| e.in_clusters.contains(&cl::BASIC))
+                        .map(|e| e.ep);
                 match (ep, Self::BASIC_BATCHES.get(i)) {
-                    (Some(ep), Some(attrs)) => self.read_attrs(id, ep, cl::BASIC, None, attrs, Purpose::Interview(step), now),
+                    (Some(ep), Some(attrs)) => self.read_attrs(
+                        id,
+                        ep,
+                        cl::BASIC,
+                        None,
+                        attrs,
+                        Purpose::Interview(step),
+                        now,
+                    ),
                     _ => {
                         self.resolve_device(id, now);
                         self.after_basic(id, now);
@@ -609,12 +777,28 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
             InterviewStep::SchemaHeader => match schema_endpoint(d) {
-                Some(ep) => self.read_attrs(id, ep, cl::ZRS_SCHEMA, Some(0x6D6B), &[0x0000, 0x0001, 0x0002, 0x0003], Purpose::Interview(step), now),
+                Some(ep) => self.read_attrs(
+                    id,
+                    ep,
+                    cl::ZRS_SCHEMA,
+                    Some(0x6D6B),
+                    &[0x0000, 0x0001, 0x0002, 0x0003],
+                    Purpose::Interview(step),
+                    now,
+                ),
                 None => self.start_configure(id, now),
             },
             InterviewStep::SchemaChunk(i) => {
                 if let Some(ep) = schema_endpoint(d) {
-                    self.read_attrs(id, ep, cl::ZRS_SCHEMA, Some(0x6D6B), &[0x0100 + i], Purpose::Interview(step), now);
+                    self.read_attrs(
+                        id,
+                        ep,
+                        cl::ZRS_SCHEMA,
+                        Some(0x6D6B),
+                        &[0x0100 + i],
+                        Purpose::Interview(step),
+                        now,
+                    );
                 }
             }
             InterviewStep::Configure => self.start_configure(id, now),
@@ -623,7 +807,10 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn after_basic(&mut self, id: &str, now: Millis) {
-        let has_schema = self.devices.get(id).is_some_and(|d| schema_endpoint(d).is_some());
+        let has_schema = self
+            .devices
+            .get(id)
+            .is_some_and(|d| schema_endpoint(d).is_some());
         if has_schema {
             self.interview_step(id, InterviewStep::SchemaHeader, now);
         } else {
@@ -635,10 +822,18 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Ok(msg) = ZdoMessage::parse(ind.cluster, &ind.payload) else {
             return;
         };
-        if let ZdoMessage::DeviceAnnce { nwk, ieee, capability, .. } = msg {
+        if let ZdoMessage::DeviceAnnce {
+            nwk,
+            ieee,
+            capability,
+            ..
+        } = msg
+        {
             let did = zigbee_id(ieee);
             if self.devices.contains_key(&did) {
-                if let Some(DeviceKind::Zigbee { nwk: n, .. }) = self.devices.get_mut(&did).map(|d| &mut d.kind) {
+                if let Some(DeviceKind::Zigbee { nwk: n, .. }) =
+                    self.devices.get_mut(&did).map(|d| &mut d.kind)
+                {
                     *n = nwk;
                 }
                 self.nwk_index.insert(nwk, did.clone());
@@ -654,7 +849,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             return;
         }
-        let Some(p) = self.pending.remove(&(true, msg.tsn())) else { return };
+        let Some(p) = self.pending.remove(&(true, msg.tsn())) else {
+            return;
+        };
         if p.device != id {
             self.pending.insert((true, msg.tsn()), p);
             return;
@@ -662,11 +859,23 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Purpose::Interview(step) = p.purpose else {
             if let Purpose::Configure(key) = p.purpose {
                 let ok = matches!(msg, ZdoMessage::Status { status: 0, .. });
-                self.configure_done(id, &key, ok, if ok { "SUCCESS".into() } else { "bind failed".into() }, now);
+                self.configure_done(
+                    id,
+                    &key,
+                    ok,
+                    if ok {
+                        "SUCCESS".into()
+                    } else {
+                        "bind failed".into()
+                    },
+                    now,
+                );
             }
             return;
         };
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         match (step, msg) {
             (InterviewStep::NodeDesc, ZdoMessage::NodeDesc { desc: Some(nd), .. }) => {
                 d.fp.mfr_code = Some(nd.manufacturer_code);
@@ -715,14 +924,17 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Re-resolves one device and materializes the result (3.4).
     pub fn resolve_device(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get(id) else { return };
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         let fp = d.fp.clone();
         let gp_seen = d.gp.is_some();
         let res = {
             let attrs = &d.attrs;
             let gen_zb = |power: PowerKind| generic_entities(&fp, &GenericInput { attrs, power });
             let gen_gp = |_p: PowerKind| crate::gp::generic::gp_generic_entities(&fp, attrs);
-            let generic: &dyn Fn(PowerKind) -> Vec<EntityDef> = if gp_seen { &gen_gp } else { &gen_zb };
+            let generic: &dyn Fn(PowerKind) -> Vec<EntityDef> =
+                if gp_seen { &gen_gp } else { &gen_zb };
             let sd = d.schema.fragment.clone();
             resolve(&ResolveInput {
                 fp: &fp,
@@ -738,9 +950,12 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn materialize(&mut self, id: &str, res: crate::resolve::Resolution, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let old_layers = d.resolution.layers.clone();
-        let mut old: BTreeMap<String, Entity> = d.entities.drain(..).map(|e| (e.uid.clone(), e)).collect();
+        let mut old: BTreeMap<String, Entity> =
+            d.entities.drain(..).map(|e| (e.uid.clone(), e)).collect();
         let mut added = Vec::new();
         let mut revived = Vec::new();
         let mut updated = Vec::new();
@@ -763,10 +978,21 @@ impl<T: ZigbeeTransport> Hub<T> {
                 None => {
                     let mut st = EntityState::default();
                     if let Binding::Hub { default } = &r.def.value.binding {
-                        st.value = d.options.get(&r.def.key).cloned().unwrap_or_else(|| default.clone());
+                        st.value = d
+                            .options
+                            .get(&r.def.key)
+                            .cloned()
+                            .unwrap_or_else(|| default.clone());
                     }
                     added.push(uid.clone());
-                    entities.push(Entity { uid, r: r.clone(), state: st, orphaned: false, user_name: None, user_enabled: None });
+                    entities.push(Entity {
+                        uid,
+                        r: r.clone(),
+                        state: st,
+                        orphaned: false,
+                        user_name: None,
+                        user_enabled: None,
+                    });
                 }
             }
         }
@@ -791,7 +1017,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.emit(HubEvent::EntityUpdated(u.clone()));
         }
         if !added.is_empty() || !orphaned.is_empty() || layers_changed {
-            self.emit(HubEvent::ResolutionChanged { device: id.to_string(), added: added.clone(), orphaned });
+            self.emit(HubEvent::ResolutionChanged {
+                device: id.to_string(),
+                added: added.clone(),
+                orphaned,
+            });
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
         // New entities start from what the hub already knows (a read that
@@ -802,20 +1032,37 @@ impl<T: ZigbeeTransport> Hub<T> {
             if !added.contains(&e.uid) && !revived.contains(&e.uid) {
                 continue;
             }
-            let vals = std::iter::once((None, &e.r.def.value)).chain(e.r.def.parts.iter().enumerate().map(|(k, p)| (Some(k), &p.1)));
+            let vals = std::iter::once((None, &e.r.def.value)).chain(
+                e.r.def
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| (Some(k), &p.1)),
+            );
             for (pi, vd) in vals {
                 let key = match &vd.binding {
                     Binding::Zcl(z) => Some((e.r.ep, z.cluster, z.attr, z.mfr)),
-                    Binding::Gp(GpBinding::Report { cluster, attr, mfr, .. }) => Some((e.r.ep, *cluster, *attr, *mfr)),
+                    Binding::Gp(GpBinding::Report {
+                        cluster, attr, mfr, ..
+                    }) => Some((e.r.ep, *cluster, *attr, *mfr)),
                     _ => None,
                 };
-                if let Some(v) = key.and_then(|k| d.attrs.map.get(&k)).and_then(|a| a.value.as_ref()) {
+                if let Some(v) = key
+                    .and_then(|k| d.attrs.map.get(&k))
+                    .and_then(|a| a.value.as_ref())
+                {
                     work.push((i, pi, values::from_zcl(v)));
                 }
             }
         }
         let seeded: BTreeSet<usize> = work.iter().map(|w| w.0).collect();
-        let unseeded: Vec<String> = d.entities.iter().enumerate().filter(|(i, e)| added.contains(&e.uid) && !seeded.contains(i)).map(|(_, e)| e.uid.clone()).collect();
+        let unseeded: Vec<String> = d
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| added.contains(&e.uid) && !seeded.contains(i))
+            .map(|(_, e)| e.uid.clone())
+            .collect();
         self.apply_raw(id, work, now);
         for u in unseeded {
             self.publish_state(&u);
@@ -824,7 +1071,9 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Emits an `entity_state` for a uid.
     pub(crate) fn publish_state(&mut self, uid: &str) {
-        let Some((d, e)) = self.entity(uid) else { return };
+        let Some((d, e)) = self.entity(uid) else {
+            return;
+        };
         let msg = e.state_msg(d.available);
         self.emit(HubEvent::EntityState(msg));
     }
@@ -834,7 +1083,11 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// `EVT_APS_DATA_INDICATION`.
     pub fn on_aps_indication(&mut self, ind: ApsIndication, now: Millis) {
-        let id = match ind.src_ieee.map(zigbee_id).filter(|i| self.devices.contains_key(i)) {
+        let id = match ind
+            .src_ieee
+            .map(zigbee_id)
+            .filter(|i| self.devices.contains_key(i))
+        {
             Some(i) => Some(i),
             None => self.nwk_index.get(&ind.src_nwk).cloned(),
         };
@@ -859,7 +1112,9 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Any frame from a device: last_seen, link quality, availability.
     pub(crate) fn seen(&mut self, id: &str, lqi: Option<u8>, rssi: Option<i8>, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let was = d.available;
         let minute_passed = d.last_seen.is_none_or(|t| now.saturating_sub(t) >= 60_000);
         d.last_seen = Some(now);
@@ -871,14 +1126,25 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         d.available = true;
         d.check = None;
-        let mut fields = vec![(DeviceField::Linkquality, d.lqi.map_or(Value::Null, |v| Value::Int(i64::from(v)))), (DeviceField::Rssi, d.rssi.map_or(Value::Null, |v| Value::Int(i64::from(v))))];
+        let mut fields = vec![
+            (
+                DeviceField::Linkquality,
+                d.lqi.map_or(Value::Null, |v| Value::Int(i64::from(v))),
+            ),
+            (
+                DeviceField::Rssi,
+                d.rssi.map_or(Value::Null, |v| Value::Int(i64::from(v))),
+            ),
+        ];
         if minute_passed || !was {
             fields.push((DeviceField::LastSeen, Value::Float(ts(now))));
         }
         let mut touched = Vec::new();
         for (f, v) in fields {
             for i in 0..d.entities.len() {
-                if !d.entities[i].orphaned && matches!(d.entities[i].r.def.value.binding, Binding::DeviceField(x) if x == f) {
+                if !d.entities[i].orphaned
+                    && matches!(d.entities[i].r.def.value.binding, Binding::DeviceField(x) if x == f)
+                {
                     set_value(d, i, None, v.clone(), now);
                     touched.push(d.entities[i].uid.clone());
                 }
@@ -888,7 +1154,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
         if !was {
-            let uids: Vec<String> = self.devices[id].entities.iter().map(|e| e.uid.clone()).collect();
+            let uids: Vec<String> = self.devices[id]
+                .entities
+                .iter()
+                .map(|e| e.uid.clone())
+                .collect();
             for u in uids {
                 self.publish_state(&u);
             }
@@ -920,7 +1190,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                     for r in &recs {
                         match (&r.value, r.status) {
                             (Some(v), _) => {
-                                let (sc, vc) = d.attrs.set(ep, ind.cluster, r.attr, h.mfr, Some(v.value.clone()));
+                                let (sc, vc) = d.attrs.set(
+                                    ep,
+                                    ind.cluster,
+                                    r.attr,
+                                    h.mfr,
+                                    Some(v.value.clone()),
+                                );
                                 structural |= sc || (vc && is_structural(ind.cluster, r.attr));
                                 values.push((r.attr, v.clone()));
                             }
@@ -932,8 +1208,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                     }
                 }
                 match purpose {
-                    Some(Purpose::Interview(step)) => self.interview_read(id, step, ind.cluster, &recs, now),
-                    Some(Purpose::Configure(key)) => self.configure_done(id, &key, true, "SUCCESS".into(), now),
+                    Some(Purpose::Interview(step)) => {
+                        self.interview_read(id, step, ind.cluster, &recs, now)
+                    }
+                    Some(Purpose::Configure(key)) => {
+                        self.configure_done(id, &key, true, "SUCCESS".into(), now)
+                    }
                     Some(Purpose::GpProbe(nwk)) => self.gp_probe_result(nwk, &recs, now),
                     _ => {}
                 }
@@ -947,7 +1227,9 @@ impl<T: ZigbeeTransport> Hub<T> {
                 let mut structural = false;
                 if let Some(d) = self.devices.get_mut(id) {
                     for (a, v) in &recs {
-                        let (sc, vc) = d.attrs.set(ep, ind.cluster, *a, h.mfr, Some(v.value.clone()));
+                        let (sc, vc) =
+                            d.attrs
+                                .set(ep, ind.cluster, *a, h.mfr, Some(v.value.clone()));
                         structural |= sc || (vc && is_structural(ind.cluster, *a));
                     }
                 }
@@ -959,7 +1241,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             (FrameType::Global, global::WRITE_ATTRIBUTES_RSP) => {
                 needs_default_rsp = false;
                 let recs = zf::parse_write_attributes_rsp(&frame.payload).unwrap_or_default();
-                let st = recs.iter().map(|r| r.0).find(|s| *s != Status::SUCCESS).unwrap_or(Status::SUCCESS);
+                let st = recs
+                    .iter()
+                    .map(|r| r.0)
+                    .find(|s| *s != Status::SUCCESS)
+                    .unwrap_or(Status::SUCCESS);
                 self.complete_tsn(id, h.tsn, st, now);
             }
             (FrameType::Global, global::CONFIGURE_REPORTING_RSP) => {
@@ -969,7 +1255,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                     for (st, a) in &recs {
                         if let (Some(a), true) = (a, *st != Status::SUCCESS) {
                             d.configure.unreportable.push((ep, ind.cluster, *a));
-                            d.diag.configure.insert(format!("report:{ep}:0x{:04x}:0x{a:04x}", ind.cluster), st.name().into());
+                            d.diag.configure.insert(
+                                format!("report:{ep}:0x{:04x}:0x{a:04x}", ind.cluster),
+                                st.name().into(),
+                            );
                         }
                     }
                 }
@@ -994,7 +1283,8 @@ impl<T: ZigbeeTransport> Hub<T> {
                             let zs = u16::from_le_bytes([frame.payload[0], frame.payload[1]]);
                             let tv = TypedValue::uint(ZclType::MAP16, u64::from(zs));
                             if let Some(d) = self.devices.get_mut(id) {
-                                d.attrs.set(ep, cl::IAS_ZONE, 0x0002, None, Some(tv.value.clone()));
+                                d.attrs
+                                    .set(ep, cl::IAS_ZONE, 0x0002, None, Some(tv.value.clone()));
                             }
                             self.dispatch_attrs(id, ep, cl::IAS_ZONE, None, &[(0x0002, tv)], now);
                         }
@@ -1004,7 +1294,14 @@ impl<T: ZigbeeTransport> Hub<T> {
                         needs_default_rsp = false;
                         let zone_id = self.zone_id(id);
                         let f = ZclFrame {
-                            header: ZclHeader { frame_type: FrameType::Cluster, mfr: None, direction: Direction::ClientToServer, disable_default_response: true, tsn: h.tsn, cmd: 0x00 },
+                            header: ZclHeader {
+                                frame_type: FrameType::Cluster,
+                                mfr: None,
+                                direction: Direction::ClientToServer,
+                                disable_default_response: true,
+                                tsn: h.tsn,
+                                cmd: 0x00,
+                            },
                             payload: vec![0x00, zone_id],
                         };
                         self.send_zcl(id, ep, cl::IAS_ZONE, f, Purpose::None, now);
@@ -1028,7 +1325,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                 header: ZclHeader {
                     frame_type: FrameType::Global,
                     mfr: h.mfr,
-                    direction: if h.direction == Direction::ClientToServer { Direction::ServerToClient } else { Direction::ClientToServer },
+                    direction: if h.direction == Direction::ClientToServer {
+                        Direction::ServerToClient
+                    } else {
+                        Direction::ClientToServer
+                    },
                     disable_default_response: true,
                     tsn,
                     cmd: global::DEFAULT_RSP,
@@ -1040,13 +1341,26 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn zone_id(&self, id: &str) -> u8 {
-        self.devices.keys().position(|k| k == id).map_or(0, |p| (p % 254) as u8)
+        self.devices
+            .keys()
+            .position(|k| k == id)
+            .map_or(0, |p| (p % 254) as u8)
     }
 
     fn check_in(&mut self, id: &str, ep: u8, tsn: u8, now: Millis) {
-        let fast = self.devices.get(id).is_some_and(|d| !d.queue.is_empty() || !d.configure.queue.is_empty());
+        let fast = self
+            .devices
+            .get(id)
+            .is_some_and(|d| !d.queue.is_empty() || !d.configure.queue.is_empty());
         let f = ZclFrame {
-            header: ZclHeader { frame_type: FrameType::Cluster, mfr: None, direction: Direction::ClientToServer, disable_default_response: true, tsn, cmd: 0x00 },
+            header: ZclHeader {
+                frame_type: FrameType::Cluster,
+                mfr: None,
+                direction: Direction::ClientToServer,
+                disable_default_response: true,
+                tsn,
+                cmd: 0x00,
+            },
             payload: vec![u8::from(fast), 0x28, 0x00],
         };
         self.send_zcl(id, ep, cl::POLL_CONTROL, f, Purpose::None, now);
@@ -1071,22 +1385,41 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn complete_tsn(&mut self, id: &str, tsn: u8, st: Status, now: Millis) {
-        let Some(p) = self.take_pending(id, tsn) else { return };
+        let Some(p) = self.take_pending(id, tsn) else {
+            return;
+        };
         match p.purpose {
-            Purpose::Command(t) => self.ticket_part_done(t, if st == Status::SUCCESS { None } else { Some(ApiError::zcl(st)) }, now),
+            Purpose::Command(t) => self.ticket_part_done(
+                t,
+                if st == Status::SUCCESS {
+                    None
+                } else {
+                    Some(ApiError::zcl(st))
+                },
+                now,
+            ),
             Purpose::Configure(key) => self.configure_done(id, &key, true, st.name().into(), now),
             _ => {}
         }
     }
 
-    fn interview_read(&mut self, id: &str, step: InterviewStep, cluster: u16, recs: &[zf::ReadRecord], now: Millis) {
+    fn interview_read(
+        &mut self,
+        id: &str,
+        step: InterviewStep,
+        cluster: u16,
+        recs: &[zf::ReadRecord],
+        now: Millis,
+    ) {
         match step {
             InterviewStep::Basic(i) if cluster == cl::BASIC => {
                 if let Some(d) = self.devices.get_mut(id) {
                     for r in recs {
                         let Some(v) = &r.value else { continue };
                         let s = || match &v.value {
-                            ZclValue::String(s) => Some(s.trim_end_matches(['\0', ' ']).to_string()),
+                            ZclValue::String(s) => {
+                                Some(s.trim_end_matches(['\0', ' ']).to_string())
+                            }
                             _ => None,
                         };
                         let n = v.value.as_i64().map(|x| x as u32);
@@ -1116,8 +1449,15 @@ impl<T: ZigbeeTransport> Hub<T> {
     // Self-description (12.3).
 
     fn schema_header(&mut self, id: &str, recs: &[zf::ReadRecord], now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
-        let get = |a: u16| recs.iter().find(|r| r.attr == a).and_then(|r| r.value.as_ref()).map(|v| v.value.clone());
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let get = |a: u16| {
+            recs.iter()
+                .find(|r| r.attr == a)
+                .and_then(|r| r.value.as_ref())
+                .map(|v| v.value.clone())
+        };
         let format = get(0).and_then(|v| v.as_i64()).map(|v| v as u8);
         let hash = match get(1) {
             Some(ZclValue::Octets(b)) => Some(b),
@@ -1126,7 +1466,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         let length = get(2).and_then(|v| v.as_i64()).map(|v| v as u16);
         let chunk = get(3).and_then(|v| v.as_i64()).map(|v| v as u8);
         let was_configuring = matches!(d.interview, InterviewStep::Done | InterviewStep::Configure);
-        let valid = format.is_some_and(|f| f & 0x0F == 1 && (f >> 4) & 0x03 <= 1) && hash.as_ref().is_some_and(|h| h.len() == 8);
+        let valid = format.is_some_and(|f| f & 0x0F == 1 && (f >> 4) & 0x03 <= 1)
+            && hash.as_ref().is_some_and(|h| h.len() == 8);
         if !valid {
             d.schema.error = Some(format!("unsupported schema format {format:?}"));
             if !was_configuring {
@@ -1155,7 +1496,13 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             return;
         }
-        d.schema = SchemaState { format, hash: Some(hash), length, chunk_size: chunk, ..Default::default() };
+        d.schema = SchemaState {
+            format,
+            hash: Some(hash),
+            length,
+            chunk_size: chunk,
+            ..Default::default()
+        };
         if length.unwrap_or(0) == 0 || chunk.unwrap_or(0) == 0 {
             d.schema.error = Some("empty schema".into());
             if !was_configuring {
@@ -1167,11 +1514,17 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn schema_chunk(&mut self, id: &str, i: u16, recs: &[zf::ReadRecord], now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
-        let data = recs.iter().find(|r| r.attr == 0x0100 + i).and_then(|r| r.value.as_ref()).and_then(|v| match &v.value {
-            ZclValue::Octets(b) => Some(b.clone()),
-            _ => None,
-        });
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let data = recs
+            .iter()
+            .find(|r| r.attr == 0x0100 + i)
+            .and_then(|r| r.value.as_ref())
+            .and_then(|v| match &v.value {
+                ZclValue::Octets(b) => Some(b.clone()),
+                _ => None,
+            });
         let Some(data) = data else {
             d.schema.retries += 1;
             if d.schema.retries > 3 {
@@ -1197,7 +1550,8 @@ impl<T: ZigbeeTransport> Hub<T> {
                 return Err(format!("schema length {} != {len}", blob.len()));
             }
             let cbor = if deflated {
-                miniz_oxide::inflate::decompress_to_vec_with_limit(&blob, 12 * 1024).map_err(|e| format!("inflate: {e:?}"))?
+                miniz_oxide::inflate::decompress_to_vec_with_limit(&blob, 12 * 1024)
+                    .map_err(|e| format!("inflate: {e:?}"))?
             } else {
                 blob.clone()
             };
@@ -1206,7 +1560,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             if Some(&h[..8]) != d.schema.hash.as_deref() {
                 return Err("schema hash mismatch".into());
             }
-            let dec = self.schema_decoder.as_ref().ok_or("no zdef schema decoder installed")?;
+            let dec = self
+                .schema_decoder
+                .as_ref()
+                .ok_or("no zdef schema decoder installed")?;
             let mut frag = dec.decode(&cbor)?;
             frag.source = LayerSource::SelfDescription;
             frag.content_hash = Some(crate::expr::hex(&h));
@@ -1241,15 +1598,33 @@ impl<T: ZigbeeTransport> Hub<T> {
     // Dispatch.
 
     fn maybe_reresolve(&mut self, id: &str, now: Millis) {
-        let interviewing = self.devices.get(id).is_some_and(|d| matches!(d.interview, InterviewStep::NodeDesc | InterviewStep::ActiveEp | InterviewStep::SimpleDesc(_) | InterviewStep::Basic(_)));
+        let interviewing = self.devices.get(id).is_some_and(|d| {
+            matches!(
+                d.interview,
+                InterviewStep::NodeDesc
+                    | InterviewStep::ActiveEp
+                    | InterviewStep::SimpleDesc(_)
+                    | InterviewStep::Basic(_)
+            )
+        });
         if !interviewing {
             self.resolve_device(id, now);
             self.redo_configure(id, now);
         }
     }
 
-    pub(crate) fn dispatch_attrs(&mut self, id: &str, ep: u8, cluster: u16, mfr: Option<u16>, recs: &[(u16, TypedValue)], now: Millis) {
-        let Some(table) = self.dispatch.get(id) else { return };
+    pub(crate) fn dispatch_attrs(
+        &mut self,
+        id: &str,
+        ep: u8,
+        cluster: u16,
+        mfr: Option<u16>,
+        recs: &[(u16, TypedValue)],
+        now: Millis,
+    ) {
+        let Some(table) = self.dispatch.get(id) else {
+            return;
+        };
         let mut work: Vec<(usize, Option<usize>, Value)> = Vec::new();
         let mut unknown = Vec::new();
         let d = &self.devices[id];
@@ -1289,17 +1664,29 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// Decodes raw values for `(entity, part)` and applies them.
-    pub(crate) fn apply_raw(&mut self, id: &str, work: Vec<(usize, Option<usize>, Value)>, now: Millis) {
+    pub(crate) fn apply_raw(
+        &mut self,
+        id: &str,
+        work: Vec<(usize, Option<usize>, Value)>,
+        now: Millis,
+    ) {
         if work.is_empty() {
             return;
         }
         let tz = self.cfg.tz_offset_s;
-        let Some(d) = self.devices.get(id) else { return };
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         let mut decoded = Vec::new();
         {
             let env = DevEnv { dev: d, now, tz };
             let scale = |c: u16, a: u16| {
-                d.attrs.map.iter().find(|((_, cc, aa, m), _)| *cc == c && *aa == a && m.is_none()).and_then(|(_, e)| e.value.as_ref()).and_then(ZclValue::as_f64)
+                d.attrs
+                    .map
+                    .iter()
+                    .find(|((_, cc, aa, m), _)| *cc == c && *aa == a && m.is_none())
+                    .and_then(|(_, e)| e.value.as_ref())
+                    .and_then(ZclValue::as_f64)
             };
             for (i, p, raw) in work {
                 let e = &d.entities[i];
@@ -1317,7 +1704,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         for (i, p, v, flags) in decoded {
             if flags.map_miss || flags.expr_error {
                 d.entities[i].state.errors += 1;
-                d.diag.count(if flags.map_miss { "map_miss" } else { "expr_error" });
+                d.diag.count(if flags.map_miss {
+                    "map_miss"
+                } else {
+                    "expr_error"
+                });
             }
             let part = p.map(|pi| d.entities[i].r.def.parts[pi].0.clone());
             set_value(d, i, part.as_deref(), v, now);
@@ -1347,29 +1738,56 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     fn dispatch_command(&mut self, id: &str, ep: u8, cluster: u16, frame: &ZclFrame, now: Millis) {
         let h = frame.header;
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         // De-duplication: same source, TSN, cluster, command within 2 s.
-        let key = (u64::from(ep) << 40) | (u64::from(cluster) << 24) | (u64::from(h.tsn) << 8) | u64::from(h.cmd);
+        let key = (u64::from(ep) << 40)
+            | (u64::from(cluster) << 24)
+            | (u64::from(h.tsn) << 8)
+            | u64::from(h.cmd);
         d.dedup.retain(|(t, _)| now.saturating_sub(*t) < DEDUP_MS);
         if d.dedup.iter().any(|(_, k)| *k == key) {
             d.diag.count("duplicate_command");
             return;
         }
         d.dedup.push_back((now, key));
-        let ignored = d.resolution.ignore.iter().any(|r| r.cluster == cluster && r.ep.is_none_or(|e| e == ep) && r.cmd.is_none_or(|c| c == h.cmd));
+        let ignored = d.resolution.ignore.iter().any(|r| {
+            r.cluster == cluster && r.ep.is_none_or(|e| e == ep) && r.cmd.is_none_or(|c| c == h.cmd)
+        });
         let mut fired = Vec::new();
         {
-            let env = DevEnv { dev: d, now, tz: self.cfg.tz_offset_s };
+            let env = DevEnv {
+                dev: d,
+                now,
+                tz: self.cfg.tz_offset_s,
+            };
             for (i, e) in d.entities.iter().enumerate() {
                 if e.orphaned || (ignored && e.r.source == LayerSource::Generic) {
                     continue;
                 }
                 for t in &e.r.def.triggers {
-                    let TriggerSource::Cmd { ep: tep, cluster: tc, id: tid, mfr, global } = t.source else { continue };
-                    if tc != cluster || tid != h.cmd || tep.is_some_and(|x| x != ep) || mfr.is_some_and(|m| h.mfr != Some(m)) || global != (h.frame_type == FrameType::Global) {
+                    let TriggerSource::Cmd {
+                        ep: tep,
+                        cluster: tc,
+                        id: tid,
+                        mfr,
+                        global,
+                    } = t.source
+                    else {
+                        continue;
+                    };
+                    if tc != cluster
+                        || tid != h.cmd
+                        || tep.is_some_and(|x| x != ep)
+                        || mfr.is_some_and(|m| h.mfr != Some(m))
+                        || global != (h.frame_type == FrameType::Global)
+                    {
                         continue;
                     }
-                    if let Some(ev) = eval_trigger(t, &frame.payload, e.state.last_event.as_deref(), &env) {
+                    if let Some(ev) =
+                        eval_trigger(t, &frame.payload, e.state.last_event.as_deref(), &env)
+                    {
                         let mut attrs = ev.1;
                         attrs.insert("endpoint".into(), ep.into());
                         fired.push((i, ev.0, attrs));
@@ -1387,8 +1805,17 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// Fires an event on entity `i` (4.7).
-    pub(crate) fn fire_event(&mut self, id: &str, i: usize, event_type: String, mut attrs: Map<String, J>, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+    pub(crate) fn fire_event(
+        &mut self,
+        id: &str,
+        i: usize,
+        event_type: String,
+        mut attrs: Map<String, J>,
+        now: Millis,
+    ) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let e = &mut d.entities[i];
         if !e.r.def.event_types.is_empty() && !e.r.def.event_types.contains(&event_type) {
             d.diag.count("event_type_dropped");
@@ -1409,7 +1836,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                 attrs.insert(k, v);
             }
         }
-        self.emit(HubEvent::EntityEvent { uid: uid.clone(), event_type, attributes: attrs, time: ts(now) });
+        self.emit(HubEvent::EntityEvent {
+            uid: uid.clone(),
+            event_type,
+            attributes: attrs,
+            time: ts(now),
+        });
         self.publish_state(&uid);
     }
 
@@ -1424,12 +1856,19 @@ impl<T: ZigbeeTransport> Hub<T> {
             .iter()
             .filter(|(_, p)| {
                 let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
-                now.saturating_sub(p.sent_at) > if sleepy { TX_TIMEOUT_SLEEPY_MS } else { TX_TIMEOUT_MS }
+                now.saturating_sub(p.sent_at)
+                    > if sleepy {
+                        TX_TIMEOUT_SLEEPY_MS
+                    } else {
+                        TX_TIMEOUT_MS
+                    }
             })
             .map(|(k, _)| *k)
             .collect();
         for k in expired {
-            let Some(mut p) = self.pending.remove(&k) else { continue };
+            let Some(mut p) = self.pending.remove(&k) else {
+                continue;
+            };
             let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
             if p.retries < 2 && p.purpose != Purpose::Check {
                 p.retries += 1;
@@ -1437,7 +1876,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if sleepy {
                     // Park until the device talks again.
                     if let Some(d) = self.devices.get_mut(&p.device) {
-                        d.queue.push_back(Queued { req: p.req.clone(), purpose: p.purpose.clone(), tsn: k.1 });
+                        d.queue.push_back(Queued {
+                            req: p.req.clone(),
+                            purpose: p.purpose.clone(),
+                            tsn: k.1,
+                        });
                     }
                 } else if self.transport.aps_send(p.req.clone()).is_ok() {
                     self.pending.insert(k, p);
@@ -1445,14 +1888,27 @@ impl<T: ZigbeeTransport> Hub<T> {
                 continue;
             }
             let dev = p.device.clone();
-            self.fail_purpose(&dev, &p.purpose, ApiError::new("timeout", "no response from the device"), now);
+            self.fail_purpose(
+                &dev,
+                &p.purpose,
+                ApiError::new("timeout", "no response from the device"),
+                now,
+            );
         }
         // Tickets waiting for Tuya dataResponse.
-        let late: Vec<u64> = self.tickets.iter().filter(|(_, t)| t.deadline > 0 && now > t.deadline).map(|(k, _)| *k).collect();
+        let late: Vec<u64> = self
+            .tickets
+            .iter()
+            .filter(|(_, t)| t.deadline > 0 && now > t.deadline)
+            .map(|(k, _)| *k)
+            .collect();
         for t in late {
             if let Some(tk) = self.tickets.remove(&t) {
                 self.clear_pending_state(&tk);
-                self.emit(HubEvent::CommandResult { ticket: t, result: Err(ApiError::new("timeout", "no dataResponse from the device")) });
+                self.emit(HubEvent::CommandResult {
+                    ticket: t,
+                    result: Err(ApiError::new("timeout", "no dataResponse from the device")),
+                });
             }
         }
         let ids: Vec<String> = self.devices.keys().cloned().collect();
@@ -1491,7 +1947,9 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn tick_device(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         // Auto-reset timers.
         let mut touched = Vec::new();
         for i in 0..d.entities.len() {
@@ -1507,7 +1965,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         // Availability.
         self.availability_tick(id, now);
         // Configure retries (mains).
-        let retry = self.devices.get(id).and_then(|d| d.configure.retry_at).is_some_and(|t| now >= t);
+        let retry = self
+            .devices
+            .get(id)
+            .and_then(|d| d.configure.retry_at)
+            .is_some_and(|t| now >= t);
         if retry {
             if let Some(d) = self.devices.get_mut(id) {
                 d.configure.retry_at = None;
@@ -1515,11 +1977,20 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.redo_configure(id, now);
         }
         // Periodic Tuya query.
-        let q = self.devices.get(id).and_then(|d| d.tuya_query_at).is_some_and(|t| now >= t);
+        let q = self
+            .devices
+            .get(id)
+            .and_then(|d| d.tuya_query_at)
+            .is_some_and(|t| now >= t);
         if q {
             self.tuya_query(id, now);
             if let Some(d) = self.devices.get_mut(id) {
-                let iv = d.resolution.tuya.as_ref().and_then(|t| t.query_interval_s).unwrap_or(0);
+                let iv = d
+                    .resolution
+                    .tuya
+                    .as_ref()
+                    .and_then(|t| t.query_interval_s)
+                    .unwrap_or(0);
                 d.tuya_query_at = (iv > 0).then(|| now + u64::from(iv) * 1000);
             }
         }
@@ -1531,10 +2002,23 @@ impl<T: ZigbeeTransport> Hub<T> {
             return Some(t);
         }
         if let Some(g) = &d.fp.gp {
-            if d.power() == PowerKind::EnergyHarvesting || crate::gp::generic::is_switch(g.device_id) && d.resolution.gp.as_ref().and_then(|x| x.report_interval_s).is_none() {
+            if d.power() == PowerKind::EnergyHarvesting
+                || crate::gp::generic::is_switch(g.device_id)
+                    && d.resolution
+                        .gp
+                        .as_ref()
+                        .and_then(|x| x.report_interval_s)
+                        .is_none()
+            {
                 return None;
             }
-            return Some(d.resolution.gp.as_ref().and_then(|x| x.report_interval_s).map_or(25 * HOUR_S, |i| 3 * u64::from(i)));
+            return Some(
+                d.resolution
+                    .gp
+                    .as_ref()
+                    .and_then(|x| x.report_interval_s)
+                    .map_or(25 * HOUR_S, |i| 3 * u64::from(i)),
+            );
         }
         if d.power() == PowerKind::Mains && !d.sleepy() {
             return None;
@@ -1554,16 +2038,25 @@ impl<T: ZigbeeTransport> Hub<T> {
             .max()
             .unwrap_or(0);
         let checkin = u64::from(d.resolution.device.checkin_s.unwrap_or(0));
-        Some(((max_report * 5).div_ceil(2)).max((checkin * 5).div_ceil(2)).max(25 * HOUR_S))
+        Some(
+            ((max_report * 5).div_ceil(2))
+                .max((checkin * 5).div_ceil(2))
+                .max(25 * HOUR_S),
+        )
     }
 
     fn availability_tick(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get(id) else { return };
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         if !d.available {
             return;
         }
         let silence = now.saturating_sub(d.last_seen.unwrap_or(now));
-        let mains_active = d.gp.is_none() && d.power() == PowerKind::Mains && !d.sleepy() && d.resolution.device.availability_timeout_s.is_none();
+        let mains_active = d.gp.is_none()
+            && d.power() == PowerKind::Mains
+            && !d.sleepy()
+            && d.resolution.device.availability_timeout_s.is_none();
         if mains_active {
             if silence < MAINS_SILENCE_MS {
                 return;
@@ -1593,15 +2086,23 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn availability_probe(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let Some((left, _)) = d.check else { return };
         d.check = Some((left.saturating_sub(1), now + 10_000));
-        let ep = d.fp.endpoints.iter().find(|e| e.in_clusters.contains(&cl::BASIC)).map_or(1, |e| e.ep);
+        let ep =
+            d.fp.endpoints
+                .iter()
+                .find(|e| e.in_clusters.contains(&cl::BASIC))
+                .map_or(1, |e| e.ep);
         self.read_attrs(id, ep, cl::BASIC, None, &[0x0000], Purpose::Check, now);
     }
 
     fn set_unavailable(&mut self, id: &str) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         d.available = false;
         d.check = None;
         let uids: Vec<String> = d.entities.iter().map(|e| e.uid.clone()).collect();
@@ -1621,7 +2122,12 @@ impl<T: ZigbeeTransport> Hub<T> {
         t
     }
 
-    pub(crate) fn ticket_add(&mut self, t: u64, frames: u32, optimistic: Vec<(String, Option<String>, Value)>) {
+    pub(crate) fn ticket_add(
+        &mut self,
+        t: u64,
+        frames: u32,
+        optimistic: Vec<(String, Option<String>, Value)>,
+    ) {
         if let Some(tk) = self.tickets.get_mut(&t) {
             tk.remaining += frames;
             tk.optimistic.extend(optimistic);
@@ -1630,13 +2136,16 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     pub(crate) fn ticket_wait_tuya(&mut self, t: u64, device: &str, dps: &[u8], deadline: Millis) {
         if let Some(tk) = self.tickets.get_mut(&t) {
-            tk.tuya_dps.extend(dps.iter().map(|d| (device.to_string(), *d)));
+            tk.tuya_dps
+                .extend(dps.iter().map(|d| (device.to_string(), *d)));
             tk.deadline = deadline;
         }
     }
 
     pub(crate) fn ticket_part_done(&mut self, t: u64, err: Option<ApiError>, now: Millis) {
-        let Some(tk) = self.tickets.get_mut(&t) else { return };
+        let Some(tk) = self.tickets.get_mut(&t) else {
+            return;
+        };
         tk.remaining = tk.remaining.saturating_sub(1);
         if err.is_some() && tk.error.is_none() {
             tk.error = err;
@@ -1677,11 +2186,17 @@ impl<T: ZigbeeTransport> Hub<T> {
                 for u in uids {
                     self.publish_state(&u);
                 }
-                self.emit(HubEvent::CommandResult { ticket: t, result: Ok("ok".into()) });
+                self.emit(HubEvent::CommandResult {
+                    ticket: t,
+                    result: Ok("ok".into()),
+                });
             }
             Some(e) => {
                 self.clear_pending_state(&tk);
-                self.emit(HubEvent::CommandResult { ticket: t, result: Err(e) });
+                self.emit(HubEvent::CommandResult {
+                    ticket: t,
+                    result: Err(e),
+                });
             }
         }
     }
@@ -1710,12 +2225,21 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Removes a device (`devices/remove`).
     pub fn remove_device(&mut self, id: &str, force: bool, now: Millis) -> Result<(), ApiError> {
-        let d = self.devices.get(id).ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
+        let d = self
+            .devices
+            .get(id)
+            .ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
         match d.kind.clone() {
             DeviceKind::Zigbee { ieee, nwk } => {
                 if !force {
                     let tsn = self.next_zdo_tsn();
-                    self.send_zdo(id, zdo::cluster::MGMT_LEAVE_REQ, zdo::mgmt_leave_req(tsn, ieee), Purpose::None, now);
+                    self.send_zdo(
+                        id,
+                        zdo::cluster::MGMT_LEAVE_REQ,
+                        zdo::mgmt_leave_req(tsn, ieee),
+                        Purpose::None,
+                        now,
+                    );
                 }
                 let _ = self.transport.remove_device(ieee);
                 self.nwk_index.remove(&nwk);
@@ -1735,13 +2259,25 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Uploads (or replaces) a user definition; affected devices
     /// re-resolve. Returns the IDs of devices it matches.
-    pub fn upload_user_definition(&mut self, mut def: Definition, now: Millis) -> Result<Vec<String>, ApiError> {
+    pub fn upload_user_definition(
+        &mut self,
+        mut def: Definition,
+        now: Millis,
+    ) -> Result<Vec<String>, ApiError> {
         let missing = crate::resolve::missing_features(&def, &self.features);
         if !missing.is_empty() {
-            return Err(ApiError::new("unsupported", format!("requires {}", missing.join(", "))));
+            return Err(ApiError::new(
+                "unsupported",
+                format!("requires {}", missing.join(", ")),
+            ));
         }
         def.source = LayerSource::User;
-        let matching: Vec<String> = self.devices.values().filter(|d| crate::resolve::score(&def, &d.fp).is_some()).map(|d| d.id.clone()).collect();
+        let matching: Vec<String> = self
+            .devices
+            .values()
+            .filter(|d| crate::resolve::score(&def, &d.fp).is_some())
+            .map(|d| d.id.clone())
+            .collect();
         self.user.insert(def);
         for id in &matching {
             self.resolve_device(id, now);
@@ -1753,7 +2289,10 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Deletes a user definition.
     pub fn delete_user_definition(&mut self, id: &str, now: Millis) -> Result<(), ApiError> {
         if !self.user.remove(id) {
-            return Err(ApiError::new("not_found", format!("no user definition {id}")));
+            return Err(ApiError::new(
+                "not_found",
+                format!("no user definition {id}"),
+            ));
         }
         let ids: Vec<String> = self.devices.keys().cloned().collect();
         for d in ids {
@@ -1763,13 +2302,21 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// Pins a definition (`devices/pin_definition`).
-    pub fn pin_definition(&mut self, id: &str, def: Option<String>, now: Millis) -> Result<(), ApiError> {
+    pub fn pin_definition(
+        &mut self,
+        id: &str,
+        def: Option<String>,
+        now: Millis,
+    ) -> Result<(), ApiError> {
         if let Some(x) = &def {
             if self.user.get(x).is_none() && self.catalog.get(x).is_none() {
                 return Err(ApiError::new("not_found", format!("no definition {x}")));
             }
         }
-        let d = self.devices.get_mut(id).ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
+        let d = self
+            .devices
+            .get_mut(id)
+            .ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
         d.pinned = def;
         self.resolve_device(id, now);
         self.redo_configure(id, now);
@@ -1778,10 +2325,18 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Deletes an orphaned entity (`entities/delete`).
     pub fn delete_entity(&mut self, uid: &str) -> Result<(), ApiError> {
-        let d = self.devices.get_mut(device_of_uid(uid)).ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
-        let i = d.entity_index(uid).ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
+        let d = self
+            .devices
+            .get_mut(device_of_uid(uid))
+            .ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
+        let i = d
+            .entity_index(uid)
+            .ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
         if !d.entities[i].orphaned {
-            return Err(ApiError::new("invalid_value", "only orphaned entities can be deleted"));
+            return Err(ApiError::new(
+                "invalid_value",
+                "only orphaned entities can be deleted",
+            ));
         }
         d.entities.remove(i);
         let did = d.id.clone();
@@ -1794,7 +2349,10 @@ impl<T: ZigbeeTransport> Hub<T> {
 
 /// The schema endpoint of a device (0xFC6B server).
 fn schema_endpoint(d: &Device) -> Option<u8> {
-    d.fp.endpoints.iter().find(|e| e.in_clusters.contains(&cl::ZRS_SCHEMA)).map(|e| e.ep)
+    d.fp.endpoints
+        .iter()
+        .find(|e| e.in_clusters.contains(&cl::ZRS_SCHEMA))
+        .map(|e| e.ep)
 }
 
 /// Attributes whose value changes the generic entity set or capabilities.
@@ -1802,12 +2360,27 @@ fn is_structural(cluster: u16, attr: u16) -> bool {
     matches!(
         (cluster, attr),
         (cl::IAS_ZONE, 0x0001)
-            | (cl::COLOR, 0x400A | 0x400B | 0x400C)
+            | (cl::COLOR, 0x400A..=0x400C)
             | (cl::THERMOSTAT, 0x001B | 0x0015 | 0x0016)
             | (cl::FAN_CONTROL, 0x0001)
             | (cl::METERING, 0x0300)
-            | (cl::BINARY_INPUT | cl::ANALOG_INPUT | cl::MULTISTATE_INPUT, 0x001C)
-    ) || matches!((cluster, attr), (cl::ON_OFF, 0x4003) | (cl::LEVEL, 0x0010 | 0x0011) | (cl::OCCUPANCY, 0x0010) | (cl::POWER_CONFIG, 0x0020 | 0x0021) | (cl::DEVICE_TEMPERATURE, 0) | (cl::THERMOSTAT, 0x0010 | 0x0008) | (cl::WINDOW_COVERING, 0x0009) | (cl::METERING, 0x0400) | (cl::ELECTRICAL, 0x0510 | 0x0300) | (cl::DIAGNOSTICS, 0x011C | 0x011D))
+            | (
+                cl::BINARY_INPUT | cl::ANALOG_INPUT | cl::MULTISTATE_INPUT,
+                0x001C
+            )
+    ) || matches!(
+        (cluster, attr),
+        (cl::ON_OFF, 0x4003)
+            | (cl::LEVEL, 0x0010 | 0x0011)
+            | (cl::OCCUPANCY, 0x0010)
+            | (cl::POWER_CONFIG, 0x0020 | 0x0021)
+            | (cl::DEVICE_TEMPERATURE, 0)
+            | (cl::THERMOSTAT, 0x0010 | 0x0008)
+            | (cl::WINDOW_COVERING, 0x0009)
+            | (cl::METERING, 0x0400)
+            | (cl::ELECTRICAL, 0x0510 | 0x0300)
+            | (cl::DIAGNOSTICS, 0x011C | 0x011D)
+    )
 }
 
 /// The device ID part of a uid.
@@ -1854,8 +2427,18 @@ pub(crate) fn set_value(d: &mut Device, i: usize, part: Option<&str>, v: Value, 
 }
 
 /// Evaluates a trigger: `when`, `event`, `attrs`.
-pub(crate) fn eval_trigger(t: &Trigger, payload: &[u8], last: Option<&str>, env: &dyn ExprEnv) -> Option<(String, Map<String, J>)> {
-    let ctx = ExprCtx { x: Value::Null, payload: Some(payload), last, env };
+pub(crate) fn eval_trigger(
+    t: &Trigger,
+    payload: &[u8],
+    last: Option<&str>,
+    env: &dyn ExprEnv,
+) -> Option<(String, Map<String, J>)> {
+    let ctx = ExprCtx {
+        x: Value::Null,
+        payload: Some(payload),
+        last,
+        env,
+    };
     if let Some(w) = &t.when {
         if w.eval(&ctx).truthy() != Some(true) {
             return None;
@@ -1888,9 +2471,13 @@ pub(crate) fn build_dispatch(d: &Device) -> BTreeMap<DKey, Vec<(usize, Option<us
         let mut add = |vd: &ValueDef, p: Option<usize>| {
             let k = match &vd.binding {
                 Binding::Zcl(z) => Some(DKey::Attr(e.r.ep, z.cluster, z.attr, z.mfr)),
-                Binding::Struct { cluster, attr, mfr, .. } => Some(DKey::Attr(e.r.ep, *cluster, *attr, *mfr)),
+                Binding::Struct {
+                    cluster, attr, mfr, ..
+                } => Some(DKey::Attr(e.r.ep, *cluster, *attr, *mfr)),
                 Binding::Tuya { dp, .. } => Some(DKey::Tuya(*dp)),
-                Binding::Gp(GpBinding::Report { cluster, attr, mfr, .. }) => Some(DKey::GpAttr(*cluster, *attr, *mfr)),
+                Binding::Gp(GpBinding::Report {
+                    cluster, attr, mfr, ..
+                }) => Some(DKey::GpAttr(*cluster, *attr, *mfr)),
                 Binding::Gp(GpBinding::Cmd(c)) => Some(DKey::GpCmd(*c)),
                 _ => None,
             };

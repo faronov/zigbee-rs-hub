@@ -145,7 +145,14 @@ impl SimpleDescriptor {
         let in_clusters = (0..n).map(|_| r.u16()).collect::<Result<_, _>>()?;
         let n = r.u8()?;
         let out_clusters = (0..n).map(|_| r.u16()).collect::<Result<_, _>>()?;
-        Ok(Self { endpoint, profile, device_id, version, in_clusters, out_clusters })
+        Ok(Self {
+            endpoint,
+            profile,
+            device_id,
+            version,
+            in_clusters,
+            out_clusters,
+        })
     }
 
     /// Encodes the descriptor body.
@@ -163,7 +170,9 @@ impl SimpleDescriptor {
 }
 
 /// Bind destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum BindDst {
     /// Address mode 0x01: a group.
     Group(u16),
@@ -233,16 +242,36 @@ pub fn mgmt_leave_req(tsn: u8, ieee: u64) -> Vec<u8> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZdoMessage {
     /// Node_Desc_rsp.
-    NodeDesc { tsn: u8, status: u8, nwk: u16, desc: Option<NodeDescriptor> },
+    NodeDesc {
+        tsn: u8,
+        status: u8,
+        nwk: u16,
+        desc: Option<NodeDescriptor>,
+    },
     /// Active_EP_rsp.
-    ActiveEp { tsn: u8, status: u8, nwk: u16, endpoints: Vec<u8> },
+    ActiveEp {
+        tsn: u8,
+        status: u8,
+        nwk: u16,
+        endpoints: Vec<u8>,
+    },
     /// Simple_Desc_rsp.
-    SimpleDesc { tsn: u8, status: u8, nwk: u16, desc: Option<SimpleDescriptor> },
+    SimpleDesc {
+        tsn: u8,
+        status: u8,
+        nwk: u16,
+        desc: Option<SimpleDescriptor>,
+    },
     /// Bind_rsp / Unbind_rsp / Mgmt_Leave_rsp and other status-only
     /// responses.
     Status { cluster: u16, tsn: u8, status: u8 },
     /// Device_annce.
-    DeviceAnnce { tsn: u8, nwk: u16, ieee: u64, capability: u8 },
+    DeviceAnnce {
+        tsn: u8,
+        nwk: u16,
+        ieee: u64,
+        capability: u8,
+    },
     /// Anything else.
     Other { cluster: u16, tsn: u8 },
 }
@@ -257,8 +286,17 @@ impl ZdoMessage {
             cluster::NODE_DESC_RSP => {
                 let status = r.u8()?;
                 let nwk = r.u16()?;
-                let desc = if status == ZDP_SUCCESS { Some(NodeDescriptor::parse(r.rest())?) } else { None };
-                Self::NodeDesc { tsn, status, nwk, desc }
+                let desc = if status == ZDP_SUCCESS {
+                    Some(NodeDescriptor::parse(r.rest())?)
+                } else {
+                    None
+                };
+                Self::NodeDesc {
+                    tsn,
+                    status,
+                    nwk,
+                    desc,
+                }
             }
             cluster::ACTIVE_EP_RSP => {
                 let status = r.u8()?;
@@ -269,7 +307,12 @@ impl ZdoMessage {
                 } else {
                     Vec::new()
                 };
-                Self::ActiveEp { tsn, status, nwk, endpoints }
+                Self::ActiveEp {
+                    tsn,
+                    status,
+                    nwk,
+                    endpoints,
+                }
             }
             cluster::SIMPLE_DESC_RSP => {
                 let status = r.u8()?;
@@ -280,15 +323,29 @@ impl ZdoMessage {
                 } else {
                     None
                 };
-                Self::SimpleDesc { tsn, status, nwk, desc }
+                Self::SimpleDesc {
+                    tsn,
+                    status,
+                    nwk,
+                    desc,
+                }
             }
             cluster::DEVICE_ANNCE => {
                 let nwk = r.u16()?;
                 let ieee = r.u64()?;
                 let capability = r.u8()?;
-                Self::DeviceAnnce { tsn, nwk, ieee, capability }
+                Self::DeviceAnnce {
+                    tsn,
+                    nwk,
+                    ieee,
+                    capability,
+                }
             }
-            c if c & 0x8000 != 0 && r.remaining() >= 1 => Self::Status { cluster: c, tsn, status: r.u8()? },
+            c if c & 0x8000 != 0 && r.remaining() >= 1 => Self::Status {
+                cluster: c,
+                tsn,
+                status: r.u8()?,
+            },
             c => Self::Other { cluster: c, tsn },
         })
     }
@@ -359,7 +416,12 @@ mod tests {
         let p = node_desc_rsp(7, 0x1234, &nd);
         assert_eq!(
             ZdoMessage::parse(cluster::NODE_DESC_RSP, &p).unwrap(),
-            ZdoMessage::NodeDesc { tsn: 7, status: 0, nwk: 0x1234, desc: Some(nd) }
+            ZdoMessage::NodeDesc {
+                tsn: 7,
+                status: 0,
+                nwk: 0x1234,
+                desc: Some(nd)
+            }
         );
         assert!(!nd.rx_on_when_idle());
         let sd = SimpleDescriptor {
@@ -373,13 +435,25 @@ mod tests {
         let p = simple_desc_rsp(8, 0x1234, &sd);
         assert_eq!(
             ZdoMessage::parse(cluster::SIMPLE_DESC_RSP, &p).unwrap(),
-            ZdoMessage::SimpleDesc { tsn: 8, status: 0, nwk: 0x1234, desc: Some(sd) }
+            ZdoMessage::SimpleDesc {
+                tsn: 8,
+                status: 0,
+                nwk: 0x1234,
+                desc: Some(sd)
+            }
         );
         let b = bind_req(9, 0x00158d0001a2b3c4, 1, 0x0402, BindDst::Ieee(0xAABB, 1));
-        assert_eq!(parse_bind_req(&b).unwrap(), (9, 0x00158d0001a2b3c4, 1, 0x0402, BindDst::Ieee(0xAABB, 1)));
+        assert_eq!(
+            parse_bind_req(&b).unwrap(),
+            (9, 0x00158d0001a2b3c4, 1, 0x0402, BindDst::Ieee(0xAABB, 1))
+        );
         assert_eq!(
             ZdoMessage::parse(cluster::BIND_RSP, &[9, 0]).unwrap(),
-            ZdoMessage::Status { cluster: cluster::BIND_RSP, tsn: 9, status: 0 }
+            ZdoMessage::Status {
+                cluster: cluster::BIND_RSP,
+                tsn: 9,
+                status: 0
+            }
         );
     }
 }

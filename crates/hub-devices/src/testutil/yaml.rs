@@ -16,11 +16,14 @@ fn get<'a>(m: &'a Y, k: &str) -> Option<&'a Y> {
 }
 
 fn int(v: &Y) -> R<i64> {
-    v.as_i64().ok_or_else(|| format!("integer expected, got {v:?}"))
+    v.as_i64()
+        .ok_or_else(|| format!("integer expected, got {v:?}"))
 }
 
 fn num(v: &Y) -> R<f64> {
-    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).ok_or_else(|| format!("number expected, got {v:?}"))
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|i| i as f64))
+        .ok_or_else(|| format!("number expected, got {v:?}"))
 }
 
 fn s(v: &Y) -> R<String> {
@@ -59,7 +62,9 @@ fn opt_expr(m: &Y, k: &str) -> R<Option<Expr>> {
 fn scalar(v: &Y) -> Value {
     match v {
         Y::Bool(b) => Value::Bool(*b),
-        Y::Number(n) => n.as_i64().map_or_else(|| Value::Float(n.as_f64().unwrap_or(0.0)), Value::Int),
+        Y::Number(n) => n
+            .as_i64()
+            .map_or_else(|| Value::Float(n.as_f64().unwrap_or(0.0)), Value::Int),
         Y::String(s) => Value::Str(s.clone()),
         _ => Value::Null,
     }
@@ -79,14 +84,24 @@ fn report(v: &Y) -> R<ReportSpec> {
             max: int(&l[1])? as u16,
             change: Some(num(&l[2])?),
         }),
-        Y::Sequence(l) if l.len() == 2 => Ok(ReportSpec::Config { min: int(&l[0])? as u16, max: int(&l[1])? as u16, change: None }),
+        Y::Sequence(l) if l.len() == 2 => Ok(ReportSpec::Config {
+            min: int(&l[0])? as u16,
+            max: int(&l[1])? as u16,
+            change: None,
+        }),
         _ => Err(format!("bad report {v:?}")),
     }
 }
 
 fn str_match(v: &Y) -> R<StrMatch> {
     if let Some(a) = get(v, "any") {
-        return Ok(StrMatch::Any(a.as_sequence().ok_or("any: list")?.iter().map(s).collect::<R<_>>()?));
+        return Ok(StrMatch::Any(
+            a.as_sequence()
+                .ok_or("any: list")?
+                .iter()
+                .map(s)
+                .collect::<R<_>>()?,
+        ));
     }
     if let Some(p) = get(v, "prefix") {
         return Ok(StrMatch::Prefix(s(p)?));
@@ -95,19 +110,29 @@ fn str_match(v: &Y) -> R<StrMatch> {
 }
 
 fn range(v: &Y) -> R<(u32, u32)> {
-    Ok((opt_int(v, "min")?.unwrap_or(0) as u32, opt_int(v, "max")?.unwrap_or(i64::from(u32::MAX)) as u32))
+    Ok((
+        opt_int(v, "min")?.unwrap_or(0) as u32,
+        opt_int(v, "max")?.unwrap_or(i64::from(u32::MAX)) as u32,
+    ))
 }
 
 fn clusters(v: Option<&Y>) -> R<Vec<u16>> {
-    v.map_or(Ok(Vec::new()), |l| l.as_sequence().ok_or("cluster list")?.iter().map(|x| int(x).map(|i| i as u16)).collect())
+    v.map_or(Ok(Vec::new()), |l| {
+        l.as_sequence()
+            .ok_or("cluster list")?
+            .iter()
+            .map(|x| int(x).map(|i| i as u16))
+            .collect()
+    })
 }
 
 fn gp_match(v: &Y) -> R<GpMatch> {
     let model_id = match get(v, "model_id") {
         None => None,
-        Some(m @ Y::Mapping(_)) => {
-            Some((opt_int(m, "value")?.ok_or("model_id.value")? as u16, opt_int(m, "mask")?.unwrap_or(0xFFFF) as u16))
-        }
+        Some(m @ Y::Mapping(_)) => Some((
+            opt_int(m, "value")?.ok_or("model_id.value")? as u16,
+            opt_int(m, "mask")?.unwrap_or(0xFFFF) as u16,
+        )),
         Some(m) => Some((int(m)? as u16, 0xFFFF)),
     };
     let src_id = match get(v, "src_id") {
@@ -125,7 +150,10 @@ fn gp_match(v: &Y) -> R<GpMatch> {
         model_id,
         src_id,
         ieee_prefix: None,
-        commands: clusters(get(v, "commands"))?.into_iter().map(|c| c as u8).collect(),
+        commands: clusters(get(v, "commands"))?
+            .into_iter()
+            .map(|c| c as u8)
+            .collect(),
         server_clusters: clusters(cl.and_then(|c| get(c, "server")))?,
         client_clusters: clusters(cl.and_then(|c| get(c, "client")))?,
     })
@@ -201,7 +229,10 @@ fn binding(v: &Y) -> R<Binding> {
     }
     if let Some(Y::Sequence(t)) = get(v, "tuya") {
         let tt = s(&t[1])?;
-        return Ok(Binding::Tuya { dp: int(&t[0])? as u8, ty: TuyaType::parse(&tt).ok_or(format!("tuya type {tt}"))? });
+        return Ok(Binding::Tuya {
+            dp: int(&t[0])? as u8,
+            ty: TuyaType::parse(&tt).ok_or(format!("tuya type {tt}"))?,
+        });
     }
     if let Some(st) = get(v, "struct") {
         return Ok(Binding::Struct {
@@ -221,17 +252,24 @@ fn binding(v: &Y) -> R<Binding> {
                 mfr: opt_u16(r, "mfr")?,
             }));
         }
-        return Ok(Binding::Gp(GpBinding::Cmd(opt_int(g, "cmd")?.ok_or("gp.cmd")? as u8)));
+        return Ok(Binding::Gp(GpBinding::Cmd(
+            opt_int(g, "cmd")?.ok_or("gp.cmd")? as u8,
+        )));
     }
     if let Some(h) = get(v, "hub") {
-        return Ok(Binding::Hub { default: get(h, "default").map_or(Value::Null, scalar) });
+        return Ok(Binding::Hub {
+            default: get(h, "default").map_or(Value::Null, scalar),
+        });
     }
     Ok(Binding::None)
 }
 
 fn value_def(v: &Y) -> R<ValueDef> {
     let map = match get(v, "map") {
-        Some(Y::Mapping(m)) => m.iter().map(|(k, l)| Ok((int(k)?, s(l)?))).collect::<R<Vec<_>>>()?,
+        Some(Y::Mapping(m)) => m
+            .iter()
+            .map(|(k, l)| Ok((int(k)?, s(l)?)))
+            .collect::<R<Vec<_>>>()?,
         _ => Vec::new(),
     };
     Ok(ValueDef {
@@ -257,7 +295,9 @@ fn value_def(v: &Y) -> R<ValueDef> {
             mode: opt_s(v, "mode")?,
         },
         report: get(v, "report").map(report).transpose()?,
-        access: opt_s(v, "access")?.map(|a| Access::parse(&a).ok_or(format!("access {a}"))).transpose()?,
+        access: opt_s(v, "access")?
+            .map(|a| Access::parse(&a).ok_or(format!("access {a}")))
+            .transpose()?,
     })
 }
 
@@ -273,12 +313,17 @@ fn trigger(v: &Y) -> R<Trigger> {
     } else if let Some(g) = get(v, "gp_cmd") {
         TriggerSource::GpCmd(int(g)? as u8)
     } else if let Some(Y::Sequence(t)) = get(v, "tuya") {
-        TriggerSource::Tuya { dp: int(&t[0])? as u8 }
+        TriggerSource::Tuya {
+            dp: int(&t[0])? as u8,
+        }
     } else {
         return Err("trigger source".into());
     };
     let attrs = match get(v, "attrs") {
-        Some(Y::Mapping(m)) => m.iter().map(|(k, e)| Ok((s(k)?, expr(e)?))).collect::<R<_>>()?,
+        Some(Y::Mapping(m)) => m
+            .iter()
+            .map(|(k, e)| Ok((s(k)?, expr(e)?)))
+            .collect::<R<_>>()?,
         _ => Vec::new(),
     };
     Ok(Trigger {
@@ -296,7 +341,9 @@ fn press(v: &Y) -> R<Press> {
             id: opt_int(c, "id")?.ok_or("press.cmd.id")? as u8,
             mfr: opt_u16(c, "mfr")?,
             ep: opt_int(c, "ep")?.map(|e| e as u8),
-            payload: get(v, "payload").map(|p| expr(p).map(PressPayload::Expr)).transpose()?,
+            payload: get(v, "payload")
+                .map(|p| expr(p).map(PressPayload::Expr))
+                .transpose()?,
         });
     }
     if let Some(w) = get(v, "write") {
@@ -330,7 +377,10 @@ fn entity(v: &Y) -> R<EntityDef> {
     e.category = opt_s(v, "category")?.and_then(|x| Category::parse(&x));
     e.name = opt_s(v, "name")?;
     e.enabled = get(v, "enabled").and_then(Y::as_bool).unwrap_or(true);
-    e.ep = opt_int(v, "ep")?.map(|x| x as u8).or(get(v, "zcl").and_then(|z| get(z, "ep")).and_then(Y::as_i64).map(|x| x as u8));
+    e.ep = opt_int(v, "ep")?.map(|x| x as u8).or(get(v, "zcl")
+        .and_then(|z| get(z, "ep"))
+        .and_then(Y::as_i64)
+        .map(|x| x as u8));
     e.value = value_def(v)?;
     if let Some(Y::Mapping(parts)) = get(v, "parts") {
         for (n, pv) in parts {
@@ -353,7 +403,10 @@ fn entity(v: &Y) -> R<EntityDef> {
 fn configure_op(v: &Y) -> R<ConfigureOp> {
     let ep = |m: &Y| opt_int(m, "ep").map(|e| e.map(|x| x as u8));
     if let Some(b) = get(v, "bind") {
-        return Ok(ConfigureOp::Bind { ep: ep(b)?, clusters: clusters(get(b, "clusters"))? });
+        return Ok(ConfigureOp::Bind {
+            ep: ep(b)?,
+            clusters: clusters(get(b, "clusters"))?,
+        });
     }
     if let Some(w) = get(v, "write") {
         return Ok(ConfigureOp::Write {
@@ -385,7 +438,10 @@ fn configure_op(v: &Y) -> R<ConfigureOp> {
     }
     if let Some(c) = get(v, "cmd") {
         let payload = match get(c, "payload") {
-            Some(Y::Sequence(b)) => b.iter().map(|x| int(x).map(|i| i as u8)).collect::<R<_>>()?,
+            Some(Y::Sequence(b)) => b
+                .iter()
+                .map(|x| int(x).map(|i| i as u8))
+                .collect::<R<_>>()?,
             _ => Vec::new(),
         };
         return Ok(ConfigureOp::Cmd {
@@ -397,10 +453,15 @@ fn configure_op(v: &Y) -> R<ConfigureOp> {
         });
     }
     if let Some(g) = get(v, "group") {
-        return Ok(ConfigureOp::Group { ep: ep(g)?, group: opt_u16(g, "group")?.ok_or("group.group")? });
+        return Ok(ConfigureOp::Group {
+            ep: ep(g)?,
+            group: opt_u16(g, "group")?.ok_or("group.group")?,
+        });
     }
     if let Some(c) = get(v, "checkin") {
-        return Ok(ConfigureOp::Checkin { interval_qs: opt_int(c, "interval_qs")?.ok_or("interval_qs")? as u32 });
+        return Ok(ConfigureOp::Checkin {
+            interval_qs: opt_int(c, "interval_qs")?.ok_or("interval_qs")? as u32,
+        });
     }
     Err(format!("unknown configure op {v:?}"))
 }
@@ -430,7 +491,14 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
     let v: Y = serde_yaml::from_str(src).map_err(|e| e.to_string())?;
     let fragment = get(&v, "zdef_fragment").is_some();
     let id = opt_s(&v, "id")?.unwrap_or_else(|| "self-description".into());
-    let mut d = Definition::new(id, if fragment { LayerSource::SelfDescription } else { source });
+    let mut d = Definition::new(
+        id,
+        if fragment {
+            LayerSource::SelfDescription
+        } else {
+            source
+        },
+    );
     d.revision = opt_int(&v, "revision")?.unwrap_or(1) as u32;
     d.vendor = opt_s(&v, "vendor")?.unwrap_or_default();
     d.model = opt_s(&v, "model")?.unwrap_or_default();
@@ -461,13 +529,19 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
             battery: match get(dev, "battery") {
                 Some(Y::String(n)) => Some(BatteryCurve::Named(n.clone())),
                 Some(b) => match get(b, "voltage_to_percent") {
-                    Some(Y::Sequence(l)) if l.len() == 2 => Some(BatteryCurve::Linear(num(&l[0])?, num(&l[1])?)),
+                    Some(Y::Sequence(l)) if l.len() == 2 => {
+                        Some(BatteryCurve::Linear(num(&l[0])?, num(&l[1])?))
+                    }
                     _ => None,
                 },
                 None => None,
             },
             checkin_s: opt_int(dev, "checkin_s")?.map(|x| x as u32),
-            availability_timeout_s: get(dev, "availability").map(|a| opt_int(a, "timeout_s")).transpose()?.flatten().map(|x| x as u64),
+            availability_timeout_s: get(dev, "availability")
+                .map(|a| opt_int(a, "timeout_s"))
+                .transpose()?
+                .flatten()
+                .map(|x| x as u64),
             ota: get(dev, "ota").and_then(Y::as_bool),
         };
     }
@@ -477,7 +551,11 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
             d.generic.exclude = x.iter().map(s).collect::<R<_>>()?;
         }
         if let Some(Y::Sequence(x)) = get(g, "only_endpoints") {
-            d.generic.only_endpoints = Some(x.iter().map(|e| int(e).map(|i| i as u8)).collect::<R<_>>()?);
+            d.generic.only_endpoints = Some(
+                x.iter()
+                    .map(|e| int(e).map(|i| i as u8))
+                    .collect::<R<_>>()?,
+            );
         }
         if let Some(Y::Mapping(p)) = get(g, "patch") {
             for (k, pv) in p {
@@ -531,12 +609,20 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
                     }
                 }
             }
-            Some(m @ Y::Mapping(_)) => f.query_interval_s = opt_int(m, "interval_s")?.map(|x| x as u32),
+            Some(m @ Y::Mapping(_)) => {
+                f.query_interval_s = opt_int(m, "interval_s")?.map(|x| x as u32)
+            }
             _ => {}
         }
         f.bind_basic = get(t, "bind_basic").and_then(Y::as_bool).unwrap_or(false);
-        f.gateway_status = get(t, "gateway_status").and_then(Y::as_bool).unwrap_or(true);
-        f.send = if opt_s(t, "send")?.as_deref() == Some("sendData") { TuyaSend::SendData } else { TuyaSend::DataRequest };
+        f.gateway_status = get(t, "gateway_status")
+            .and_then(Y::as_bool)
+            .unwrap_or(true);
+        f.send = if opt_s(t, "send")?.as_deref() == Some("sendData") {
+            TuyaSend::SendData
+        } else {
+            TuyaSend::DataRequest
+        };
         f.mcu_version = get(t, "mcu_version").and_then(Y::as_bool).unwrap_or(false);
         f.optimistic = get(t, "optimistic").and_then(Y::as_bool).unwrap_or(false);
         f.dedup = get(t, "dedup").and_then(Y::as_bool).unwrap_or(true);
@@ -546,7 +632,10 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
         d.gp = Some(GpFlags {
             report_interval_s: opt_int(g, "report_interval_s")?.map(|x| x as u32),
             security_min: opt_int(g, "security_min")?.map(|x| x as u8),
-            ignore_commands: clusters(get(g, "ignore_commands"))?.into_iter().map(|c| c as u8).collect(),
+            ignore_commands: clusters(get(g, "ignore_commands"))?
+                .into_iter()
+                .map(|c| c as u8)
+                .collect(),
         });
     }
     Ok(d)
@@ -554,7 +643,10 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
 
 /// Loads `definitions/examples/<name>.yaml` of the repository.
 pub fn example(name: &str) -> Definition {
-    let path = format!("{}/../../definitions/examples/{name}.yaml", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../definitions/examples/{name}.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     load_definition(&src, LayerSource::Catalog).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
@@ -570,7 +662,8 @@ mod tests {
         for f in std::fs::read_dir(dir).unwrap() {
             let p = f.unwrap().path();
             let src = std::fs::read_to_string(&p).unwrap();
-            let d = load_definition(&src, LayerSource::Catalog).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            let d = load_definition(&src, LayerSource::Catalog)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
             assert!(!d.model.is_empty());
             n += 1;
         }
@@ -578,6 +671,9 @@ mod tests {
         let trv = example("tuya-ts0601-trv-me167");
         assert_eq!(trv.entities.len(), 15);
         assert_eq!(trv.entities[0].parts.len(), 4);
-        assert!(trv.used_features().contains(&"codec.tuya_schedule_day".to_string()));
+        assert!(
+            trv.used_features()
+                .contains(&"codec.tuya_schedule_day".to_string())
+        );
     }
 }

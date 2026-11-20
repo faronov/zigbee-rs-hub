@@ -199,10 +199,17 @@ impl Fingerprint {
                     c.opt_uint(gp.model_id.map(u64::from));
                     c.bytes(&gp.commands);
                     c.array(gp.server_clusters.len());
-                    gp.server_clusters.iter().for_each(|x| c.uint(u64::from(*x)));
+                    gp.server_clusters
+                        .iter()
+                        .for_each(|x| c.uint(u64::from(*x)));
                     c.array(gp.client_clusters.len());
-                    gp.client_clusters.iter().for_each(|x| c.uint(u64::from(*x)));
-                    c.opt_uint(gp.switch_info.map(|(n, t)| (u64::from(n) << 8) | u64::from(t)));
+                    gp.client_clusters
+                        .iter()
+                        .for_each(|x| c.uint(u64::from(*x)));
+                    c.opt_uint(
+                        gp.switch_info
+                            .map(|(n, t)| (u64::from(n) << 8) | u64::from(t)),
+                    );
                 }),
             ));
         }
@@ -298,8 +305,20 @@ mod tests {
             manufacturer_name: Some("LUMI".into()),
             model_id: Some("lumi.motion.ac02".into()),
             endpoints: vec![
-                EndpointFp { ep: 2, profile: 0x0104, device_id: 0x0107, in_clusters: vec![0x0406], out_clusters: vec![] },
-                EndpointFp { ep: 1, profile: 0x0104, device_id: 0x0107, in_clusters: vec![0x0000], out_clusters: vec![] },
+                EndpointFp {
+                    ep: 2,
+                    profile: 0x0104,
+                    device_id: 0x0107,
+                    in_clusters: vec![0x0406],
+                    out_clusters: vec![],
+                },
+                EndpointFp {
+                    ep: 1,
+                    profile: 0x0104,
+                    device_id: 0x0107,
+                    in_clusters: vec![0x0000],
+                    out_clusters: vec![],
+                },
             ],
             ..Default::default()
         };
@@ -317,7 +336,10 @@ mod tests {
 
     #[test]
     fn power_classification() {
-        let mut f = Fingerprint { power_source: Some(0x03), ..Default::default() };
+        let mut f = Fingerprint {
+            power_source: Some(0x03),
+            ..Default::default()
+        };
         assert_eq!(f.power(), PowerKind::Battery);
         f.power_source = Some(0x81);
         assert_eq!(f.power(), PowerKind::Mains);

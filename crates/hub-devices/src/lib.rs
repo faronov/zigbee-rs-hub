@@ -8,7 +8,14 @@
 #![warn(missing_docs)]
 // Nested `if let` reads better than let-chains in the decoders (as in zdef);
 // the handlers take the full request context.
-#![allow(clippy::collapsible_if, clippy::too_many_arguments, clippy::type_complexity, clippy::if_same_then_else)]
+#![allow(
+    clippy::collapsible_if,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::if_same_then_else,
+    clippy::new_ret_no_self,
+    clippy::field_reassign_with_default
+)]
 
 pub mod api;
 pub mod codec;

@@ -25,10 +25,16 @@ pub fn from_zcl(v: &ZclValue) -> Value {
 /// check; integers are rounded.
 pub fn to_zcl(ty: ZclType, v: &Value) -> Result<ZclValue, String> {
     if ty == ZclType::BOOL {
-        return v.truthy().map(|b| ZclValue::Bool(Some(b))).ok_or_else(|| format!("bool expected, got {v:?}"));
+        return v
+            .truthy()
+            .map(|b| ZclValue::Bool(Some(b)))
+            .ok_or_else(|| format!("bool expected, got {v:?}"));
     }
     if ty.is_float() {
-        return v.as_f64().map(ZclValue::Float).ok_or_else(|| "number expected".into());
+        return v
+            .as_f64()
+            .map(ZclValue::Float)
+            .ok_or_else(|| "number expected".into());
     }
     if matches!(ty, ZclType::OCTET_STR | ZclType::LONG_OCTET_STR) {
         return match v {
@@ -44,12 +50,18 @@ pub fn to_zcl(ty: ZclType, v: &Value) -> Result<ZclValue, String> {
         };
     }
     let (lo, hi) = int_range(ty).ok_or_else(|| format!("type {ty} not writable"))?;
-    let f = v.as_f64().ok_or_else(|| format!("number expected, got {v:?}"))?;
+    let f = v
+        .as_f64()
+        .ok_or_else(|| format!("number expected, got {v:?}"))?;
     let i = f.round() as i128;
     if i < lo || i > hi {
         return Err(format!("{f} out of range {lo}..={hi} for type {ty}"));
     }
-    Ok(if ty.int_width().is_some() { ZclValue::Int(i as i64) } else { ZclValue::Uint(i as u64) })
+    Ok(if ty.int_width().is_some() {
+        ZclValue::Int(i as i64)
+    } else {
+        ZclValue::Uint(i as u64)
+    })
 }
 
 /// Outcome flags of one decode, for diagnostics counters.
@@ -130,8 +142,16 @@ pub fn decode(
     let (mut mul, mut div) = (t.mul, t.div);
     if mul.is_none() && div.is_none() {
         if let Some(s) = &t.attr_scale {
-            let m = s.mul_attr.and_then(|a| scale(s.cluster, a)).filter(|v| *v != 0.0).unwrap_or(1.0);
-            let d = s.div_attr.and_then(|a| scale(s.cluster, a)).filter(|v| *v != 0.0).unwrap_or(1.0);
+            let m = s
+                .mul_attr
+                .and_then(|a| scale(s.cluster, a))
+                .filter(|v| *v != 0.0)
+                .unwrap_or(1.0);
+            let d = s
+                .div_attr
+                .and_then(|a| scale(s.cluster, a))
+                .filter(|v| *v != 0.0)
+                .unwrap_or(1.0);
             mul = Some(m * s.factor);
             div = Some(d);
         }
@@ -162,22 +182,43 @@ pub fn decode(
 pub struct EncodeError(pub String);
 
 /// Encodes a commanded value (6.4, inverse order).
-pub fn encode(vd: &ValueDef, is_bool: bool, v: &Value, env: &dyn ExprEnv) -> Result<Value, EncodeError> {
+pub fn encode(
+    vd: &ValueDef,
+    is_bool: bool,
+    v: &Value,
+    env: &dyn ExprEnv,
+) -> Result<Value, EncodeError> {
     let t: &Transforms = &vd.transforms;
     let err = |s: String| EncodeError(s);
     if let (Some(n), true) = (v.as_f64(), !matches!(v, Value::Bool(_) | Value::Str(_))) {
-        if vd.limits.min.is_some_and(|m| n < m - 1e-9) || vd.limits.max.is_some_and(|m| n > m + 1e-9) {
-            return Err(err(format!("{n} outside {:?}..{:?}", vd.limits.min, vd.limits.max)));
+        if vd.limits.min.is_some_and(|m| n < m - 1e-9)
+            || vd.limits.max.is_some_and(|m| n > m + 1e-9)
+        {
+            return Err(err(format!(
+                "{n} outside {:?}..{:?}",
+                vd.limits.min, vd.limits.max
+            )));
         }
     }
     let mut x = v.clone();
     if !t.map.is_empty() {
-        let label = x.as_str().ok_or_else(|| err(format!("option expected, got {x:?}")))?;
-        let (raw, _) = t.map.iter().find(|(_, l)| l == label).ok_or_else(|| err(format!("unknown option {label:?}")))?;
+        let label = x
+            .as_str()
+            .ok_or_else(|| err(format!("option expected, got {x:?}")))?;
+        let (raw, _) = t
+            .map
+            .iter()
+            .find(|(_, l)| l == label)
+            .ok_or_else(|| err(format!("unknown option {label:?}")))?;
         x = Value::Int(*raw);
     } else if t.value_on.is_some() || t.value_off.is_some() {
         let b = x.truthy().ok_or_else(|| err("bool expected".into()))?;
-        x = if b { t.value_on.clone() } else { t.value_off.clone() }.ok_or_else(|| err("no raw value for that state".into()))?;
+        x = if b {
+            t.value_on.clone()
+        } else {
+            t.value_off.clone()
+        }
+        .ok_or_else(|| err("no raw value for that state".into()))?;
     } else if is_bool {
         x = Value::Bool(x.truthy().ok_or_else(|| err("bool expected".into()))?);
     }
@@ -185,7 +226,10 @@ pub fn encode(vd: &ValueDef, is_bool: bool, v: &Value, env: &dyn ExprEnv) -> Res
         x = codec::encode(c, &x).map_err(|e| err(e.0))?;
     }
     if t.mul.is_some() || t.div.is_some() || t.offset.is_some() {
-        let n = x.as_f64().filter(|_| !matches!(x, Value::Bool(_))).ok_or_else(|| err("number expected".into()))?;
+        let n = x
+            .as_f64()
+            .filter(|_| !matches!(x, Value::Bool(_)))
+            .ok_or_else(|| err("number expected".into()))?;
         let r = (n - t.offset.unwrap_or(0.0)) * t.div.unwrap_or(1.0) / t.mul.unwrap_or(1.0);
         x = Value::Float(r);
     }
@@ -217,46 +261,115 @@ mod tests {
 
     fn vd(t: Transforms) -> ValueDef {
         ValueDef {
-            binding: Binding::Zcl(ZclBinding { cluster: 0x0402, attr: 0x0410, ty: ZclType::I16, mfr: None, write: ZclWrite::Attribute }),
+            binding: Binding::Zcl(ZclBinding {
+                cluster: 0x0402,
+                attr: 0x0410,
+                ty: ZclType::I16,
+                mfr: None,
+                write: ZclWrite::Attribute,
+            }),
             transforms: t,
-            limits: Limits { min: Some(-50.0), max: Some(50.0), step: Some(0.1), mode: None },
+            limits: Limits {
+                min: Some(-50.0),
+                max: Some(50.0),
+                step: Some(0.1),
+                mode: None,
+            },
             ..Default::default()
         }
     }
 
     #[test]
     fn spec_6_5_example() {
-        let v = vd(Transforms { div: Some(10.0), ..Default::default() });
+        let v = vd(Transforms {
+            div: Some(10.0),
+            ..Default::default()
+        });
         let none = |_: u16, _: u16| None;
-        assert_eq!(decode(&v, false, Value::Int(-15), &EmptyEnv, &none).0, Value::Float(-1.5));
-        assert_eq!(encode(&v, false, &Value::Float(2.3), &EmptyEnv).unwrap(), Value::Int(23));
+        assert_eq!(
+            decode(&v, false, Value::Int(-15), &EmptyEnv, &none).0,
+            Value::Float(-1.5)
+        );
+        assert_eq!(
+            encode(&v, false, &Value::Float(2.3), &EmptyEnv).unwrap(),
+            Value::Int(23)
+        );
         assert!(encode(&v, false, &Value::Float(51.0), &EmptyEnv).is_err());
-        assert_eq!(to_zcl(ZclType::I16, &Value::Int(23)).unwrap(), ZclValue::Int(23));
+        assert_eq!(
+            to_zcl(ZclType::I16, &Value::Int(23)).unwrap(),
+            ZclValue::Int(23)
+        );
         assert!(to_zcl(ZclType::U8, &Value::Int(300)).is_err());
     }
 
     #[test]
     fn map_bool_invalid_precision() {
         let none = |_: u16, _: u16| None;
-        let m = vd(Transforms { map: vec![(1, "low".into()), (2, "high".into())], ..Default::default() });
-        assert_eq!(decode(&m, false, Value::Int(2), &EmptyEnv, &none).0, Value::Str("high".into()));
+        let m = vd(Transforms {
+            map: vec![(1, "low".into()), (2, "high".into())],
+            ..Default::default()
+        });
+        assert_eq!(
+            decode(&m, false, Value::Int(2), &EmptyEnv, &none).0,
+            Value::Str("high".into())
+        );
         let (v, f) = decode(&m, false, Value::Int(9), &EmptyEnv, &none);
         assert!(v.is_null() && f.map_miss);
-        assert_eq!(encode(&m, false, &Value::Str("low".into()), &EmptyEnv).unwrap(), Value::Int(1));
+        assert_eq!(
+            encode(&m, false, &Value::Str("low".into()), &EmptyEnv).unwrap(),
+            Value::Int(1)
+        );
         assert!(encode(&m, false, &Value::Str("mid".into()), &EmptyEnv).is_err());
-        let b = vd(Transforms { value_on: Some(Value::Int(1)), value_off: Some(Value::Int(0)), ..Default::default() });
-        assert_eq!(decode(&b, true, Value::Int(1), &EmptyEnv, &none).0, Value::Bool(true));
-        assert_eq!(encode(&b, true, &Value::Bool(false), &EmptyEnv).unwrap(), Value::Int(0));
-        let inv = vd(Transforms { invalid: Some(-32768.0), div: Some(100.0), ..Default::default() });
-        assert!(decode(&inv, false, Value::Int(-32768), &EmptyEnv, &none).0.is_null());
-        assert_eq!(decode(&inv, false, Value::Int(2137), &EmptyEnv, &none).0, Value::Float(21.37));
-        let p = vd(Transforms { mul: Some(360.0), div: Some(254.0), precision: Some(1), ..Default::default() });
-        assert_eq!(decode(&p, false, Value::Int(127), &EmptyEnv, &none).0, Value::Float(180.0));
+        let b = vd(Transforms {
+            value_on: Some(Value::Int(1)),
+            value_off: Some(Value::Int(0)),
+            ..Default::default()
+        });
+        assert_eq!(
+            decode(&b, true, Value::Int(1), &EmptyEnv, &none).0,
+            Value::Bool(true)
+        );
+        assert_eq!(
+            encode(&b, true, &Value::Bool(false), &EmptyEnv).unwrap(),
+            Value::Int(0)
+        );
+        let inv = vd(Transforms {
+            invalid: Some(-32768.0),
+            div: Some(100.0),
+            ..Default::default()
+        });
+        assert!(
+            decode(&inv, false, Value::Int(-32768), &EmptyEnv, &none)
+                .0
+                .is_null()
+        );
+        assert_eq!(
+            decode(&inv, false, Value::Int(2137), &EmptyEnv, &none).0,
+            Value::Float(21.37)
+        );
+        let p = vd(Transforms {
+            mul: Some(360.0),
+            div: Some(254.0),
+            precision: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(
+            decode(&p, false, Value::Int(127), &EmptyEnv, &none).0,
+            Value::Float(180.0)
+        );
         let sc = vd(Transforms {
-            attr_scale: Some(crate::model::AttrScale { cluster: 0x0B04, mul_attr: Some(1), div_attr: Some(2), factor: 1.0 }),
+            attr_scale: Some(crate::model::AttrScale {
+                cluster: 0x0B04,
+                mul_attr: Some(1),
+                div_attr: Some(2),
+                factor: 1.0,
+            }),
             ..Default::default()
         });
         let scale = |_: u16, a: u16| if a == 1 { Some(1.0) } else { Some(1000.0) };
-        assert_eq!(decode(&sc, false, Value::Int(523), &EmptyEnv, &scale).0, Value::Float(0.523));
+        assert_eq!(
+            decode(&sc, false, Value::Int(523), &EmptyEnv, &scale).0,
+            Value::Float(0.523)
+        );
     }
 }

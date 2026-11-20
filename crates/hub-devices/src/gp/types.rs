@@ -31,7 +31,9 @@ pub mod ids {
 }
 
 /// GPD identifier (`app_id` 0 or 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum GpdId {
     /// Application ID 0.
     SrcId(u32),
@@ -419,7 +421,8 @@ impl GpRequest {
     /// `true` for remote provisioning requests answered by an
     /// `EVT_GP_REMOTE_*` with the request's ZCL TSN.
     pub fn is_remote(&self) -> bool {
-        (ids::GP_PAIRING_CONFIGURATION..=ids::GP_REMOTE_PROXY_TABLE_REQUEST).contains(&self.zrhp_id())
+        (ids::GP_PAIRING_CONFIGURATION..=ids::GP_REMOTE_PROXY_TABLE_REQUEST)
+            .contains(&self.zrhp_id())
     }
 }
 

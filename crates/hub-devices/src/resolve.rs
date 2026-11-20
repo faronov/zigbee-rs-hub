@@ -75,12 +75,19 @@ pub struct FpEnv<'a>(pub &'a Fingerprint);
 
 impl ExprEnv for FpEnv<'_> {
     fn gpd(&self, f: &str) -> Value {
-        let Some(g) = &self.0.gp else { return Value::Null };
+        let Some(g) = &self.0.gp else {
+            return Value::Null;
+        };
         match f {
             "device_id" => Value::Int(i64::from(g.device_id)),
-            "manufacturer_id" => g.manufacturer_id.map_or(Value::Null, |v| Value::Int(i64::from(v))),
+            "manufacturer_id" => g
+                .manufacturer_id
+                .map_or(Value::Null, |v| Value::Int(i64::from(v))),
             "model_id" => g.model_id.map_or(Value::Null, |v| Value::Int(i64::from(v))),
-            "src_id" => g.gpd_id.src_id().map_or(Value::Null, |v| Value::Int(i64::from(v))),
+            "src_id" => g
+                .gpd_id
+                .src_id()
+                .map_or(Value::Null, |v| Value::Int(i64::from(v))),
             _ => Value::Null,
         }
     }
@@ -128,19 +135,29 @@ pub fn score_clause(c: &MatchClause, fp: &Fingerprint) -> Option<u32> {
             }
         }
         if let Some((prefix, n)) = g.ieee_prefix {
-            let crate::gp::types::GpdId::Ieee { ieee, .. } = gf.gpd_id else { return None };
+            let crate::gp::types::GpdId::Ieee { ieee, .. } = gf.gpd_id else {
+                return None;
+            };
             let shift = 64 - 8 * u32::from(n.min(8));
             if n > 0 && (ieee >> shift) != (prefix >> shift) {
                 return None;
             }
         }
         if !g.commands.iter().all(|x| gf.commands.contains(x))
-            || !g.server_clusters.iter().all(|x| gf.server_clusters.contains(x))
-            || !g.client_clusters.iter().all(|x| gf.client_clusters.contains(x))
+            || !g
+                .server_clusters
+                .iter()
+                .all(|x| gf.server_clusters.contains(x))
+            || !g
+                .client_clusters
+                .iter()
+                .all(|x| gf.client_clusters.contains(x))
         {
             return None;
         }
-        let base = if (g.manufacturer_id.is_some() && g.model_id.is_some()) || (g.src_id.is_some() && g.device_id.is_some()) {
+        let base = if (g.manufacturer_id.is_some() && g.model_id.is_some())
+            || (g.src_id.is_some() && g.device_id.is_some())
+        {
             600
         } else if g.device_id.is_some() && !g.commands.is_empty() {
             300
@@ -168,7 +185,9 @@ pub fn score_clause(c: &MatchClause, fp: &Fingerprint) -> Option<u32> {
         || !in_range(fp.app_version, c.app_version)
         || !in_range(fp.stack_version, c.stack_version)
         || !in_range(fp.hw_version, c.hw_version)
-        || c.sw_build.as_ref().is_some_and(|m| !fp.sw_build_id.as_deref().is_some_and(|v| m.matches(v)))
+        || c.sw_build
+            .as_ref()
+            .is_some_and(|m| !fp.sw_build_id.as_deref().is_some_and(|v| m.matches(v)))
         || c.power.is_some_and(|p| fp.power() != p)
     {
         return None;
@@ -218,7 +237,10 @@ pub fn score(d: &Definition, fp: &Fingerprint) -> Option<u32> {
 
 /// The features of `d` this hub lacks.
 pub fn missing_features(d: &Definition, features: &[&str]) -> Vec<String> {
-    d.used_features().into_iter().filter(|f| !features.contains(&f.as_str())).collect()
+    d.used_features()
+        .into_iter()
+        .filter(|f| !features.contains(&f.as_str()))
+        .collect()
 }
 
 /// Picks the best definition among candidates (3.3 ties: priority, user
@@ -235,12 +257,18 @@ pub fn best_match(
         let Some(s) = score(&d, fp) else { continue };
         let missing = missing_features(&d, features);
         if !missing.is_empty() {
-            skipped.push(format!("definition_skipped: {} requires {}", d.id, missing.join(", ")));
+            skipped.push(format!(
+                "definition_skipped: {} requires {}",
+                d.id,
+                missing.join(", ")
+            ));
             continue;
         }
         let better = match &best {
             None => true,
-            Some((b, bs)) => (s, d.priority, d.source, d.revision) > (*bs, b.priority, b.source, b.revision),
+            Some((b, bs)) => {
+                (s, d.priority, d.source, d.revision) > (*bs, b.priority, b.source, b.revision)
+            }
         };
         if better {
             best = Some((d, s));
@@ -307,7 +335,9 @@ pub struct Resolution {
 impl Resolution {
     /// Entity by `(ep, key)`.
     pub fn entity(&self, ep: u8, key: &str) -> Option<&ResolvedEntity> {
-        self.entities.iter().find(|e| e.ep == ep && e.def.key == key)
+        self.entities
+            .iter()
+            .find(|e| e.ep == ep && e.def.key == key)
     }
 }
 
@@ -358,7 +388,9 @@ fn bound_cluster(e: &EntityDef) -> Option<(u16, bool)> {
 
 fn is_gp_entity(e: &EntityDef) -> bool {
     e.values().any(|(_, v)| matches!(v.binding, Binding::Gp(_)))
-        || e.triggers.iter().any(|t| matches!(t.source, TriggerSource::GpCmd(_)))
+        || e.triggers
+            .iter()
+            .any(|t| matches!(t.source, TriggerSource::GpCmd(_)))
 }
 
 /// Default endpoint of a definition entity (6.3).
@@ -381,7 +413,11 @@ pub fn default_endpoint(e: &EntityDef, fp: &Fingerprint) -> u8 {
     }) {
         return ep;
     }
-    let app: Vec<_> = fp.endpoints.iter().filter(|x| x.profile != PROFILE_GP).collect();
+    let app: Vec<_> = fp
+        .endpoints
+        .iter()
+        .filter(|x| x.profile != PROFILE_GP)
+        .collect();
     if let Some((c, server)) = bound_cluster(e) {
         if let Some(x) = app
             .iter()
@@ -460,19 +496,32 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
     let mut skipped = Vec::new();
 
     // Layers 2 and 4: catalog and user, or the pinned definition.
-    let pinned = input.pinned.and_then(|id| input.user.get(id).or_else(|| input.catalog.get(id)));
+    let pinned = input
+        .pinned
+        .and_then(|id| input.user.get(id).or_else(|| input.catalog.get(id)));
     let (catalog, user) = match pinned {
         Some(p) if p.source == LayerSource::User => (None, Some((p, None))),
         Some(p) => (Some((p, None)), None),
         None => (
-            best_match(input.catalog.candidates(fp), fp, input.features, &mut skipped).map(|(d, s)| (d, Some(s))),
-            best_match(input.user.candidates(fp), fp, input.features, &mut skipped).map(|(d, s)| (d, Some(s))),
+            best_match(
+                input.catalog.candidates(fp),
+                fp,
+                input.features,
+                &mut skipped,
+            )
+            .map(|(d, s)| (d, Some(s))),
+            best_match(input.user.candidates(fp), fp, input.features, &mut skipped)
+                .map(|(d, s)| (d, Some(s))),
         ),
     };
     // A user definition replaces the catalog definition (3.3).
     let chosen = user.or(catalog);
-    let selfdesc_mode = chosen.as_ref().map_or(SelfDescMode::Over, |(d, _)| d.self_description);
-    let selfdesc = input.self_description.filter(|_| selfdesc_mode != SelfDescMode::Ignore);
+    let selfdesc_mode = chosen
+        .as_ref()
+        .map_or(SelfDescMode::Over, |(d, _)| d.self_description);
+    let selfdesc = input
+        .self_description
+        .filter(|_| selfdesc_mode != SelfDescMode::Ignore);
 
     // Layer order, bottom to top (excluding generic).
     let mut layers: Vec<(&Definition, Option<u32>)> = Vec::new();
@@ -489,18 +538,30 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
     }
 
     // Device fields.
-    let mut device = DeviceFields { power: Some(fp.power()), sleepy: Some(fp.sleepy()), ..Default::default() };
+    let mut device = DeviceFields {
+        power: Some(fp.power()),
+        sleepy: Some(fp.sleepy()),
+        ..Default::default()
+    };
     for (d, _) in &layers {
         device.overlay(&d.device);
     }
     let power = device.power.unwrap_or(PowerKind::Mains);
 
     // Layer 1 with the knobs of the higher layers.
-    res.layers.push(LayerRef { source: LayerSource::Generic, id: "generic".into(), revision: 1, content_hash: None, score: None });
+    res.layers.push(LayerRef {
+        source: LayerSource::Generic,
+        id: "generic".into(),
+        revision: 1,
+        content_hash: None,
+        score: None,
+    });
     let disable = layers.iter().any(|(d, _)| d.generic.disable);
     let mut merged: BTreeMap<(u8, String), ResolvedEntity> = BTreeMap::new();
     let mut order: Vec<(u8, String)> = Vec::new();
-    let put = |merged: &mut BTreeMap<(u8, String), ResolvedEntity>, order: &mut Vec<(u8, String)>, r: ResolvedEntity| {
+    let put = |merged: &mut BTreeMap<(u8, String), ResolvedEntity>,
+               order: &mut Vec<(u8, String)>,
+               r: ResolvedEntity| {
         let k = (r.ep, r.def.key.clone());
         if !merged.contains_key(&k) {
             order.push(k.clone());
@@ -513,11 +574,18 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         if disable && !device_level {
             continue;
         }
-        if layers.iter().any(|(d, _)| d.generic.exclude.contains(&e.key)) {
+        if layers
+            .iter()
+            .any(|(d, _)| d.generic.exclude.contains(&e.key))
+        {
             continue;
         }
         if !device_level {
-            if let Some(only) = layers.iter().rev().find_map(|(d, _)| d.generic.only_endpoints.as_ref()) {
+            if let Some(only) = layers
+                .iter()
+                .rev()
+                .find_map(|(d, _)| d.generic.only_endpoints.as_ref())
+            {
                 if !only.contains(&ep) {
                     continue;
                 }
@@ -531,7 +599,16 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             }
         }
         e.ep = Some(ep);
-        put(&mut merged, &mut order, ResolvedEntity { def: e, ep, source: LayerSource::Generic, ep_name: None });
+        put(
+            &mut merged,
+            &mut order,
+            ResolvedEntity {
+                def: e,
+                ep,
+                source: LayerSource::Generic,
+                ep_name: None,
+            },
+        );
     }
 
     // Definition layers: replace by key, add new keys.
@@ -554,7 +631,16 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             let ep = default_endpoint(e, fp);
             let mut def = e.clone();
             def.ep = Some(ep);
-            put(&mut merged, &mut order, ResolvedEntity { def, ep, source: d.source, ep_name: None });
+            put(
+                &mut merged,
+                &mut order,
+                ResolvedEntity {
+                    def,
+                    ep,
+                    source: d.source,
+                    ep_name: None,
+                },
+            );
         }
         res.configure.extend(d.configure.iter().cloned());
         res.ignore.extend(d.ignore.iter().copied());
@@ -567,17 +653,20 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         if !d.vendor.is_empty() {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());
-            if let Some(wl) = fp
-                .manufacturer_name
-                .as_deref()
-                .and_then(|m| d.white_label.iter().find(|w| w.manufacturer.iter().any(|x| x == m)))
-            {
+            if let Some(wl) = fp.manufacturer_name.as_deref().and_then(|m| {
+                d.white_label
+                    .iter()
+                    .find(|w| w.manufacturer.iter().any(|x| x == m))
+            }) {
                 res.vendor = Some(wl.vendor.clone());
                 res.model = Some(wl.model.clone());
             }
         }
     }
-    let ep_names: BTreeMap<u8, String> = layers.iter().flat_map(|(d, _)| d.endpoints.clone()).collect();
+    let ep_names: BTreeMap<u8, String> = layers
+        .iter()
+        .flat_map(|(d, _)| d.endpoints.clone())
+        .collect();
     res.entities = order
         .into_iter()
         .filter_map(|k| merged.remove(&k))
@@ -601,7 +690,13 @@ mod tests {
         Fingerprint {
             manufacturer_name: Some(man.into()),
             model_id: Some(model.into()),
-            endpoints: vec![EndpointFp { ep: 1, profile: 0x0104, device_id: 0x51, in_clusters: vec![0, 6], out_clusters: vec![] }],
+            endpoints: vec![EndpointFp {
+                ep: 1,
+                profile: 0x0104,
+                device_id: 0x51,
+                in_clusters: vec![0, 6],
+                out_clusters: vec![],
+            }],
             ..Default::default()
         }
     }
@@ -627,7 +722,10 @@ mod tests {
             manufacturer: Some(StrMatch::Prefix("_TZE2".into())),
             ..Default::default()
         };
-        let model_only = MatchClause { model: Some(StrMatch::Exact("TS0601".into())), ..Default::default() };
+        let model_only = MatchClause {
+            model: Some(StrMatch::Exact("TS0601".into())),
+            ..Default::default()
+        };
         assert_eq!(score_clause(&exact, &f), Some(500));
         assert_eq!(score_clause(&prefix, &f), Some(400));
         assert_eq!(score_clause(&model_only, &f), Some(300));
@@ -659,12 +757,30 @@ mod tests {
             pob.ep = Some(1);
             let mut cur = EntityDef::new("current", Platform::Sensor);
             cur.ep = Some(1);
-            cur.value.transforms.attr_scale = Some(AttrScale { cluster: 0x0B04, mul_attr: Some(1), div_attr: Some(2), factor: 1.0 });
+            cur.value.transforms.attr_scale = Some(AttrScale {
+                cluster: 0x0B04,
+                mul_attr: Some(1),
+                div_attr: Some(2),
+                factor: 1.0,
+            });
             vec![s, pob, cur]
         };
-        let mut d = def("innr", MatchClause { model: Some(StrMatch::Exact("SP 120".into())), ..Default::default() }, LayerSource::Catalog);
+        let mut d = def(
+            "innr",
+            MatchClause {
+                model: Some(StrMatch::Exact("SP 120".into())),
+                ..Default::default()
+            },
+            LayerSource::Catalog,
+        );
         d.generic.exclude = vec!["power_on_behavior".into()];
-        d.generic.patch = vec![("current".into(), EntityPatch { div: Some(1000.0), ..Default::default() })];
+        d.generic.patch = vec![(
+            "current".into(),
+            EntityPatch {
+                div: Some(1000.0),
+                ..Default::default()
+            },
+        )];
         let mut extra = EntityDef::new("switch", Platform::Switch);
         extra.name = Some("replaced".into());
         d.entities.push(extra);
@@ -680,8 +796,18 @@ mod tests {
             pinned: None,
             features: HUB_FEATURES,
         });
-        let keys: Vec<_> = r.entities.iter().map(|e| (e.ep, e.def.key.as_str(), e.source)).collect();
-        assert_eq!(keys, [(1, "switch", LayerSource::Catalog), (1, "current", LayerSource::Generic)]);
+        let keys: Vec<_> = r
+            .entities
+            .iter()
+            .map(|e| (e.ep, e.def.key.as_str(), e.source))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (1, "switch", LayerSource::Catalog),
+                (1, "current", LayerSource::Generic)
+            ]
+        );
         assert_eq!(r.entities[0].def.name.as_deref(), Some("replaced"));
         let cur = &r.entities[1].def.value.transforms;
         assert_eq!(cur.div, Some(1000.0));

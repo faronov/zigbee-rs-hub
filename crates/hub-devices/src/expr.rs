@@ -73,7 +73,9 @@ impl Value {
             Self::Null => serde_json::Value::Null,
             Self::Bool(b) => (*b).into(),
             Self::Int(i) => (*i).into(),
-            Self::Float(f) => serde_json::Number::from_f64(*f).map_or(serde_json::Value::Null, Into::into),
+            Self::Float(f) => {
+                serde_json::Number::from_f64(*f).map_or(serde_json::Value::Null, Into::into)
+            }
             Self::Str(s) => s.clone().into(),
             Self::Bytes(b) => hex(b).into(),
         }
@@ -82,7 +84,9 @@ impl Value {
     pub fn from_json(v: &serde_json::Value) -> Self {
         match v {
             serde_json::Value::Bool(b) => Self::Bool(*b),
-            serde_json::Value::Number(n) => n.as_i64().map_or_else(|| Self::Float(n.as_f64().unwrap_or(f64::NAN)), Self::Int),
+            serde_json::Value::Number(n) => n
+                .as_i64()
+                .map_or_else(|| Self::Float(n.as_f64().unwrap_or(f64::NAN)), Self::Int),
             serde_json::Value::String(s) => Self::Str(s.clone()),
             _ => Self::Null,
         }
@@ -146,7 +150,12 @@ pub struct ExprCtx<'a> {
 impl<'a> ExprCtx<'a> {
     /// A context with only `x`.
     pub fn with_x(x: Value, env: &'a dyn ExprEnv) -> Self {
-        Self { x, payload: None, last: None, env }
+        Self {
+            x,
+            payload: None,
+            last: None,
+            env,
+        }
     }
 }
 
@@ -172,8 +181,14 @@ pub struct NativeExpr {
 
 impl NativeExpr {
     /// Wraps a closure.
-    pub fn new(name: &'static str, f: impl Fn(&ExprCtx<'_>) -> Value + Send + Sync + 'static) -> Expr {
-        Arc::new(Self { name, f: Box::new(f) })
+    pub fn new(
+        name: &'static str,
+        f: impl Fn(&ExprCtx<'_>) -> Value + Send + Sync + 'static,
+    ) -> Expr {
+        Arc::new(Self {
+            name,
+            f: Box::new(f),
+        })
     }
 }
 

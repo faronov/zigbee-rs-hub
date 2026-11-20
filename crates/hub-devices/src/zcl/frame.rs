@@ -65,7 +65,11 @@ impl ZclFrame {
             header: ZclHeader {
                 frame_type,
                 mfr,
-                direction: if fc & 0x08 != 0 { Direction::ServerToClient } else { Direction::ClientToServer },
+                direction: if fc & 0x08 != 0 {
+                    Direction::ServerToClient
+                } else {
+                    Direction::ClientToServer
+                },
                 disable_default_response: fc & 0x10 != 0,
                 tsn,
                 cmd,
@@ -102,7 +106,13 @@ impl ZclFrame {
     }
 
     /// A client-to-server command from the hub.
-    pub fn command(frame_type: FrameType, tsn: u8, cmd: u8, mfr: Option<u16>, payload: Vec<u8>) -> Self {
+    pub fn command(
+        frame_type: FrameType,
+        tsn: u8,
+        cmd: u8,
+        mfr: Option<u16>,
+        payload: Vec<u8>,
+    ) -> Self {
         Self {
             header: ZclHeader {
                 frame_type,
@@ -223,10 +233,12 @@ pub fn read_attributes(attrs: &[u16]) -> Vec<u8> {
 /// Parses Read Attributes (the device-side request; used by tests and the
 /// simulator).
 pub fn parse_read_attributes(p: &[u8]) -> Result<Vec<u16>, CodecError> {
-    if p.len() % 2 != 0 {
+    if !p.len().is_multiple_of(2) {
         return Err(CodecError::Truncated);
     }
-    Ok(p.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+    Ok(p.chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect())
 }
 
 /// Parses Read Attributes Response.
@@ -242,7 +254,11 @@ pub fn parse_read_attributes_rsp(p: &[u8]) -> Result<Vec<ReadRecord>, CodecError
         } else {
             None
         };
-        out.push(ReadRecord { attr, status, value });
+        out.push(ReadRecord {
+            attr,
+            status,
+            value,
+        });
     }
     Ok(out)
 }
@@ -294,7 +310,11 @@ pub fn parse_write_attributes_rsp(p: &[u8]) -> Result<Vec<(Status, Option<u16>)>
     let mut out = Vec::new();
     while r.remaining() > 0 {
         let st = Status(r.u8()?);
-        let attr = if r.remaining() >= 2 { Some(r.u16()?) } else { None };
+        let attr = if r.remaining() >= 2 {
+            Some(r.u16()?)
+        } else {
+            None
+        };
         out.push((st, attr));
     }
     Ok(out)
@@ -355,8 +375,18 @@ pub fn parse_configure_reporting(p: &[u8]) -> Result<Vec<ReportingConfig>, Codec
         let ty = ZclType(r.u8()?);
         let min = r.u16()?;
         let max = r.u16()?;
-        let change = if ty.is_analog() { decode_value(ty, &mut r)?.as_f64() } else { None };
-        out.push(ReportingConfig { attr, ty, min, max, change });
+        let change = if ty.is_analog() {
+            decode_value(ty, &mut r)?.as_f64()
+        } else {
+            None
+        };
+        out.push(ReportingConfig {
+            attr,
+            ty,
+            min,
+            max,
+            change,
+        });
     }
     Ok(out)
 }
@@ -445,16 +475,37 @@ mod tests {
         let r = parse_report_attributes(&[0x00, 0x00, 0x29, 0x59, 0x08]).unwrap();
         assert_eq!(r, vec![(0, TypedValue::int(ZclType::I16, 2137))]);
         // Read response with an unsupported attribute.
-        let rr = parse_read_attributes_rsp(&[0x05, 0x00, 0x00, 0x42, 0x02, b'h', b'i', 0x07, 0x00, 0x86]).unwrap();
-        assert_eq!(rr[0].value.as_ref().unwrap().value, ZclValue::String("hi".into()));
+        let rr = parse_read_attributes_rsp(&[
+            0x05, 0x00, 0x00, 0x42, 0x02, b'h', b'i', 0x07, 0x00, 0x86,
+        ])
+        .unwrap();
+        assert_eq!(
+            rr[0].value.as_ref().unwrap().value,
+            ZclValue::String("hi".into())
+        );
         assert_eq!(rr[1].status, Status::UNSUPPORTED_ATTRIBUTE);
-        let cfg = ReportingConfig { attr: 0, ty: ZclType::I16, min: 30, max: 900, change: Some(50.0) };
+        let cfg = ReportingConfig {
+            attr: 0,
+            ty: ZclType::I16,
+            min: 30,
+            max: 900,
+            change: Some(50.0),
+        };
         let p = configure_reporting(std::slice::from_ref(&cfg)).unwrap();
         assert_eq!(p, vec![0x00, 0x00, 0x00, 0x29, 30, 0, 0x84, 0x03, 50, 0]);
         assert_eq!(parse_configure_reporting(&p).unwrap(), vec![cfg]);
-        let onoff = ReportingConfig { attr: 0, ty: ZclType::BOOL, min: 0, max: 900, change: None };
+        let onoff = ReportingConfig {
+            attr: 0,
+            ty: ZclType::BOOL,
+            min: 0,
+            max: 900,
+            change: None,
+        };
         assert_eq!(configure_reporting(&[onoff]).unwrap().len(), 8);
-        assert_eq!(parse_write_attributes_rsp(&[0x00]).unwrap(), vec![(Status::SUCCESS, None)]);
+        assert_eq!(
+            parse_write_attributes_rsp(&[0x00]).unwrap(),
+            vec![(Status::SUCCESS, None)]
+        );
         assert_eq!(
             parse_configure_reporting_rsp(&[0x8C, 0x00, 0x21, 0x00]).unwrap(),
             vec![(Status::UNREPORTABLE_ATTRIBUTE, Some(0x0021))]

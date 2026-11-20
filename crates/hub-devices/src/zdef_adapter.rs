@@ -58,10 +58,14 @@ impl<'a> Host<'a> for ZHost<'a> {
         self.borrow(self.env.opt(key))
     }
     fn gpd(&self, field: u8) -> ZValue<'a> {
-        GPD_FIELDS.get(usize::from(field)).map_or(ZValue::Null, |f| self.borrow(self.env.gpd(f)))
+        GPD_FIELDS
+            .get(usize::from(field))
+            .map_or(ZValue::Null, |f| self.borrow(self.env.gpd(f)))
     }
     fn fp(&self, field: u8) -> ZValue<'a> {
-        FP_FIELDS.get(usize::from(field)).map_or(ZValue::Null, |(f, _)| self.borrow(self.env.fp(f)))
+        FP_FIELDS
+            .get(usize::from(field))
+            .map_or(ZValue::Null, |(f, _)| self.borrow(self.env.fp(f)))
     }
     fn now(&self) -> Option<i64> {
         Some(self.env.now())
@@ -78,9 +82,17 @@ impl Expression for ZdefExpr {
     fn eval(&self, ctx: &ExprCtx<'_>) -> Value {
         let strs = Arena::new();
         let bytes = Arena::new();
-        let host = ZHost { env: ctx.env, strs: &strs, bytes: &bytes };
+        let host = ZHost {
+            env: ctx.env,
+            strs: &strs,
+            bytes: &bytes,
+        };
         let x = host.borrow(ctx.x.clone());
-        let inputs = Inputs { x, payload: ctx.payload, last: ctx.last };
+        let inputs = Inputs {
+            x,
+            payload: ctx.payload,
+            last: ctx.last,
+        };
         let mut vm = Vm::new();
         match vm.eval_or_null(self.code.code(), &self.def.consts, &inputs, &host) {
             ZValue::Null => Value::Null,
@@ -104,7 +116,10 @@ struct Cx {
 
 impl Cx {
     fn expr(&self, e: &z::Expr) -> Expr {
-        Arc::new(ZdefExpr { def: self.def.clone(), code: e.clone() })
+        Arc::new(ZdefExpr {
+            def: self.def.clone(),
+            code: e.clone(),
+        })
     }
     fn opt_expr(&self, e: &Option<z::Expr>) -> Option<Expr> {
         e.as_ref().map(|e| self.expr(e))
@@ -128,7 +143,11 @@ fn scalar(s: &z::Scalar) -> Value {
 fn report(r: &z::Report) -> ReportSpec {
     match r {
         z::Report::Off => ReportSpec::Off,
-        z::Report::Config { min, max, change } => ReportSpec::Config { min: *min, max: *max, change: num(change) },
+        z::Report::Config { min, max, change } => ReportSpec::Config {
+            min: *min,
+            max: *max,
+            change: num(change),
+        },
     }
 }
 
@@ -154,33 +173,67 @@ fn tuya_ty(t: zdef::enums::TuyaType) -> TuyaType {
 fn codec(c: &z::Codec) -> Result<Codec, AdaptError> {
     Ok(match c {
         z::Codec::ZclTagged => Codec::ZclTagged,
-        z::Codec::TuyaScheduleDay { day, transitions } => Codec::TuyaScheduleDay { day: *day, transitions: *transitions },
+        z::Codec::TuyaScheduleDay { day, transitions } => Codec::TuyaScheduleDay {
+            day: *day,
+            transitions: *transitions,
+        },
         z::Codec::BcdTime => Codec::BcdTime,
         z::Codec::Hhmm => Codec::Hhmm,
         z::Codec::Ascii => Codec::Ascii,
         z::Codec::Utf16beHex => Codec::Utf16BeHex,
         z::Codec::BitmapFlags(v) => Codec::BitmapFlags(v.clone()),
-        z::Codec::TuyaScheduleWeek { variant } => return Err(AdaptError(format!("codec tuya_schedule_week/{variant} not implemented"))),
+        z::Codec::TuyaScheduleWeek { variant } => {
+            return Err(AdaptError(format!(
+                "codec tuya_schedule_week/{variant} not implemented"
+            )));
+        }
     })
 }
 
 fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
     let binding = if let Some(b) = &e.zcl {
-        Binding::Zcl(ZclBinding { cluster: b.cluster, attr: b.attr, ty: ZclType(b.zcl_type), mfr: b.mfr, write: ZclWrite::Attribute })
+        Binding::Zcl(ZclBinding {
+            cluster: b.cluster,
+            attr: b.attr,
+            ty: ZclType(b.zcl_type),
+            mfr: b.mfr,
+            write: ZclWrite::Attribute,
+        })
     } else if let Some(t) = &e.tuya {
-        Binding::Tuya { dp: t.dp, ty: tuya_ty(t.ty) }
+        Binding::Tuya {
+            dp: t.dp,
+            ty: tuya_ty(t.ty),
+        }
     } else if let Some(s) = &e.struct_ {
         if s.codec != "zcl_tagged" {
             return Err(AdaptError(format!("struct codec {}", s.codec)));
         }
-        Binding::Struct { cluster: s.cluster, attr: s.attr, mfr: s.mfr, codec: Codec::ZclTagged, tag: s.tag.unwrap_or(0) as u8 }
+        Binding::Struct {
+            cluster: s.cluster,
+            attr: s.attr,
+            mfr: s.mfr,
+            codec: Codec::ZclTagged,
+            tag: s.tag.unwrap_or(0) as u8,
+        }
     } else if let Some(g) = &e.gp {
         Binding::Gp(match g {
-            z::GpBinding::Report { cluster, attr, zcl_type, mfr } => GpBinding::Report { cluster: *cluster, attr: *attr, ty: ZclType(*zcl_type), mfr: *mfr },
+            z::GpBinding::Report {
+                cluster,
+                attr,
+                zcl_type,
+                mfr,
+            } => GpBinding::Report {
+                cluster: *cluster,
+                attr: *attr,
+                ty: ZclType(*zcl_type),
+                mfr: *mfr,
+            },
             z::GpBinding::Cmd(c) => GpBinding::Cmd(*c),
         })
     } else if let Some(h) = &e.hub {
-        Binding::Hub { default: h.default.as_ref().map_or(Value::Null, scalar) }
+        Binding::Hub {
+            default: h.default.as_ref().map_or(Value::Null, scalar),
+        }
     } else {
         Binding::None
     };
@@ -200,7 +253,12 @@ fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
             precision: e.precision,
             attr_scale: None,
         },
-        limits: Limits { min: num(&e.min), max: num(&e.max), step: num(&e.step), mode: e.mode.clone() },
+        limits: Limits {
+            min: num(&e.min),
+            max: num(&e.max),
+            step: num(&e.step),
+            mode: e.mode.clone(),
+        },
         report: e.report.as_ref().map(report),
         access: access(e.access),
     })
@@ -211,8 +269,13 @@ fn platform(p: zdef::enums::Platform) -> Platform {
 }
 
 fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
-    let key = e.key.clone().ok_or_else(|| AdaptError("entity without key".into()))?;
-    let p = e.platform.ok_or_else(|| AdaptError(format!("{key}: no platform")))?;
+    let key = e
+        .key
+        .clone()
+        .ok_or_else(|| AdaptError("entity without key".into()))?;
+    let p = e
+        .platform
+        .ok_or_else(|| AdaptError(format!("{key}: no platform")))?;
     let mut d = EntityDef::new(key, platform(p));
     d.device_class = table(e.device_class, zdef::enums::DEVICE_CLASSES);
     d.unit = table(e.unit, zdef::enums::UNITS);
@@ -220,15 +283,24 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
     d.category = e.category.and_then(|c| Category::parse(c.as_str()));
     d.name = e.name.clone();
     d.enabled = e.enabled.unwrap_or(true);
-    d.ep = e.ep.or(e.zcl.and_then(|z| z.ep)).or(e.struct_.as_ref().and_then(|s| s.ep));
+    d.ep =
+        e.ep.or(e.zcl.and_then(|z| z.ep))
+            .or(e.struct_.as_ref().and_then(|s| s.ep));
     d.value = value_def(cx, e)?;
     for (k, pe) in &e.parts {
-        let name = zdef::keys::sub_name(u64::from(*k)).ok_or_else(|| AdaptError(format!("unknown part key {k}")))?;
+        let name = zdef::keys::sub_name(u64::from(*k))
+            .ok_or_else(|| AdaptError(format!("unknown part key {k}")))?;
         d.parts.push((name.to_string(), value_def(cx, pe)?));
     }
     for t in &e.triggers {
         let source = if let Some(c) = t.cmd {
-            TriggerSource::Cmd { ep: c.ep, cluster: c.cluster, id: c.id, mfr: c.mfr, global: false }
+            TriggerSource::Cmd {
+                ep: c.ep,
+                cluster: c.cluster,
+                id: c.id,
+                mfr: c.mfr,
+                global: false,
+            }
         } else if let Some(g) = t.gp_cmd {
             TriggerSource::GpCmd(g)
         } else if let Some(dp) = t.tuya {
@@ -236,9 +308,18 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
         } else {
             return Err(AdaptError("trigger without source".into()));
         };
-        let mut attrs: Vec<(String, Expr)> = t.attrs.iter().map(|(k, x)| (k.clone(), cx.expr(x))).collect();
+        let mut attrs: Vec<(String, Expr)> = t
+            .attrs
+            .iter()
+            .map(|(k, x)| (k.clone(), cx.expr(x)))
+            .collect();
         attrs.extend(e.attrs.iter().map(|(k, x)| (k.clone(), cx.expr(x))));
-        d.triggers.push(Trigger { source, when: cx.opt_expr(&t.when), event: EventSel::Expr(cx.expr(&t.event)), attrs });
+        d.triggers.push(Trigger {
+            source,
+            when: cx.opt_expr(&t.when),
+            event: EventSel::Expr(cx.expr(&t.event)),
+            attrs,
+        });
     }
     d.event_types = e.event_types.clone();
     d.press = match &e.press {
@@ -250,8 +331,18 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
             ep: cmd.ep,
             payload: payload.as_ref().map(|p| PressPayload::Expr(cx.expr(p))),
         }),
-        Some(z::Press::Write(w)) => Some(Press::Write { cluster: w.cluster, attr: w.attr, ty: ZclType(w.zcl_type), value: scalar(&w.value), mfr: w.mfr }),
-        Some(z::Press::Tuya { dp, value }) => Some(Press::Tuya { dp: dp.dp, ty: tuya_ty(dp.ty), value: scalar(value) }),
+        Some(z::Press::Write(w)) => Some(Press::Write {
+            cluster: w.cluster,
+            attr: w.attr,
+            ty: ZclType(w.zcl_type),
+            value: scalar(&w.value),
+            mfr: w.mfr,
+        }),
+        Some(z::Press::Tuya { dp, value }) => Some(Press::Tuya {
+            dp: dp.dp,
+            ty: tuya_ty(dp.ty),
+            value: scalar(value),
+        }),
     };
     d.reset_after = cx.opt_expr(&e.reset_after);
     d.present_if = cx.opt_expr(&e.present_if);
@@ -288,7 +379,12 @@ fn name_match(m: &z::NameMatch) -> StrMatch {
 }
 
 fn range(r: &z::VersionRange) -> (u32, u32) {
-    (r.min.unwrap_or(0).clamp(0, i64::from(u32::MAX)) as u32, r.max.unwrap_or(i64::from(u32::MAX)).clamp(0, i64::from(u32::MAX)) as u32)
+    (
+        r.min.unwrap_or(0).clamp(0, i64::from(u32::MAX)) as u32,
+        r.max
+            .unwrap_or(i64::from(u32::MAX))
+            .clamp(0, i64::from(u32::MAX)) as u32,
+    )
 }
 
 fn clause(c: &z::MatchClause) -> MatchClause {
@@ -304,7 +400,13 @@ fn clause(c: &z::MatchClause) -> MatchClause {
         endpoints: c
             .endpoints
             .iter()
-            .map(|(ep, m)| EpMatch { ep: *ep, profile: m.profile, device_id: m.device_id, in_clusters: m.in_clusters.clone(), out_clusters: m.out_clusters.clone() })
+            .map(|(ep, m)| EpMatch {
+                ep: *ep,
+                profile: m.profile,
+                device_id: m.device_id,
+                in_clusters: m.in_clusters.clone(),
+                out_clusters: m.out_clusters.clone(),
+            })
             .collect(),
         gp: c.gp.as_ref().map(|g| GpMatch {
             device_id: g.device_id,
@@ -313,36 +415,108 @@ fn clause(c: &z::MatchClause) -> MatchClause {
             src_id: g.src_id,
             ieee_prefix: g.ieee.as_ref().and_then(|h| {
                 let n = (h.len() / 2).min(8) as u8;
-                u64::from_str_radix(&format!("{h:0<16}")[..16], 16).ok().map(|v| (v, n))
+                u64::from_str_radix(&format!("{h:0<16}")[..16], 16)
+                    .ok()
+                    .map(|v| (v, n))
             }),
             commands: g.commands.clone(),
-            server_clusters: g.clusters.as_ref().map(|c| c.server.clone()).unwrap_or_default(),
-            client_clusters: g.clusters.as_ref().map(|c| c.client.clone()).unwrap_or_default(),
+            server_clusters: g
+                .clusters
+                .as_ref()
+                .map(|c| c.server.clone())
+                .unwrap_or_default(),
+            client_clusters: g
+                .clusters
+                .as_ref()
+                .map(|c| c.client.clone())
+                .unwrap_or_default(),
         }),
     }
 }
 
 fn configure(op: &z::ConfigureOp) -> ConfigureOp {
     match op {
-        z::ConfigureOp::Bind { ep, clusters } => ConfigureOp::Bind { ep: *ep, clusters: clusters.clone() },
-        z::ConfigureOp::Write(w) => ConfigureOp::Write { ep: w.ep, cluster: w.cluster, attr: w.attr, ty: ZclType(w.zcl_type), value: scalar(&w.value), mfr: w.mfr },
-        z::ConfigureOp::Read { ep, cluster, attrs, mfr } => ConfigureOp::Read { ep: *ep, cluster: *cluster, attrs: attrs.clone(), mfr: *mfr },
-        z::ConfigureOp::Report { ep, cluster, attr, zcl_type, report: r, mfr } => {
-            ConfigureOp::Report { ep: *ep, cluster: *cluster, attr: *attr, ty: ZclType(*zcl_type), report: report(r), mfr: *mfr }
-        }
-        z::ConfigureOp::Cmd { ep, cluster, id, mfr } => ConfigureOp::Cmd { ep: *ep, cluster: *cluster, id: *id, mfr: *mfr, payload: Vec::new() },
-        z::ConfigureOp::Group { ep, group } => ConfigureOp::Group { ep: *ep, group: *group },
-        z::ConfigureOp::Checkin { interval_qs } => ConfigureOp::Checkin { interval_qs: *interval_qs },
+        z::ConfigureOp::Bind { ep, clusters } => ConfigureOp::Bind {
+            ep: *ep,
+            clusters: clusters.clone(),
+        },
+        z::ConfigureOp::Write(w) => ConfigureOp::Write {
+            ep: w.ep,
+            cluster: w.cluster,
+            attr: w.attr,
+            ty: ZclType(w.zcl_type),
+            value: scalar(&w.value),
+            mfr: w.mfr,
+        },
+        z::ConfigureOp::Read {
+            ep,
+            cluster,
+            attrs,
+            mfr,
+        } => ConfigureOp::Read {
+            ep: *ep,
+            cluster: *cluster,
+            attrs: attrs.clone(),
+            mfr: *mfr,
+        },
+        z::ConfigureOp::Report {
+            ep,
+            cluster,
+            attr,
+            zcl_type,
+            report: r,
+            mfr,
+        } => ConfigureOp::Report {
+            ep: *ep,
+            cluster: *cluster,
+            attr: *attr,
+            ty: ZclType(*zcl_type),
+            report: report(r),
+            mfr: *mfr,
+        },
+        z::ConfigureOp::Cmd {
+            ep,
+            cluster,
+            id,
+            mfr,
+        } => ConfigureOp::Cmd {
+            ep: *ep,
+            cluster: *cluster,
+            id: *id,
+            mfr: *mfr,
+            payload: Vec::new(),
+        },
+        z::ConfigureOp::Group { ep, group } => ConfigureOp::Group {
+            ep: *ep,
+            group: *group,
+        },
+        z::ConfigureOp::Checkin { interval_qs } => ConfigureOp::Checkin {
+            interval_qs: *interval_qs,
+        },
     }
 }
 
 /// Converts a loaded `zdef` definition.
-pub fn adapt(zd: z::Definition, source: LayerSource, content_hash: Option<String>) -> Result<Definition, AdaptError> {
+pub fn adapt(
+    zd: z::Definition,
+    source: LayerSource,
+    content_hash: Option<String>,
+) -> Result<Definition, AdaptError> {
     let def = Arc::new(zd);
     let cx = Cx { def: def.clone() };
     let zd = &*def;
-    let source = if zd.is_fragment() { LayerSource::SelfDescription } else { source };
-    let id = zd.id.clone().unwrap_or_else(|| if zd.is_fragment() { "self-description".into() } else { "unnamed".into() });
+    let source = if zd.is_fragment() {
+        LayerSource::SelfDescription
+    } else {
+        source
+    };
+    let id = zd.id.clone().unwrap_or_else(|| {
+        if zd.is_fragment() {
+            "self-description".into()
+        } else {
+            "unnamed".into()
+        }
+    });
     let mut d = Definition::new(id, source);
     d.revision = zd.revision.unwrap_or(1);
     d.vendor = zd.vendor.clone().unwrap_or_default();
@@ -357,14 +531,22 @@ pub fn adapt(zd: z::Definition, source: LayerSource, content_hash: Option<String
             manufacturer: w.manufacturer.clone(),
         })
         .collect();
-    d.requires = zd.requires.iter().filter_map(|f| zdef::enums::Feature::from_code(u64::from(*f)).map(|x| x.as_str().to_string())).collect();
+    d.requires = zd
+        .requires
+        .iter()
+        .filter_map(|f| {
+            zdef::enums::Feature::from_code(u64::from(*f)).map(|x| x.as_str().to_string())
+        })
+        .collect();
     d.priority = zd.priority.unwrap_or(0) as i32;
     if let Some(dev) = &zd.device {
         d.device = DeviceFields {
             power: dev.power.and_then(|p| PowerKind::parse(p.as_str())),
             sleepy: dev.sleepy,
             battery: dev.battery.as_ref().map(|b| match b {
-                z::Battery::Linear { min_mv, max_mv } => BatteryCurve::Linear(f64::from(*min_mv), f64::from(*max_mv)),
+                z::Battery::Linear { min_mv, max_mv } => {
+                    BatteryCurve::Linear(f64::from(*min_mv), f64::from(*max_mv))
+                }
                 z::Battery::Curve(n) => BatteryCurve::Named(n.clone()),
             }),
             checkin_s: dev.checkin_s,
@@ -387,8 +569,20 @@ pub fn adapt(zd: z::Definition, source: LayerSource, content_hash: Option<String
         _ => SelfDescMode::Over,
     };
     d.configure = zd.configure.iter().map(configure).collect();
-    d.ignore = zd.ignore.iter().map(|r| IgnoreRule { ep: r.ep, cluster: r.cluster, cmd: r.cmd }).collect();
-    d.entities = zd.entities.iter().map(|e| entity(&cx, e)).collect::<Result<_, _>>()?;
+    d.ignore = zd
+        .ignore
+        .iter()
+        .map(|r| IgnoreRule {
+            ep: r.ep,
+            cluster: r.cluster,
+            cmd: r.cmd,
+        })
+        .collect();
+    d.entities = zd
+        .entities
+        .iter()
+        .map(|e| entity(&cx, e))
+        .collect::<Result<_, _>>()?;
     d.tuya = zd.tuya.as_ref().map(|t| {
         let mut f = TuyaFlags::default();
         f.time_sync = match t.time_sync {
@@ -399,7 +593,10 @@ pub fn adapt(zd: z::Definition, source: LayerSource, content_hash: Option<String
         f.force_time_sync_s = t.force_time_sync_s;
         f.magic_packet = t.magic_packet.unwrap_or(false);
         match &t.query {
-            Some(z::TuyaQuery::On { configure, announce }) => {
+            Some(z::TuyaQuery::On {
+                configure,
+                announce,
+            }) => {
                 f.query_on_configure = *configure;
                 f.query_on_announce = *announce;
             }
@@ -408,23 +605,37 @@ pub fn adapt(zd: z::Definition, source: LayerSource, content_hash: Option<String
         }
         f.bind_basic = t.bind_basic.unwrap_or(false);
         f.gateway_status = t.gateway_status.unwrap_or(true);
-        f.send = if t.send == Some(z::TuyaSend::SendData) { TuyaSend::SendData } else { TuyaSend::DataRequest };
+        f.send = if t.send == Some(z::TuyaSend::SendData) {
+            TuyaSend::SendData
+        } else {
+            TuyaSend::DataRequest
+        };
         f.mcu_version = t.mcu_version.unwrap_or(false);
         f.optimistic = t.optimistic.unwrap_or(false);
         f.dedup = t.dedup.unwrap_or(true);
         f
     });
-    d.gp = zd.gp.as_ref().map(|g| GpFlags { report_interval_s: g.report_interval_s, security_min: g.security_min, ignore_commands: g.ignore_commands.clone() });
+    d.gp = zd.gp.as_ref().map(|g| GpFlags {
+        report_interval_s: g.report_interval_s,
+        security_min: g.security_min,
+        ignore_commands: g.ignore_commands.clone(),
+    });
     d.mfr = zd.mfr;
     d.content_hash = content_hash;
     d.zdef = Some(def.clone());
     Ok(d)
 }
 
+/// The `zdef` features this engine implements: all of v1 except
+/// `codec.tuya_schedule_week` (not implemented yet) and `wasm`.
+pub fn hub_features() -> zdef::HubFeatures {
+    zdef::HubFeatures::v1().without(zdef::Feature::CodecTuyaScheduleWeek as u16)
+}
+
 /// The hub's load path for CBOR (catalog, uploads, fetched definitions,
 /// self-descriptions): `zdef::load` + [`adapt`].
 pub fn load_cbor(cbor: &[u8], source: LayerSource) -> Result<Definition, AdaptError> {
-    let zd = zdef::load(cbor, &zdef::HubFeatures::v1()).map_err(|e| AdaptError(e.to_string()))?;
+    let zd = zdef::load(cbor, &hub_features()).map_err(|e| AdaptError(e.to_string()))?;
     let hash = zdef::ContentHash::of(cbor);
     adapt(zd, source, Some(format!("{hash}")))
 }
@@ -453,10 +664,18 @@ pub fn zdef_fingerprint(fp: &Fingerprint) -> zdef::Fingerprint {
         endpoints: fp
             .endpoints
             .iter()
-            .map(|e| zdef::matching::Endpoint { ep: e.ep, profile: e.profile, device_id: e.device_id, in_clusters: e.in_clusters.clone(), out_clusters: e.out_clusters.clone() })
+            .map(|e| zdef::matching::Endpoint {
+                ep: e.ep,
+                profile: e.profile,
+                device_id: e.device_id,
+                in_clusters: e.in_clusters.clone(),
+                out_clusters: e.out_clusters.clone(),
+            })
             .collect(),
         self_description: fp.self_description.as_ref().and_then(|h| {
-            let b: Vec<u8> = (0..h.len() / 2).filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()).collect();
+            let b: Vec<u8> = (0..h.len() / 2)
+                .filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok())
+                .collect();
             b.try_into().ok()
         }),
     }
@@ -467,7 +686,9 @@ pub fn zdef_gp_fingerprint(g: &crate::fingerprint::GpFingerprint) -> zdef::GpFin
     zdef::GpFingerprint {
         gpd_id: match g.gpd_id {
             crate::gp::types::GpdId::SrcId(s) => zdef::matching::GpdId::SrcId(s),
-            crate::gp::types::GpdId::Ieee { ieee, endpoint } => zdef::matching::GpdId::Ieee { ieee, ep: endpoint },
+            crate::gp::types::GpdId::Ieee { ieee, endpoint } => {
+                zdef::matching::GpdId::Ieee { ieee, ep: endpoint }
+            }
         },
         device_id: g.device_id,
         manufacturer_id: g.manufacturer_id,

@@ -25,7 +25,13 @@ impl<T: ZigbeeTransport> Hub<T> {
     fn tuya_ep(&self, id: &str) -> u8 {
         self.devices
             .get(id)
-            .and_then(|d| d.fp.endpoints.iter().filter(|e| e.profile != PROFILE_GP).find(|e| e.in_clusters.contains(&cl::TUYA)).map(|e| e.ep))
+            .and_then(|d| {
+                d.fp.endpoints
+                    .iter()
+                    .filter(|e| e.profile != PROFILE_GP)
+                    .find(|e| e.in_clusters.contains(&cl::TUYA))
+                    .map(|e| e.ep)
+            })
             .unwrap_or(1)
     }
 
@@ -44,9 +50,18 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn tuya_time(&mut self, id: &str, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
-        let epoch = d.resolution.tuya.as_ref().map_or(TimeSync::Off, |t| t.time_sync);
-        let Some(p) = tuya::time_sync_payload((now / 1000) as i64, self.cfg.tz_offset_s, epoch) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let epoch = d
+            .resolution
+            .tuya
+            .as_ref()
+            .map_or(TimeSync::Off, |t| t.time_sync);
+        let Some(p) = tuya::time_sync_payload((now / 1000) as i64, self.cfg.tz_offset_s, epoch)
+        else {
+            return;
+        };
         d.tuya_time_at = Some(now);
         let ep = self.tuya_ep(id);
         let f = self.tuya_frame(cmd::MCU_SYNC_TIME, p);
@@ -55,10 +70,17 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Sends DP records with dataRequest / sendData; returns the frame TSN.
     pub(crate) fn tuya_send(&mut self, id: &str, records: &[DpRecord], now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         d.tuya_seq = d.tuya_seq.wrapping_add(1);
         let seq = d.tuya_seq;
-        let c = match d.resolution.tuya.as_ref().map_or(TuyaSend::DataRequest, |t| t.send) {
+        let c = match d
+            .resolution
+            .tuya
+            .as_ref()
+            .map_or(TuyaSend::DataRequest, |t| t.send)
+        {
             TuyaSend::DataRequest => cmd::DATA_REQUEST,
             TuyaSend::SendData => cmd::SEND_DATA,
         };
@@ -67,12 +89,24 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.send_zcl(id, ep, cl::TUYA, f, Purpose::None, now);
     }
 
-    pub(crate) fn handle_tuya(&mut self, id: &str, ep: u8, h: &ZclHeader, payload: &[u8], now: Millis) {
-        let Some(d) = self.devices.get(id) else { return };
+    pub(crate) fn handle_tuya(
+        &mut self,
+        id: &str,
+        ep: u8,
+        h: &ZclHeader,
+        payload: &[u8],
+        now: Millis,
+    ) {
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         let flags = d.resolution.tuya.clone().unwrap_or_default();
         // Forced time pushes on any message.
         if let Some(s) = flags.force_time_sync_s {
-            if d.tuya_time_at.is_none_or(|t| now.saturating_sub(t) >= u64::from(s) * 1000) && flags.time_sync != TimeSync::Off {
+            if d.tuya_time_at
+                .is_none_or(|t| now.saturating_sub(t) >= u64::from(s) * 1000)
+                && flags.time_sync != TimeSync::Off
+            {
                 self.tuya_time(id, now);
             }
         }
@@ -90,19 +124,28 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             cmd::MCU_SYNC_TIME => self.tuya_time(id, now),
             cmd::MCU_GATEWAY_CONNECTION_STATUS if flags.gateway_status => {
-                let f = self.tuya_frame(cmd::MCU_GATEWAY_CONNECTION_STATUS, tuya::gateway_status_payload());
+                let f = self.tuya_frame(
+                    cmd::MCU_GATEWAY_CONNECTION_STATUS,
+                    tuya::gateway_status_payload(),
+                );
                 self.send_zcl(id, ep, cl::TUYA, f, Purpose::None, now);
             }
             cmd::MCU_VERSION_RESPONSE if payload.len() >= 3 => {
                 let v = tuya::mcu_version(payload[2]);
                 if let Some(d) = self.devices.get_mut(id) {
                     let idx: Vec<usize> = (0..d.entities.len())
-                        .filter(|&i| matches!(d.entities[i].r.def.value.binding, Binding::DeviceField(DeviceField::McuVersion)))
+                        .filter(|&i| {
+                            matches!(
+                                d.entities[i].r.def.value.binding,
+                                Binding::DeviceField(DeviceField::McuVersion)
+                            )
+                        })
                         .collect();
                     for i in &idx {
                         set_value(d, *i, None, crate::expr::Value::Str(v.clone()), now);
                     }
-                    let uids: Vec<String> = idx.iter().map(|&i| d.entities[i].uid.clone()).collect();
+                    let uids: Vec<String> =
+                        idx.iter().map(|&i| d.entities[i].uid.clone()).collect();
                     for u in uids {
                         self.publish_state(&u);
                     }
@@ -117,7 +160,9 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn tuya_dp(&mut self, id: &str, _ep: u8, seq: u16, r: &DpRecord, dedup: bool, now: Millis) {
-        let Some(d) = self.devices.get_mut(id) else { return };
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         if dedup {
             let key = fnv(&[&seq.to_be_bytes(), &[r.dp, r.ty], &r.data]);
             d.dedup.retain(|(t, _)| now.saturating_sub(*t) < 2_000);
@@ -128,10 +173,17 @@ impl<T: ZigbeeTransport> Hub<T> {
             d.dedup.push_back((now, key));
         }
         let raw = tuya::dp_value(r.ty, &r.data);
-        let bound = self.dispatch.get(id).and_then(|t| t.get(&DKey::Tuya(r.dp))).cloned().unwrap_or_default();
+        let bound = self
+            .dispatch
+            .get(id)
+            .and_then(|t| t.get(&DKey::Tuya(r.dp)))
+            .cloned()
+            .unwrap_or_default();
         let d = self.devices.get_mut(id).unwrap();
         if bound.is_empty() {
-            d.diag.tuya_dps.insert(r.dp, (r.ty, crate::expr::hex(&r.data), now));
+            d.diag
+                .tuya_dps
+                .insert(r.dp, (r.ty, crate::expr::hex(&r.data), now));
         }
         let mut work = Vec::new();
         for (i, p) in bound {
@@ -146,14 +198,20 @@ impl<T: ZigbeeTransport> Hub<T> {
         // Tuya triggers (events from DPs).
         let mut fired = Vec::new();
         {
-            let env = DevEnv { dev: d, now, tz: self.cfg.tz_offset_s };
+            let env = DevEnv {
+                dev: d,
+                now,
+                tz: self.cfg.tz_offset_s,
+            };
             for (i, e) in d.entities.iter().enumerate() {
                 if e.orphaned {
                     continue;
                 }
                 for t in &e.r.def.triggers {
                     if t.source == (TriggerSource::Tuya { dp: r.dp }) {
-                        if let Some(ev) = eval_trigger(t, &r.data, e.state.last_event.as_deref(), &env) {
+                        if let Some(ev) =
+                            eval_trigger(t, &r.data, e.state.last_event.as_deref(), &env)
+                        {
                             fired.push((i, ev.0, ev.1));
                             break;
                         }

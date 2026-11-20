@@ -13,7 +13,9 @@ use crate::expr::{Expr, Value};
 use crate::zcl::ZclType;
 
 /// HA entity platform (spec 4.3, CBOR enum 8.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum Platform {
@@ -86,15 +88,36 @@ impl Platform {
     /// Default access letters (spec 6.3).
     pub fn default_access(self) -> Access {
         match self {
-            Self::Sensor | Self::BinarySensor | Self::Event => Access { read: true, write: false, report: true },
-            Self::Button => Access { read: false, write: true, report: false },
-            _ => Access { read: true, write: true, report: true },
+            Self::Sensor | Self::BinarySensor | Self::Event => Access {
+                read: true,
+                write: false,
+                report: true,
+            },
+            Self::Button => Access {
+                read: false,
+                write: true,
+                report: false,
+            },
+            _ => Access {
+                read: true,
+                write: true,
+                report: true,
+            },
         }
     }
 
     /// Composite platforms are built from parts (4.3).
     pub fn is_composite(self) -> bool {
-        matches!(self, Self::Light | Self::Cover | Self::Climate | Self::Lock | Self::Fan | Self::Siren | Self::Valve)
+        matches!(
+            self,
+            Self::Light
+                | Self::Cover
+                | Self::Climate
+                | Self::Lock
+                | Self::Fan
+                | Self::Siren
+                | Self::Valve
+        )
     }
 
     /// Platforms whose state is a bool.
@@ -237,7 +260,9 @@ pub struct ZclBinding {
 }
 
 /// Tuya DP type (10.1, 8.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum TuyaType {
@@ -634,7 +659,8 @@ impl EntityDef {
 
     /// All value definitions (own value and parts) with their part name.
     pub fn values(&self) -> impl Iterator<Item = (Option<&str>, &ValueDef)> {
-        std::iter::once((None, &self.value)).chain(self.parts.iter().map(|(n, v)| (Some(n.as_str()), v)))
+        std::iter::once((None, &self.value))
+            .chain(self.parts.iter().map(|(n, v)| (Some(n.as_str()), v)))
     }
 }
 
@@ -1059,7 +1085,9 @@ pub enum SelfDescMode {
 }
 
 /// Layer source (4.2 `source`, 3.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerSource {
     /// Tier a.

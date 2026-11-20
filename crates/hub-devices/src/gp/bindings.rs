@@ -10,7 +10,10 @@ use crate::device::{DeviceKind, Millis, ts};
 use crate::hub::{ApiError, Hub, HubEvent, Purpose};
 use crate::transport::{ApsDst, ApsRequest, TxOptions, ZigbeeTransport};
 use crate::zcl::frame::{ReadRecord, Status};
-use crate::zcl::{Direction, FrameType, PROFILE_GP, PROFILE_HA, ZclFrame, ZclHeader, ZclValue, cluster as cl, frame as zf};
+use crate::zcl::{
+    Direction, FrameType, PROFILE_GP, PROFILE_HA, ZclFrame, ZclHeader, ZclValue, cluster as cl,
+    frame as zf,
+};
 
 /// Remote request timeout (13.8: 3 s after the APS confirm; the engine
 /// has no confirm hook yet, so a slightly longer budget from the send).
@@ -209,7 +212,9 @@ impl GpBindingRecord {
             return false;
         }
         match self.trigger.contact_mask {
-            Some(m) => payload.first().is_some_and(|b| b & m == self.trigger.contact_value.unwrap_or(m) & m),
+            Some(m) => payload
+                .first()
+                .is_some_and(|b| b & m == self.trigger.contact_value.unwrap_or(m) & m),
             None => true,
         }
     }
@@ -286,12 +291,24 @@ fn level_bit(level: u8) -> u32 {
 
 impl<T: ZigbeeTransport> Hub<T> {
     fn binding_event(&mut self, id: u32) {
-        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id) else { return };
+        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id) else {
+            return;
+        };
         let mut body = b.to_json();
-        if let (BindState::Failed { zcl_status: Some(s), .. }, Some(o)) = (&b.state, body.as_object_mut()) {
+        if let (
+            BindState::Failed {
+                zcl_status: Some(s),
+                ..
+            },
+            Some(o),
+        ) = (&b.state, body.as_object_mut())
+        {
             o.insert("zcl_status".into(), s.clone().into());
         }
-        self.emit(HubEvent::Gp { kind: "gp/binding".into(), body });
+        self.emit(HubEvent::Gp {
+            kind: "gp/binding".into(),
+            body,
+        });
     }
 
     fn binding_mut(&mut self, id: u32) -> Option<&mut GpBindingRecord> {
@@ -318,12 +335,18 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         for (dev, _) in Self::target_endpoints(&req.target) {
             if self.nwk_of(&dev).is_none() {
-                return Err(ApiError::new("not_found", format!("no Zigbee device {dev}")));
+                return Err(ApiError::new(
+                    "not_found",
+                    format!("no Zigbee device {dev}"),
+                ));
             }
         }
         if let TranslationPayload::Fixed(b) = &req.action.payload {
             if b.len() > 8 {
-                return Err(ApiError::new("invalid_value", "fixed payload must be ≤ 8 bytes"));
+                return Err(ApiError::new(
+                    "invalid_value",
+                    "fixed payload must be ≤ 8 bytes",
+                ));
             }
         }
         self.gp.next_id += 1;
@@ -342,13 +365,25 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         self.gp.bindings.push(rec);
         self.decide_binding(id, now);
-        Ok(self.gp.bindings.iter().find(|b| b.id == id).map(GpBindingRecord::to_json).unwrap_or_default())
+        Ok(self
+            .gp
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .map(GpBindingRecord::to_json)
+            .unwrap_or_default())
     }
 
     /// Chooses the executor once all target capabilities are known.
     fn decide_binding(&mut self, id: u32, now: Millis) {
-        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else { return };
-        let level = self.devices.get(&b.gpd.device_id()).and_then(|d| d.gp.as_ref()).map_or(0, |g| g.security_level);
+        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else {
+            return;
+        };
+        let level = self
+            .devices
+            .get(&b.gpd.device_id())
+            .and_then(|d| d.gp.as_ref())
+            .map_or(0, |g| g.security_level);
         let members = Self::target_endpoints(&b.target);
         let structural_hub_only = b.trigger.contact_mask.is_some() || members.is_empty();
         let to_hub = |hub: &mut Self| {
@@ -381,17 +416,37 @@ impl<T: ZigbeeTransport> Hub<T> {
         if waiting {
             if let Some(b) = self.binding_mut(id) {
                 b.state = BindState::Pending;
-                b.targets = members.iter().map(|(d, e)| TargetState { device: d.clone(), endpoint: *e, step: TargetStep::Probe, last_verified: None, error: None }).collect();
+                b.targets = members
+                    .iter()
+                    .map(|(d, e)| TargetState {
+                        device: d.clone(),
+                        endpoint: *e,
+                        step: TargetStep::Probe,
+                        last_verified: None,
+                        error: None,
+                    })
+                    .collect();
             }
             return self.binding_event(id);
         }
-        let all = members.iter().all(|(d, _)| self.gp.caps.get(d).is_some_and(|c| c.qualifies(level)));
+        let all = members
+            .iter()
+            .all(|(d, _)| self.gp.caps.get(d).is_some_and(|c| c.qualifies(level)));
         match (all, b.choice) {
             (true, _) => {
                 if let Some(b) = self.binding_mut(id) {
                     b.executor = Some(Executor::Device);
                     b.state = BindState::Pending;
-                    b.targets = members.iter().map(|(d, e)| TargetState { device: d.clone(), endpoint: *e, step: TargetStep::Pairing, last_verified: None, error: None }).collect();
+                    b.targets = members
+                        .iter()
+                        .map(|(d, e)| TargetState {
+                            device: d.clone(),
+                            endpoint: *e,
+                            step: TargetStep::Pairing,
+                            last_verified: None,
+                            error: None,
+                        })
+                        .collect();
                 }
                 for (dev, _) in members {
                     self.program_target(id, &dev, now);
@@ -410,14 +465,24 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Starts a capability probe of a target (`gp/targets/probe`).
     pub fn probe_target(&mut self, device: &str, gpd: Option<GpdId>, now: Millis) {
-        let Some(d) = self.devices.get(device) else { return };
+        let Some(d) = self.devices.get(device) else {
+            return;
+        };
         let Some(nwk) = d.nwk() else { return };
         if self.gp.caps.get(device).is_some_and(|c| !c.probed) {
             return; // already probing
         }
-        self.gp.caps.insert(device.to_string(), TargetCaps::default());
+        self.gp
+            .caps
+            .insert(device.to_string(), TargetCaps::default());
         let tsn = self.next_zcl_tsn();
-        let f = ZclFrame::command(FrameType::Global, tsn, crate::zcl::frame::global::READ_ATTRIBUTES, None, zf::read_attributes(&[0x0000, 0x0006]));
+        let f = ZclFrame::command(
+            FrameType::Global,
+            tsn,
+            crate::zcl::frame::global::READ_ATTRIBUTES,
+            None,
+            zf::read_attributes(&[0x0000, 0x0006]),
+        );
         // The GP cluster lives on endpoint 242 with the GP profile.
         let req = ApsRequest {
             dst: ApsDst::Nwk(nwk),
@@ -426,7 +491,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             profile: PROFILE_GP,
             cluster: cl::GREEN_POWER,
             payload: f.encode(),
-            options: TxOptions { ack: true, extended_timeout: false },
+            options: TxOptions {
+                ack: true,
+                extended_timeout: false,
+            },
         };
         let _ = gpd;
         self.send_tracked(device, req, Purpose::GpProbe(nwk), tsn, false, now);
@@ -435,18 +503,49 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Probe answers (Read Attributes Response or a timeout with `recs`
     /// empty).
     pub(crate) fn gp_probe_result(&mut self, nwk: u16, recs: &[ReadRecord], now: Millis) {
-        let Some(device) = self.devices.values().find(|d| d.nwk() == Some(nwk)).map(|d| d.id.clone()) else { return };
-        let get = |a: u16| recs.iter().find(|r| r.attr == a && r.status == Status::SUCCESS).and_then(|r| r.value.as_ref()).and_then(|v| v.value.as_i64());
+        let Some(device) = self
+            .devices
+            .values()
+            .find(|d| d.nwk() == Some(nwk))
+            .map(|d| d.id.clone())
+        else {
+            return;
+        };
+        let get = |a: u16| {
+            recs.iter()
+                .find(|r| r.attr == a && r.status == Status::SUCCESS)
+                .and_then(|r| r.value.as_ref())
+                .and_then(|v| v.value.as_i64())
+        };
         let func = get(0x0006).map(|v| v as u32);
         let max = get(0x0000).map(|v| v as u8);
-        let mut caps = TargetCaps { functionality: func, max_sink_entries: max, ..Default::default() };
+        let mut caps = TargetCaps {
+            functionality: func,
+            max_sink_entries: max,
+            ..Default::default()
+        };
         if let Some(f) = func {
             caps.translation_table = f & (1 << 18) != 0;
-            caps.security_levels = (0..=3u8).filter(|l| f & (1 << level_bit(*l)) != 0).collect();
+            caps.security_levels = (0..=3u8)
+                .filter(|l| f & (1 << level_bit(*l)) != 0)
+                .collect();
             if f & (1 << 11) != 0 {
                 // Confirm a working sink with a Sink Table Request by GPD ID.
-                let gpd = self.gp.bindings.iter().find(|b| Self::target_endpoints(&b.target).iter().any(|(d, _)| *d == device)).map_or(GpdId::SrcId(0xFFFF_FFFE), |b| b.gpd);
-                let req = GpRequest::RemoteSinkTableRequest { dst: nwk, index: 0xFF, gpd_id: gpd };
+                let gpd = self
+                    .gp
+                    .bindings
+                    .iter()
+                    .find(|b| {
+                        Self::target_endpoints(&b.target)
+                            .iter()
+                            .any(|(d, _)| *d == device)
+                    })
+                    .map_or(GpdId::SrcId(0xFFFF_FFFE), |b| b.gpd);
+                let req = GpRequest::RemoteSinkTableRequest {
+                    dst: nwk,
+                    index: 0xFF,
+                    gpd_id: gpd,
+                };
                 self.gp.caps.insert(device.clone(), caps);
                 self.remote_send(None, &device, nwk, TargetStep::Probe, req, now);
                 return;
@@ -459,12 +558,21 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     fn probe_finished(&mut self, device: &str, now: Millis) {
         let caps = self.gp.caps.get(device).cloned().unwrap_or_default();
-        self.emit(HubEvent::Gp { kind: "gp/target".into(), body: json!({"device": device, "capabilities": caps}) });
+        self.emit(HubEvent::Gp {
+            kind: "gp/target".into(),
+            body: json!({"device": device, "capabilities": caps}),
+        });
         let waiting: Vec<u32> = self
             .gp
             .bindings
             .iter()
-            .filter(|b| b.state == BindState::Pending && b.executor.is_none() && Self::target_endpoints(&b.target).iter().any(|(d, _)| d == device))
+            .filter(|b| {
+                b.state == BindState::Pending
+                    && b.executor.is_none()
+                    && Self::target_endpoints(&b.target)
+                        .iter()
+                        .any(|(d, _)| d == device)
+            })
             .map(|b| b.id)
             .collect();
         for id in waiting {
@@ -472,10 +580,29 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
-    fn remote_send(&mut self, binding: Option<u32>, target: &str, nwk: u16, step: TargetStep, req: GpRequest, now: Millis) {
+    fn remote_send(
+        &mut self,
+        binding: Option<u32>,
+        target: &str,
+        nwk: u16,
+        step: TargetStep,
+        req: GpRequest,
+        now: Millis,
+    ) {
         match self.transport.gp_request(req.clone()) {
             Ok(Some(tsn)) => {
-                self.gp.remote.insert(tsn, RemoteWait { binding, target: target.to_string(), nwk, step, sent_at: now, retries: 0, req });
+                self.gp.remote.insert(
+                    tsn,
+                    RemoteWait {
+                        binding,
+                        target: target.to_string(),
+                        nwk,
+                        step,
+                        sent_at: now,
+                        retries: 0,
+                        req,
+                    },
+                );
             }
             Ok(None) => {}
             Err(e) => {
@@ -500,8 +627,15 @@ impl<T: ZigbeeTransport> Hub<T> {
             flags |= pairing_config_flags::RX_ON_CAPABLE;
         }
         let mode = sink.as_ref().map_or(2, |s| s.communication_mode);
-        let group = sink.as_ref().map(|s| s.group).filter(|g| *g != 0xFFFF).unwrap_or(self.cfg.gp_group);
-        let (mfr, model) = (fp.and_then(|f| f.manufacturer_id), fp.and_then(|f| f.model_id));
+        let group = sink
+            .as_ref()
+            .map(|s| s.group)
+            .filter(|g| *g != 0xFFFF)
+            .unwrap_or(self.cfg.gp_group);
+        let (mfr, model) = (
+            fp.and_then(|f| f.manufacturer_id),
+            fp.and_then(|f| f.model_id),
+        );
         PairingConfiguration {
             dst: nwk,
             actions,
@@ -516,8 +650,15 @@ impl<T: ZigbeeTransport> Hub<T> {
             key: sink.as_ref().and_then(|s| s.key).unwrap_or([0; 16]),
             // The current counter: the larger of the Sink Table's and the
             // last accepted frame's, so a reset target never accepts replays.
-            frame_counter: sink.as_ref().map_or(0, |s| s.frame_counter).max(g.map_or(0, |g| g.frame_counter)),
-            groups: if mode == 2 { vec![(group, 0xFFFF)] } else { Vec::new() },
+            frame_counter: sink
+                .as_ref()
+                .map_or(0, |s| s.frame_counter)
+                .max(g.map_or(0, |g| g.frame_counter)),
+            groups: if mode == 2 {
+                vec![(group, 0xFFFF)]
+            } else {
+                Vec::new()
+            },
             paired: 0x00,
             endpoints: Vec::new(),
             app_info: u8::from(mfr.is_some()) | (u8::from(model.is_some()) << 1),
@@ -531,22 +672,59 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Step 1 of on-device programming for one target.
     fn program_target(&mut self, id: u32, device: &str, now: Millis) {
-        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else { return };
-        let Some(nwk) = self.nwk_of(device) else { return };
-        let pc = self.gpd_pairing(b.gpd, nwk, pairing_actions::EXTEND | pairing_actions::SEND_GP_PAIRING);
-        if let Some(t) = self.binding_mut(id).and_then(|b| b.targets.iter_mut().find(|t| t.device == device)) {
+        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else {
+            return;
+        };
+        let Some(nwk) = self.nwk_of(device) else {
+            return;
+        };
+        let pc = self.gpd_pairing(
+            b.gpd,
+            nwk,
+            pairing_actions::EXTEND | pairing_actions::SEND_GP_PAIRING,
+        );
+        if let Some(t) = self
+            .binding_mut(id)
+            .and_then(|b| b.targets.iter_mut().find(|t| t.device == device))
+        {
             t.step = TargetStep::Pairing;
         }
-        self.remote_send(Some(id), device, nwk, TargetStep::Pairing, GpRequest::PairingConfiguration(pc), now);
+        self.remote_send(
+            Some(id),
+            device,
+            nwk,
+            TargetStep::Pairing,
+            GpRequest::PairingConfiguration(pc),
+            now,
+        );
     }
 
     /// All device-executed translations of a GPD on a target.
-    fn translations_for(&self, gpd: GpdId, device: &str, exclude: Option<u32>) -> Vec<GpTranslation> {
+    fn translations_for(
+        &self,
+        gpd: GpdId,
+        device: &str,
+        exclude: Option<u32>,
+    ) -> Vec<GpTranslation> {
         self.gp
             .bindings
             .iter()
-            .filter(|b| b.gpd == gpd && b.executor == Some(Executor::Device) && Some(b.id) != exclude && !matches!(b.state, BindState::Removing | BindState::Failed { .. } | BindState::Unsupported))
-            .flat_map(|b| Self::target_endpoints(&b.target).into_iter().filter(|(d, _)| d == device).map(|(_, ep)| b.translation(ep)).collect::<Vec<_>>())
+            .filter(|b| {
+                b.gpd == gpd
+                    && b.executor == Some(Executor::Device)
+                    && Some(b.id) != exclude
+                    && !matches!(
+                        b.state,
+                        BindState::Removing | BindState::Failed { .. } | BindState::Unsupported
+                    )
+            })
+            .flat_map(|b| {
+                Self::target_endpoints(&b.target)
+                    .into_iter()
+                    .filter(|(d, _)| d == device)
+                    .map(|(_, ep)| b.translation(ep))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -557,8 +735,17 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.binding_event(id);
     }
 
-    pub(crate) fn gp_remote_status(&mut self, src_nwk: u16, tsn: u8, _command_id: u8, status: u8, now: Millis) {
-        let Some(w) = self.gp.remote.get(&tsn).cloned() else { return };
+    pub(crate) fn gp_remote_status(
+        &mut self,
+        src_nwk: u16,
+        tsn: u8,
+        _command_id: u8,
+        status: u8,
+        now: Millis,
+    ) {
+        let Some(w) = self.gp.remote.get(&tsn).cloned() else {
+            return;
+        };
         if w.nwk != src_nwk && src_nwk != 0xFFFF {
             return;
         }
@@ -566,41 +753,84 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(id) = w.binding else { return };
         if status != 0 {
             let st = Status(status).name().to_string();
-            if matches!(w.step, TargetStep::RemoveTranslation | TargetStep::RemovePairing) {
+            if matches!(
+                w.step,
+                TargetStep::RemoveTranslation | TargetStep::RemovePairing
+            ) {
                 // Removal refused: keep the record in `removing` for a retry.
-                if let Some(t) = self.binding_mut(id).and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target)) {
+                if let Some(t) = self
+                    .binding_mut(id)
+                    .and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target))
+                {
                     t.error = Some(st);
                 }
                 return self.binding_event(id);
             }
             return self.binding_failed(id, Some(st.clone()), format!("{st} at {:?}", w.step));
         }
-        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else { return };
+        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else {
+            return;
+        };
         match w.step {
             TargetStep::Pairing => {
                 let tr = self.translations_for(b.gpd, &w.target, None);
                 let tr: Vec<_> = tr.into_iter().take(MAX_TRANSLATIONS_PER_UPDATE).collect();
-                if let Some(t) = self.binding_mut(id).and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target)) {
+                if let Some(t) = self
+                    .binding_mut(id)
+                    .and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target))
+                {
                     t.step = TargetStep::Translation;
                 }
-                let req = GpRequest::TranslationUpdate { dst: w.nwk, action: translation_action::REPLACE, gpd_id: b.gpd, translations: tr };
-                self.remote_send(Some(id), &w.target, w.nwk, TargetStep::Translation, req, now);
+                let req = GpRequest::TranslationUpdate {
+                    dst: w.nwk,
+                    action: translation_action::REPLACE,
+                    gpd_id: b.gpd,
+                    translations: tr,
+                };
+                self.remote_send(
+                    Some(id),
+                    &w.target,
+                    w.nwk,
+                    TargetStep::Translation,
+                    req,
+                    now,
+                );
             }
             TargetStep::Translation => {
-                if let Some(t) = self.binding_mut(id).and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target)) {
+                if let Some(t) = self
+                    .binding_mut(id)
+                    .and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target))
+                {
                     t.step = TargetStep::Verify;
                 }
-                let req = GpRequest::TranslationRequest { dst: w.nwk, start_index: 0 };
+                let req = GpRequest::TranslationRequest {
+                    dst: w.nwk,
+                    start_index: 0,
+                };
                 self.remote_send(Some(id), &w.target, w.nwk, TargetStep::Verify, req, now);
             }
             TargetStep::RemoveTranslation => {
                 let others = self.translations_for(b.gpd, &w.target, Some(id));
                 if others.is_empty() {
-                    if let Some(t) = self.binding_mut(id).and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target)) {
+                    if let Some(t) = self
+                        .binding_mut(id)
+                        .and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target))
+                    {
                         t.step = TargetStep::RemovePairing;
                     }
-                    let pc = self.gpd_pairing(b.gpd, w.nwk, pairing_actions::REMOVE_PAIRING | pairing_actions::SEND_GP_PAIRING);
-                    self.remote_send(Some(id), &w.target, w.nwk, TargetStep::RemovePairing, GpRequest::PairingConfiguration(pc), now);
+                    let pc = self.gpd_pairing(
+                        b.gpd,
+                        w.nwk,
+                        pairing_actions::REMOVE_PAIRING | pairing_actions::SEND_GP_PAIRING,
+                    );
+                    self.remote_send(
+                        Some(id),
+                        &w.target,
+                        w.nwk,
+                        TargetStep::RemovePairing,
+                        GpRequest::PairingConfiguration(pc),
+                        now,
+                    );
                 } else {
                     self.target_removed(id, &w.target, now);
                 }
@@ -611,7 +841,9 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn target_removed(&mut self, id: u32, device: &str, now: Millis) {
-        let Some(b) = self.binding_mut(id) else { return };
+        let Some(b) = self.binding_mut(id) else {
+            return;
+        };
         if let Some(t) = b.targets.iter_mut().find(|t| t.device == device) {
             t.step = TargetStep::Removed;
         }
@@ -630,14 +862,26 @@ impl<T: ZigbeeTransport> Hub<T> {
                     self.gp.bindings.retain(|x| x.id != id);
                     let mut body = rec;
                     body["state"] = "removed".into();
-                    self.emit(HubEvent::Gp { kind: "gp/binding".into(), body });
+                    self.emit(HubEvent::Gp {
+                        kind: "gp/binding".into(),
+                        body,
+                    });
                 }
             }
         }
     }
 
-    pub(crate) fn gp_remote_sink_table(&mut self, src_nwk: u16, tsn: u8, status: u8, _records: &[GpSinkRecord], now: Millis) {
-        let Some(w) = self.gp.remote.remove(&tsn) else { return };
+    pub(crate) fn gp_remote_sink_table(
+        &mut self,
+        src_nwk: u16,
+        tsn: u8,
+        status: u8,
+        _records: &[GpSinkRecord],
+        now: Millis,
+    ) {
+        let Some(w) = self.gp.remote.remove(&tsn) else {
+            return;
+        };
         let _ = src_nwk;
         if w.step == TargetStep::Probe {
             let ok = status == Status::SUCCESS.0 || status == Status::NOT_FOUND.0;
@@ -649,16 +893,35 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
-    pub(crate) fn gp_remote_translation_table(&mut self, src_nwk: u16, tsn: u8, status: u8, records: &[(GpdId, GpTranslation)], now: Millis) {
-        let Some(w) = self.gp.remote.remove(&tsn) else { return };
+    pub(crate) fn gp_remote_translation_table(
+        &mut self,
+        src_nwk: u16,
+        tsn: u8,
+        status: u8,
+        records: &[(GpdId, GpTranslation)],
+        now: Millis,
+    ) {
+        let Some(w) = self.gp.remote.remove(&tsn) else {
+            return;
+        };
         let _ = src_nwk;
         let Some(id) = w.binding else { return };
-        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else { return };
+        let Some(b) = self.gp.bindings.iter().find(|b| b.id == id).cloned() else {
+            return;
+        };
         if status != 0 && status != Status::NOT_FOUND.0 {
-            return self.binding_failed(id, Some(Status(status).name().into()), "translation table request failed".into());
+            return self.binding_failed(
+                id,
+                Some(Status(status).name().into()),
+                "translation table request failed".into(),
+            );
         }
         let want = self.translations_for(b.gpd, &w.target, None);
-        let have: Vec<&GpTranslation> = records.iter().filter(|(g, _)| *g == b.gpd).map(|(_, t)| t).collect();
+        let have: Vec<&GpTranslation> = records
+            .iter()
+            .filter(|(g, _)| *g == b.gpd)
+            .map(|(_, t)| t)
+            .collect();
         let complete = want.iter().all(|t| have.contains(&t));
         if complete {
             if let Some(bm) = self.binding_mut(id) {
@@ -680,15 +943,27 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.binding_event(id);
             self.program_target(id, &w.target, now);
         } else {
-            self.binding_failed(id, None, "target does not hold the translation after programming".into());
+            self.binding_failed(
+                id,
+                None,
+                "target does not hold the translation after programming".into(),
+            );
         }
     }
 
     /// Remote request timeouts (called from `tick`).
     pub(crate) fn gp_tick(&mut self, now: Millis) {
-        let late: Vec<u8> = self.gp.remote.iter().filter(|(_, w)| now.saturating_sub(w.sent_at) > REMOTE_TIMEOUT_MS).map(|(k, _)| *k).collect();
+        let late: Vec<u8> = self
+            .gp
+            .remote
+            .iter()
+            .filter(|(_, w)| now.saturating_sub(w.sent_at) > REMOTE_TIMEOUT_MS)
+            .map(|(k, _)| *k)
+            .collect();
         for tsn in late {
-            let Some(mut w) = self.gp.remote.remove(&tsn) else { continue };
+            let Some(mut w) = self.gp.remote.remove(&tsn) else {
+                continue;
+            };
             if w.retries < REMOTE_RETRIES {
                 w.retries += 1;
                 w.sent_at = now;
@@ -707,7 +982,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
                 (Some(id), TargetStep::RemoveTranslation | TargetStep::RemovePairing) => {
                     // Unreachable: stay `removing`, retried at the next announcement.
-                    if let Some(t) = self.binding_mut(id).and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target)) {
+                    if let Some(t) = self
+                        .binding_mut(id)
+                        .and_then(|b| b.targets.iter_mut().find(|t| t.device == w.target))
+                    {
                         t.error = Some("timeout".into());
                     }
                     self.binding_event(id);
@@ -720,13 +998,25 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// `gp/bindings/delete`.
     pub fn delete_binding(&mut self, id: u32, now: Millis) -> Result<(), ApiError> {
-        let b = self.gp.bindings.iter().find(|b| b.id == id).cloned().ok_or_else(|| ApiError::new("not_found", format!("no binding {id}")))?;
-        let programmed = b.executor == Some(Executor::Device) && b.targets.iter().any(|t| !matches!(t.step, TargetStep::Probe | TargetStep::Removed));
+        let b = self
+            .gp
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
+            .ok_or_else(|| ApiError::new("not_found", format!("no binding {id}")))?;
+        let programmed = b.executor == Some(Executor::Device)
+            && b.targets
+                .iter()
+                .any(|t| !matches!(t.step, TargetStep::Probe | TargetStep::Removed));
         if !programmed {
             self.gp.bindings.retain(|x| x.id != id);
             let mut body = b.to_json();
             body["state"] = "removed".into();
-            self.emit(HubEvent::Gp { kind: "gp/binding".into(), body });
+            self.emit(HubEvent::Gp {
+                kind: "gp/binding".into(),
+                body,
+            });
             return Ok(());
         }
         self.start_removal(id, now);
@@ -734,19 +1024,38 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn start_removal(&mut self, id: u32, now: Millis) {
-        let Some(b) = self.binding_mut(id) else { return };
+        let Some(b) = self.binding_mut(id) else {
+            return;
+        };
         b.state = BindState::Removing;
         let b = b.clone();
         for t in &b.targets {
             if t.step == TargetStep::Removed {
                 continue;
             }
-            let Some(nwk) = self.nwk_of(&t.device) else { continue };
-            if let Some(tm) = self.binding_mut(id).and_then(|x| x.targets.iter_mut().find(|x| x.device == t.device)) {
+            let Some(nwk) = self.nwk_of(&t.device) else {
+                continue;
+            };
+            if let Some(tm) = self
+                .binding_mut(id)
+                .and_then(|x| x.targets.iter_mut().find(|x| x.device == t.device))
+            {
                 tm.step = TargetStep::RemoveTranslation;
             }
-            let req = GpRequest::TranslationUpdate { dst: nwk, action: translation_action::REMOVE, gpd_id: b.gpd, translations: vec![b.translation(t.endpoint)] };
-            self.remote_send(Some(id), &t.device, nwk, TargetStep::RemoveTranslation, req, now);
+            let req = GpRequest::TranslationUpdate {
+                dst: nwk,
+                action: translation_action::REMOVE,
+                gpd_id: b.gpd,
+                translations: vec![b.translation(t.endpoint)],
+            };
+            self.remote_send(
+                Some(id),
+                &t.device,
+                nwk,
+                TargetStep::RemoveTranslation,
+                req,
+                now,
+            );
         }
         self.binding_event(id);
     }
@@ -754,10 +1063,24 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// `gp/bindings/update`: a new executor, action or trigger. Changing
     /// away from an on-device executor removes the old programming first,
     /// so a press never runs twice.
-    pub fn update_binding(&mut self, id: u32, executor: Option<ExecutorChoice>, action: Option<BindAction>, trigger: Option<BindTrigger>, now: Millis) -> Result<J, ApiError> {
-        let b = self.gp.bindings.iter().find(|b| b.id == id).cloned().ok_or_else(|| ApiError::new("not_found", format!("no binding {id}")))?;
+    pub fn update_binding(
+        &mut self,
+        id: u32,
+        executor: Option<ExecutorChoice>,
+        action: Option<BindAction>,
+        trigger: Option<BindTrigger>,
+        now: Millis,
+    ) -> Result<J, ApiError> {
+        let b = self
+            .gp
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
+            .ok_or_else(|| ApiError::new("not_found", format!("no binding {id}")))?;
         let choice = executor.unwrap_or(b.choice);
-        let was_device = b.executor == Some(Executor::Device) && b.targets.iter().any(|t| t.step != TargetStep::Probe);
+        let was_device = b.executor == Some(Executor::Device)
+            && b.targets.iter().any(|t| t.step != TargetStep::Probe);
         if was_device {
             if let Some(bm) = self.binding_mut(id) {
                 bm.next_choice = Some(choice);
@@ -786,21 +1109,40 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             self.decide_binding(id, now);
         }
-        Ok(self.gp.bindings.iter().find(|b| b.id == id).map(GpBindingRecord::to_json).unwrap_or_default())
+        Ok(self
+            .gp
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .map(GpBindingRecord::to_json)
+            .unwrap_or_default())
     }
 
     /// `gp/bindings/verify`: re-reads on-device targets, repairs drift.
     pub fn verify_bindings(&mut self, id: Option<u32>, now: Millis) {
-        let ids: Vec<u32> = self.gp.bindings.iter().filter(|b| id.is_none_or(|x| x == b.id) && b.executor == Some(Executor::Device)).map(|b| b.id).collect();
+        let ids: Vec<u32> = self
+            .gp
+            .bindings
+            .iter()
+            .filter(|b| id.is_none_or(|x| x == b.id) && b.executor == Some(Executor::Device))
+            .map(|b| b.id)
+            .collect();
         for bid in ids {
-            let Some(b) = self.gp.bindings.iter().find(|b| b.id == bid).cloned() else { continue };
+            let Some(b) = self.gp.bindings.iter().find(|b| b.id == bid).cloned() else {
+                continue;
+            };
             if b.state == BindState::Removing {
                 self.start_removal(bid, now);
                 continue;
             }
             for t in &b.targets {
-                let Some(nwk) = self.nwk_of(&t.device) else { continue };
-                let req = GpRequest::TranslationRequest { dst: nwk, start_index: 0 };
+                let Some(nwk) = self.nwk_of(&t.device) else {
+                    continue;
+                };
+                let req = GpRequest::TranslationRequest {
+                    dst: nwk,
+                    start_index: 0,
+                };
                 self.remote_send(Some(bid), &t.device, nwk, TargetStep::Verify, req, now);
             }
         }
@@ -812,7 +1154,13 @@ impl<T: ZigbeeTransport> Hub<T> {
             .bindings
             .iter()
             .filter(|b| gpd.is_none_or(|g| b.gpd.device_id() == g))
-            .filter(|b| target.is_none_or(|t| Self::target_endpoints(&b.target).iter().any(|(d, _)| d == t)))
+            .filter(|b| {
+                target.is_none_or(|t| {
+                    Self::target_endpoints(&b.target)
+                        .iter()
+                        .any(|(d, _)| d == t)
+                })
+            })
             .map(GpBindingRecord::to_json)
             .collect()
     }
@@ -826,7 +1174,12 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// drift (13.8 "a restore of a hub backup reprograms on-device
     /// bindings as drift").
     pub fn import_bindings(&mut self, list: Vec<GpBindingRecord>, now: Millis) {
-        self.gp.next_id = list.iter().map(|b| b.id).max().unwrap_or(0).max(self.gp.next_id);
+        self.gp.next_id = list
+            .iter()
+            .map(|b| b.id)
+            .max()
+            .unwrap_or(0)
+            .max(self.gp.next_id);
         self.gp.bindings = list;
         self.verify_bindings(None, now);
     }
@@ -838,7 +1191,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             .gp
             .bindings
             .iter()
-            .filter(|b| b.executor == Some(Executor::Device) && b.targets.iter().any(|t| t.device == device))
+            .filter(|b| {
+                b.executor == Some(Executor::Device) && b.targets.iter().any(|t| t.device == device)
+            })
             .map(|b| b.id)
             .collect();
         for id in ids {
@@ -852,19 +1207,35 @@ impl<T: ZigbeeTransport> Hub<T> {
             .gp
             .bindings
             .iter()
-            .filter(|b| b.gpd == f.gpd_id && b.executor == Some(Executor::Hub) && b.state == BindState::Active && b.matches(f.command_id, &f.payload))
+            .filter(|b| {
+                b.gpd == f.gpd_id
+                    && b.executor == Some(Executor::Hub)
+                    && b.state == BindState::Active
+                    && b.matches(f.command_id, &f.payload)
+            })
             .cloned()
             .collect();
         for b in list {
             let payload = match &b.action.payload {
                 TranslationPayload::Fixed(p) => p.clone(),
                 TranslationPayload::Copy => f.payload.clone(),
-                TranslationPayload::Derived => zigbee_gp::translation::translate(f.command_id, &f.payload).map(|t| t.payload.to_vec()).unwrap_or_default(),
+                TranslationPayload::Derived => {
+                    zigbee_gp::translation::translate(f.command_id, &f.payload)
+                        .map(|t| t.payload.to_vec())
+                        .unwrap_or_default()
+                }
             };
             let group = matches!(b.target, BindTarget::Group { .. });
             let tsn = self.next_zcl_tsn();
             let frame = ZclFrame {
-                header: ZclHeader { frame_type: FrameType::Cluster, mfr: None, direction: Direction::ClientToServer, disable_default_response: group, tsn, cmd: b.action.command },
+                header: ZclHeader {
+                    frame_type: FrameType::Cluster,
+                    mfr: None,
+                    direction: Direction::ClientToServer,
+                    disable_default_response: group,
+                    tsn,
+                    cmd: b.action.command,
+                },
                 payload,
             };
             let (dst, dst_ep) = match &b.target {
@@ -881,7 +1252,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 profile: b.action.profile,
                 cluster: b.action.cluster,
                 payload: frame.encode(),
-                options: TxOptions { ack: !group, extended_timeout: false },
+                options: TxOptions {
+                    ack: !group,
+                    extended_timeout: false,
+                },
             };
             let _ = self.transport.aps_send(req);
             let _ = now;
@@ -892,22 +1266,50 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// being processed and their executor (13.8).
     pub(crate) fn gp_binding_attrs(&self, device: &str, _entity: usize) -> Option<Map<String, J>> {
         let d = self.devices.get(device)?;
-        let DeviceKind::Gp { gpd_id } = d.kind else { return None };
-        let (cmd, payload) = self.gp_last_frame.as_ref().filter(|(g, _, _)| *g == gpd_id).map(|(_, c, p)| (*c, p.clone()))?;
-        let bs: Vec<&GpBindingRecord> = self.gp.bindings.iter().filter(|b| b.gpd == gpd_id && b.matches(cmd, &payload)).collect();
+        let DeviceKind::Gp { gpd_id } = d.kind else {
+            return None;
+        };
+        let (cmd, payload) = self
+            .gp_last_frame
+            .as_ref()
+            .filter(|(g, _, _)| *g == gpd_id)
+            .map(|(_, c, p)| (*c, p.clone()))?;
+        let bs: Vec<&GpBindingRecord> = self
+            .gp
+            .bindings
+            .iter()
+            .filter(|b| b.gpd == gpd_id && b.matches(cmd, &payload))
+            .collect();
         if bs.is_empty() {
             return None;
         }
         let mut m = Map::new();
-        m.insert("bindings".into(), json!(bs.iter().map(|b| b.id).collect::<Vec<_>>()));
-        let ex = bs.iter().find_map(|b| b.executor).map_or("pending", |e| if e == Executor::Device { "device" } else { "hub" });
+        m.insert(
+            "bindings".into(),
+            json!(bs.iter().map(|b| b.id).collect::<Vec<_>>()),
+        );
+        let ex = bs.iter().find_map(|b| b.executor).map_or("pending", |e| {
+            if e == Executor::Device {
+                "device"
+            } else {
+                "hub"
+            }
+        });
         m.insert("executor".into(), ex.into());
         Some(m)
     }
 
     /// Last verified time of an on-device target, s.
     pub fn binding_last_verified(&self, id: u32) -> Option<f64> {
-        self.gp.bindings.iter().find(|b| b.id == id)?.targets.iter().filter_map(|t| t.last_verified).max().map(ts)
+        self.gp
+            .bindings
+            .iter()
+            .find(|b| b.id == id)?
+            .targets
+            .iter()
+            .filter_map(|t| t.last_verified)
+            .max()
+            .map(ts)
     }
 }
 

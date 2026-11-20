@@ -67,11 +67,22 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
   ~2,000 compressed definitions (~83 B per definition in a deflate block,
   ~226 KiB total); on 8 MB a 576 KiB bank holds everything translatable
   (~365 KiB).
+- **Engine** ([`crates/hub-devices`](crates/hub-devices/README.md), host
+  tests only so far): interview → fingerprint → resolution → entities with
+  stable uids `<device>:<endpoint>:<key>`, the generic ZCL tier with
+  reporting defaults, definitions loaded as zdefc CBOR through `zdef`
+  (expressions on the zdef VM), Tuya EF00 with time sync and the magic
+  packet, self-description over ZRDS chunks, Green Power (generic tier, GP
+  definitions, GP bindings on-device through ZRHP 0x0A08–0x0A0D or
+  hub-side), availability, events, and the WebSocket API model. It is
+  sans-IO behind a `ZigbeeTransport` trait; the adapter to the phase-1 host
+  core is the next step.
 
 ## Layout
 
 | Path | What |
 |---|---|
+| `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb) |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF) |

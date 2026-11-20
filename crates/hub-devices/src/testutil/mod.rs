@@ -2,5 +2,5 @@
 //! the definition examples, a device simulator.
 
 pub mod expr;
-pub mod yaml;
 pub mod sim;
+pub mod yaml;

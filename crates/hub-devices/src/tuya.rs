@@ -27,7 +27,11 @@ pub mod cmd {
 pub fn is_data_command(c: u8) -> bool {
     matches!(
         c,
-        cmd::DATA_RESPONSE | cmd::DATA_REPORT | cmd::ACTIVE_STATUS_REPORT_ALT | cmd::ACTIVE_STATUS_REPORT | cmd::DATA_REPORT_ALT
+        cmd::DATA_RESPONSE
+            | cmd::DATA_REPORT
+            | cmd::ACTIVE_STATUS_REPORT_ALT
+            | cmd::ACTIVE_STATUS_REPORT
+            | cmd::DATA_REPORT_ALT
     )
 }
 
@@ -53,7 +57,11 @@ pub fn parse_data(p: &[u8]) -> Result<(u16, Vec<DpRecord>), CodecError> {
         let ty = r.u8()?;
         let l = r.take(2)?;
         let len = usize::from(u16::from_be_bytes([l[0], l[1]]));
-        out.push(DpRecord { dp, ty, data: r.take(len)?.to_vec() });
+        out.push(DpRecord {
+            dp,
+            ty,
+            data: r.take(len)?.to_vec(),
+        });
     }
     Ok((seq, out))
 }
@@ -76,11 +84,15 @@ pub fn dp_value(ty: u8, data: &[u8]) -> Value {
     match TuyaType::from_code(ty) {
         Some(TuyaType::Bool) => data.first().map_or(Value::Null, |b| Value::Bool(*b != 0)),
         Some(TuyaType::Value) => match data.len() {
-            4 => Value::Int(i64::from(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))),
+            4 => Value::Int(i64::from(i32::from_be_bytes([
+                data[0], data[1], data[2], data[3],
+            ]))),
             1..=8 => Value::Int(be(data) as i64),
             _ => Value::Null,
         },
-        Some(TuyaType::Enum) => data.first().map_or(Value::Null, |b| Value::Int(i64::from(*b))),
+        Some(TuyaType::Enum) => data
+            .first()
+            .map_or(Value::Null, |b| Value::Int(i64::from(*b))),
         Some(TuyaType::Bitmap) if matches!(data.len(), 1 | 2 | 4) => Value::Int(be(data) as i64),
         Some(TuyaType::Raw | TuyaType::String) => Value::Bytes(data.to_vec()),
         _ => Value::Null,
@@ -89,12 +101,18 @@ pub fn dp_value(ty: u8, data: &[u8]) -> Value {
 
 /// Encodes a value for a DP of type `ty`.
 pub fn dp_encode(ty: TuyaType, v: &Value) -> Result<Vec<u8>, String> {
-    let i = || v.as_i64().ok_or_else(|| format!("integer value expected for {ty:?}"));
+    let i = || {
+        v.as_i64()
+            .ok_or_else(|| format!("integer value expected for {ty:?}"))
+    };
     Ok(match ty {
         TuyaType::Bool => vec![u8::from(v.truthy().ok_or("bool expected")?)],
         TuyaType::Value => {
             let x = i()?;
-            i32::try_from(x).map_err(|_| format!("{x} out of i32 range"))?.to_be_bytes().to_vec()
+            i32::try_from(x)
+                .map_err(|_| format!("{x} out of i32 range"))?
+                .to_be_bytes()
+                .to_vec()
         }
         TuyaType::Enum => vec![u8::try_from(i()?).map_err(|_| "enum out of range")?],
         TuyaType::Bitmap => {
@@ -153,7 +171,10 @@ mod tests {
     #[test]
     fn dp_frames() {
         // seq 0x0102; DP 4 value 215 (21.5 degC); DP 2 enum 1.
-        let p = [0x01, 0x02, 0x04, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0xD7, 0x02, 0x04, 0x00, 0x01, 0x01];
+        let p = [
+            0x01, 0x02, 0x04, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0xD7, 0x02, 0x04, 0x00, 0x01,
+            0x01,
+        ];
         let (seq, recs) = parse_data(&p).unwrap();
         assert_eq!(seq, 0x0102);
         assert_eq!(recs.len(), 2);
@@ -161,7 +182,10 @@ mod tests {
         assert_eq!(dp_value(recs[1].ty, &recs[1].data), Value::Int(1));
         assert_eq!(encode_data(seq, &recs), p);
         assert_eq!(dp_value(2, &(-25i32).to_be_bytes()), Value::Int(-25));
-        assert_eq!(dp_encode(TuyaType::Value, &Value::Int(-25)).unwrap(), (-25i32).to_be_bytes());
+        assert_eq!(
+            dp_encode(TuyaType::Value, &Value::Int(-25)).unwrap(),
+            (-25i32).to_be_bytes()
+        );
         assert_eq!(dp_encode(TuyaType::Bool, &Value::Bool(true)).unwrap(), [1]);
         assert!(parse_data(&[0, 1, 4, 2, 0, 4, 0]).is_err());
     }

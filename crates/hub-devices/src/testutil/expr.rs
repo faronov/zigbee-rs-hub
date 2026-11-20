@@ -17,8 +17,8 @@ enum Tok {
 }
 
 const OPS: [&str; 30] = [
-    "??", "||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", "<", ">", "|", "^", "&", "+", "-", "*", "/", "%", "!",
-    "~", "?", ":", "(", ")", "[", "]", ",", ".",
+    "??", "||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", "<", ">", "|", "^", "&", "+", "-",
+    "*", "/", "%", "!", "~", "?", ":", "(", ")", "[", "]", ",", ".",
 ];
 
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
@@ -92,7 +92,10 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             i += 1;
             continue;
         }
-        let op = OPS.iter().find(|op| src[i..].starts_with(*op)).ok_or_else(|| format!("unexpected {c:?}"))?;
+        let op = OPS
+            .iter()
+            .find(|op| src[i..].starts_with(*op))
+            .ok_or_else(|| format!("unexpected {c:?}"))?;
         out.push(Tok::Op(op));
         i += op.len();
     }
@@ -130,7 +133,11 @@ impl Parser {
         }
     }
     fn expect(&mut self, op: &str) -> Result<(), String> {
-        if self.eat_op(op) { Ok(()) } else { Err(format!("expected {op} at token {}", self.pos)) }
+        if self.eat_op(op) {
+            Ok(())
+        } else {
+            Err(format!("expected {op} at token {}", self.pos))
+        }
     }
     fn expr(&mut self) -> Result<Ast, String> {
         if matches!(self.peek(), Some(Tok::Ident(s)) if s == "let") {
@@ -186,8 +193,7 @@ impl Parser {
             return self.unary();
         }
         let mut lhs = self.binary(level + 1)?;
-        loop {
-            let Some(Tok::Op(op)) = self.peek().cloned() else { break };
+        while let Some(Tok::Op(op)) = self.peek().cloned() {
             if !LEVELS[level].contains(&op) {
                 break;
             }
@@ -333,12 +339,17 @@ fn num_bin(op: &str, a: &Value, b: &Value) -> Value {
                     }
                 }
                 "//" => floor_div(x, y).map_or(Null, Int),
-                "%" => floor_div(x, y).and_then(|q| q.checked_mul(y)).and_then(|m| x.checked_sub(m)).map_or(Null, Int),
+                "%" => floor_div(x, y)
+                    .and_then(|q| q.checked_mul(y))
+                    .and_then(|m| x.checked_sub(m))
+                    .map_or(Null, Int),
                 _ => Null,
             }
         }
         _ => {
-            let (Some(x), Some(y)) = (num(a), num(b)) else { return Null };
+            let (Some(x), Some(y)) = (num(a), num(b)) else {
+                return Null;
+            };
             let r = match op {
                 "+" => x + y,
                 "-" => x - y,
@@ -370,7 +381,11 @@ fn num_bin(op: &str, a: &Value, b: &Value) -> Value {
 
 fn floor_div(x: i64, y: i64) -> Option<i64> {
     let q = x.checked_div(y)?;
-    if x % y != 0 && ((x < 0) != (y < 0)) { Some(q - 1) } else { Some(q) }
+    if x % y != 0 && ((x < 0) != (y < 0)) {
+        Some(q - 1)
+    } else {
+        Some(q)
+    }
 }
 
 fn num(v: &Value) -> Option<f64> {
@@ -397,8 +412,12 @@ fn boolish(v: &Value) -> Option<bool> {
 }
 
 fn read_int(b: &[u8], o: i64, n: usize, be: bool, signed: bool) -> Value {
-    let Ok(o) = usize::try_from(o) else { return Value::Null };
-    let Some(s) = b.get(o..o + n) else { return Value::Null };
+    let Ok(o) = usize::try_from(o) else {
+        return Value::Null;
+    };
+    let Some(s) = b.get(o..o + n) else {
+        return Value::Null;
+    };
     let mut v: u64 = 0;
     if be {
         for &x in s {
@@ -431,7 +450,12 @@ impl SourceExpr {
                 ("opt", Some(k)) => s.ctx.env.opt(k),
                 ("gpd", Some(k)) => s.ctx.env.gpd(k),
                 ("fp", Some(k)) => s.ctx.env.fp(k),
-                (n, None) => s.locals.iter().rev().find(|(k, _)| k == n).map_or(Null, |(_, v)| v.clone()),
+                (n, None) => s
+                    .locals
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == n)
+                    .map_or(Null, |(_, v)| v.clone()),
                 _ => Null,
             },
             Ast::Let(binds, body) => {
@@ -462,7 +486,10 @@ impl SourceExpr {
             Ast::Index(b, i) => {
                 let (bv, iv) = (self.eval_ast(b, s), self.eval_ast(i, s));
                 match (bv, iv) {
-                    (Bytes(b), Int(i)) => usize::try_from(i).ok().and_then(|i| b.get(i).copied()).map_or(Null, |x| Int(i64::from(x))),
+                    (Bytes(b), Int(i)) => usize::try_from(i)
+                        .ok()
+                        .and_then(|i| b.get(i).copied())
+                        .map_or(Null, |x| Int(i64::from(x))),
                     _ => Null,
                 }
             }
@@ -522,7 +549,9 @@ impl SourceExpr {
         use Value::*;
         if f == "lookup" {
             let x = args.first().map_or(Null, |a| self.eval_ast(a, s));
-            let Some(Ast::Map(m)) = args.get(1) else { return Null };
+            let Some(Ast::Map(m)) = args.get(1) else {
+                return Null;
+            };
             let found = m.iter().find(|(k, _)| match (k, &x) {
                 (Int(_) | Float(_), Int(_) | Float(_)) => num(k) == num(&x),
                 _ => *k == x,
@@ -579,7 +608,9 @@ impl SourceExpr {
                 let Str(fmt) = arg(0) else { return Null };
                 let mut out = Vec::new();
                 for (i, item) in fmt.split_whitespace().enumerate() {
-                    let Some(x) = int(&arg(i + 1)) else { return Null };
+                    let Some(x) = int(&arg(i + 1)) else {
+                        return Null;
+                    };
                     let (n, be) = match item {
                         "u8" | "i8" => (1, false),
                         "u16le" | "i16le" => (2, false),
@@ -603,7 +634,9 @@ impl SourceExpr {
                 _ => Null,
             },
             "bits" => match (int(&arg(0)), int(&arg(1)), int(&arg(2))) {
-                (Some(x), Some(lo), Some(len)) if (0..64).contains(&lo) && (1..64).contains(&len) => {
+                (Some(x), Some(lo), Some(len))
+                    if (0..64).contains(&lo) && (1..64).contains(&len) =>
+                {
                     Int((x >> lo) & ((1i64 << len) - 1))
                 }
                 _ => Null,
@@ -664,8 +697,13 @@ impl SourceExpr {
                 v => num(&v).map_or(Null, |x| Int(x.trunc() as i64)),
             },
             "float" => num(&arg(0)).map_or(Null, Float),
-            "pow10" => num(&arg(0)).map(|x| 10f64.powf(x)).filter(|r| r.is_finite()).map_or(Null, Float),
-            "log10" => num(&arg(0)).filter(|x| *x > 0.0).map_or(Null, |x| Float(x.log10())),
+            "pow10" => num(&arg(0))
+                .map(|x| 10f64.powf(x))
+                .filter(|r| r.is_finite())
+                .map_or(Null, Float),
+            "log10" => num(&arg(0))
+                .filter(|x| *x > 0.0)
+                .map_or(Null, |x| Float(x.log10())),
             "str" => match arg(0) {
                 Int(i) => Str(i.to_string()),
                 Float(x) => Str(x.to_string()),
@@ -684,7 +722,10 @@ impl SourceExpr {
 
 impl Expression for SourceExpr {
     fn eval(&self, ctx: &ExprCtx<'_>) -> Value {
-        let mut s = Scope { ctx, locals: Vec::new() };
+        let mut s = Scope {
+            ctx,
+            locals: Vec::new(),
+        };
         self.eval_ast(&self.ast, &mut s)
     }
     fn source(&self) -> Option<&str> {
@@ -703,7 +744,10 @@ pub fn compile(src: &str) -> Result<Expr, String> {
     if p.pos != p.toks.len() {
         return Err(format!("trailing tokens in {src:?}"));
     }
-    Ok(Arc::new(SourceExpr { src: src.to_string(), ast }))
+    Ok(Arc::new(SourceExpr {
+        src: src.to_string(),
+        ast,
+    }))
 }
 
 /// Rewrites single `=` (let bindings) into a token the lexer accepts as
@@ -742,28 +786,108 @@ mod tests {
         struct Env;
         impl ExprEnv for Env {
             fn state(&self, k: &str) -> Value {
-                if k == "detection_interval" { Value::Int(60) } else { Value::Null }
+                if k == "detection_interval" {
+                    Value::Int(60)
+                } else {
+                    Value::Null
+                }
             }
             fn gpd(&self, k: &str) -> Value {
-                if k == "model_id" { Value::Int(0xF103) } else { Value::Null }
+                if k == "model_id" {
+                    Value::Int(0xF103)
+                } else {
+                    Value::Null
+                }
             }
         }
         let e = compile(src).unwrap_or_else(|e| panic!("{src}: {e}"));
-        e.eval(&ExprCtx { x, payload, last, env: &Env })
+        e.eval(&ExprCtx {
+            x,
+            payload,
+            last,
+            env: &Env,
+        })
     }
 
     #[test]
     fn spec_examples() {
         assert_eq!(ev("x == 1", Value::Int(1), None, None), Value::Bool(true));
-        assert_eq!(ev("x > 130536 ? 0 : x - 65536", Value::Int(65536 + 120), None, None), Value::Int(120));
-        assert_eq!(ev("x > 130536 ? 0 : x - 65536", Value::Int(200_000), None, None), Value::Int(0));
-        assert_eq!(ev("(state.detection_interval ?? 30) + 2", Value::Null, None, None), Value::Int(62));
-        assert_eq!(ev("(state.other ?? 30) + 2", Value::Null, None, None), Value::Int(32));
-        assert_eq!(ev(r#"bit(payload[0], 0) && last != "press""#, Value::Null, Some(&[1]), Some("release")), Value::Bool(true));
-        assert_eq!(ev(r#"bit(payload[0], 0) && last != "press""#, Value::Null, Some(&[1]), Some("press")), Value::Bool(false));
-        assert_eq!(ev("x == 0 ? 0 : round(pow10((x - 1) / 10000))", Value::Int(40001), None, None), Value::Int(10000));
-        assert_eq!(ev("u16le(payload, 2)", Value::Null, Some(&[0, 0, 0x34, 0x12]), None), Value::Int(0x1234));
-        assert_eq!(ev("bit(gpd.model_id, 0) && bit(gpd.model_id, 1)", Value::Null, None, None), Value::Bool(true));
+        assert_eq!(
+            ev(
+                "x > 130536 ? 0 : x - 65536",
+                Value::Int(65536 + 120),
+                None,
+                None
+            ),
+            Value::Int(120)
+        );
+        assert_eq!(
+            ev(
+                "x > 130536 ? 0 : x - 65536",
+                Value::Int(200_000),
+                None,
+                None
+            ),
+            Value::Int(0)
+        );
+        assert_eq!(
+            ev(
+                "(state.detection_interval ?? 30) + 2",
+                Value::Null,
+                None,
+                None
+            ),
+            Value::Int(62)
+        );
+        assert_eq!(
+            ev("(state.other ?? 30) + 2", Value::Null, None, None),
+            Value::Int(32)
+        );
+        assert_eq!(
+            ev(
+                r#"bit(payload[0], 0) && last != "press""#,
+                Value::Null,
+                Some(&[1]),
+                Some("release")
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            ev(
+                r#"bit(payload[0], 0) && last != "press""#,
+                Value::Null,
+                Some(&[1]),
+                Some("press")
+            ),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            ev(
+                "x == 0 ? 0 : round(pow10((x - 1) / 10000))",
+                Value::Int(40001),
+                None,
+                None
+            ),
+            Value::Int(10000)
+        );
+        assert_eq!(
+            ev(
+                "u16le(payload, 2)",
+                Value::Null,
+                Some(&[0, 0, 0x34, 0x12]),
+                None
+            ),
+            Value::Int(0x1234)
+        );
+        assert_eq!(
+            ev(
+                "bit(gpd.model_id, 0) && bit(gpd.model_id, 1)",
+                Value::Null,
+                None,
+                None
+            ),
+            Value::Bool(true)
+        );
         assert_eq!(
             ev(
                 r#"lookup(payload[0], {1: "on", 2: "up", 3: "down", 4: "off"}) + "_" + lookup(payload[4], {0: "press", 1: "hold"})"#,
@@ -773,17 +897,37 @@ mod tests {
             ),
             Value::Str("up_hold".into())
         );
-        assert_eq!(ev(r#""recall_" + str(payload[2])"#, Value::Null, Some(&[0, 0, 3]), None), Value::Str("recall_3".into()));
-        assert_eq!(ev("x & 0x10 == 0x10", Value::Int(0x30), None, None), Value::Bool(true));
-        assert_eq!(ev("let a = x * 2, b = a + 1 in b", Value::Int(3), None, None), Value::Int(7));
+        assert_eq!(
+            ev(
+                r#""recall_" + str(payload[2])"#,
+                Value::Null,
+                Some(&[0, 0, 3]),
+                None
+            ),
+            Value::Str("recall_3".into())
+        );
+        assert_eq!(
+            ev("x & 0x10 == 0x10", Value::Int(0x30), None, None),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            ev("let a = x * 2, b = a + 1 in b", Value::Int(3), None, None),
+            Value::Int(7)
+        );
         assert_eq!(ev("payload[9]", Value::Null, Some(&[1]), None), Value::Null);
         assert_eq!(ev("7 // 2", Value::Null, None, None), Value::Int(3));
         assert_eq!(ev("-7 // 2", Value::Null, None, None), Value::Int(-4));
         assert_eq!(ev("-7 % 2", Value::Null, None, None), Value::Int(1));
         assert_eq!(ev("1 / 0", Value::Null, None, None), Value::Null);
-        assert_eq!(ev(r#"pack("u8 u16le", 1, 513)"#, Value::Null, None, None), Value::Bytes(vec![1, 1, 2]));
+        assert_eq!(
+            ev(r#"pack("u8 u16le", 1, 513)"#, Value::Null, None, None),
+            Value::Bytes(vec![1, 1, 2])
+        );
         assert_eq!(ev("true", Value::Null, None, None), Value::Bool(true));
         let e = compile("x").unwrap();
-        assert_eq!(e.eval(&ExprCtx::with_x(Value::Int(4), &EmptyEnv)), Value::Int(4));
+        assert_eq!(
+            e.eval(&ExprCtx::with_x(Value::Int(4), &EmptyEnv)),
+            Value::Int(4)
+        );
     }
 }

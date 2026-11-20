@@ -8,7 +8,9 @@
 use std::fmt;
 
 /// A ZCL data type code (`0x10` bool, `0x21` uint16, …).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ZclType(pub u8);
 
 #[allow(missing_docs)]
@@ -120,22 +122,30 @@ impl ZclType {
 
     /// Unsigned integer width in bytes (uint8…uint64).
     pub fn uint_width(self) -> Option<usize> {
-        (0x20..=0x27).contains(&self.0).then(|| usize::from(self.0 - 0x1F))
+        (0x20..=0x27)
+            .contains(&self.0)
+            .then(|| usize::from(self.0 - 0x1F))
     }
 
     /// Signed integer width in bytes (int8…int64).
     pub fn int_width(self) -> Option<usize> {
-        (0x28..=0x2F).contains(&self.0).then(|| usize::from(self.0 - 0x27))
+        (0x28..=0x2F)
+            .contains(&self.0)
+            .then(|| usize::from(self.0 - 0x27))
     }
 
     /// Bitmap width in bytes (map8…map64).
     pub fn map_width(self) -> Option<usize> {
-        (0x18..=0x1F).contains(&self.0).then(|| usize::from(self.0 - 0x17))
+        (0x18..=0x1F)
+            .contains(&self.0)
+            .then(|| usize::from(self.0 - 0x17))
     }
 
     /// General data width in bytes (data8…data64).
     pub fn data_width(self) -> Option<usize> {
-        (0x08..=0x0F).contains(&self.0).then(|| usize::from(self.0 - 0x07))
+        (0x08..=0x0F)
+            .contains(&self.0)
+            .then(|| usize::from(self.0 - 0x07))
     }
 
     /// Analog types carry a Reportable Change field in Configure Reporting
@@ -310,7 +320,9 @@ impl<'a> Reader<'a> {
     /// Unsigned LE integer of `n` ≤ 8 bytes.
     pub fn uint_le(&mut self, n: usize) -> Result<u64, CodecError> {
         let b = self.take(n)?;
-        Ok(b.iter().rev().fold(0u64, |acc, &x| (acc << 8) | u64::from(x)))
+        Ok(b.iter()
+            .rev()
+            .fold(0u64, |acc, &x| (acc << 8) | u64::from(x)))
     }
 }
 
@@ -615,26 +627,50 @@ mod tests {
         rt(ZclType::U48, ZclValue::Uint(0xFFFF_FFFF_FFFF));
         rt(ZclType::I40, ZclValue::Int(-5));
         rt(ZclType::U8, ZclValue::Uint(0xFF));
-        assert_eq!(decode_slice(ZclType::I16, &[0x00, 0x80]).unwrap().0, ZclValue::Int(-32768));
+        assert_eq!(
+            decode_slice(ZclType::I16, &[0x00, 0x80]).unwrap().0,
+            ZclValue::Int(-32768)
+        );
         let mut out = Vec::new();
-        assert_eq!(encode_value(ZclType::U8, &ZclValue::Uint(256), &mut out), Err(CodecError::OutOfRange));
-        assert_eq!(encode_value(ZclType::I8, &ZclValue::Int(128), &mut out), Err(CodecError::OutOfRange));
+        assert_eq!(
+            encode_value(ZclType::U8, &ZclValue::Uint(256), &mut out),
+            Err(CodecError::OutOfRange)
+        );
+        assert_eq!(
+            encode_value(ZclType::I8, &ZclValue::Int(128), &mut out),
+            Err(CodecError::OutOfRange)
+        );
     }
 
     #[test]
     fn strings_structs_and_floats() {
-        rt(ZclType::CHAR_STR, ZclValue::String("lumi.motion.ac02".into()));
+        rt(
+            ZclType::CHAR_STR,
+            ZclValue::String("lumi.motion.ac02".into()),
+        );
         rt(ZclType::OCTET_STR, ZclValue::Octets(vec![7; 48]));
         rt(
             ZclType::STRUCT,
-            ZclValue::Struct(vec![(ZclType::U8, ZclValue::Uint(1)), (ZclType::I16, ZclValue::Int(-2))]),
+            ZclValue::Struct(vec![
+                (ZclType::U8, ZclValue::Uint(1)),
+                (ZclType::I16, ZclValue::Int(-2)),
+            ]),
         );
-        rt(ZclType::ARRAY, ZclValue::List(ZclType::U16, vec![ZclValue::Uint(1), ZclValue::Uint(2)]));
+        rt(
+            ZclType::ARRAY,
+            ZclValue::List(ZclType::U16, vec![ZclValue::Uint(1), ZclValue::Uint(2)]),
+        );
         rt(ZclType::SINGLE, ZclValue::Float(f64::from(0.000_412_5f32)));
         rt(ZclType::SEMI, ZclValue::Float(1.5));
         assert_eq!(f16_to_f64(f64_to_f16(-2.0)), -2.0);
-        assert_eq!(decode_slice(ZclType::CHAR_STR, &[0xFF]).unwrap().0, ZclValue::String(String::new()));
-        assert_eq!(decode_slice(ZclType::BOOL, &[0xFF]).unwrap().0, ZclValue::Bool(None));
+        assert_eq!(
+            decode_slice(ZclType::CHAR_STR, &[0xFF]).unwrap().0,
+            ZclValue::String(String::new())
+        );
+        assert_eq!(
+            decode_slice(ZclType::BOOL, &[0xFF]).unwrap().0,
+            ZclValue::Bool(None)
+        );
     }
 
     #[test]
@@ -642,7 +678,9 @@ mod tests {
         assert_eq!(ZclType::from_name("i16"), Some(ZclType::I16));
         assert_eq!(ZclType::from_name("map16"), Some(ZclType::MAP16));
         assert_eq!(ZclType::from_name("f32"), Some(ZclType::SINGLE));
-        assert!(ZclType::U8.is_analog() && !ZclType::MAP8.is_analog() && !ZclType::ENUM8.is_analog());
+        assert!(
+            ZclType::U8.is_analog() && !ZclType::MAP8.is_analog() && !ZclType::ENUM8.is_analog()
+        );
         assert_eq!(int_range(ZclType::I8), Some((-128, 127)));
         assert_eq!(int_range(ZclType::ENUM8), Some((0, 255)));
     }

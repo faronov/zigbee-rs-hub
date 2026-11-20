@@ -18,7 +18,12 @@ pub const SEEN_COMMANDS: u16 = 0xFFFF;
 /// code, value.
 pub type GpRecord = (u16, u16, Option<u16>, TypedValue);
 
-fn records(r: &mut Reader<'_>, cluster: Option<u16>, mfr: Option<u16>, out: &mut Vec<GpRecord>) -> Result<(), CodecError> {
+fn records(
+    r: &mut Reader<'_>,
+    cluster: Option<u16>,
+    mfr: Option<u16>,
+    out: &mut Vec<GpRecord>,
+) -> Result<(), CodecError> {
     while r.remaining() > 0 {
         let c = match cluster {
             Some(c) => c,
@@ -123,12 +128,23 @@ fn typical_commands(device_id: u8) -> Vec<u8> {
 }
 
 fn to_gp(mut e: EntityDef) -> EntityDef {
-    for (_, v) in std::iter::once(("", &mut e.value)).chain(e.parts.iter_mut().map(|(n, v)| (n.as_str(), v))) {
+    for (_, v) in
+        std::iter::once(("", &mut e.value)).chain(e.parts.iter_mut().map(|(n, v)| (n.as_str(), v)))
+    {
         if let Binding::Zcl(z) = &v.binding {
-            v.binding = Binding::Gp(GpBinding::Report { cluster: z.cluster, attr: z.attr, ty: z.ty, mfr: None });
+            v.binding = Binding::Gp(GpBinding::Report {
+                cluster: z.cluster,
+                attr: z.attr,
+                ty: z.ty,
+                mfr: None,
+            });
         }
         v.report = None;
-        v.access = Some(Access { read: false, write: false, report: true });
+        v.access = Some(Access {
+            read: false,
+            write: false,
+            report: true,
+        });
     }
     e.ep = Some(GP_ENDPOINT);
     e
@@ -139,8 +155,12 @@ pub fn gp_generic_entities(fp: &Fingerprint, attrs: &AttrCache) -> Vec<EntityDef
     let Some(g) = &fp.gp else { return Vec::new() };
     let mut out: Vec<EntityDef> = Vec::new();
     // Commands → `action` event / per-contact events.
-    let mut cmds: Vec<u8> = if g.commands.is_empty() { typical_commands(g.device_id) } else { g.commands.clone() };
-    for (&(ep, c, a, _), _) in &attrs.map {
+    let mut cmds: Vec<u8> = if g.commands.is_empty() {
+        typical_commands(g.device_id)
+    } else {
+        g.commands.clone()
+    };
+    for &(ep, c, a, _) in attrs.map.keys() {
         if ep == GP_ENDPOINT && c == SEEN_COMMANDS && !cmds.contains(&(a as u8)) {
             cmds.push(a as u8);
         }
@@ -161,7 +181,9 @@ pub fn gp_generic_entities(fp: &Fingerprint, attrs: &AttrCache) -> Vec<EntityDef
     let mut types: Vec<String> = Vec::new();
     let mut triggers = Vec::new();
     for &c in &cmds {
-        if (vector && contacts > 0 && matches!(c, 0x69 | 0x6A)) || matches!(c, 0xA0..=0xA3 | 0xA8 | 0xB0..=0xBF | 0xE0..=0xFF) {
+        if (vector && contacts > 0 && matches!(c, 0x69 | 0x6A))
+            || matches!(c, 0xA0..=0xA3 | 0xA8 | 0xB0..=0xBF | 0xE0..=0xFF)
+        {
             continue;
         }
         let Some(t) = command_event(c) else { continue };
@@ -171,15 +193,37 @@ pub fn gp_generic_entities(fp: &Fingerprint, attrs: &AttrCache) -> Vec<EntityDef
         let mut attrs_e: Vec<(String, crate::expr::Expr)> = Vec::new();
         match c {
             0x30..=0x38 => {
-                attrs_e.push(("rate".into(), NativeExpr::new("payload[0]", |c| c.payload.and_then(|p| p.first()).map_or(Value::Null, |b| Value::Int(i64::from(*b))))));
+                attrs_e.push((
+                    "rate".into(),
+                    NativeExpr::new("payload[0]", |c| {
+                        c.payload
+                            .and_then(|p| p.first())
+                            .map_or(Value::Null, |b| Value::Int(i64::from(*b)))
+                    }),
+                ));
             }
             0x69 | 0x6A => {
-                attrs_e.push(("contacts".into(), NativeExpr::new("payload[0]", |c| c.payload.and_then(|p| p.first()).map_or(Value::Null, |b| Value::Int(i64::from(*b))))));
+                attrs_e.push((
+                    "contacts".into(),
+                    NativeExpr::new("payload[0]", |c| {
+                        c.payload
+                            .and_then(|p| p.first())
+                            .map_or(Value::Null, |b| Value::Int(i64::from(*b)))
+                    }),
+                ));
             }
             _ => {}
         }
-        attrs_e.push(("command".into(), NativeExpr::new("gpd_cmd", move |_| Value::Int(i64::from(c)))));
-        triggers.push(Trigger { source: TriggerSource::GpCmd(c), when: None, event: EventSel::Fixed(t), attrs: attrs_e });
+        attrs_e.push((
+            "command".into(),
+            NativeExpr::new("gpd_cmd", move |_| Value::Int(i64::from(c))),
+        ));
+        triggers.push(Trigger {
+            source: TriggerSource::GpCmd(c),
+            when: None,
+            event: EventSel::Fixed(t),
+            attrs: attrs_e,
+        });
     }
     if !triggers.is_empty() {
         let mut e = EntityDef::new("action", Platform::Event);
@@ -192,12 +236,16 @@ pub fn gp_generic_entities(fp: &Fingerprint, attrs: &AttrCache) -> Vec<EntityDef
     // Reports: announced clusters up front, then every attribute seen.
     let mut pairs: Vec<(u16, u16)> = Vec::new();
     for &c in &g.server_clusters {
-        let attrs_of: &[u16] = if c == cl::POWER_CONFIG { &[0x0021, 0x0020] } else { &[0x0000] };
+        let attrs_of: &[u16] = if c == cl::POWER_CONFIG {
+            &[0x0021, 0x0020]
+        } else {
+            &[0x0000]
+        };
         for &a in attrs_of {
             pairs.push((c, a));
         }
     }
-    for (&(ep, c, a, m), _) in &attrs.map {
+    for &(ep, c, a, m) in attrs.map.keys() {
         if ep == GP_ENDPOINT && c != SEEN_COMMANDS && m.is_none() && !pairs.contains(&(c, a)) {
             pairs.push((c, a));
         }
@@ -210,13 +258,20 @@ pub fn gp_generic_entities(fp: &Fingerprint, attrs: &AttrCache) -> Vec<EntityDef
         }
     }
     let mut dl = device_level(GP_ENDPOINT);
-    for (key, f) in [("frame_counter", DeviceField::FrameCounter), ("security_level", DeviceField::SecurityLevel)] {
+    for (key, f) in [
+        ("frame_counter", DeviceField::FrameCounter),
+        ("security_level", DeviceField::SecurityLevel),
+    ] {
         let mut e = EntityDef::new(key, Platform::Sensor);
         e.category = Some(Category::Diagnostic);
         e.enabled = key == "security_level";
         e.ep = Some(GP_ENDPOINT);
         e.value.binding = Binding::DeviceField(f);
-        e.value.access = Some(Access { read: true, write: false, report: true });
+        e.value.access = Some(Access {
+            read: true,
+            write: false,
+            report: true,
+        });
         dl.push(e);
     }
     out.extend(dl);
@@ -231,9 +286,19 @@ mod tests {
     #[test]
     fn report_decoders() {
         // zigbee-rs MultiClusterReport layout: cluster, attr, type, value.
-        let p = [0x02, 0x04, 0x00, 0x00, 0x29, 0x5A, 0x08, 0x01, 0x00, 0x21, 0x00, 0x20, 0xC8];
+        let p = [
+            0x02, 0x04, 0x00, 0x00, 0x29, 0x5A, 0x08, 0x01, 0x00, 0x21, 0x00, 0x20, 0xC8,
+        ];
         let r = decode_report(0xA2, &p).unwrap();
-        assert_eq!(r[0], (0x0402, 0x0000, None, TypedValue::new(ZclType::I16, ZclValue::Int(2138))));
+        assert_eq!(
+            r[0],
+            (
+                0x0402,
+                0x0000,
+                None,
+                TypedValue::new(ZclType::I16, ZclValue::Int(2138))
+            )
+        );
         assert_eq!(r[1].0, 0x0001);
         let p = [0x6B, 0x6D, 0x6C, 0xFC, 0x01, 0x00, 0x29, 0x10, 0x00];
         let r = decode_report(0xA1, &p).unwrap();

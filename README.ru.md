@@ -67,11 +67,21 @@ ZRHP остаётся протоколом для USB/UART (сетевого т�
 - **Размеры:** простые определения — 120–320 Б CBOR; банк 256 КиБ вмещает
   ~2 000 сжатых определений (~83 Б на определение в deflate-блоке, всего
   ~226 КиБ); на 8 МБ банк 576 КиБ вмещает всё переводимое (~365 КиБ).
+- **Движок** ([`crates/hub-devices`](crates/hub-devices/README.md), пока
+  только хост-тесты): опрос → отпечаток → разрешение слоёв → сущности со
+  стабильными uid `<device>:<endpoint>:<key>`, generic-уровень ZCL с
+  умолчаниями отчётов, определения в виде CBOR от zdefc через `zdef`
+  (выражения на VM zdef), Tuya EF00 с синхронизацией времени и magic packet,
+  самоописание через чанки ZRDS, Green Power (generic-уровень, GP-определения,
+  GP-привязки на устройстве через ZRHP 0x0A08–0x0A0D или на хабе),
+  доступность, события и модель WebSocket API. Движок sans-IO за трейтом
+  `ZigbeeTransport`; адаптер к хост-ядру этапа 1 — следующий шаг.
 
 ## Структура
 
 | Путь | Что |
 |---|---|
+| `crates/hub-devices` | Движок устройств и сущностей (`std`, sans-IO): кодек ZCL/ZDO, опрос, generic-уровень, разрешение слоёв, рантайм сущностей, Tuya EF00, Green Power и GP-привязки, модель WebSocket API; golden-сценарии и property-тесты |
 | `crates/hub-core` | Переносимое ядро `no_std`: разводка платы (`board`), логика esptool DTR/RTS → EN/BOOT (`lines`), реэкспорт `zigbee-zrhp` (git-зависимость от faronov/zigbee-rs, зафиксированная ревизия) |
 | `firmware/bridge` | Прошивка S3 этапа 0 (`tbr-bridge`, esp-idf-svc + esp_tinyusb) |
 | `tools/make-app-image.sh` | ELF → образ приложения ESP (те же аргументы `elf2image`, что в ESP-IDF) |

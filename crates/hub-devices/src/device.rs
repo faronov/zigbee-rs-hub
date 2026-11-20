@@ -41,20 +41,38 @@ pub struct AttrCache {
 
 impl AttrCache {
     /// Records a value; returns `(support changed, value changed)`.
-    pub fn set(&mut self, ep: u8, cluster: u16, attr: u16, mfr: Option<u16>, v: Option<ZclValue>) -> (bool, bool) {
-        let support = if v.is_some() { Support::Supported } else { Support::Unsupported };
+    pub fn set(
+        &mut self,
+        ep: u8,
+        cluster: u16,
+        attr: u16,
+        mfr: Option<u16>,
+        v: Option<ZclValue>,
+    ) -> (bool, bool) {
+        let support = if v.is_some() {
+            Support::Supported
+        } else {
+            Support::Unsupported
+        };
         let e = AttrEntry { support, value: v };
         let old = self.map.insert((ep, cluster, attr, mfr), e.clone());
-        (old.as_ref().map(|o| o.support) != Some(support), old.as_ref().map(|o| &o.value) != Some(&e.value))
+        (
+            old.as_ref().map(|o| o.support) != Some(support),
+            old.as_ref().map(|o| &o.value) != Some(&e.value),
+        )
     }
 }
 
 impl AttrView for AttrCache {
     fn support(&self, ep: u8, cluster: u16, attr: u16) -> Support {
-        self.map.get(&(ep, cluster, attr, None)).map_or(Support::Unknown, |e| e.support)
+        self.map
+            .get(&(ep, cluster, attr, None))
+            .map_or(Support::Unknown, |e| e.support)
     }
     fn value(&self, ep: u8, cluster: u16, attr: u16) -> Option<&ZclValue> {
-        self.map.get(&(ep, cluster, attr, None)).and_then(|e| e.value.as_ref())
+        self.map
+            .get(&(ep, cluster, attr, None))
+            .and_then(|e| e.value.as_ref())
     }
 }
 
@@ -164,7 +182,8 @@ impl Diagnostics {
         if self.frames.len() >= 50 {
             self.frames.pop_front();
         }
-        self.frames.push_back((now, cluster, crate::expr::hex(payload)));
+        self.frames
+            .push_back((now, cluster, crate::expr::hex(payload)));
     }
 }
 
@@ -362,12 +381,17 @@ impl Device {
 
     /// Sleepy (RxOnWhenIdle = 0 or `device.sleepy`).
     pub fn sleepy(&self) -> bool {
-        self.resolution.device.sleepy.unwrap_or_else(|| self.fp.sleepy())
+        self.resolution
+            .device
+            .sleepy
+            .unwrap_or_else(|| self.fp.sleepy())
     }
 
     /// Live entity by `(ep, key)`.
     pub fn entity(&self, ep: u8, key: &str) -> Option<&Entity> {
-        self.entities.iter().find(|e| !e.orphaned && e.r.ep == ep && e.r.def.key == key)
+        self.entities
+            .iter()
+            .find(|e| !e.orphaned && e.r.ep == ep && e.r.def.key == key)
     }
 
     /// Entity index by uid.
@@ -385,9 +409,17 @@ impl Device {
 
     /// Display manufacturer.
     pub fn manufacturer(&self) -> Option<String> {
-        self.resolution.vendor.clone().or_else(|| self.fp.manufacturer_name.clone()).or_else(|| {
-            self.fp.gp.as_ref().and_then(|g| g.manufacturer_id).map(|m| format!("0x{m:04X}"))
-        })
+        self.resolution
+            .vendor
+            .clone()
+            .or_else(|| self.fp.manufacturer_name.clone())
+            .or_else(|| {
+                self.fp
+                    .gp
+                    .as_ref()
+                    .and_then(|g| g.manufacturer_id)
+                    .map(|m| format!("0x{m:04X}"))
+            })
     }
 
     /// Display model.
@@ -396,7 +428,12 @@ impl Device {
             .model
             .clone()
             .or_else(|| self.fp.model_id.clone())
-            .or_else(|| self.fp.gp.as_ref().map(|g| format!("GPD 0x{:02X}", g.device_id)))
+            .or_else(|| {
+                self.fp
+                    .gp
+                    .as_ref()
+                    .map(|g| format!("GPD 0x{:02X}", g.device_id))
+            })
     }
 
     /// Device record (4.1).
@@ -448,11 +485,21 @@ impl Device {
 }
 
 fn platform_name_key(e: &EntityDef) -> Option<String> {
-    e.translation_key.clone().or_else(|| if e.name.is_none() && e.device_class.is_none() { Some(e.key.clone()) } else { None })
+    e.translation_key.clone().or_else(|| {
+        if e.name.is_none() && e.device_class.is_none() {
+            Some(e.key.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn map_labels(v: &ValueDef) -> Vec<J> {
-    v.transforms.map.iter().map(|(_, l)| J::String(l.clone())).collect()
+    v.transforms
+        .map
+        .iter()
+        .map(|(_, l)| J::String(l.clone()))
+        .collect()
 }
 
 fn part<'a>(e: &'a EntityDef, n: &str) -> Option<&'a ValueDef> {
@@ -470,26 +517,66 @@ pub fn capabilities(e: &EntityDef) -> Map<String, J> {
             }
             if let Some(p) = v.transforms.precision {
                 c.insert("suggested_display_precision".into(), p.into());
-            } else if let Some(d) = v.transforms.div.filter(|d| *d >= 10.0 && (d.log10().fract() == 0.0)) {
-                c.insert("suggested_display_precision".into(), (d.log10() as u32).into());
+            } else if let Some(d) = v
+                .transforms
+                .div
+                .filter(|d| *d >= 10.0 && (d.log10().fract() == 0.0))
+            {
+                c.insert(
+                    "suggested_display_precision".into(),
+                    (d.log10() as u32).into(),
+                );
             }
         }
         Platform::Number => {
-            c.insert("native_min_value".into(), json!(v.limits.min.unwrap_or(0.0)));
-            c.insert("native_max_value".into(), json!(v.limits.max.unwrap_or(100.0)));
-            c.insert("native_step".into(), json!(v.limits.step.unwrap_or_else(|| v.transforms.div.map_or(1.0, |d| 1.0 / d))));
-            c.insert("mode".into(), json!(v.limits.mode.clone().unwrap_or_else(|| "auto".into())));
+            c.insert(
+                "native_min_value".into(),
+                json!(v.limits.min.unwrap_or(0.0)),
+            );
+            c.insert(
+                "native_max_value".into(),
+                json!(v.limits.max.unwrap_or(100.0)),
+            );
+            c.insert(
+                "native_step".into(),
+                json!(
+                    v.limits
+                        .step
+                        .unwrap_or_else(|| v.transforms.div.map_or(1.0, |d| 1.0 / d))
+                ),
+            );
+            c.insert(
+                "mode".into(),
+                json!(v.limits.mode.clone().unwrap_or_else(|| "auto".into())),
+            );
         }
         Platform::Select => {
             c.insert("options".into(), J::Array(map_labels(v)));
         }
         Platform::Text => {
-            c.insert("native_min".into(), json!(v.limits.min.unwrap_or(0.0) as u64));
-            c.insert("native_max".into(), json!(v.limits.max.unwrap_or(255.0) as u64));
-            c.insert("mode".into(), json!(v.limits.mode.clone().unwrap_or_else(|| "text".into())));
-            if let Some(crate::model::Codec::TuyaScheduleDay { transitions, .. }) = &v.transforms.codec {
+            c.insert(
+                "native_min".into(),
+                json!(v.limits.min.unwrap_or(0.0) as u64),
+            );
+            c.insert(
+                "native_max".into(),
+                json!(v.limits.max.unwrap_or(255.0) as u64),
+            );
+            c.insert(
+                "mode".into(),
+                json!(v.limits.mode.clone().unwrap_or_else(|| "text".into())),
+            );
+            if let Some(crate::model::Codec::TuyaScheduleDay { transitions, .. }) =
+                &v.transforms.codec
+            {
                 let one = r"\d{2}:\d{2}/\d+(\.\d)?";
-                c.insert("pattern".into(), json!(format!("^{one}( {one}){{{}}}$", transitions.saturating_sub(1))));
+                c.insert(
+                    "pattern".into(),
+                    json!(format!(
+                        "^{one}( {one}){{{}}}$",
+                        transitions.saturating_sub(1)
+                    )),
+                );
             }
         }
         Platform::Event => {
@@ -507,7 +594,11 @@ pub fn capabilities(e: &EntityDef) -> Map<String, J> {
                 modes.push("hs");
             }
             if modes.is_empty() {
-                modes.push(if part(e, "brightness").is_some() { "brightness" } else { "onoff" });
+                modes.push(if part(e, "brightness").is_some() {
+                    "brightness"
+                } else {
+                    "onoff"
+                });
             }
             c.insert("supported_color_modes".into(), json!(modes));
             c.insert("supported_features".into(), json!(["transition"]));
@@ -535,7 +626,10 @@ pub fn capabilities(e: &EntityDef) -> Map<String, J> {
                 f.push("target_temperature");
                 c.insert("min_temp".into(), json!(t.limits.min.unwrap_or(7.0)));
                 c.insert("max_temp".into(), json!(t.limits.max.unwrap_or(35.0)));
-                c.insert("target_temperature_step".into(), json!(t.limits.step.unwrap_or(0.5)));
+                c.insert(
+                    "target_temperature_step".into(),
+                    json!(t.limits.step.unwrap_or(0.5)),
+                );
             }
             if let Some(p) = part(e, "preset") {
                 f.push("preset_mode");
@@ -554,10 +648,16 @@ pub fn capabilities(e: &EntityDef) -> Map<String, J> {
         Platform::Fan => {
             c.insert("speed_count".into(), json!(3));
             c.insert("preset_modes".into(), json!([]));
-            c.insert("supported_features".into(), json!(["set_speed", "preset_mode", "turn_on", "turn_off"]));
+            c.insert(
+                "supported_features".into(),
+                json!(["set_speed", "preset_mode", "turn_on", "turn_off"]),
+            );
         }
         Platform::Valve => {
-            c.insert("reports_position".into(), json!(part(e, "position").is_some()));
+            c.insert(
+                "reports_position".into(),
+                json!(part(e, "position").is_some()),
+            );
             let mut f = vec!["open", "close"];
             if part(e, "position").is_some() {
                 f.push("set_position");
@@ -579,10 +679,17 @@ impl Entity {
     /// Entity record (4.2).
     pub fn record(&self, device_id: &str) -> J {
         let e = &self.r.def;
-        let name = self.user_name.clone().or_else(|| e.name.clone()).or_else(|| {
-            // Disambiguate keys on several endpoints by name, not key (4.2).
-            self.r.ep_name.as_ref().map(|n| format!("{} {n}", e.key.replace('_', " ")))
-        });
+        let name = self
+            .user_name
+            .clone()
+            .or_else(|| e.name.clone())
+            .or_else(|| {
+                // Disambiguate keys on several endpoints by name, not key (4.2).
+                self.r
+                    .ep_name
+                    .as_ref()
+                    .map(|n| format!("{} {n}", e.key.replace('_', " ")))
+            });
         json!({
             "uid": self.uid,
             "device": device_id,
@@ -631,7 +738,17 @@ impl Entity {
                 }
                 put("color_mode", pv("color_mode").to_json());
                 for (k, v) in &s.parts {
-                    if !matches!(k.as_str(), "on_off" | "brightness" | "color_temp" | "color_x" | "color_y" | "hue" | "saturation" | "color_mode") {
+                    if !matches!(
+                        k.as_str(),
+                        "on_off"
+                            | "brightness"
+                            | "color_temp"
+                            | "color_x"
+                            | "color_y"
+                            | "hue"
+                            | "saturation"
+                            | "color_mode"
+                    ) {
                         put(k, v.to_json());
                     }
                 }
@@ -687,7 +804,11 @@ impl Entity {
                     }
                 }
                 match e.platform {
-                    Platform::Siren => onoff(if e.parts.is_empty() { s.value.clone() } else { pv(primary) }),
+                    Platform::Siren => onoff(if e.parts.is_empty() {
+                        s.value.clone()
+                    } else {
+                        pv(primary)
+                    }),
                     _ => pv(primary).to_json(),
                 }
             }

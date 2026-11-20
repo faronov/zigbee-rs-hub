@@ -81,8 +81,22 @@ impl SimDevice {
     }
 
     /// Adds an endpoint.
-    pub fn endpoint(mut self, ep: u8, profile: u16, device_id: u16, inc: &[u16], out: &[u16]) -> Self {
-        self.endpoints.push(SimpleDescriptor { endpoint: ep, profile, device_id, version: 1, in_clusters: inc.to_vec(), out_clusters: out.to_vec() });
+    pub fn endpoint(
+        mut self,
+        ep: u8,
+        profile: u16,
+        device_id: u16,
+        inc: &[u16],
+        out: &[u16],
+    ) -> Self {
+        self.endpoints.push(SimpleDescriptor {
+            endpoint: ep,
+            profile,
+            device_id,
+            version: 1,
+            in_clusters: inc.to_vec(),
+            out_clusters: out.to_vec(),
+        });
         self
     }
 
@@ -95,36 +109,107 @@ impl SimDevice {
     /// Sets Basic strings and power source.
     pub fn basic(self, manufacturer: &str, model: &str, power: u8) -> Self {
         let ep = self.endpoints.first().map_or(1, |e| e.endpoint);
-        self.attr(ep, 0, 0x0004, TypedValue::new(ZclType::CHAR_STR, ZclValue::String(manufacturer.into())))
-            .attr(ep, 0, 0x0005, TypedValue::new(ZclType::CHAR_STR, ZclValue::String(model.into())))
-            .attr(ep, 0, 0x0007, TypedValue::uint(ZclType::ENUM8, u64::from(power)))
-            .attr(ep, 0, 0x0000, TypedValue::uint(ZclType::U8, 8))
-            .attr(ep, 0, 0x0001, TypedValue::uint(ZclType::U8, 1))
+        self.attr(
+            ep,
+            0,
+            0x0004,
+            TypedValue::new(ZclType::CHAR_STR, ZclValue::String(manufacturer.into())),
+        )
+        .attr(
+            ep,
+            0,
+            0x0005,
+            TypedValue::new(ZclType::CHAR_STR, ZclValue::String(model.into())),
+        )
+        .attr(
+            ep,
+            0,
+            0x0007,
+            TypedValue::uint(ZclType::ENUM8, u64::from(power)),
+        )
+        .attr(ep, 0, 0x0000, TypedValue::uint(ZclType::U8, 8))
+        .attr(ep, 0, 0x0001, TypedValue::uint(ZclType::U8, 1))
     }
 
     /// An indication from this device.
     pub fn ind(&self, src_ep: u8, profile: u16, cluster: u16, payload: Vec<u8>) -> ApsIndication {
-        ApsIndication { src_nwk: self.nwk, src_ieee: Some(self.ieee), src_ep, dst_ep: 1, group: None, profile, cluster, payload, lqi: 200, rssi: -55 }
+        ApsIndication {
+            src_nwk: self.nwk,
+            src_ieee: Some(self.ieee),
+            src_ep,
+            dst_ep: 1,
+            group: None,
+            profile,
+            cluster,
+            payload,
+            lqi: 200,
+            rssi: -55,
+        }
     }
 
     /// A ZCL frame from this device (server → client).
-    pub fn zcl(&self, ep: u8, cluster: u16, frame_type: FrameType, mfr: Option<u16>, tsn: u8, cmd: u8, payload: Vec<u8>) -> ApsIndication {
+    pub fn zcl(
+        &self,
+        ep: u8,
+        cluster: u16,
+        frame_type: FrameType,
+        mfr: Option<u16>,
+        tsn: u8,
+        cmd: u8,
+        payload: Vec<u8>,
+    ) -> ApsIndication {
         let f = ZclFrame {
-            header: ZclHeader { frame_type, mfr, direction: Direction::ServerToClient, disable_default_response: true, tsn, cmd },
+            header: ZclHeader {
+                frame_type,
+                mfr,
+                direction: Direction::ServerToClient,
+                disable_default_response: true,
+                tsn,
+                cmd,
+            },
             payload,
         };
         self.ind(ep, 0x0104, cluster, f.encode())
     }
 
     /// A Report Attributes frame.
-    pub fn report(&self, ep: u8, cluster: u16, mfr: Option<u16>, recs: &[(u16, TypedValue)]) -> ApsIndication {
-        self.zcl(ep, cluster, FrameType::Global, mfr, 0x70, global::REPORT_ATTRIBUTES, zf::report_attributes(recs).unwrap())
+    pub fn report(
+        &self,
+        ep: u8,
+        cluster: u16,
+        mfr: Option<u16>,
+        recs: &[(u16, TypedValue)],
+    ) -> ApsIndication {
+        self.zcl(
+            ep,
+            cluster,
+            FrameType::Global,
+            mfr,
+            0x70,
+            global::REPORT_ATTRIBUTES,
+            zf::report_attributes(recs).unwrap(),
+        )
     }
 
     /// A Tuya data frame (dataReport by default).
     pub fn tuya_frame(&self, cmd: u8, seq: u16, dps: &[(u8, u8, Vec<u8>)]) -> ApsIndication {
-        let recs: Vec<tuya::DpRecord> = dps.iter().map(|(dp, ty, data)| tuya::DpRecord { dp: *dp, ty: *ty, data: data.clone() }).collect();
-        self.zcl(1, 0xEF00, FrameType::Cluster, None, 0x10, cmd, tuya::encode_data(seq, &recs))
+        let recs: Vec<tuya::DpRecord> = dps
+            .iter()
+            .map(|(dp, ty, data)| tuya::DpRecord {
+                dp: *dp,
+                ty: *ty,
+                data: data.clone(),
+            })
+            .collect();
+        self.zcl(
+            1,
+            0xEF00,
+            FrameType::Cluster,
+            None,
+            0x10,
+            cmd,
+            tuya::encode_data(seq, &recs),
+        )
     }
 
     fn answer(&mut self, req: &ApsRequest) -> Vec<ApsIndication> {
@@ -135,14 +220,25 @@ impl SimDevice {
         if req.profile == 0 {
             let tsn = req.payload[0];
             let p = match req.cluster {
-                zdo::cluster::NODE_DESC_REQ => Some((zdo::cluster::NODE_DESC_RSP, zdo::node_desc_rsp(tsn, self.nwk, &self.node))),
+                zdo::cluster::NODE_DESC_REQ => Some((
+                    zdo::cluster::NODE_DESC_RSP,
+                    zdo::node_desc_rsp(tsn, self.nwk, &self.node),
+                )),
                 zdo::cluster::ACTIVE_EP_REQ => {
                     let eps: Vec<u8> = self.endpoints.iter().map(|e| e.endpoint).collect();
-                    Some((zdo::cluster::ACTIVE_EP_RSP, zdo::active_ep_rsp(tsn, self.nwk, &eps)))
+                    Some((
+                        zdo::cluster::ACTIVE_EP_RSP,
+                        zdo::active_ep_rsp(tsn, self.nwk, &eps),
+                    ))
                 }
                 zdo::cluster::SIMPLE_DESC_REQ => {
                     let ep = req.payload[3];
-                    self.endpoints.iter().find(|e| e.endpoint == ep).map(|d| (zdo::cluster::SIMPLE_DESC_RSP, zdo::simple_desc_rsp(tsn, self.nwk, d)))
+                    self.endpoints.iter().find(|e| e.endpoint == ep).map(|d| {
+                        (
+                            zdo::cluster::SIMPLE_DESC_RSP,
+                            zdo::simple_desc_rsp(tsn, self.nwk, d),
+                        )
+                    })
                 }
                 zdo::cluster::BIND_REQ => {
                     if let Ok((_, _, ep, c, _)) = zdo::parse_bind_req(&req.payload) {
@@ -158,11 +254,20 @@ impl SimDevice {
             }
             return out;
         }
-        let Ok(f) = ZclFrame::parse(&req.payload) else { return out };
+        let Ok(f) = ZclFrame::parse(&req.payload) else {
+            return out;
+        };
         let ep = req.dst_ep;
         let h = f.header;
         let rsp = |ft: FrameType, cmd: u8, payload: Vec<u8>| ZclFrame {
-            header: ZclHeader { frame_type: ft, mfr: h.mfr, direction: Direction::ServerToClient, disable_default_response: true, tsn: h.tsn, cmd },
+            header: ZclHeader {
+                frame_type: ft,
+                mfr: h.mfr,
+                direction: Direction::ServerToClient,
+                disable_default_response: true,
+                tsn: h.tsn,
+                cmd,
+            },
             payload,
         };
         let reply = match (h.frame_type, h.cmd) {
@@ -171,18 +276,34 @@ impl SimDevice {
                 let recs: Vec<ReadRecord> = attrs
                     .iter()
                     .map(|a| match self.attrs.get(&(ep, req.cluster, *a, h.mfr)) {
-                        Some(v) => ReadRecord { attr: *a, status: Status::SUCCESS, value: Some(v.clone()) },
-                        None => ReadRecord { attr: *a, status: Status::UNSUPPORTED_ATTRIBUTE, value: None },
+                        Some(v) => ReadRecord {
+                            attr: *a,
+                            status: Status::SUCCESS,
+                            value: Some(v.clone()),
+                        },
+                        None => ReadRecord {
+                            attr: *a,
+                            status: Status::UNSUPPORTED_ATTRIBUTE,
+                            value: None,
+                        },
                     })
                     .collect();
-                Some(rsp(FrameType::Global, global::READ_ATTRIBUTES_RSP, zf::read_attributes_rsp(&recs).unwrap()))
+                Some(rsp(
+                    FrameType::Global,
+                    global::READ_ATTRIBUTES_RSP,
+                    zf::read_attributes_rsp(&recs).unwrap(),
+                ))
             }
             (FrameType::Global, global::WRITE_ATTRIBUTES) => {
                 for (a, v) in zf::parse_write_attributes(&f.payload).unwrap_or_default() {
                     self.writes.push((ep, req.cluster, a, h.mfr, v.clone()));
                     self.attrs.insert((ep, req.cluster, a, h.mfr), v);
                 }
-                Some(rsp(FrameType::Global, global::WRITE_ATTRIBUTES_RSP, vec![0]))
+                Some(rsp(
+                    FrameType::Global,
+                    global::WRITE_ATTRIBUTES_RSP,
+                    vec![0],
+                ))
             }
             (FrameType::Global, global::CONFIGURE_REPORTING) => {
                 let mut fails = Vec::new();
@@ -193,11 +314,16 @@ impl SimDevice {
                         self.reporting.push((ep, req.cluster, c));
                     }
                 }
-                Some(rsp(FrameType::Global, global::CONFIGURE_REPORTING_RSP, zf::configure_reporting_rsp(&fails)))
+                Some(rsp(
+                    FrameType::Global,
+                    global::CONFIGURE_REPORTING_RSP,
+                    zf::configure_reporting_rsp(&fails),
+                ))
             }
             (FrameType::Global, _) => None,
             (FrameType::Cluster, cmd) => {
-                self.commands.push((ep, req.cluster, cmd, h.mfr, f.payload.clone()));
+                self.commands
+                    .push((ep, req.cluster, cmd, h.mfr, f.payload.clone()));
                 if req.cluster == 0xEF00 {
                     self.tuya_rx.push((cmd, f.payload.clone()));
                     if matches!(cmd, tuya::cmd::DATA_REQUEST | tuya::cmd::SEND_DATA) {
@@ -205,7 +331,11 @@ impl SimDevice {
                             for r in &recs {
                                 self.tuya.insert(r.dp, (r.ty, r.data.clone()));
                             }
-                            let mut r = rsp(FrameType::Cluster, tuya::cmd::DATA_RESPONSE, tuya::encode_data(seq, &recs));
+                            let mut r = rsp(
+                                FrameType::Cluster,
+                                tuya::cmd::DATA_RESPONSE,
+                                tuya::encode_data(seq, &recs),
+                            );
                             r.header.tsn = h.tsn.wrapping_add(100);
                             out.push(self.ind(ep, req.profile, req.cluster, r.encode()));
                         }
@@ -213,15 +343,27 @@ impl SimDevice {
                     None
                 } else {
                     if req.cluster == 0x0006 && cmd <= 0x02 {
-                        let cur = matches!(self.attrs.get(&(ep, 6, 0, None)).map(|v| &v.value), Some(ZclValue::Bool(Some(true))));
+                        let cur = matches!(
+                            self.attrs.get(&(ep, 6, 0, None)).map(|v| &v.value),
+                            Some(ZclValue::Bool(Some(true)))
+                        );
                         let new = match cmd {
                             0 => false,
                             1 => true,
                             _ => !cur,
                         };
-                        self.attrs.insert((ep, 6, 0, None), TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(new))));
+                        self.attrs.insert(
+                            (ep, 6, 0, None),
+                            TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(new))),
+                        );
                     }
-                    (!h.disable_default_response).then(|| rsp(FrameType::Global, global::DEFAULT_RSP, zf::default_rsp(cmd, self.cmd_status)))
+                    (!h.disable_default_response).then(|| {
+                        rsp(
+                            FrameType::Global,
+                            global::DEFAULT_RSP,
+                            zf::default_rsp(cmd, self.cmd_status),
+                        )
+                    })
                 }
             }
         };
@@ -244,7 +386,10 @@ pub struct Sim {
 impl Sim {
     /// The device by IEEE.
     pub fn dev(&mut self, ieee: u64) -> &mut SimDevice {
-        self.devices.iter_mut().find(|d| d.ieee == ieee).expect("sim device")
+        self.devices
+            .iter_mut()
+            .find(|d| d.ieee == ieee)
+            .expect("sim device")
     }
 
     /// Delivers the hub's traffic until the network is quiet.

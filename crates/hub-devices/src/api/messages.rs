@@ -248,7 +248,9 @@ mod double_option {
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<String>>, D::Error> {
         Ok(Some(Option::<String>::deserialize(d)?))
     }
 }
@@ -261,7 +263,12 @@ pub enum ServerMessage {
     #[serde(rename = "auth_required")]
     AuthRequired { hub: String, api_version: String },
     #[serde(rename = "auth_ok")]
-    AuthOk { hub: String, api_version: String, zdef_versions: Vec<u8>, features: Vec<String> },
+    AuthOk {
+        hub: String,
+        api_version: String,
+        zdef_versions: Vec<u8>,
+        features: Vec<String>,
+    },
     #[serde(rename = "auth_invalid")]
     AuthInvalid { message: String },
     #[serde(rename = "result")]
@@ -280,11 +287,21 @@ pub enum ServerMessage {
 impl ServerMessage {
     /// A success result.
     pub fn ok(id: u64, result: J) -> Self {
-        Self::Result { id, success: true, result: Some(result), error: None }
+        Self::Result {
+            id,
+            success: true,
+            result: Some(result),
+            error: None,
+        }
     }
     /// An error result.
     pub fn err(id: u64, error: ApiError) -> Self {
-        Self::Result { id, success: false, result: None, error: Some(error) }
+        Self::Result {
+            id,
+            success: false,
+            result: None,
+            error: Some(error),
+        }
     }
     /// JSON text.
     pub fn to_text(&self) -> String {

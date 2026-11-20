@@ -47,7 +47,14 @@ pub fn schedule_day_decode(b: &[u8], transitions: u8) -> Option<String> {
     let parts: Vec<String> = body
         .chunks_exact(4)
         .take(n)
-        .map(|c| format!("{:02}:{:02}/{:.1}", c[0], c[1], f64::from(u16::from_be_bytes([c[2], c[3]])) / 10.0))
+        .map(|c| {
+            format!(
+                "{:02}:{:02}/{:.1}",
+                c[0],
+                c[1],
+                f64::from(u16::from_be_bytes([c[2], c[3]])) / 10.0
+            )
+        })
         .collect();
     Some(parts.join(" "))
 }
@@ -57,7 +64,10 @@ pub fn schedule_day_decode(b: &[u8], transitions: u8) -> Option<String> {
 pub fn schedule_day_encode(text: &str, day: u8, transitions: u8) -> Result<Vec<u8>, CodecFailure> {
     let items: Vec<&str> = text.split_whitespace().collect();
     if items.len() != usize::from(transitions) {
-        return Err(CodecFailure(format!("schedule needs {transitions} transitions, got {}", items.len())));
+        return Err(CodecFailure(format!(
+            "schedule needs {transitions} transitions, got {}",
+            items.len()
+        )));
     }
     let mut out = vec![day];
     for it in items {
@@ -86,9 +96,9 @@ fn bcd(b: u8) -> Option<u8> {
 pub fn decode(codec: &Codec, raw: &Value) -> Value {
     match codec {
         Codec::ZclTagged => Value::Null,
-        Codec::TuyaScheduleDay { transitions, .. } => {
-            bytes_of(raw).and_then(|b| schedule_day_decode(b, *transitions)).map_or(Value::Null, Value::Str)
-        }
+        Codec::TuyaScheduleDay { transitions, .. } => bytes_of(raw)
+            .and_then(|b| schedule_day_decode(b, *transitions))
+            .map_or(Value::Null, Value::Str),
         Codec::BcdTime => match bytes_of(raw) {
             Some([h, m, ..]) => match (bcd(*h), bcd(*m)) {
                 (Some(h), Some(m)) => Value::Str(format!("{h:02}:{m:02}")),
@@ -99,24 +109,42 @@ pub fn decode(codec: &Codec, raw: &Value) -> Value {
         Codec::Hhmm => match bytes_of(raw) {
             Some([h, m, ..]) => Value::Str(format!("{h:02}:{m:02}")),
             _ => match raw.as_i64() {
-                Some(v) if (0..1440).contains(&v) => Value::Str(format!("{:02}:{:02}", v / 60, v % 60)),
+                Some(v) if (0..1440).contains(&v) => {
+                    Value::Str(format!("{:02}:{:02}", v / 60, v % 60))
+                }
                 _ => Value::Null,
             },
         },
         Codec::Ascii => bytes_of(raw).map_or_else(
             || raw.clone(),
-            |b| Value::Str(String::from_utf8_lossy(b).trim_end_matches('\0').to_string()),
+            |b| {
+                Value::Str(
+                    String::from_utf8_lossy(b)
+                        .trim_end_matches('\0')
+                        .to_string(),
+                )
+            },
         ),
         Codec::Utf16BeHex => match bytes_of(raw) {
             Some(b) if b.len() % 2 == 0 => {
-                let units: Vec<u16> = b.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-                String::from_utf16(&units).map_or(Value::Null, |s| Value::Str(s.trim_end_matches('\0').to_string()))
+                let units: Vec<u16> = b
+                    .chunks(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16(&units).map_or(Value::Null, |s| {
+                    Value::Str(s.trim_end_matches('\0').to_string())
+                })
             }
             _ => Value::Null,
         },
         Codec::BitmapFlags(labels) => match raw.as_i64() {
             Some(v) => Value::Str(
-                labels.iter().filter(|(bit, _)| (v >> bit) & 1 == 1).map(|(_, l)| l.as_str()).collect::<Vec<_>>().join(","),
+                labels
+                    .iter()
+                    .filter(|(bit, _)| (v >> bit) & 1 == 1)
+                    .map(|(_, l)| l.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
             ),
             None => Value::Null,
         },
@@ -125,9 +153,14 @@ pub fn decode(codec: &Codec, raw: &Value) -> Value {
 
 /// Encodes a value with a codec into raw bytes or an integer.
 pub fn encode(codec: &Codec, v: &Value) -> Result<Value, CodecFailure> {
-    let text = || v.as_str().ok_or_else(|| CodecFailure("text value expected".into()));
+    let text = || {
+        v.as_str()
+            .ok_or_else(|| CodecFailure("text value expected".into()))
+    };
     match codec {
-        Codec::TuyaScheduleDay { day, transitions } => schedule_day_encode(text()?, *day, *transitions).map(Value::Bytes),
+        Codec::TuyaScheduleDay { day, transitions } => {
+            schedule_day_encode(text()?, *day, *transitions).map(Value::Bytes)
+        }
         Codec::BcdTime | Codec::Hhmm => {
             let t = text()?;
             let bad = || CodecFailure(format!("bad time {t:?}"));
@@ -143,11 +176,16 @@ pub fn encode(codec: &Codec, v: &Value) -> Result<Value, CodecFailure> {
             }))
         }
         Codec::Ascii => Ok(Value::Bytes(text()?.as_bytes().to_vec())),
-        Codec::Utf16BeHex => Ok(Value::Bytes(text()?.encode_utf16().flat_map(u16::to_be_bytes).collect())),
+        Codec::Utf16BeHex => Ok(Value::Bytes(
+            text()?.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        )),
         Codec::BitmapFlags(labels) => {
             let mut x = 0i64;
             for l in text()?.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                let (bit, _) = labels.iter().find(|(_, n)| n == l).ok_or_else(|| CodecFailure(format!("unknown flag {l}")))?;
+                let (bit, _) = labels
+                    .iter()
+                    .find(|(_, n)| n == l)
+                    .ok_or_else(|| CodecFailure(format!("unknown flag {l}")))?;
                 x |= 1 << bit;
             }
             Ok(Value::Int(x))
@@ -164,7 +202,9 @@ mod tests {
     #[test]
     fn lumi_tagged_struct() {
         // tag 1 u16 3005 mV, tag 3 i8 26 degC, tag 5 u16 7, tag 0x64 bool.
-        let b = [0x01, 0x21, 0xBD, 0x0B, 0x03, 0x28, 0x1A, 0x05, 0x21, 0x07, 0x00, 0x64, 0x10, 0x01];
+        let b = [
+            0x01, 0x21, 0xBD, 0x0B, 0x03, 0x28, 0x1A, 0x05, 0x21, 0x07, 0x00, 0x64, 0x10, 0x01,
+        ];
         let t = decode_tagged(&b);
         assert_eq!(t[0], (1, TypedValue::uint(ZclType::U16, 3005)));
         assert_eq!(t[1], (3, TypedValue::int(ZclType::I8, 26)));
@@ -176,7 +216,10 @@ mod tests {
 
     #[test]
     fn schedule_round_trip() {
-        let c = Codec::TuyaScheduleDay { day: 1, transitions: 6 };
+        let c = Codec::TuyaScheduleDay {
+            day: 1,
+            transitions: 6,
+        };
         let text = "06:00/20.0 08:00/16.5 12:00/20.0 14:00/16.0 17:00/21.0 22:00/16.0";
         let raw = encode(&c, &Value::Str(text.into())).unwrap();
         let Value::Bytes(b) = &raw else { panic!() };
@@ -184,11 +227,23 @@ mod tests {
         assert_eq!(&b[..5], &[1, 6, 0, 0, 200]);
         assert_eq!(decode(&c, &raw), Value::Str(text.into()));
         assert!(encode(&c, &Value::Str("06:00/20".into())).is_err());
-        assert_eq!(decode(&Codec::BcdTime, &Value::Bytes(vec![0x23, 0x59])), Value::Str("23:59".into()));
         assert_eq!(
-            decode(&Codec::BitmapFlags(vec![(0, "a".into()), (2, "c".into())]), &Value::Int(5)),
+            decode(&Codec::BcdTime, &Value::Bytes(vec![0x23, 0x59])),
+            Value::Str("23:59".into())
+        );
+        assert_eq!(
+            decode(
+                &Codec::BitmapFlags(vec![(0, "a".into()), (2, "c".into())]),
+                &Value::Int(5)
+            ),
             Value::Str("a,c".into())
         );
-        assert_eq!(decode(&Codec::Utf16BeHex, &encode(&Codec::Utf16BeHex, &Value::Str("Hé".into())).unwrap()), Value::Str("Hé".into()));
+        assert_eq!(
+            decode(
+                &Codec::Utf16BeHex,
+                &encode(&Codec::Utf16BeHex, &Value::Str("Hé".into())).unwrap()
+            ),
+            Value::Str("Hé".into())
+        );
     }
 }
