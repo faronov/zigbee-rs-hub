@@ -139,6 +139,8 @@ pub fn measurement(cluster: u16, attr: u16) -> Option<EntityDef> {
             if ppm {
                 e.value.transforms.mul = Some(1_000_000.0);
             }
+            // A single-precision fraction scaled to ppm carries float noise.
+            e.value.transforms.precision = Some(if ppm { 0 } else { 1 });
         }
         _ => return None,
     }

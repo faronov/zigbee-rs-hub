@@ -24,6 +24,7 @@ pub mod tuya;
 mod tuya_rt;
 pub mod values;
 pub mod zcl;
+pub mod zdef_adapter;
 pub mod zdo;
 
 #[cfg(test)]

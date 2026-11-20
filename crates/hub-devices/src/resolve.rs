@@ -210,6 +210,9 @@ pub fn score_clause(c: &MatchClause, fp: &Fingerprint) -> Option<u32> {
 
 /// Best score of a definition (OR over clauses).
 pub fn score(d: &Definition, fp: &Fingerprint) -> Option<u32> {
+    if let Some(z) = &d.zdef {
+        return crate::zdef_adapter::zdef_score(z, fp);
+    }
     d.matches.iter().filter_map(|c| score_clause(c, fp)).max()
 }
 

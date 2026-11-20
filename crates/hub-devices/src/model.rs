@@ -1117,6 +1117,9 @@ pub struct Definition {
     pub source: LayerSource,
     /// SHA-256 of the standalone CBOR (8.6), hex; set by the store.
     pub content_hash: Option<String>,
+    /// The `zdef` definition this was adapted from (matching, VM
+    /// constants).
+    pub zdef: Option<std::sync::Arc<zdef::Definition>>,
 }
 
 impl Definition {
@@ -1143,6 +1146,7 @@ impl Definition {
             mfr: None,
             source,
             content_hash: None,
+            zdef: None,
         }
     }
 
