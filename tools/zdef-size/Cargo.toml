@@ -1,0 +1,27 @@
+[package]
+name = "zdef-size"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Code-size probe of the zdef crate on the hub target (xtensa-esp32s3) and a thumbv7em proxy"
+
+[workspace]
+
+[features]
+default = ["all"]
+all = ["load", "vm", "matching", "resolve", "bank"]
+load = []
+vm = []
+matching = []
+resolve = []
+bank = []
+
+[dependencies]
+zdef = { path = "../../crates/zdef" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false

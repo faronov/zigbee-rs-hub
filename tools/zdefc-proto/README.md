@@ -1,10 +1,14 @@
 # zdefc-proto
 
 Python prototype of `zdefc`, the definition compiler (YAML → CBOR) specified
-in [`docs/device-support.md`](../../docs/device-support.md). It exists to
-check the format against real definitions and to measure encoded sizes; the
-production compiler will be Rust (CLI plus a WebAssembly build for the web
-UI, decision D15), sharing a `zdef-core` crate with the hub.
+in [`docs/device-support.md`](../../docs/device-support.md). It was used to
+check the format against real definitions and to measure encoded sizes.
+The production compiler is [`crates/zdefc`](../../crates/zdefc) (Rust, CLI
+and WebAssembly), sharing [`crates/zdef`](../../crates/zdef) with the hub;
+its golden tests compare against this prototype's output, which is
+committed under `crates/zdefc/tests/golden/proto/` (byte-identical for 12 of
+the 13 examples; the differences are listed in
+[`docs/zdef.md`](../../docs/zdef.md)).
 
 ## Use
 
@@ -37,4 +41,4 @@ python3 tools/zdefc-proto/zdefc.py expr 'x > 130536 ? 0 : x - 65536'
 - catalog form with shared-string references and bank building (8.4, 9.1);
 - error messages with YAML line numbers.
 
-Its key tables are not normative: the real ones come from the CDDL schema.
+Its key tables are not normative: the v1 tables are `crates/zdef/src/keys.rs`.

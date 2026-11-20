@@ -1,0 +1,30 @@
+[package]
+name = "zdefc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "zdef definition compiler: strict YAML 1.2 / JSON / JSONC / JSON5 -> canonical CBOR, decompiler, bank builder"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "zdefc"
+path = "src/main.rs"
+
+[dependencies]
+zdef = { path = "../zdef", features = ["std"] }
+yaml-rust2 = { version = "0.10", default-features = false }
+regex-lite = "0.1"
+miniz_oxide = "0.8"
+ed25519-compact = { version = "2.1", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.3"
+
+[dev-dependencies]
+jsonschema = { version = "0.33", default-features = false }
+serde_json = "1"

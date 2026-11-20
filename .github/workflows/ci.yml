@@ -18,12 +18,82 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p hub-core
 
+  zdef:
+    name: zdef + zdefc (host tests, clippy, fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt -p zdef -p zdefc -p zdefc-wasm -- --check
+      - run: cargo clippy -p zdef -p zdefc -p zdefc-wasm --all-targets -- -D warnings
+      - run: cargo test -p zdef -p zdefc
+      - name: Examples check and size table
+        run: |
+          cargo run -q -p zdefc -- check definitions/examples
+          cargo run -q -p zdefc -- measure definitions/examples
+
+  zdef-nostd:
+    name: zdef no_std (thumbv7em proxy, xtensa-esp32s3) + code size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: llvm-tools
+      - run: cargo build -p zdef --release --target thumbv7em-none-eabihf
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        env:
+          # espup queries the GitHub API; unauthenticated calls hit the rate limit
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          default: false
+          buildtargets: esp32s3
+          version: "1.90.0.0"
+      - name: Build for xtensa-esp32s3 (hub target, Rust 1.90)
+        working-directory: crates/zdef
+        run: cargo +esp build --release --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc
+      - name: Code size per entry point
+        run: |
+          export PATH="$(dirname "$(find "$(rustc +stable --print sysroot)" -name llvm-size | head -1)"):$PATH"
+          XTENSA_GCC="$(find "$HOME/.rustup/toolchains/esp" -name xtensa-esp32s3-elf-gcc -type f | head -1)"
+          echo "xtensa gcc: $XTENSA_GCC"
+          XTENSA_GCC="$XTENSA_GCC" RUSTUP_TOOLCHAIN=stable tools/zdef-size/measure.sh
+
+  zdefc-wasm:
+    name: zdefc WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.130
+      - run: cargo build -p zdefc-wasm --profile wasm --target wasm32-unknown-unknown
+      - name: wasm-bindgen, size, Node smoke test
+        run: |
+          wasm-bindgen --target nodejs --remove-name-section --remove-producers-section --out-dir target/zdefc-wasm-node target/wasm32-unknown-unknown/wasm/zdefc_wasm.wasm
+          wasm-bindgen --target web --remove-name-section --remove-producers-section --out-dir target/zdefc-wasm-web target/wasm32-unknown-unknown/wasm/zdefc_wasm.wasm
+          ls -l target/zdefc-wasm-web/zdefc_wasm_bg.wasm
+          echo "gzip: $(gzip -9 -c target/zdefc-wasm-web/zdefc_wasm_bg.wasm | wc -c) B"
+          node crates/zdefc-wasm/tests/smoke.js target/zdefc-wasm-node .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zdefc-wasm
+          path: target/zdefc-wasm-web
+
   bridge:
     name: tbr-bridge firmware (ESP32-S3, esp-idf-svc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: esp-rs/xtensa-toolchain@v1.7.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           default: true
           buildtargets: esp32s3

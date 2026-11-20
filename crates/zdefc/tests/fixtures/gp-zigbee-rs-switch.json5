@@ -1,0 +1,29 @@
+// JSON5 form of definitions/examples/gp-zigbee-rs-switch.yaml (D22):
+// comments, hexadecimal numbers, unquoted keys, single quotes, trailing commas.
+{
+  zdef: 1,
+  id: 'zigbee-rs/gpd-switch-mg22',
+  revision: 1,
+  vendor: 'zigbee-rs',
+  model: 'GP switch (EFR32MG22)',
+  match: [
+    {gp: {device_id: 0x02, manufacturer_id: 0x6D6B, model_id: 0xF400}},
+  ],
+  device: {power: 'battery'},   /* coin cell */
+  gp: {security_min: 3},
+  generic: {exclude: ['action']},
+  entities: [
+    {
+      key: 'action',
+      platform: 'event',
+      device_class: 'button',
+      event_types: ['off', 'on', 'toggle'],
+      triggers: [
+        {gp_cmd: 0x20, event: '"off"'},
+        {gp_cmd: 0x21, event: '"on"'},
+        {gp_cmd: 0x22, event: '"tog\
+gle"'},
+      ],
+    },
+  ],
+}

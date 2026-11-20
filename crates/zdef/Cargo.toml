@@ -1,0 +1,22 @@
+[package]
+name = "zdef"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "zigbee-rs-hub device definitions: data model, canonical CBOR, expression VM, matching, layer resolution, catalog banks"
+publish = false
+
+[features]
+default = []
+# Host conveniences (std::error::Error impls). The crate itself is `no_std` + `alloc`.
+std = []
+
+[dependencies]
+libm = "0.2"
+sha2 = { version = "0.10", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false }
+ed25519-compact = { version = "2.1", default-features = false, features = ["opt_size"] }
+
+[dev-dependencies]
