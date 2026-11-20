@@ -9,7 +9,6 @@ description = "Portable ZRHP host core of zigbee-rs-hub (std): session/resume, A
 publish = false
 
 [dependencies]
-hub-core = { workspace = true }
 zigbee-zrhp = { workspace = true, features = ["std"] }
 log = "0.4"
 sha2 = { version = "0.10", default-features = false }

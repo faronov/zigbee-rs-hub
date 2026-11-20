@@ -49,6 +49,27 @@ use crate::transport::{Line, PortRx, PortTx};
 /// Embedded-host link: 8 TX and 8 RX slots (spec 3.3/3.4, ≈ 11.9 KB).
 pub type HostLink = Link<8, 8>;
 
+/// Compile-time image of a fresh embedded-profile link (cookie 1; the
+/// driver gives it its real cookie with `reopen`).
+static TEMPLATE: HostLink = HostLink::new(LinkConfig::embedded_host(), 1);
+
+/// A heap-allocated link. `Link::new` builds ~12 KB by value and needs
+/// 24–32 KiB of stack in unoptimised builds, so the default profile is
+/// copied from a static straight into the allocation instead.
+pub fn boxed_link(cfg: LinkConfig, cookie: u32) -> Box<HostLink> {
+    if cfg != LinkConfig::embedded_host() {
+        return Box::new(HostLink::new(cfg, cookie));
+    }
+    let mut slot = Box::<HostLink>::new_uninit();
+    // SAFETY: `Link` is plain data (no heap, no `Drop`: the crate is
+    // `no_std` without `alloc`), so a bitwise copy of the never-used
+    // template is a valid fresh value, and the copy initialises the slot.
+    unsafe {
+        core::ptr::copy_nonoverlapping(&TEMPLATE, slot.as_mut_ptr(), 1);
+        slot.assume_init()
+    }
+}
+
 /// Driver settings.
 #[derive(Debug, Clone)]
 pub struct DriverConfig {
@@ -664,12 +685,13 @@ struct Driver<T: PortTx> {
     established_at: Instant,
     line_idx: usize,
     line_since: Instant,
+    cookie: u32,
 }
 
 impl<T: PortTx> Driver<T> {
     fn new(cfg: DriverConfig, tx: T, cookie: u32, events: Sender<DriverEvent>, shared: Arc<Shared>) -> Self {
         let now = Instant::now();
-        let link = Box::new(HostLink::new(cfg.link, cookie));
+        let link = boxed_link(cfg.link, cookie);
         Self {
             cfg,
             link,
@@ -692,6 +714,7 @@ impl<T: PortTx> Driver<T> {
             established_at: now,
             line_idx: 0,
             line_since: now,
+            cookie,
         }
     }
 
@@ -725,7 +748,7 @@ impl<T: PortTx> Driver<T> {
             warn!("zrhp: set_line {:?}: {e}", self.line());
         }
         let now = self.now_us();
-        self.link.open(now, ResetReason::HostOpen);
+        self.link.reopen(now, self.cookie, ResetReason::HostOpen);
         'outer: loop {
             self.transmit();
             let wait = self.next_wait();

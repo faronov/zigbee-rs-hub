@@ -825,7 +825,6 @@ dependencies = [
 name = "hub-ncp"
 version = "0.1.0"
 dependencies = [
- "hub-core",
  "log",
  "sha2",
  "zigbee-zrhp",
