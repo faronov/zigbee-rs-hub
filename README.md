@@ -16,7 +16,7 @@ interface will be a WebSocket JSON API.
 | Phase | Content | Status |
 |---|---|---|
 | **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
-| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode); hardware runs pending (see "Phase 1") |
+| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode); on hardware: resets/resume, soak, `FW_*` update with rollback and confirm, `tbr-hub` on the S3 (see "Phase 1 status") |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | **in progress** (branch `stage2`): engine on the host core, device registry in `hubdata`, WebSocket JSON API on a desktop (`hubctl serve`) and on the S3 over Wi-Fi, catalog verifier, 8 MB production / 4 MB dev layouts; the S3 application build is 2.1 MiB, see "Stage 2" |
 
 ## Device support
@@ -551,9 +551,42 @@ The stock table's `ota_0` (1.6 MB) holds either.
   frame counters; 200 `SYS_ECHO`s, mean 11.4 ms, worst 15 ms, no
   retransmissions (the NCP's ACK arrives ~7 ms after a request over the USB
   bridge; the host core adds < 1 ms, 0.7 ms against the simulated NCP).
-- Not run on hardware yet: NCP resets/resume, formation, joins, `FW_*`
-  (the NCP is shared), and `tbr-hub` on the S3 (not flashed: the bridge
-  stays the board's image until the user decides).
+- Hardware, 2026-11-20 (board handed over for the hub runs; H2 = master
+  NCP BR image, PAN 0x1C06, channel 17, the C6 sensor 0x93B2 joined):
+  - `hubctl` with a store on macOS through the bridge: adopted the NCP's
+    network; a 600 s soak with three H2 EN resets from the bridge console
+    found that a rebooted NCP reports its network **formed but down**
+    (`network_state` 1) and `NWK_GET_INFO` has no PAN/EPID until
+    `NWK_INIT`, so the hub took it for a foreign network and left it down.
+    Fixed: a formed-down network is started first (`NWK_INIT` with floors),
+    then compared. After the fix: 330 s soak with three EN resets, 28 856
+    echoes, 0 failures, 3 echoes interrupted by the resets (outcome unknown,
+    as specified), each resume ~200 ms with `NWK_INIT` from the store's
+    floors; `reset` (SYS_RESET) and `reset --hard` (EN) resumed in < 1 s;
+    the frame-counter floors move forward. The ~3 000 bad frames per run
+    are the H2 boot log at the wrong baud during resets (2 without resets).
+  - Permit join (30 s) and listen: the C6's temperature and humidity reports
+    every 10–60 s. `hubctl serve` against the real NCP: WebSocket API up,
+    but the engine knows no devices: devices that joined before the hub
+    adopted the network are not imported from the NCP tables yet (gap).
+  - `FW_*` with an ECDSA-P256-signed envelope (master 33cdace BR build,
+    726 200 B, ~30.8 s at 921 600): staged in slot 1, trial boot, held
+    unconfirmed (`--hold-trial`), reset → the H2 rolled back to slot 0 with
+    the network and counters kept; second run with `FW_CONFIRM` → slot 1
+    confirmed, survives a reset. Fixed: rollback is detected by slot and
+    version (the NCP reports the digest of the staged ESP image, not of the
+    envelope), and `Hub::shutdown` waits for a store commit in progress.
+    H2 backup before the update: `esp32h2-br-flash-…-40f581eccab2`.
+  - `tbr-hub` 0.1.0 core-only (521 632 B) in S3 `ota_0` of the stock table
+    (hwlab backup and program, RTS reset): boots in bridge mode (the bridge
+    works for the Mac as before); `mode hub once`: ZRHP session at 921 600
+    with RTS/CTS, network owned (host store in RAM: the stock table has no
+    `hubdata`), 200 echoes mean 11.3 ms / worst 15 ms (same as through the
+    bridge: the NCP's ACK delay dominates), `hub ncp reset` resumed;
+    `s3 reset` → bridge mode again.
+- Not run on hardware yet: formation by the hub, joins handled by the
+  engine, the application build on the S3 (needs the 4 MB dev partition
+  table).
 
 ## Stage 2: the application on the host core (`hub-app`, branch `stage2`)
 

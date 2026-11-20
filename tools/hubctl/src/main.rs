@@ -33,7 +33,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim) [--store FILE] [--read-only] [-v|-vv] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -44,6 +44,8 @@ commands:
   fw-slots                  FW_GET_SLOTS
   fw-update FILE --version 0xMMmmrrrr
                             stream FILE into the inactive slot, trial boot, confirm
+                            (--hold-trial: leave the trial image unconfirmed;
+                            a reset then rolls the NCP back)
   fw-confirm                FW_CONFIRM
   reset [--hard]            SYS_RESET, or an EN pulse through the bridge's DTR/RTS
   serve [--listen ADDR] [--token T] [--for SECS]
@@ -244,15 +246,17 @@ fn print_event(m: &Message) {
     println!("event 0x{:04X} seq {} {}", m.msg_id, m.tid, hex(&m.payload));
 }
 
-fn echo_round(hub: &Hub, i: u32) -> Result<Duration, String> {
+fn echo_round(hub: &Hub, i: u32) -> Result<Duration, hub_ncp::driver::Error> {
     let data = [(i & 0xFF) as u8; 32];
     let t = Instant::now();
-    let rsp = hub.client().call(&SysEcho { data: Rest(&data) }, CallOpts::default()).map_err(|e| e.to_string())?;
+    let rsp = hub.client().call(&SysEcho { data: Rest(&data) }, CallOpts::default())?;
     if rsp.payload.get(1..) != Some(&data[..]) {
-        return Err("echo mismatch".into());
+        return Err(hub_ncp::driver::Error::Other("echo mismatch".into()));
     }
     Ok(t.elapsed())
 }
+
+static HOLD_TRIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
     let cmd = if args.0.is_empty() { "status".to_string() } else { args.0.remove(0) };
@@ -275,7 +279,7 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             let mut worst = Duration::ZERO;
             let mut total = Duration::ZERO;
             for i in 0..n {
-                let d = echo_round(hub, i)?;
+                let d = echo_round(hub, i).map_err(|e| e.to_string())?;
                 worst = worst.max(d);
                 total += d;
             }
@@ -284,7 +288,7 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
         "soak" => {
             let secs: u64 = args.0.first().and_then(|s| s.parse().ok()).unwrap_or(30);
             let until = Instant::now() + Duration::from_secs(secs);
-            let (mut ok, mut failed, mut worst) = (0u64, 0u64, Duration::ZERO);
+            let (mut ok, mut failed, mut interrupted, mut worst) = (0u64, 0u64, 0u64, Duration::ZERO);
             let mut i = 0;
             while Instant::now() < until {
                 match echo_round(hub, i) {
@@ -292,6 +296,8 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                         ok += 1;
                         worst = worst.max(d);
                     }
+                    // In flight when the NCP rebooted: expected, not a failure.
+                    Err(hub_ncp::driver::Error::LinkReset) => interrupted += 1,
                     Err(e) => {
                         failed += 1;
                         log::warn!("echo: {e}");
@@ -302,7 +308,7 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             let s = hub.status();
             let c = hub.client().counters();
             println!(
-                "soak {secs} s: {ok} ok, {failed} failed, worst {worst:?}; resumes {} NCP restarts {}; host link retx {} bad {} dup {}",
+                "soak {secs} s: {ok} ok, {failed} failed, {interrupted} interrupted by NCP resets, worst {worst:?}; resumes {} NCP restarts {}; host link retx {} bad {} dup {}",
                 s.resumes, s.ncp_restarts, c.tx_retransmissions, c.rx_bad_frame, c.rx_duplicate
             );
             if failed > 0 {
@@ -346,6 +352,16 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             let t = Instant::now();
             let slot = hub.fw_update(&image, &mut src).map_err(|e| e.to_string())?;
             println!("staged {size} B in slot {slot} in {:?}; trial boot", t.elapsed());
+            if HOLD_TRIAL.load(std::sync::atomic::Ordering::Relaxed) {
+                let trial = hub.wait_status(Duration::from_secs(120), |s| {
+                    s.slots.iter().any(|x| x.slot == slot && x.state == hub_ncp::fw::slot_state::RUNNING_TRIAL)
+                });
+                println!("trial image running in slot {slot}, not confirmed: {trial}");
+                for x in hub.status().slots {
+                    println!("slot {}: state {} version 0x{:08X}", x.slot, x.state, x.version);
+                }
+                return Ok(());
+            }
             let done = hub.wait_status(Duration::from_secs(120), |s| {
                 !matches!(s.fw, hub_ncp::FwState::Activated { .. } | hub_ncp::FwState::Staging { .. })
             });
@@ -457,6 +473,8 @@ fn main() -> ExitCode {
     if args.flag("--read-only") {
         cfg.resume = ResumePolicy::read_only();
     }
+    cfg.resume.hold_trial = args.flag("--hold-trial");
+    HOLD_TRIAL.store(cfg.resume.hold_trial, std::sync::atomic::Ordering::Relaxed);
     let store = match args.value("--store") {
         Some(p) => match FileFlash::open(p.as_ref(), JOURNAL_BYTES / SECTOR, SECTOR).and_then(|f| Store::open(Box::new(f))) {
             Ok(s) => s,
