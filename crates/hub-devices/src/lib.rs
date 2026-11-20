@@ -28,6 +28,7 @@ pub mod generic;
 pub mod gp;
 pub mod hub;
 pub mod model;
+pub mod persist;
 pub mod resolve;
 pub mod transport;
 pub mod tuya;

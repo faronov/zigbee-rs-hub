@@ -446,6 +446,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.zdo_tsn
     }
 
+    /// Maps a NWK address to a device (restore).
+    pub(crate) fn index_nwk(&mut self, nwk: u16, id: &str) {
+        self.nwk_index.insert(nwk, id.to_string());
+    }
+
     pub(crate) fn emit(&mut self, e: HubEvent) {
         self.events.push(e);
     }
