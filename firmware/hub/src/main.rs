@@ -118,9 +118,10 @@ fn status_text(hub: &Hub) -> String {
     if let Some(app) = APP.get() {
         let a = app.status();
         out += &format!(
-            "app: {} devices ({} restored), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {}, endpoint {}\r\n",
+            "app: {} devices ({} restored, {} imported), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {}, endpoint {}\r\n",
             a.devices,
             a.restored,
+            a.imported,
             a.sessions,
             a.registry_writes,
             a.registry_errors,

@@ -19,7 +19,9 @@ use zigbee_zrhp::msg::network::{
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKeyRsp};
 use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysNegotiateRsp, caps};
-use zigbee_zrhp::msg::tables::TblSyncRsp;
+use zigbee_zrhp::msg::diag::{Child, DiagGetChildren, DiagGetChildrenRsp, DiagGetNeighbors, DiagGetNeighborsRsp, Neighbor};
+use zigbee_zrhp::msg::tables::{TblRead, TblReadEntry, TblReadRsp, TblSyncRsp};
+use zigbee_zrhp::records::{ChildInfo, DeviceRecord, Record, device_flags};
 use zigbee_zrhp::msg::{Batch, Kind, RawMessage, ids};
 use zigbee_zrhp::queue::EndpointQueues;
 use zigbee_zrhp::types::{Endpoint, Ieee, Status};
@@ -83,7 +85,17 @@ pub struct SimState {
     pub log: Vec<(u16, Vec<u8>)>,
     /// Next ZCL TSN returned by remote GP requests.
     pub gp_tsn: u8,
+    /// `DEVICE` table for `TBL_READ`: `(ieee, nwk, capability of a child)`.
+    pub table_devices: Vec<([u8; 8], u16, Option<u8>)>,
+    /// `DIAG_GET_CHILDREN`: `(ieee, nwk, capability)`; `None` answers
+    /// `UNSUPPORTED_COMMAND` (as the master NCP image does).
+    pub children: Option<Vec<([u8; 8], u16, u8)>>,
+    /// `DIAG_GET_NEIGHBORS`: `(ieee, nwk, device type, relationship)`.
+    pub neighbors: Option<Vec<SimNeighbor>>,
 }
+
+/// `(ieee, nwk, device type, relationship)` of a simulated neighbor.
+pub type SimNeighbor = ([u8; 8], u16, u8, u8);
 
 type Injected = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 
@@ -125,6 +137,9 @@ impl SimNcp {
             aps: Vec::new(),
             log: Vec::new(),
             gp_tsn: 0x40,
+            table_devices: Vec::new(),
+            children: None,
+            neighbors: None,
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
@@ -448,6 +463,67 @@ impl SimNcp {
                 paging_active: 0,
             })),
             ids::LOG_CONFIG => status(Status::Success),
+            // Pages of two, to exercise the cursors.
+            ids::TBL_READ => {
+                let r: TblRead = m.decode().unwrap();
+                let start = r.cursor as usize;
+                let entries: Vec<TblReadEntry> = s
+                    .table_devices
+                    .iter()
+                    .skip(start)
+                    .take(2)
+                    .map(|&(ieee, nwk, cap)| TblReadEntry {
+                        rev: 1,
+                        state: 0,
+                        record: Record::Device(DeviceRecord {
+                            ieee: Ieee(ieee),
+                            nwk,
+                            flags: device_flags::NWK_VALID | if cap.is_some() { device_flags::IS_CHILD } else { 0 },
+                            child: cap.map(|capability| ChildInfo { capability, timeout_exp: 8 }),
+                            link: None,
+                        }),
+                    })
+                    .collect();
+                let end = start + entries.len();
+                let next_cursor = if r.table != 5 || end >= s.table_devices.len() { 0xFFFF } else { end as u16 };
+                let entries = if r.table == 5 { entries } else { Vec::new() };
+                ok(encode!(TblReadRsp { next_cursor, entries: List::new(&entries) }))
+            }
+            ids::DIAG_GET_CHILDREN => match &s.children {
+                None => status(Status::UnsupportedCommand),
+                Some(list) => {
+                    let r: DiagGetChildren = m.decode().unwrap();
+                    let entries: Vec<Child> = list
+                        .iter()
+                        .skip(r.start as usize)
+                        .take(2)
+                        .map(|&(ieee, nwk, capability)| Child { ieee: Ieee(ieee), nwk, capability, timeout_exp: 8, last_poll_ms: 100 })
+                        .collect();
+                    ok(encode!(DiagGetChildrenRsp { total: list.len() as u8, entries: List::new(&entries) }))
+                }
+            },
+            ids::DIAG_GET_NEIGHBORS => match &s.neighbors {
+                None => status(Status::UnsupportedCommand),
+                Some(list) => {
+                    let r: DiagGetNeighbors = m.decode().unwrap();
+                    let entries: Vec<Neighbor> = list
+                        .iter()
+                        .skip(r.start as usize)
+                        .take(2)
+                        .map(|&(ieee, nwk, device_type, relationship)| Neighbor {
+                            ieee: Ieee(ieee),
+                            nwk,
+                            device_type,
+                            rx_on: 1,
+                            relationship,
+                            lqi: 200,
+                            outgoing_cost: 1,
+                            age: 0,
+                        })
+                        .collect();
+                    ok(encode!(DiagGetNeighborsRsp { total: list.len() as u8, entries: List::new(&entries) }))
+                }
+            },
             ids::NWK_GROUP_MEMBERSHIP | ids::NWK_REMOVE_DEVICE | ids::GP_SINK_CONFIG | ids::GP_SINK_COMMISSIONING | ids::GP_SINK_REMOVE => {
                 s.log.push((m.header.msg_id, m.payload.to_vec()));
                 status(Status::Success)

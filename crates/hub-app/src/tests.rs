@@ -151,3 +151,38 @@ fn registry_survives_an_app_restart() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+#[test]
+fn devices_joined_before_the_hub_are_imported_from_the_ncp() {
+    let r = rig(Store::volatile());
+    // Joined before this hub adopted the network: only the NCP's DEVICE
+    // table knows it (DIAG_GET_CHILDREN/NEIGHBORS unsupported, as on the
+    // master NCP image).
+    r.sim.with(|s| s.table_devices = vec![(DEV.to_le_bytes(), 0x93B2, Some(0x80))]);
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.imported == 1 && s.devices == 1), "{:?}", app.status());
+    let (sid, rx) = session(&app);
+    let dev = call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": "zb:00158d0001a2b3c4"}));
+    assert_eq!(dev["success"], true, "{dev}");
+    let node_desc_to_child = |aps: &Vec<Vec<u8>>| {
+        aps.iter().any(|p| {
+            let req: zigbee_zrhp::msg::data::ApsDataRequest =
+                zigbee_zrhp::codec::Wire::read(&mut zigbee_zrhp::codec::Reader::new(p)).unwrap();
+            req.profile == 0 && req.cluster == 0x0002 && p.windows(2).any(|w| w == 0x93B2u16.to_le_bytes())
+        })
+    };
+    let t = std::time::Instant::now();
+    while !node_desc_to_child(&r.sim.state().aps) && t.elapsed() < T {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(node_desc_to_child(&r.sim.state().aps), "the imported device is interviewed");
+    // An NCP reboot (new session) does not import it twice.
+    r.sim.reboot();
+    assert!(r.ncp.wait_status(T, |s| s.resumes >= 2));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(app.status().imported, 1);
+    assert_eq!(app.status().devices, 1);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
