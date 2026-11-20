@@ -20,18 +20,18 @@ impl SigningKey {
         }
     }
 
-    /// Parses a key file / `ZDEF_SIGNING_KEY` value: 64 hex digits (the seed);
-    /// whitespace and `#` comment lines are ignored.
+    /// Parses a key file / `ZDEF_SIGNING_KEY` value: an Ed25519 PKCS#8 PEM
+    /// (`openssl genpkey -algorithm ed25519`) or 64 hex digits (the seed);
+    /// see [`crate::keys`].
     pub fn parse(text: &str) -> Result<Self, String> {
-        let hex: String = text
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .collect::<String>()
-            .split_whitespace()
-            .collect();
-        let b = unhex(&hex).ok_or("signing key: expected 64 hex digits (Ed25519 seed)")?;
-        let seed: [u8; 32] = b.try_into().map_err(|_| "signing key: expected 32 bytes")?;
-        Ok(Self::from_seed(seed))
+        let k = crate::keys::parse_private(text)?;
+        let key = Self::from_seed(k.seed);
+        if k.public.is_some_and(|p| p != key.public()) {
+            return Err(
+                "signing key: the embedded public key does not match the private key".into(),
+            );
+        }
+        Ok(key)
     }
 
     pub fn public(&self) -> [u8; 32] {
@@ -69,6 +69,7 @@ pub fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Bank build parameters.
+#[derive(Clone, Copy, Debug)]
 pub struct BankParams {
     pub generation: u32,
     pub catalog_date: u32,
@@ -91,9 +92,9 @@ pub struct BankReport {
 }
 
 pub struct BuiltBank {
+    /// Unsigned bank (signature length 0).
     pub bytes: Vec<u8>,
     pub report: BankReport,
-    pub shards: BTreeMap<u8, Vec<u8>>,
 }
 
 fn ce(x: zdef::cbor::CborError) -> String {
@@ -223,37 +224,101 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
     if s.len() < d.len() { s } else { d }
 }
 
-/// Builds a bank from standalone definitions `(name, cbor)`.
-pub fn build_bank(
-    defs: &[(String, Vec<u8>)],
-    params: &BankParams,
-    key: &SigningKey,
-) -> Result<BuiltBank, String> {
-    let mut items: Vec<(String, Definition, Vec<u8>)> = Vec::new();
-    for (name, cbor) in defs {
-        let d = zdef::load_canonical(cbor, &zdef::HubFeatures(u128::MAX))
+/// A compiled definition ready for banking: `(name, model, standalone CBOR)`.
+pub struct Item {
+    pub name: String,
+    pub def: Definition,
+    pub standalone: Vec<u8>,
+}
+
+impl Item {
+    /// Checks canonical standalone CBOR (the shard and content-hash form).
+    pub fn new(name: &str, cbor: Vec<u8>) -> Result<Item, String> {
+        let def = zdef::load_canonical(&cbor, &zdef::HubFeatures(u128::MAX))
             .map_err(|e| format!("{name}: {e}"))?;
-        if d.is_fragment() {
-            return Err(format!("{name}: self-description fragments are not banked"));
-        }
-        let mut cat = d.clone();
-        cat.description = None;
-        let bytes = cat.encode().map_err(|e| format!("{name}: {e:?}"))?;
-        items.push((name.clone(), d, bytes));
-    }
-    items.sort_by(|a, b| a.1.id.cmp(&b.1.id).then(a.1.revision.cmp(&b.1.revision)));
-    for w in items.windows(2) {
-        if w[0].1.id == w[1].1.id && w[0].1.requires == w[1].1.requires {
+        if def.is_fragment() {
             return Err(format!(
-                "duplicate id {:?} with the same requires",
-                w[0].1.id
+                "{name}: self-description fragments are not catalogued"
             ));
         }
+        Ok(Item {
+            name: name.into(),
+            def,
+            standalone: cbor,
+        })
+    }
+
+    /// Catalog form before string sharing (`description` removed).
+    fn catalog_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut cat = self.def.clone();
+        cat.description = None;
+        cat.encode().map_err(|e| format!("{}: {e:?}", self.name))
+    }
+
+    /// Index keys of every match clause, with flags.
+    fn keys(&self) -> Result<Vec<(u64, u8)>, String> {
+        let wl: Vec<&str> = self
+            .def
+            .white_label
+            .iter()
+            .flat_map(|w| w.manufacturer.iter().map(|s| s.as_str()))
+            .collect();
+        let mut out = Vec::new();
+        for c in &self.def.match_ {
+            let keys = clause_keys(c).map_err(|_| format!("{}: a match clause cannot be indexed (needs names, a GP identity, or an endpoint with profile and device_id)", self.name))?;
+            for (k, flags) in keys {
+                let mut fl = flags;
+                if let zdef::matching::IndexKey::Names(m, _) = k {
+                    if wl.contains(&m) {
+                        fl |= key_flags::WHITE_LABEL;
+                    }
+                }
+                out.push((k.hash(), fl));
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn sort_items(items: &mut [&Item]) -> Result<(), String> {
+    items.sort_by(|a, b| {
+        a.def
+            .id
+            .cmp(&b.def.id)
+            .then(a.def.revision.cmp(&b.def.revision))
+            .then(a.standalone.cmp(&b.standalone))
+    });
+    for w in items.windows(2) {
+        if w[0].def.id == w[1].def.id && w[0].def.requires == w[1].def.requires {
+            return Err(format!(
+                "duplicate id {:?} with the same requires ({} and {})",
+                w[0].def.id, w[0].name, w[1].name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Largest catalog-form definition a block holds (`u16` length + form).
+pub const BLOCK_ITEM_MAX: usize = BLOCK_MAX - 2;
+
+/// Whether a definition fits a bank block (larger ones are shard-only).
+pub fn fits_block(it: &Item) -> Result<bool, String> {
+    Ok(it.catalog_bytes()?.len() <= BLOCK_ITEM_MAX)
+}
+
+/// Builds an unsigned bank (signature length 0); see [`sign_bank`].
+pub fn build_bank(items: &[&Item], params: &BankParams) -> Result<BuiltBank, String> {
+    let mut items: Vec<&Item> = items.to_vec();
+    sort_items(&mut items)?;
+    let mut forms: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+    for it in &items {
+        forms.push(it.catalog_bytes()?);
     }
 
     // String table: strings that occur in at least two definitions, largest saving first.
     let mut count: HashMap<String, usize> = HashMap::new();
-    for (_, _, b) in &items {
+    for b in &forms {
         let mut seen: Vec<String> = Vec::new();
         walk_texts(&mut Reader::new(b), &mut |s| {
             if !seen.iter().any(|x| x == s) {
@@ -293,14 +358,15 @@ pub fn build_bank(
     let mut slots = 0u8;
     let mut placed: Vec<(u16, u8)> = Vec::new();
     let mut catalog_total = 0;
-    for (name, _, b) in &items {
+    for (it, b) in items.iter().zip(&forms) {
         let mut w = Writer::new();
         to_catalog_form(&mut Reader::new(b), &mut w, &table)?;
         let cf = w.into_vec();
         catalog_total += cf.len();
-        if cf.len() + 2 > BLOCK_MAX {
+        if cf.len() > BLOCK_ITEM_MAX {
             return Err(format!(
-                "{name}: {} bytes in catalog form, larger than one {BLOCK_MAX} B block",
+                "{}: {} bytes in catalog form, larger than one {BLOCK_MAX} B block",
+                it.name,
                 cf.len()
             ));
         }
@@ -318,47 +384,16 @@ pub fn build_bank(
     }
     let compressed: Vec<Vec<u8>> = blocks.iter().map(|b| deflate(b)).collect();
 
-    // Index and shards.
+    // Index.
     let mut index: Vec<IndexEntry> = Vec::new();
-    let mut shards: BTreeMap<u8, Vec<ShardRecord>> = BTreeMap::new();
-    for ((name, d, _), (block, slot)) in items.iter().zip(&placed) {
-        let wl: Vec<&str> = d
-            .white_label
-            .iter()
-            .flat_map(|w| w.manufacturer.iter().map(|s| s.as_str()))
-            .collect();
-        let mut hashes: Vec<u64> = Vec::new();
-        for c in &d.match_ {
-            let keys = clause_keys(c).map_err(|_| format!("{name}: a match clause cannot be indexed (needs names, a GP identity, or an endpoint with profile and device_id)"))?;
-            for (k, flags) in keys {
-                let mut fl = flags;
-                if let zdef::matching::IndexKey::Names(m, _) = k {
-                    if wl.contains(&m) {
-                        fl |= key_flags::WHITE_LABEL;
-                    }
-                }
-                let h = k.hash();
-                index.push(IndexEntry {
-                    key_hash: h,
-                    block: *block,
-                    slot: *slot,
-                    flags: fl,
-                });
-                if !hashes.contains(&h) {
-                    hashes.push(h);
-                }
-            }
-        }
-        let standalone = d.encode().map_err(|e| format!("{name}: {e:?}"))?;
-        for h in hashes {
-            shards
-                .entry(zb::shard_of(h))
-                .or_default()
-                .push(ShardRecord {
-                    key_hash: h,
-                    requires: d.requires.clone(),
-                    definition: standalone.clone(),
-                });
+    for (it, (block, slot)) in items.iter().zip(&placed) {
+        for (h, flags) in it.keys()? {
+            index.push(IndexEntry {
+                key_hash: h,
+                block: *block,
+                slot: *slot,
+                flags,
+            });
         }
     }
     index.sort();
@@ -378,10 +413,9 @@ pub fn build_bank(
         body.extend_from_slice(c);
     }
 
-    let sig_len = key.cose_sign1(&[0u8; HEADER_LEN], true).len();
     let header = Header {
         format: FORMAT,
-        sig_len: sig_len as u16,
+        sig_len: 0,
         generation: params.generation,
         catalog_date: params.catalog_date,
         catalog_serial: params.catalog_serial,
@@ -392,32 +426,28 @@ pub fn build_bank(
         strings_len: strings_sec.len() as u32,
         body_sha256: zdef::hash::sha256(&body),
     };
-    let hb = header.to_bytes();
-    let sig = key.cose_sign1(&hb, true);
-    if sig.len() != sig_len {
-        return Err("internal: signature length changed".into());
-    }
-    let mut bytes = hb.to_vec();
-    bytes.extend(sig);
+    let mut bytes = header.to_bytes().to_vec();
     bytes.extend(&body);
-    if bytes.len() > params.max_size {
+    // room for the signature added by `sign_bank`
+    let total_signed = bytes.len() + signature_len();
+    if total_signed > params.max_size {
         return Err(format!(
-            "bank is {} bytes, above the {} byte partition",
-            bytes.len(),
+            "bank is {total_signed} bytes signed, above the {} byte partition",
             params.max_size
         ));
     }
 
-    // Self-check with the hub-side reader: parse, verify, load every definition.
+    // Self-check with the hub-side reader: parse, body hash, load every definition.
     let bank = zb::Bank::parse(&bytes).map_err(|e| format!("self-check: {e:?}"))?;
-    bank.verify(&[sign::TrustedKey::new(key.public())])
-        .map_err(|e| format!("self-check: {e:?}"))?;
+    if zdef::hash::sha256(bank.body()) != bank.header.body_sha256 {
+        return Err("self-check: body hash".into());
+    }
     let mut inf = zb::MinizInflate::new();
     let st = bank
         .load_strings(&mut inf)
         .map_err(|e| format!("self-check: {e:?}"))?;
     let mut buf = [0u8; BLOCK_MAX];
-    for ((name, d, _), (block, slot)) in items.iter().zip(&placed) {
+    for (it, (block, slot)) in items.iter().zip(&placed) {
         let back = bank
             .load(
                 &mut inf,
@@ -430,11 +460,11 @@ pub fn build_bank(
                 },
                 &mut buf,
             )
-            .map_err(|e| format!("self-check {name}: {e:?}"))?;
-        let mut want = d.clone();
+            .map_err(|e| format!("self-check {}: {e:?}", it.name))?;
+        let mut want = it.def.clone();
         want.description = None;
         if back != want {
-            return Err(format!("self-check {name}: bank round trip differs"));
+            return Err(format!("self-check {}: bank round trip differs", it.name));
         }
     }
 
@@ -447,42 +477,117 @@ pub fn build_bank(
         index_bytes: index.len() * zb::INDEX_ENTRY_LEN,
         blocks_bytes: compressed.iter().map(|c| c.len()).sum(),
         catalog_form_bytes: catalog_total,
-        total: bytes.len(),
+        total: total_signed,
     };
-    let shards = shards
-        .into_iter()
-        .map(|(k, v)| (k, zb::encode_shard(&v)))
-        .collect();
-    Ok(BuiltBank {
-        bytes,
-        report,
-        shards,
-    })
+    Ok(BuiltBank { bytes, report })
 }
 
-/// Builds and signs `manifest.cose`.
-pub fn build_manifest(
+/// Length of the detached COSE_Sign1 of a bank header (fixed for Ed25519:
+/// 8-byte kid, 64-byte signature).
+pub fn signature_len() -> usize {
+    SigningKey::from_seed([1; 32])
+        .cose_sign1(&[0u8; HEADER_LEN], true)
+        .len()
+}
+
+/// Signs (or re-signs) a bank: the header's signature length changes, the
+/// body and its hash do not.
+pub fn sign_bank(bank: &[u8], key: &SigningKey) -> Result<Vec<u8>, String> {
+    let b = zb::Bank::parse(bank).map_err(|e| format!("bank: {e:?}"))?;
+    let mut h = b.header;
+    let sig_len = signature_len();
+    h.sig_len = sig_len as u16;
+    let hb = h.to_bytes();
+    let sig = key.cose_sign1(&hb, true);
+    if sig.len() != sig_len {
+        return Err("internal: signature length changed".into());
+    }
+    let mut out = hb.to_vec();
+    out.extend(sig);
+    out.extend(b.body());
+    let back = zb::Bank::parse(&out).map_err(|e| format!("self-check: {e:?}"))?;
+    back.verify(&[sign::TrustedKey::new(key.public())])
+        .map_err(|e| format!("self-check: {e:?}"))?;
+    Ok(out)
+}
+
+/// Shards (spec 9.3) of every definition, and the content digest: SHA-256
+/// of the ascending content hashes.
+/// Encoded shards by shard number.
+pub type Shards = BTreeMap<u8, Vec<u8>>;
+
+pub fn build_shards(items: &[&Item]) -> Result<(Shards, [u8; 32]), String> {
+    let mut items: Vec<&Item> = items.to_vec();
+    sort_items(&mut items)?;
+    let mut shards: BTreeMap<u8, Vec<ShardRecord>> = BTreeMap::new();
+    let mut hashes: Vec<[u8; 32]> = Vec::new();
+    for it in &items {
+        hashes.push(zdef::hash::sha256(&it.standalone));
+        let mut by_shard: BTreeMap<u8, Vec<u64>> = BTreeMap::new();
+        for (h, _) in it.keys()? {
+            let v = by_shard.entry(zb::shard_of(h)).or_default();
+            if !v.contains(&h) {
+                v.push(h);
+            }
+        }
+        for (sh, mut key_hashes) in by_shard {
+            key_hashes.sort_unstable();
+            shards.entry(sh).or_default().push(ShardRecord {
+                key_hashes,
+                requires: it.def.requires.clone(),
+                definition: it.standalone.clone(),
+            });
+        }
+    }
+    hashes.sort_unstable();
+    hashes.dedup();
+    let digest = zdef::hash::sha256(&hashes.concat());
+    Ok((
+        shards
+            .into_iter()
+            .map(|(k, v)| (k, zb::encode_shard(&v)))
+            .collect(),
+        digest,
+    ))
+}
+
+/// A bank file of the manifest: `(name, bytes as published, definitions, generation)`.
+pub struct BankFile<'a> {
+    pub name: String,
+    pub bytes: &'a [u8],
+    pub definitions: u32,
+    pub generation: u32,
+}
+
+/// The manifest payload.
+pub fn manifest(
     params: &BankParams,
-    banks: &[(String, &[u8])],
+    banks: &[BankFile<'_>],
     shards: &BTreeMap<u8, Vec<u8>>,
     requires: Vec<u16>,
-    key: &SigningKey,
-) -> Vec<u8> {
-    let m = Manifest {
+    content: Option<[u8; 32]>,
+    mut source: Vec<(String, String)>,
+) -> Manifest {
+    // canonical CBOR map order (the decoder returns this order)
+    source.sort_by(|a, b| (a.0.len(), a.0.as_bytes()).cmp(&(b.0.len(), b.0.as_bytes())));
+    Manifest {
         catalog_date: params.catalog_date,
         catalog_serial: params.catalog_serial,
         requires,
         banks: banks
             .iter()
-            .map(|(n, b)| ManifestAsset {
-                name: n.clone(),
-                sha256: zdef::hash::sha256(b),
-                size: b.len() as u64,
+            .map(|b| ManifestAsset {
+                name: b.name.clone(),
+                sha256: zdef::hash::sha256(b.bytes),
+                size: b.bytes.len() as u64,
+                definitions: b.definitions,
+                generation: b.generation,
             })
             .collect(),
         shards: (0..=255u8)
             .map(|i| shards.get(&i).map(|s| zdef::hash::sha256(s)))
             .collect(),
-    };
-    key.cose_sign1(&m.encode(), false)
+        content,
+        source,
+    }
 }

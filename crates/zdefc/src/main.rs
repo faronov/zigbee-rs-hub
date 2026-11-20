@@ -22,13 +22,22 @@ usage:
   zdefc schema                          print the JSON Schema
   zdefc bank build -o <dir> [--key <file>] [--date YYYYMMDD] [--serial n] [--generation n]
                    [--max-size bytes] [--name bank.zdb] <file|dir>...
-  zdefc bank keygen -o <file>           new Ed25519 signing key (keep it out of git)
-  zdefc bank pubkey [--key <file>]      public key and key ID
-  zdefc bank verify <bank.zdb> --pubkey <hex>
+                                        one bank + shards + manifest (unsigned without a key)
+  zdefc catalog build --plan plan.json -o <dir> [--key <file>]
+                                        banks (largest priority prefix that fits), 256 shards,
+                                        manifest.cbor, catalog.json; signed with a key
+  zdefc catalog sign <dir> [--key <file>]   sign banks and write manifest.cose
+  zdefc catalog verify <dir> --pubkey <file|hex>
+  zdefc bank keygen -o <file> [--pem]   new Ed25519 signing key (keep it out of git)
+  zdefc bank pubkey [--key <file> | --pubkey <file|hex>] [--pem]
+                                        public key (hex) and key ID as the hub embeds them
+  zdefc bank verify <bank.zdb> --pubkey <file|hex>
   zdefc bank list <bank.zdb>
 
-The signing key is read from --key or the ZDEF_SIGNING_KEY environment variable
-(64 hex digits, the Ed25519 seed).
+The signing key is read from --key or the ZDEF_SIGNING_KEY environment variable:
+an Ed25519 PKCS#8 PEM (openssl genpkey -algorithm ed25519) or 64 hex digits
+(the seed); the format is detected. Public keys are a PEM PUBLIC KEY
+(keys/zdef-catalog-ed25519.pub.pem) or 64 hex digits.
 ";
 
 struct Args {
@@ -36,7 +45,7 @@ struct Args {
     opts: Vec<(String, Option<String>)>,
 }
 
-const FLAGS: &[&str] = &["--catalog", "--no-requires", "--json"];
+const FLAGS: &[&str] = &["--catalog", "--no-requires", "--json", "--pem"];
 
 fn parse_args(v: &[String]) -> Args {
     let mut a = Args {
@@ -100,6 +109,38 @@ fn load_key(a: &Args) -> Result<SigningKey, String> {
             .map_err(|_| "no signing key: use --key <file> or ZDEF_SIGNING_KEY")?,
     };
     SigningKey::parse(&text)
+}
+
+/// The signing key if one is given (`--key` or `ZDEF_SIGNING_KEY`), else
+/// `None` (unsigned output).
+fn optional_key(a: &Args) -> Result<Option<SigningKey>, String> {
+    if a.get("--key").is_none()
+        && std::env::var("ZDEF_SIGNING_KEY").map_or(true, |v| v.trim().is_empty())
+    {
+        return Ok(None);
+    }
+    load_key(a).map(Some)
+}
+
+/// `--pubkey`: a file (PEM or hex) or 64 hex digits.
+fn load_pubkey(v: &str) -> Result<[u8; 32], String> {
+    let text = if Path::new(v).is_file() {
+        fs::read_to_string(v).map_err(|e| format!("{v}: {e}"))?
+    } else {
+        v.to_string()
+    };
+    zdefc::keys::parse_public(&text)
+}
+
+fn print_pubkey(pk: &[u8; 32], pem: bool) {
+    println!(
+        "public key {}\nkid {}",
+        zdefc::hex(pk),
+        zdefc::hex(&zdef::sign::key_id(pk))
+    );
+    if pem {
+        print!("{}", zdefc::keys::public_pem(pk));
+    }
 }
 
 fn sources(inputs: &[String]) -> Result<Vec<PathBuf>, String> {
@@ -272,7 +313,7 @@ fn main() -> ExitCode {
                     + c.def
                         .entities
                         .iter()
-                        .map(|e| e.parts.len().saturating_sub(1))
+                        .map(|e| e.more().parts.len().saturating_sub(1))
                         .sum::<usize>();
                 all.extend_from_slice(&cat.cbor);
                 let name = Path::new(&f)
@@ -321,6 +362,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         "bank" => bank_cmd(&a),
+        "catalog" => catalog_cmd(&a),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(())
@@ -348,12 +390,16 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
             let mut seed = [0u8; 32];
             getrandom::fill(&mut seed).map_err(|e| format!("random: {e}"))?;
             let k = SigningKey::from_seed(seed);
-            let text = format!(
-                "# zdef Ed25519 signing key (seed). Secret: never commit.\n# public {} kid {}\n{}\n",
-                zdefc::hex(&k.public()),
-                zdefc::hex(&k.kid()),
-                zdefc::hex(&seed)
-            );
+            let text = if a.has("--pem") {
+                zdefc::keys::private_pem(&seed)
+            } else {
+                format!(
+                    "# zdef Ed25519 signing key (seed). Secret: never commit.\n# public {} kid {}\n{}\n",
+                    zdefc::hex(&k.public()),
+                    zdefc::hex(&k.kid()),
+                    zdefc::hex(&seed)
+                )
+            };
             let mut o = fs::OpenOptions::new();
             o.write(true).create_new(true);
             #[cfg(unix)]
@@ -372,17 +418,16 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
             Ok(())
         }
         "pubkey" => {
-            let k = load_key(a)?;
-            println!(
-                "public key {}\nkid {}",
-                zdefc::hex(&k.public()),
-                zdefc::hex(&k.kid())
-            );
+            let pk = match a.get("--pubkey") {
+                Some(v) => load_pubkey(v)?,
+                None => load_key(a)?.public(),
+            };
+            print_pubkey(&pk, a.has("--pem"));
             Ok(())
         }
         "build" => {
             let out = PathBuf::from(a.get("-o").ok_or("bank build: -o <dir> required")?);
-            let key = load_key(a)?;
+            let key = optional_key(a)?;
             let num = |k: &str, d: u64| -> Result<u64, String> {
                 a.get(k)
                     .map(|v| v.parse::<u64>().map_err(|_| format!("{k}: not a number")))
@@ -394,7 +439,7 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
                 catalog_serial: num("--serial", 0)? as u16,
                 max_size: num("--max-size", 256 * 1024)? as usize,
             };
-            let mut defs = Vec::new();
+            let mut items = Vec::new();
             for f in sources(&a.pos[1..])? {
                 let f = f.to_string_lossy().to_string();
                 let cbor = if is_cbor(&f) {
@@ -406,39 +451,57 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
                     eprintln!("{f}: self-description fragment, not banked");
                     continue;
                 }
-                defs.push((f, cbor));
+                items.push(bank::Item::new(&f, cbor)?);
             }
-            if defs.is_empty() {
+            if items.is_empty() {
                 return Err("bank build: no inputs".into());
             }
-            let built = bank::build_bank(&defs, &params, &key)?;
+            let refs: Vec<&bank::Item> = items.iter().collect();
+            let built = bank::build_bank(&refs, &params)?;
+            let bytes = match &key {
+                Some(k) => bank::sign_bank(&built.bytes, k)?,
+                None => built.bytes,
+            };
+            let (shards, content) = bank::build_shards(&refs)?;
             fs::create_dir_all(&out).map_err(|e| e.to_string())?;
             let name = a.get("--name").unwrap_or("bank.zdb").to_string();
-            fs::write(out.join(&name), &built.bytes).map_err(|e| e.to_string())?;
-            for (h, s) in &built.shards {
+            fs::write(out.join(&name), &bytes).map_err(|e| e.to_string())?;
+            for (h, s) in &shards {
                 fs::write(out.join(format!("shard-{h:02x}.cbor")), s).map_err(|e| e.to_string())?;
             }
-            let manifest = bank::build_manifest(
-                &params,
-                &[(name.clone(), &built.bytes)],
-                &built.shards,
-                Vec::new(),
-                &key,
-            );
-            fs::write(out.join("manifest.cose"), manifest).map_err(|e| e.to_string())?;
             let r = &built.report;
+            let m = bank::manifest(
+                &params,
+                &[bank::BankFile {
+                    name: name.clone(),
+                    bytes: &bytes,
+                    definitions: r.definitions as u32,
+                    generation: params.generation,
+                }],
+                &shards,
+                Vec::new(),
+                Some(content),
+                Vec::new(),
+            );
+            let payload = m.encode();
+            fs::write(out.join("manifest.cbor"), &payload).map_err(|e| e.to_string())?;
+            if let Some(k) = &key {
+                fs::write(out.join("manifest.cose"), k.cose_sign1(&payload, false))
+                    .map_err(|e| e.to_string())?;
+            }
             println!(
-                "{name}: {} B ({} definitions, {} index keys, {} blocks, {} shared strings)\n  strings {} B, index {} B, blocks {} B (catalog form {} B raw), shards {}",
-                r.total,
+                "{name}: {} B ({} definitions, {} index keys, {} blocks, {} shared strings{})\n  strings {} B, index {} B, blocks {} B (catalog form {} B raw), shards {}",
+                bytes.len(),
                 r.definitions,
                 r.keys,
                 r.blocks,
                 r.strings,
+                if key.is_some() { "" } else { ", unsigned" },
                 r.strings_bytes,
                 r.index_bytes,
                 r.blocks_bytes,
                 r.catalog_form_bytes,
-                built.shards.len()
+                shards.len()
             );
             Ok(())
         }
@@ -447,12 +510,10 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
             let bytes = read(f)?;
             let bank = zdef::bank::Bank::parse(&bytes).map_err(|e| format!("{f}: {e:?}"))?;
             if sub == "verify" {
-                let pk = a
-                    .get("--pubkey")
-                    .ok_or("bank verify: --pubkey <hex> required")?;
-                let pk: [u8; 32] = bank::unhex(pk)
-                    .and_then(|b| b.try_into().ok())
-                    .ok_or("--pubkey: 64 hex digits")?;
+                let pk = load_pubkey(
+                    a.get("--pubkey")
+                        .ok_or("bank verify: --pubkey <file|hex> required")?,
+                )?;
                 bank.verify(&[zdef::sign::TrustedKey::new(pk)])
                     .map_err(|e| format!("{f}: {e:?}"))?;
                 println!(
@@ -489,5 +550,76 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
             Ok(())
         }
         s => Err(format!("unknown bank subcommand {s}")),
+    }
+}
+
+fn catalog_cmd(a: &Args) -> Result<(), String> {
+    let sub = a
+        .pos
+        .first()
+        .map(|s| s.as_str())
+        .ok_or("catalog: missing subcommand")?;
+    match sub {
+        "build" => {
+            let plan_path = a
+                .get("--plan")
+                .ok_or("catalog build: --plan <plan.json> required")?;
+            let out = PathBuf::from(a.get("-o").ok_or("catalog build: -o <dir> required")?);
+            let text = fs::read_to_string(plan_path).map_err(|e| format!("{plan_path}: {e}"))?;
+            let base = Path::new(plan_path).parent().unwrap_or(Path::new("."));
+            let plan = zdefc::catalog::Plan::parse(&text, base)?;
+            let key = optional_key(a)?;
+            let o = zdefc::catalog::build(&plan, &out, key.as_ref())?;
+            println!(
+                "{} definitions in {} shards, content {}{}",
+                o.definitions,
+                o.shards,
+                zdefc::hex(&o.content[..8]),
+                if o.signed { ", signed" } else { ", unsigned" }
+            );
+            for b in &o.banks {
+                println!(
+                    "{}: {} / {} B, {} definitions ({} did not fit, {} larger than a block)",
+                    b.name,
+                    b.size,
+                    b.max_size,
+                    b.included.len(),
+                    b.no_room.len(),
+                    b.too_large.len()
+                );
+            }
+            Ok(())
+        }
+        "sign" => {
+            let dir = PathBuf::from(a.pos.get(1).ok_or("catalog sign: missing directory")?);
+            let key = load_key(a)?;
+            zdefc::catalog::sign(&dir, &key)?;
+            println!(
+                "signed {}: public key {} kid {}",
+                dir.display(),
+                zdefc::hex(&key.public()),
+                zdefc::hex(&key.kid())
+            );
+            Ok(())
+        }
+        "verify" => {
+            let dir = PathBuf::from(a.pos.get(1).ok_or("catalog verify: missing directory")?);
+            let pk = load_pubkey(
+                a.get("--pubkey")
+                    .ok_or("catalog verify: --pubkey <file|hex> required")?,
+            )?;
+            let m = zdefc::catalog::verify(&dir, pk)?;
+            println!(
+                "{}: catalog {}.{} ok (kid {}, {} banks, {} shards)",
+                dir.display(),
+                m.catalog_date,
+                m.catalog_serial,
+                zdefc::hex(&zdef::sign::key_id(&pk)),
+                m.banks.len(),
+                m.shards.iter().flatten().count()
+            );
+            Ok(())
+        }
+        s => Err(format!("unknown catalog subcommand {s}")),
     }
 }

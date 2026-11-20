@@ -25,6 +25,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(feature = "bank")]
 pub mod bank;
 pub mod cbor;
 pub mod codec;
@@ -37,6 +38,19 @@ pub mod model;
 pub mod num;
 pub mod resolve;
 pub mod sign;
+pub mod siphash;
+
+/// Insertion sort by key: the lists sorted on the hub are a few entries
+/// long, and `core`'s sorts cost ~9 KiB of flash per element type.
+pub(crate) fn sort_small_by_key<T, K: Ord>(v: &mut [T], key: impl Fn(&T) -> K) {
+    for i in 1..v.len() {
+        let mut j = i;
+        while j > 0 && key(&v[j - 1]) > key(&v[j]) {
+            v.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+}
 pub mod validate;
 
 pub use codec::{DecodeError, DecodeErrorKind, EncodeError, decode, decode_canonical, encode};
@@ -76,6 +90,7 @@ impl Definition {
     }
 
     /// Content hash of the canonical standalone encoding.
+    #[cfg(feature = "soft-sha256")]
     pub fn content_hash(&self) -> Result<ContentHash, EncodeError> {
         Ok(ContentHash::of(&self.encode()?))
     }
@@ -152,7 +167,10 @@ impl core::fmt::Display for LoadError {
                 }
                 Ok(())
             }
-            LoadError::Requires(x) => write!(f, "requires feature {x}"),
+            LoadError::Requires(x) => match enums::Feature::from_code(*x as u64) {
+                Some(n) => write!(f, "requires feature {x} ({})", n.as_str()),
+                None => write!(f, "requires feature {x}"),
+            },
         }
     }
 }

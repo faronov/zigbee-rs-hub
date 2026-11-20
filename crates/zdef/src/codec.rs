@@ -1,8 +1,12 @@
 //! Canonical CBOR encoding and decoding of the model (spec 8).
+//!
+//! The decoder is a hand-written recursive descent without closures or
+//! generics per field: one `match` per map, shared helpers for keys,
+//! ranges and errors, so it stays small on the hub.
 
 use crate::cbor::{CborError, CborErrorKind, Head, Reader, Writer};
 use crate::enums::{self, Category, Platform, StateClass, TableRef, TuyaType};
-use crate::keys::{self, is_extension};
+use crate::keys::is_extension;
 use crate::model::*;
 use crate::num::{decimal_value, pack_tuya_name, unpack_tuya_name, write_float, write_num};
 use alloc::string::{String, ToString};
@@ -23,14 +27,14 @@ pub enum DecodeErrorKind {
     /// A key outside the optional-extension range that this version does not know.
     UnknownKey {
         map: &'static str,
-        key: u64,
+        key: u32,
     },
     Missing(&'static str),
     /// A value of the wrong type or out of range for the field.
     Invalid(&'static str),
     UnsupportedMajor(u8),
     /// A shared-string reference without a string table, or out of range.
-    StringRef(u64),
+    StringRef(u32),
     /// Decodes, but the bytes are not the canonical encoding of the result.
     NonCanonical,
 }
@@ -81,123 +85,12 @@ pub fn decode_canonical(bytes: &[u8]) -> Result<Definition, DecodeError> {
     }
 }
 
-pub fn decode_with(bytes: &[u8], opts: &DecodeOptions<'_>) -> Result<Definition, DecodeError> {
-    // Pass 1: the constant pool (key 17) is needed to resolve event types and attrs names.
-    let consts = {
-        let mut d = D {
-            r: Reader::new(bytes),
-            strings: opts.strings,
-            consts: &[],
-            names: Vec::new(),
-        };
-        let mut found = Vec::new();
-        d.map(
-            &mut |d, k| {
-                if k == 17 {
-                    found = d.consts()?;
-                } else {
-                    d.r.skip()?;
-                }
-                Ok(true)
-            },
-            "top",
-        )?;
-        d.r.finish()?;
-        found
-    };
-    let mut d = D {
-        r: Reader::new(bytes),
-        strings: opts.strings,
-        consts: &consts,
-        names: Vec::new(),
-    };
-    let mut def = Definition::new(Kind::Definition);
-    let mut have_kind = false;
-    d.map(
-        &mut |d, k| {
-            match k {
-                0 | 20 => {
-                    let at = d.r.position();
-                    let m = d.small(at, "zdef")?;
-                    if have_kind {
-                        return Err(d.inv("zdef"));
-                    }
-                    have_kind = true;
-                    def.kind = if k == 0 {
-                        Kind::Definition
-                    } else {
-                        Kind::Fragment
-                    };
-                    def.major = m as u8;
-                    if !SUPPORTED_MAJORS.contains(&def.major) {
-                        return Err(DecodeError {
-                            offset: at,
-                            kind: DecodeErrorKind::UnsupportedMajor(def.major),
-                        });
-                    }
-                }
-                1 => def.id = Some(d.text()?),
-                2 => def.revision = Some(d.uint_as("revision")?),
-                3 => def.vendor = Some(d.text()?),
-                4 => def.model = Some(d.text()?),
-                5 => def.description = Some(d.text()?),
-                6 => {
-                    def.match_ = d.list(|d| d.clause())?;
-                    d.names = def.match_names().into_iter().map(String::from).collect();
-                }
-                7 => def.white_label = d.list(|d| d.white_label())?,
-                8 => def.requires = d.list(|d| d.uint_as("requires"))?,
-                9 => def.device = Some(d.device()?),
-                10 => def.generic = Some(d.generic()?),
-                11 => {
-                    let n = d.r.map()?;
-                    let mut prev: Option<u64> = None;
-                    for _ in 0..n {
-                        let at = d.r.position();
-                        let ep = d.r.uint()?;
-                        if prev.is_some_and(|p| p >= ep) || ep > 255 {
-                            return Err(DecodeError {
-                                offset: at,
-                                kind: DecodeErrorKind::Cbor(CborErrorKind::KeyOrder),
-                            });
-                        }
-                        prev = Some(ep);
-                        def.endpoints.push((ep as u8, d.text()?));
-                    }
-                }
-                12 => def.tuya = Some(d.tuya()?),
-                13 => def.configure = d.list(|d| d.configure_op())?,
-                14 => def.entities = d.list(|d| d.entity())?,
-                15 => def.gp = Some(d.gp_device()?),
-                16 => def.ignore = d.list(|d| d.ignore_rule())?,
-                17 => {
-                    d.r.skip()?;
-                    def.consts = consts.clone();
-                }
-                18 => def.source = Some(d.text()?),
-                19 => def.mfr = Some(d.uint_as("mfr")?),
-                22 => def.priority = Some(d.r.int()?),
-                23 => {
-                    let s = d.text()?;
-                    def.self_description =
-                        Some(SelfDescription::parse(&s).ok_or(d.inv("self_description"))?);
-                }
-                31 => def.x_wasm = Some(d.r.skip()?.to_vec()),
-                k if is_extension(k) => def.ext.push((k, d.r.skip()?.to_vec())),
-                _ => return Ok(false),
-            }
-            Ok(true)
-        },
-        "top",
-    )?;
-    d.r.finish()?;
-    if !have_kind {
-        return Err(DecodeError {
-            offset: 0,
-            kind: DecodeErrorKind::Missing("zdef"),
-        });
-    }
-    Ok(def)
+type DR<T> = Result<T, DecodeError>;
+
+/// Remaining entries of a map being read.
+struct Keys {
+    left: usize,
+    prev: Option<u64>,
 }
 
 struct D<'a, 't, 'c> {
@@ -207,68 +100,153 @@ struct D<'a, 't, 'c> {
     names: Vec<String>,
 }
 
-type DR<T> = Result<T, DecodeError>;
+/// Sets a field read once (map keys are strictly ascending, so the slot is
+/// always empty: no drop glue for the old value).
+#[inline(always)]
+fn set<T>(slot: &mut Option<T>, v: T) {
+    core::mem::forget(slot.replace(v));
+}
 
-impl<'a> D<'a, '_, '_> {
-    fn inv(&self, what: &'static str) -> DecodeError {
-        DecodeError {
-            offset: self.r.position(),
-            kind: DecodeErrorKind::Invalid(what),
-        }
+/// [`set`] for list fields (empty until their key is read).
+#[inline(always)]
+fn put<T>(slot: &mut Vec<T>, v: Vec<T>) {
+    core::mem::forget(core::mem::replace(slot, v));
+}
+
+fn err<T>(offset: usize, kind: DecodeErrorKind) -> DR<T> {
+    Err(DecodeError { offset, kind })
+}
+
+fn req<T>(v: Option<T>, what: &'static str, at: usize) -> DR<T> {
+    match v {
+        Some(v) => Ok(v),
+        None => err(at, DecodeErrorKind::Missing(what)),
     }
+}
 
-    /// Integer-keyed map; `f` returns false for keys it does not know.
-    fn map(&mut self, f: &mut dyn FnMut(&mut Self, u64) -> DR<bool>, what: &'static str) -> DR<()> {
-        let n = self.r.map()?;
-        let mut prev: Option<u64> = None;
-        for _ in 0..n {
-            let at = self.r.position();
-            let k = self.r.uint()?;
-            if prev.is_some_and(|p| p >= k) {
-                return Err(DecodeError {
-                    offset: at,
-                    kind: DecodeErrorKind::Cbor(CborErrorKind::KeyOrder),
-                });
+pub fn decode_with(bytes: &[u8], opts: &DecodeOptions<'_>) -> Result<Definition, DecodeError> {
+    // Pass 1: the constant pool (key 17) resolves event types and attrs names.
+    let consts = {
+        let mut d = D {
+            r: Reader::new(bytes),
+            strings: opts.strings,
+            consts: &[],
+            names: Vec::new(),
+        };
+        let mut found = Vec::new();
+        let mut k = d.keys()?;
+        while let Some(key) = d.key(&mut k, "top")? {
+            if key == 17 {
+                found = d.consts()?;
+            } else {
+                d.r.skip()?;
             }
-            prev = Some(k);
-            if !f(self, k)? {
-                if is_extension(k) {
-                    self.r.skip()?;
-                } else {
-                    return Err(DecodeError {
-                        offset: at,
-                        kind: DecodeErrorKind::UnknownKey { map: what, key: k },
-                    });
-                }
-            }
         }
-        Ok(())
+        d.r.finish()?;
+        found
+    };
+    let mut d = D {
+        r: Reader::new(bytes),
+        strings: opts.strings,
+        consts: &consts,
+        names: Vec::new(),
+    };
+    let def = d.top(&consts)?;
+    d.r.finish()?;
+    Ok(def)
+}
+
+impl D<'_, '_, '_> {
+    fn at(&self) -> usize {
+        self.r.position()
     }
 
-    fn list<T>(&mut self, mut f: impl FnMut(&mut Self) -> DR<T>) -> DR<Vec<T>> {
-        let n = self.r.array()?;
-        let mut v = Vec::with_capacity(n.min(256));
-        for _ in 0..n {
-            v.push(f(self)?);
-        }
-        Ok(v)
+    fn inv<T>(&self, what: &'static str) -> DR<T> {
+        err(self.at(), DecodeErrorKind::Invalid(what))
     }
 
-    fn small(&mut self, _at: usize, what: &'static str) -> DR<u64> {
-        let v = self.r.uint()?;
-        if v > 255 {
-            return Err(self.inv(what));
-        }
-        Ok(v)
-    }
-
-    fn uint_as<T: TryFrom<u64>>(&mut self, what: &'static str) -> DR<T> {
-        let at = self.r.position();
-        let v = self.r.uint()?;
-        T::try_from(v).map_err(|_| DecodeError {
-            offset: at,
-            kind: DecodeErrorKind::Invalid(what),
+    fn keys(&mut self) -> DR<Keys> {
+        Ok(Keys {
+            left: self.r.map()?,
+            prev: None,
         })
+    }
+
+    /// Next integer key, strictly ascending.
+    fn key(&mut self, k: &mut Keys, _map: &'static str) -> DR<Option<u64>> {
+        if k.left == 0 {
+            return Ok(None);
+        }
+        k.left -= 1;
+        let at = self.at();
+        let key = self.r.uint()?;
+        if k.prev.is_some_and(|p| p >= key) {
+            return err(at, DecodeErrorKind::Cbor(CborErrorKind::KeyOrder));
+        }
+        k.prev = Some(key);
+        Ok(Some(key))
+    }
+
+    /// Unknown key: skipped in the extension range, an error otherwise.
+    fn other(&mut self, key: u64, map: &'static str) -> DR<()> {
+        if is_extension(key) {
+            self.r.skip()?;
+            Ok(())
+        } else {
+            err(
+                self.at(),
+                DecodeErrorKind::UnknownKey {
+                    map,
+                    key: key.min(u32::MAX as u64) as u32,
+                },
+            )
+        }
+    }
+
+    /// Unknown key: kept raw in the extension range, an error otherwise.
+    fn keep(&mut self, key: u64, ext: &mut Vec<(u64, Vec<u8>)>, map: &'static str) -> DR<()> {
+        if is_extension(key) {
+            ext.push((key, self.r.skip()?.to_vec()));
+            Ok(())
+        } else {
+            err(
+                self.at(),
+                DecodeErrorKind::UnknownKey {
+                    map,
+                    key: key.min(u32::MAX as u64) as u32,
+                },
+            )
+        }
+    }
+
+    fn uint(&mut self, max: u64, what: &'static str) -> DR<u64> {
+        let at = self.at();
+        let v = self.r.uint()?;
+        if v > max {
+            return err(at, DecodeErrorKind::Invalid(what));
+        }
+        Ok(v)
+    }
+
+    fn u8_(&mut self) -> DR<u8> {
+        Ok(self.uint(0xff, "integer range")? as u8)
+    }
+
+    fn u16_(&mut self) -> DR<u16> {
+        Ok(self.uint(0xffff, "integer range")? as u16)
+    }
+
+    fn u32_(&mut self) -> DR<u32> {
+        Ok(self.uint(0xffff_ffff, "integer range")? as u32)
+    }
+
+    fn code<T>(&mut self, f: fn(u64) -> Option<T>, what: &'static str) -> DR<T> {
+        let at = self.at();
+        let v = self.r.uint()?;
+        match f(v) {
+            Some(x) => Ok(x),
+            None => err(at, DecodeErrorKind::Invalid(what)),
+        }
     }
 
     fn bool(&mut self) -> DR<bool> {
@@ -276,56 +254,50 @@ impl<'a> D<'a, '_, '_> {
     }
 
     fn text(&mut self) -> DR<String> {
-        let at = self.r.position();
-        match self.r.peek()? {
-            Head::Text(_) => Ok(self.r.text()?.to_string()),
+        let at = self.at();
+        let i = match self.r.peek()? {
+            Head::Text(_) => return Ok(self.r.text()?.to_string()),
             Head::Simple(n) if n < 16 => {
                 self.r.head()?;
-                self.shared(n as u64, at)
+                n as u64
             }
             Head::Tag(6) => {
                 self.r.head()?;
-                let m = self.r.uint()?;
-                self.shared(m.checked_add(16).ok_or(self.inv("string ref"))?, at)
+                match self.r.uint()?.checked_add(16) {
+                    Some(i) => i,
+                    None => return self.inv("string ref"),
+                }
             }
-            _ => Err(DecodeError {
-                offset: at,
-                kind: DecodeErrorKind::Cbor(CborErrorKind::UnexpectedType),
-            }),
+            _ => return err(at, DecodeErrorKind::Cbor(CborErrorKind::UnexpectedType)),
+        };
+        match self.strings.and_then(|t| t.get(i)) {
+            Some(s) => Ok(s.to_string()),
+            None => err(
+                at,
+                DecodeErrorKind::StringRef(i.min(u32::MAX as u64) as u32),
+            ),
         }
     }
 
-    fn shared(&self, i: u64, at: usize) -> DR<String> {
-        self.strings
-            .and_then(|t| t.get(i))
-            .map(|s| s.to_string())
-            .ok_or(DecodeError {
-                offset: at,
-                kind: DecodeErrorKind::StringRef(i),
-            })
-    }
-
     fn num(&mut self) -> DR<Num> {
-        let at = self.r.position();
+        let at = self.at();
         let h = self.r.head()?;
         Ok(match h {
-            Head::Uint(v) => Num::Int(i64::try_from(v).map_err(|_| self.inv("number"))?),
-            Head::Nint(v) => Num::Int(-1 - i64::try_from(v).map_err(|_| self.inv("number"))?),
+            Head::Uint(v) if v <= i64::MAX as u64 => Num::Int(v as i64),
+            Head::Nint(v) if v <= i64::MAX as u64 => Num::Int(-1 - v as i64),
             Head::F16(_) | Head::F32(_) | Head::F64(_) => Num::Float(self.r.float_head(h, at)?),
             Head::Tag(4) => {
                 if self.r.array()? != 2 {
-                    return Err(self.inv("decimal fraction"));
+                    return self.inv("decimal fraction");
                 }
                 let e = self.r.int()?;
                 let m = self.r.int()?;
-                Num::Float(decimal_value(e, m).ok_or(self.inv("decimal fraction"))?)
+                match decimal_value(e, m) {
+                    Some(v) => Num::Float(v),
+                    None => return self.inv("decimal fraction"),
+                }
             }
-            _ => {
-                return Err(DecodeError {
-                    offset: at,
-                    kind: DecodeErrorKind::Cbor(CborErrorKind::UnexpectedType),
-                });
-            }
+            _ => return err(at, DecodeErrorKind::Invalid("number")),
         })
     }
 
@@ -349,393 +321,371 @@ impl<'a> D<'a, '_, '_> {
     }
 
     fn const_str(&mut self) -> DR<String> {
-        let at = self.r.position();
+        let at = self.at();
         let i = self.r.uint()?;
         match self.consts.get(i as usize) {
             Some(Const::Str(s)) => Ok(s.clone()),
-            _ => Err(DecodeError {
-                offset: at,
-                kind: DecodeErrorKind::Invalid("constant reference"),
-            }),
+            _ => err(at, DecodeErrorKind::Invalid("constant reference")),
         }
     }
 
     fn consts(&mut self) -> DR<Vec<Const>> {
-        self.list(|d| {
-            Ok(match d.r.peek()? {
-                Head::Array(_) => Const::Map(d.list(|d| {
-                    if d.r.array()? != 2 {
-                        return Err(d.inv("lookup map entry"));
+        let n = self.r.array()?;
+        let mut v = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            v.push(match self.r.peek()? {
+                Head::Array(_) => {
+                    let m = self.r.array()?;
+                    let mut pairs = Vec::with_capacity(m.min(256));
+                    for _ in 0..m {
+                        if self.r.array()? != 2 {
+                            return self.inv("lookup map entry");
+                        }
+                        pairs.push((self.scalar()?, self.scalar()?));
                     }
-                    Ok((d.scalar()?, d.scalar()?))
-                })?),
-                Head::Text(_) | Head::Simple(_) | Head::Tag(6) => Const::Str(d.text()?),
-                _ => match d.num()? {
+                    Const::Map(pairs)
+                }
+                Head::Text(_) | Head::Simple(_) | Head::Tag(6) => Const::Str(self.text()?),
+                _ => match self.num()? {
                     Num::Int(i) => Const::Int(i),
                     Num::Float(f) => Const::Float(f),
                 },
-            })
-        })
+            });
+        }
+        Ok(v)
     }
 
-    fn u16s(&mut self, what: &'static str) -> DR<Vec<u16>> {
-        self.list(|d| d.uint_as(what))
+    fn u16s(&mut self) -> DR<Vec<u16>> {
+        let n = self.r.array()?;
+        let mut v = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            v.push(self.u16_()?);
+        }
+        Ok(v)
+    }
+
+    fn u8s(&mut self) -> DR<Vec<u8>> {
+        let n = self.r.array()?;
+        let mut v = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            v.push(self.u8_()?);
+        }
+        Ok(v)
+    }
+
+    fn texts(&mut self) -> DR<Vec<String>> {
+        let n = self.r.array()?;
+        let mut v = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            v.push(self.text()?);
+        }
+        Ok(v)
+    }
+
+    fn name_item(&mut self, packed: bool) -> DR<String> {
+        if packed && matches!(self.r.peek()?, Head::Bytes(_)) {
+            let at = self.at();
+            let b = self.r.bytes()?;
+            return match unpack_tuya_name(b) {
+                Some(s) => Ok(s),
+                None => err(at, DecodeErrorKind::Invalid("packed Tuya name")),
+            };
+        }
+        self.text()
     }
 
     fn name_match(&mut self, packed: bool) -> DR<NameMatch> {
-        let item = |d: &mut Self| -> DR<String> {
-            if packed && matches!(d.r.peek()?, Head::Bytes(_)) {
-                let b = d.r.bytes()?;
-                unpack_tuya_name(b).ok_or(d.inv("packed Tuya name"))
-            } else {
-                d.text()
-            }
-        };
         Ok(match self.r.peek()? {
-            Head::Array(_) => NameMatch::Any(self.list(item)?),
-            Head::Map(_) => {
-                let mut p = None;
-                self.map(
-                    &mut |d, k| {
-                        if k == 18 {
-                            p = Some(d.text()?);
-                            Ok(true)
-                        } else {
-                            Ok(false)
-                        }
-                    },
-                    "name match",
-                )?;
-                NameMatch::Prefix(p.ok_or(self.inv("prefix"))?)
+            Head::Array(_) => {
+                let n = self.r.array()?;
+                let mut v = Vec::with_capacity(n.min(256));
+                for _ in 0..n {
+                    v.push(self.name_item(packed)?);
+                }
+                NameMatch::Any(v)
             }
-            _ => NameMatch::Exact(item(self)?),
+            Head::Map(_) => {
+                let at = self.at();
+                let mut p = None;
+                let mut k = self.keys()?;
+                while let Some(key) = self.key(&mut k, "name match")? {
+                    if key == 18 {
+                        p = Some(self.text()?);
+                    } else {
+                        self.other(key, "name match")?;
+                    }
+                }
+                NameMatch::Prefix(req(p, "prefix", at)?)
+            }
+            _ => NameMatch::Exact(self.name_item(packed)?),
         })
     }
 
     fn range(&mut self) -> DR<VersionRange> {
         let mut r = VersionRange::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    60 => r.min = Some(d.r.int()?),
-                    61 => r.max = Some(d.r.int()?),
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            },
-            "range",
-        )?;
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "range")? {
+            match key {
+                60 => set(&mut r.min, self.r.int()?),
+                61 => set(&mut r.max, self.r.int()?),
+                _ => self.other(key, "range")?,
+            }
+        }
         Ok(r)
     }
 
-    fn power(&mut self) -> DR<Power> {
-        let s = self.text()?;
-        Power::parse(&s).ok_or(self.inv("power"))
+    fn endpoint_match(&mut self) -> DR<EpMatch> {
+        let mut m = EpMatch::default();
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "endpoint match")? {
+            match key {
+                21 => set(&mut m.device_id, self.u16_()?),
+                57 => set(&mut m.profile, self.u16_()?),
+                58 => put(&mut m.in_clusters, self.u16s()?),
+                59 => put(&mut m.out_clusters, self.u16s()?),
+                _ => self.other(key, "endpoint match")?,
+            }
+        }
+        Ok(m)
     }
 
     fn clause(&mut self) -> DR<MatchClause> {
         let mut c = MatchClause::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    19 => c.manufacturer = Some(d.name_match(true)?),
-                    20 => c.model = Some(d.name_match(false)?),
-                    26 => c.gp = Some(d.gp_match()?),
-                    29 => c.power = Some(d.power()?),
-                    51 => c.mfr_code = Some(d.uint_as("mfr_code")?),
-                    52 => c.app_version = Some(d.range()?),
-                    53 => c.stack_version = Some(d.range()?),
-                    54 => c.hw_version = Some(d.range()?),
-                    55 => c.sw_build = Some(d.name_match(false)?),
-                    56 => {
-                        let n = d.r.map()?;
-                        let mut prev: Option<u64> = None;
-                        for _ in 0..n {
-                            let at = d.r.position();
-                            let ep = d.r.uint()?;
-                            if prev.is_some_and(|p| p >= ep) || ep > 255 {
-                                return Err(DecodeError {
-                                    offset: at,
-                                    kind: DecodeErrorKind::Cbor(CborErrorKind::KeyOrder),
-                                });
-                            }
-                            prev = Some(ep);
-                            let mut m = EpMatch::default();
-                            d.map(
-                                &mut |d, k| {
-                                    match k {
-                                        21 => m.device_id = Some(d.uint_as("device_id")?),
-                                        57 => m.profile = Some(d.uint_as("profile")?),
-                                        58 => m.in_clusters = d.u16s("in")?,
-                                        59 => m.out_clusters = d.u16s("out")?,
-                                        _ => return Ok(false),
-                                    }
-                                    Ok(true)
-                                },
-                                "endpoint match",
-                            )?;
-                            c.endpoints.push((ep as u8, m));
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "match")? {
+            match key {
+                19 => set(&mut c.manufacturer, self.name_match(true)?),
+                20 => set(&mut c.model, self.name_match(false)?),
+                26 => set(&mut c.gp, self.gp_match()?),
+                29 => set(&mut c.power, self.code(Power::from_code, "power")?),
+                51 => set(&mut c.mfr_code, self.u16_()?),
+                52 => set(&mut c.app_version, self.range()?),
+                53 => set(&mut c.stack_version, self.range()?),
+                54 => set(&mut c.hw_version, self.range()?),
+                55 => set(&mut c.sw_build, self.name_match(false)?),
+                56 => {
+                    let mut eps = self.keys()?;
+                    while let Some(ep) = self.key(&mut eps, "endpoints")? {
+                        if ep > 255 {
+                            return self.inv("endpoint");
                         }
+                        let m = self.endpoint_match()?;
+                        c.endpoints.push((ep as u8, m));
                     }
-                    _ => return Ok(false),
                 }
-                Ok(true)
-            },
-            "match",
-        )?;
+                156 => set(
+                    &mut c.logical_type,
+                    self.code(LogicalType::from_code, "logical_type")?,
+                ),
+                _ => self.keep(key, &mut c.ext, "match")?,
+            }
+        }
         Ok(c)
     }
 
     fn gp_match(&mut self) -> DR<GpMatch> {
         let mut g = GpMatch::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    7 => {
-                        let mut c = GpClusters::default();
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    137 => c.server = d.u16s("server")?,
-                                    138 => c.client = d.u16s("client")?,
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "gp clusters",
-                        )?;
-                        g.clusters = Some(c);
-                    }
-                    21 => g.device_id = Some(d.uint_as("device_id")?),
-                    22 => g.manufacturer_id = Some(d.uint_as("manufacturer_id")?),
-                    23 => {
-                        g.model_id = Some(if matches!(d.r.peek()?, Head::Map(_)) {
-                            let (mut v, mut m) = (None, None);
-                            d.map(
-                                &mut |d, k| {
-                                    match k {
-                                        8 => v = Some(d.uint_as("model_id")?),
-                                        25 => m = Some(d.uint_as("mask")?),
-                                        _ => return Ok(false),
-                                    }
-                                    Ok(true)
-                                },
-                                "model_id",
-                            )?;
-                            ModelId {
-                                value: v.ok_or(d.inv("model_id.value"))?,
-                                mask: Some(m.ok_or(d.inv("model_id.mask"))?),
-                            }
-                        } else {
-                            ModelId {
-                                value: d.uint_as("model_id")?,
-                                mask: None,
-                            }
-                        })
-                    }
-                    24 => {
-                        if d.r.array()? != 2 {
-                            return Err(d.inv("src_id"));
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "gp match")? {
+            match key {
+                7 => {
+                    let mut c = GpClusters::default();
+                    let mut k2 = self.keys()?;
+                    while let Some(key2) = self.key(&mut k2, "gp clusters")? {
+                        match key2 {
+                            137 => put(&mut c.server, self.u16s()?),
+                            138 => put(&mut c.client, self.u16s()?),
+                            _ => self.other(key2, "gp clusters")?,
                         }
-                        g.src_id = Some((d.uint_as("src_id")?, d.uint_as("src_id")?));
                     }
-                    135 => g.ieee = Some(d.text()?),
-                    136 => g.commands = d.list(|d| d.uint_as("commands"))?,
-                    _ => return Ok(false),
+                    g.clusters = Some(c);
                 }
-                Ok(true)
-            },
-            "gp match",
-        )?;
+                21 => set(&mut g.device_id, self.u8_()?),
+                22 => set(&mut g.manufacturer_id, self.u16_()?),
+                23 => {
+                    g.model_id = Some(if matches!(self.r.peek()?, Head::Map(_)) {
+                        let at = self.at();
+                        let (mut v, mut m) = (None, None);
+                        let mut k2 = self.keys()?;
+                        while let Some(key2) = self.key(&mut k2, "model_id")? {
+                            match key2 {
+                                8 => v = Some(self.u16_()?),
+                                25 => m = Some(self.u16_()?),
+                                _ => self.other(key2, "model_id")?,
+                            }
+                        }
+                        ModelId {
+                            value: req(v, "model_id.value", at)?,
+                            mask: Some(req(m, "model_id.mask", at)?),
+                        }
+                    } else {
+                        ModelId {
+                            value: self.u16_()?,
+                            mask: None,
+                        }
+                    })
+                }
+                24 => {
+                    if self.r.array()? != 2 {
+                        return self.inv("src_id");
+                    }
+                    g.src_id = Some((self.u32_()?, self.u32_()?));
+                }
+                135 => set(&mut g.ieee, self.text()?),
+                136 => put(&mut g.commands, self.u8s()?),
+                _ => self.other(key, "gp match")?,
+            }
+        }
         Ok(g)
     }
 
     fn white_label(&mut self) -> DR<WhiteLabel> {
         let mut w = WhiteLabel::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    19 => {
-                        let idx: Vec<u64> = d.list(|d| Ok(d.r.uint()?))?;
-                        for i in idx {
-                            let n = d
-                                .names
-                                .get(i as usize)
-                                .cloned()
-                                .ok_or(d.inv("white_label manufacturer index"))?;
-                            w.manufacturer.push(n);
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "white_label")? {
+            match key {
+                19 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let at = self.at();
+                        let i = self.r.uint()? as usize;
+                        match self.names.get(i) {
+                            Some(name) => w.manufacturer.push(name.clone()),
+                            None => {
+                                return err(
+                                    at,
+                                    DecodeErrorKind::Invalid("white_label manufacturer index"),
+                                );
+                            }
                         }
                     }
-                    20 => w.model = Some(d.text()?),
-                    43 => w.vendor = Some(d.text()?),
-                    _ => return Ok(false),
                 }
-                Ok(true)
-            },
-            "white_label",
-        )?;
+                20 => set(&mut w.model, self.text()?),
+                43 => set(&mut w.vendor, self.text()?),
+                _ => self.other(key, "white_label")?,
+            }
+        }
         Ok(w)
     }
 
     fn device(&mut self) -> DR<Device> {
         let mut v = Device::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    29 => v.power = Some(d.power()?),
-                    30 => v.sleepy = Some(d.bool()?),
-                    31 => {
-                        v.battery = Some(if matches!(d.r.peek()?, Head::Map(_)) {
-                            let mut lin = None;
-                            d.map(
-                                &mut |d, k| {
-                                    if k != 32 {
-                                        return Ok(false);
-                                    }
-                                    if d.r.array()? != 2 {
-                                        return Err(d.inv("voltage_to_percent"));
-                                    }
-                                    lin = Some(Battery::Linear {
-                                        min_mv: d.uint_as("voltage_to_percent")?,
-                                        max_mv: d.uint_as("voltage_to_percent")?,
-                                    });
-                                    Ok(true)
-                                },
-                                "battery",
-                            )?;
-                            lin.ok_or(d.inv("battery"))?
-                        } else {
-                            Battery::Curve(d.text()?)
-                        })
-                    }
-                    33 => v.checkin_s = Some(d.uint_as("checkin_s")?),
-                    131 => {
-                        let mut a = Availability::default();
-                        d.map(
-                            &mut |d, k| {
-                                if k != 132 {
-                                    return Ok(false);
-                                }
-                                a.timeout_s = Some(d.uint_as("timeout_s")?);
-                                Ok(true)
-                            },
-                            "availability",
-                        )?;
-                        v.availability = Some(a);
-                    }
-                    133 => v.ota = Some(d.bool()?),
-                    _ => return Ok(false),
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "device")? {
+            match key {
+                29 => set(&mut v.power, self.code(Power::from_code, "power")?),
+                30 => set(&mut v.sleepy, self.bool()?),
+                31 => {
+                    v.battery = Some(if matches!(self.r.peek()?, Head::Map(_)) {
+                        let at = self.at();
+                        let mut lin = None;
+                        let mut k2 = self.keys()?;
+                        while let Some(key2) = self.key(&mut k2, "battery")? {
+                            if key2 != 32 {
+                                self.other(key2, "battery")?;
+                                continue;
+                            }
+                            if self.r.array()? != 2 {
+                                return self.inv("voltage_to_percent");
+                            }
+                            lin = Some(Battery::Linear {
+                                min_mv: self.u32_()?,
+                                max_mv: self.u32_()?,
+                            });
+                        }
+                        req(lin, "voltage_to_percent", at)?
+                    } else {
+                        Battery::Curve(self.code(BatteryCurve::from_code, "battery curve")?)
+                    })
                 }
-                Ok(true)
-            },
-            "device",
-        )?;
+                33 => set(&mut v.checkin_s, self.u32_()?),
+                131 => {
+                    let mut a = Availability::default();
+                    let mut k2 = self.keys()?;
+                    while let Some(key2) = self.key(&mut k2, "availability")? {
+                        if key2 == 132 {
+                            a.timeout_s = Some(self.u32_()?);
+                        } else {
+                            self.other(key2, "availability")?;
+                        }
+                    }
+                    v.availability = Some(a);
+                }
+                133 => set(&mut v.ota, self.bool()?),
+                _ => self.other(key, "device")?,
+            }
+        }
         Ok(v)
     }
 
     fn generic(&mut self) -> DR<Generic> {
         let mut g = Generic::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    34 => g.exclude = d.list(|d| d.text())?,
-                    35 => {
-                        let n = d.r.map()?;
-                        let mut order = crate::cbor::KeyOrder::new();
-                        let buf_start = d.r.clone();
-                        let _ = buf_start;
-                        for _ in 0..n {
-                            let at = d.r.position();
-                            let key_bytes_start = d.r.remaining();
-                            let key = d.r.text()?.to_string();
-                            let used = key_bytes_start.len() - d.r.remaining().len();
-                            order.check(&key_bytes_start[..used], at)?;
-                            g.patch.push((key, d.entity()?));
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "generic")? {
+            match key {
+                34 => put(&mut g.exclude, self.texts()?),
+                35 => {
+                    let n = self.r.map()?;
+                    let mut prev: &[u8] = &[];
+                    for _ in 0..n {
+                        let at = self.at();
+                        let before = self.r.remaining();
+                        let name = self.r.text()?.to_string();
+                        let enc = &before[..before.len() - self.r.remaining().len()];
+                        if !prev.is_empty() && prev >= enc {
+                            return err(at, DecodeErrorKind::Cbor(CborErrorKind::KeyOrder));
                         }
+                        prev = enc;
+                        g.patch.push((name, self.entity()?));
                     }
-                    36 => g.disable = Some(d.bool()?),
-                    37 => g.only_endpoints = d.list(|d| d.uint_as("only_endpoints"))?,
-                    _ => return Ok(false),
                 }
-                Ok(true)
-            },
-            "generic",
-        )?;
+                36 => set(&mut g.disable, self.bool()?),
+                37 => put(&mut g.only_endpoints, self.u8s()?),
+                _ => self.other(key, "generic")?,
+            }
+        }
         Ok(g)
     }
 
     fn tuya(&mut self) -> DR<Tuya> {
         let mut t = Tuya::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    38 => {
-                        t.time_sync = Some(match d.r.peek()? {
-                            Head::Uint(1970) => {
-                                d.r.uint()?;
-                                TimeSync::Epoch1970
-                            }
-                            Head::Uint(2000) => {
-                                d.r.uint()?;
-                                TimeSync::Epoch2000
-                            }
-                            _ => {
-                                if d.text()? != "off" {
-                                    return Err(d.inv("time_sync"));
-                                }
-                                TimeSync::Off
-                            }
-                        })
+        let mut q = TuyaQuery::default();
+        let mut has_q = false;
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "tuya")? {
+            match key {
+                38 => set(
+                    &mut t.time_sync,
+                    self.code(TimeSync::from_code, "time_sync")?,
+                ),
+                39 => set(&mut t.magic_packet, self.bool()?),
+                40 => {
+                    let at = self.at();
+                    let m = self.r.uint()?;
+                    if m == 0 || m > 3 {
+                        return err(at, DecodeErrorKind::Invalid("query"));
                     }
-                    39 => t.magic_packet = Some(d.bool()?),
-                    40 => {
-                        t.query = Some(if matches!(d.r.peek()?, Head::Map(_)) {
-                            let mut iv = None;
-                            d.map(
-                                &mut |d, k| {
-                                    if k != 146 {
-                                        return Ok(false);
-                                    }
-                                    iv = Some(d.uint_as("interval_s")?);
-                                    Ok(true)
-                                },
-                                "query",
-                            )?;
-                            TuyaQuery::Interval(iv.ok_or(d.inv("query"))?)
-                        } else {
-                            let (mut c, mut a) = (false, false);
-                            for s in d.list(|d| d.text())? {
-                                match s.as_str() {
-                                    "configure" => c = true,
-                                    "announce" => a = true,
-                                    _ => return Err(d.inv("query")),
-                                }
-                            }
-                            TuyaQuery::On {
-                                configure: c,
-                                announce: a,
-                            }
-                        })
-                    }
-                    139 => t.force_time_sync_s = Some(d.uint_as("force_time_sync_s")?),
-                    140 => t.bind_basic = Some(d.bool()?),
-                    141 => t.gateway_status = Some(d.bool()?),
-                    142 => {
-                        t.send = Some(match d.text()?.as_str() {
-                            "dataRequest" => TuyaSend::DataRequest,
-                            "sendData" => TuyaSend::SendData,
-                            _ => return Err(d.inv("send")),
-                        })
-                    }
-                    143 => t.mcu_version = Some(d.bool()?),
-                    144 => t.optimistic = Some(d.bool()?),
-                    145 => t.dedup = Some(d.bool()?),
-                    _ => return Ok(false),
+                    q.configure = m & 1 != 0;
+                    q.announce = m & 2 != 0;
+                    has_q = true;
                 }
-                Ok(true)
-            },
-            "tuya",
-        )?;
+                139 => set(&mut t.force_time_sync_s, self.u32_()?),
+                140 => set(&mut t.bind_basic, self.bool()?),
+                141 => set(&mut t.gateway_status, self.bool()?),
+                142 => set(&mut t.send, self.code(TuyaSend::from_code, "send")?),
+                143 => set(&mut t.mcu_version, self.bool()?),
+                144 => set(&mut t.optimistic, self.bool()?),
+                145 => set(&mut t.dedup, self.bool()?),
+                146 => {
+                    q.interval_s = Some(self.u32_()?);
+                    has_q = true;
+                }
+                _ => self.other(key, "tuya")?,
+            }
+        }
+        if has_q {
+            t.query = Some(q);
+        }
         Ok(t)
     }
 
@@ -746,256 +696,175 @@ impl<'a> D<'a, '_, '_> {
         }
         let n = self.r.array()?;
         if !(2..=3).contains(&n) {
-            return Err(self.inv("report"));
+            return self.inv("report");
         }
-        let min = self.uint_as("report")?;
-        let max = self.uint_as("report")?;
+        let min = self.u16_()?;
+        let max = self.u16_()?;
         let change = if n == 3 { Some(self.num()?) } else { None };
         Ok(Report::Config { min, max, change })
     }
 
+    /// Fields shared by attribute and command references.
+    fn attr_ref(&mut self, what: &'static str) -> DR<AttrRef> {
+        let at = self.at();
+        let mut a = AttrRef::default();
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, what)? {
+            match key {
+                0 => set(&mut a.cluster, self.u16_()?),
+                1 => set(&mut a.attr, self.u16_()?),
+                2 => set(&mut a.ty, self.u8_()?),
+                3 => set(&mut a.mfr, self.u16_()?),
+                4 => set(&mut a.ep, self.u8_()?),
+                5 => set(&mut a.id, self.u8_()?),
+                11 => set(&mut a.cmd_id, self.u8_()?),
+                6 => put(&mut a.attrs, self.u16s()?),
+                7 => put(&mut a.clusters, self.u16s()?),
+                8 => set(&mut a.value, self.scalar()?),
+                9 => set(&mut a.codec, self.code(CodecName::from_code, "codec")?),
+                10 => set(&mut a.tag, self.r.int()?),
+                12 => set(&mut a.report, self.report()?),
+                62 => set(&mut a.payload, self.expr()?),
+                128 => set(&mut a.group, self.u16_()?),
+                130 => set(&mut a.interval, self.u32_()?),
+                _ => self.other(key, what)?,
+            }
+        }
+        a.at = at;
+        Ok(a)
+    }
+
     fn write_attr(&mut self) -> DR<WriteAttr> {
-        let (mut ep, mut cluster, mut attr, mut ty, mut value, mut mfr) =
-            (None, None, None, None, None, None);
-        self.map(
-            &mut |d, k| {
-                match k {
-                    0 => cluster = Some(d.uint_as("cluster")?),
-                    1 => attr = Some(d.uint_as("attr")?),
-                    2 => ty = Some(d.uint_as("type")?),
-                    3 => mfr = Some(d.uint_as("mfr")?),
-                    4 => ep = Some(d.uint_as("ep")?),
-                    8 => value = Some(d.scalar()?),
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            },
-            "write",
-        )?;
+        let a = self.attr_ref("write")?;
         Ok(WriteAttr {
-            ep,
-            cluster: cluster.ok_or(self.inv("write.cluster"))?,
-            attr: attr.ok_or(self.inv("write.attr"))?,
-            zcl_type: ty.ok_or(self.inv("write.type"))?,
-            value: value.ok_or(self.inv("write.value"))?,
-            mfr,
+            ep: a.ep,
+            cluster: req(a.cluster, "write.cluster", a.at)?,
+            attr: req(a.attr, "write.attr", a.at)?,
+            zcl_type: req(a.ty, "write.type", a.at)?,
+            value: req(a.value, "write.value", a.at)?,
+            mfr: a.mfr,
         })
     }
 
     fn cmd_ref(&mut self) -> DR<CmdRef> {
-        let (mut cluster, mut id, mut mfr, mut ep) = (None, None, None, None);
-        self.map(
-            &mut |d, k| {
-                match k {
-                    0 => cluster = Some(d.uint_as("cluster")?),
-                    3 => mfr = Some(d.uint_as("mfr")?),
-                    4 => ep = Some(d.uint_as("ep")?),
-                    5 => id = Some(d.uint_as("id")?),
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            },
-            "cmd",
-        )?;
+        let a = self.attr_ref("cmd")?;
         Ok(CmdRef {
-            cluster: cluster.ok_or(self.inv("cmd.cluster"))?,
-            id: id.ok_or(self.inv("cmd.id"))?,
-            mfr,
-            ep,
+            cluster: req(a.cluster, "cmd.cluster", a.at)?,
+            id: req(a.id, "cmd.id", a.at)?,
+            mfr: a.mfr,
+            ep: a.ep,
         })
     }
 
     fn configure_op(&mut self) -> DR<ConfigureOp> {
-        let mut op = None;
-        self.map(
-            &mut |d, k| {
-                if op.is_some() {
-                    return Err(d.inv("configure op with several kinds"));
-                }
-                op = Some(match k {
-                    11 => {
-                        let c = d.cmd_ref()?;
-                        ConfigureOp::Cmd {
-                            ep: c.ep,
-                            cluster: c.cluster,
-                            id: c.id,
-                            mfr: c.mfr,
-                        }
-                    }
-                    12 => {
-                        let (mut ep, mut cluster, mut attr, mut ty, mut rep, mut mfr) =
-                            (None, None, None, None, None, None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    0 => cluster = Some(d.uint_as("cluster")?),
-                                    1 => attr = Some(d.uint_as("attr")?),
-                                    2 => ty = Some(d.uint_as("type")?),
-                                    3 => mfr = Some(d.uint_as("mfr")?),
-                                    4 => ep = Some(d.uint_as("ep")?),
-                                    12 => rep = Some(d.report()?),
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "report op",
-                        )?;
-                        ConfigureOp::Report {
-                            ep,
-                            cluster: cluster.ok_or(d.inv("report.cluster"))?,
-                            attr: attr.ok_or(d.inv("report.attr"))?,
-                            zcl_type: ty.ok_or(d.inv("report.type"))?,
-                            report: rep.ok_or(d.inv("report.report"))?,
-                            mfr,
-                        }
-                    }
-                    16 => ConfigureOp::Write(d.write_attr()?),
-                    27 => {
-                        let (mut ep, mut clusters) = (None, Vec::new());
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    4 => ep = Some(d.uint_as("ep")?),
-                                    7 => clusters = d.u16s("clusters")?,
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "bind",
-                        )?;
-                        ConfigureOp::Bind { ep, clusters }
-                    }
-                    28 => {
-                        let (mut ep, mut cluster, mut attrs, mut mfr) =
-                            (None, None, Vec::new(), None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    0 => cluster = Some(d.uint_as("cluster")?),
-                                    3 => mfr = Some(d.uint_as("mfr")?),
-                                    4 => ep = Some(d.uint_as("ep")?),
-                                    6 => attrs = d.u16s("attrs")?,
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "read",
-                        )?;
-                        ConfigureOp::Read {
-                            ep,
-                            cluster: cluster.ok_or(d.inv("read.cluster"))?,
-                            attrs,
-                            mfr,
-                        }
-                    }
-                    128 => {
-                        let (mut ep, mut group) = (None, None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    4 => ep = Some(d.uint_as("ep")?),
-                                    128 => group = Some(d.uint_as("group")?),
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "group",
-                        )?;
-                        ConfigureOp::Group {
-                            ep,
-                            group: group.ok_or(d.inv("group.group"))?,
-                        }
-                    }
-                    129 => {
-                        let mut iv = None;
-                        d.map(
-                            &mut |d, k| {
-                                if k != 130 {
-                                    return Ok(false);
-                                }
-                                iv = Some(d.uint_as("interval_qs")?);
-                                Ok(true)
-                            },
-                            "checkin",
-                        )?;
-                        ConfigureOp::Checkin {
-                            interval_qs: iv.ok_or(d.inv("checkin.interval_qs"))?,
-                        }
-                    }
-                    _ => return Ok(false),
-                });
-                Ok(true)
+        let at = self.at();
+        if self.r.map()? != 1 {
+            return err(at, DecodeErrorKind::Invalid("configure op"));
+        }
+        let kind = self.r.uint()?;
+        let a = self.attr_ref("configure op")?;
+        Ok(match kind {
+            11 => ConfigureOp::Cmd {
+                ep: a.ep,
+                cluster: req(a.cluster, "cmd.cluster", a.at)?,
+                id: req(a.id, "cmd.id", a.at)?,
+                mfr: a.mfr,
+                payload: a.payload,
             },
-            "configure",
-        )?;
-        op.ok_or(self.inv("configure op"))
+            12 => ConfigureOp::Report {
+                ep: a.ep,
+                cluster: req(a.cluster, "report.cluster", a.at)?,
+                attr: req(a.attr, "report.attr", a.at)?,
+                zcl_type: req(a.ty, "report.type", a.at)?,
+                report: req(a.report, "report.report", a.at)?,
+                mfr: a.mfr,
+            },
+            16 => ConfigureOp::Write(WriteAttr {
+                ep: a.ep,
+                cluster: req(a.cluster, "write.cluster", a.at)?,
+                attr: req(a.attr, "write.attr", a.at)?,
+                zcl_type: req(a.ty, "write.type", a.at)?,
+                value: req(a.value, "write.value", a.at)?,
+                mfr: a.mfr,
+            }),
+            27 => ConfigureOp::Bind {
+                ep: a.ep,
+                clusters: a.clusters,
+            },
+            28 => ConfigureOp::Read {
+                ep: a.ep,
+                cluster: req(a.cluster, "read.cluster", a.at)?,
+                attrs: a.attrs,
+                mfr: a.mfr,
+            },
+            128 => ConfigureOp::Group {
+                ep: a.ep,
+                group: req(a.group, "group.group", a.at)?,
+            },
+            129 => ConfigureOp::Checkin {
+                interval_qs: req(a.interval, "checkin.interval_qs", a.at)?,
+            },
+            _ => {
+                return err(
+                    at,
+                    DecodeErrorKind::UnknownKey {
+                        map: "configure op",
+                        key: kind.min(u32::MAX as u64) as u32,
+                    },
+                );
+            }
+        })
     }
 
     fn gp_device(&mut self) -> DR<GpDevice> {
         let mut g = GpDevice::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    41 => g.security_min = Some(d.uint_as("security_min")?),
-                    42 => g.report_interval_s = Some(d.uint_as("report_interval_s")?),
-                    134 => g.ignore_commands = d.list(|d| d.uint_as("ignore_commands"))?,
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            },
-            "gp",
-        )?;
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "gp")? {
+            match key {
+                41 => set(&mut g.security_min, self.u8_()?),
+                42 => set(&mut g.report_interval_s, self.u32_()?),
+                134 => put(&mut g.ignore_commands, self.u8s()?),
+                _ => self.other(key, "gp")?,
+            }
+        }
         Ok(g)
     }
 
     fn ignore_rule(&mut self) -> DR<IgnoreRule> {
-        let (mut ep, mut cluster, mut cmd) = (None, None, None);
-        self.map(
-            &mut |d, k| {
-                match k {
-                    0 => cluster = Some(d.uint_as("cluster")?),
-                    4 => ep = Some(d.uint_as("ep")?),
-                    11 => cmd = Some(d.uint_as("cmd")?),
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            },
-            "ignore",
-        )?;
+        let a = self.attr_ref("ignore")?;
+        let mut cmd = None;
+        // `cmd` (11) of an ignore rule is a plain command ID
+        if let Some(c) = a.cmd_id {
+            cmd = Some(c);
+        }
         Ok(IgnoreRule {
-            ep,
-            cluster: cluster.ok_or(self.inv("ignore.cluster"))?,
+            ep: a.ep,
+            cluster: req(a.cluster, "ignore.cluster", a.at)?,
             cmd,
         })
     }
 
     fn tuya_dp(&mut self) -> DR<TuyaDp> {
         if self.r.array()? != 2 {
-            return Err(self.inv("tuya"));
+            return self.inv("tuya");
         }
-        let dp = self.uint_as("tuya dp")?;
-        let t: u64 = self.r.uint()?;
-        Ok(TuyaDp {
-            dp,
-            ty: TuyaType::from_code(t).ok_or(self.inv("tuya type"))?,
-        })
+        let dp = self.u8_()?;
+        let ty = self.code(TuyaType::from_code, "tuya type")?;
+        Ok(TuyaDp { dp, ty })
     }
 
     fn named_exprs(&mut self) -> DR<Vec<(String, Expr)>> {
-        let n = self.r.map()?;
-        let mut prev: Option<u64> = None;
-        let mut out = Vec::with_capacity(n.min(64));
-        for _ in 0..n {
-            let at = self.r.position();
+        let mut out = Vec::new();
+        let mut k = self.keys()?;
+        while k.left > 0 {
+            // keys are constant indices; peek to keep the order check
             let mut probe = self.r.clone();
-            let k = probe.uint()?;
-            if prev.is_some_and(|p| p >= k) {
-                return Err(DecodeError {
-                    offset: at,
-                    kind: DecodeErrorKind::Cbor(CborErrorKind::KeyOrder),
-                });
+            let i = probe.uint()?;
+            if k.prev.is_some_and(|p| p >= i) {
+                return err(self.at(), DecodeErrorKind::Cbor(CborErrorKind::KeyOrder));
             }
-            prev = Some(k);
+            k.prev = Some(i);
+            k.left -= 1;
             let name = self.const_str()?;
             out.push((name, self.expr()?));
         }
@@ -1003,357 +872,434 @@ impl<'a> D<'a, '_, '_> {
     }
 
     fn codec(&mut self) -> DR<Codec> {
+        let at = self.at();
         if !matches!(self.r.peek()?, Head::Map(_)) {
-            let s = self.text()?;
-            return Ok(match s.as_str() {
-                "zcl_tagged" => Codec::ZclTagged,
-                "bcd_time" => Codec::BcdTime,
-                "hhmm" => Codec::Hhmm,
-                "ascii" => Codec::Ascii,
-                "utf16be_hex" => Codec::Utf16beHex,
-                _ => return Err(self.inv("codec")),
+            return Ok(match self.code(CodecName::from_code, "codec")? {
+                CodecName::ZclTagged => Codec::ZclTagged,
+                CodecName::BcdTime => Codec::BcdTime,
+                CodecName::Hhmm => Codec::Hhmm,
+                CodecName::Ascii => Codec::Ascii,
+                CodecName::Utf16beHex => Codec::Utf16beHex,
+                _ => return err(at, DecodeErrorKind::Invalid("codec parameters missing")),
             });
         }
-        let mut c = None;
-        self.map(
-            &mut |d, k| {
-                if c.is_some() {
-                    return Err(d.inv("codec with several names"));
+        if self.r.map()? != 1 {
+            return err(at, DecodeErrorKind::Invalid("codec"));
+        }
+        let name = self.code(CodecName::from_code, "codec")?;
+        let pat = self.at();
+        if name == CodecName::BitmapFlags {
+            let mut bits = Vec::new();
+            let mut k = self.keys()?;
+            while let Some(b) = self.key(&mut k, "bitmap_flags")? {
+                if b > 63 {
+                    return self.inv("bitmap_flags bit");
                 }
-                c = Some(match k {
-                    44 => {
-                        let (mut day, mut tr) = (None, None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    45 => day = Some(d.uint_as("day")?),
-                                    46 => tr = Some(d.uint_as("transitions")?),
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "tuya_schedule_day",
-                        )?;
-                        Codec::TuyaScheduleDay {
-                            day: day.ok_or(d.inv("day"))?,
-                            transitions: tr.ok_or(d.inv("transitions"))?,
-                        }
-                    }
-                    149 => {
-                        let mut v = None;
-                        d.map(
-                            &mut |d, k| {
-                                if k != 150 {
-                                    return Ok(false);
-                                }
-                                v = Some(d.text()?);
-                                Ok(true)
-                            },
-                            "tuya_schedule_week",
-                        )?;
-                        Codec::TuyaScheduleWeek {
-                            variant: v.ok_or(d.inv("variant"))?,
-                        }
-                    }
-                    155 => {
-                        let n = d.r.map()?;
-                        let mut out = Vec::new();
-                        let mut prev: Option<u64> = None;
-                        for _ in 0..n {
-                            let at = d.r.position();
-                            let b = d.r.uint()?;
-                            if prev.is_some_and(|p| p >= b) || b > 63 {
-                                return Err(DecodeError {
-                                    offset: at,
-                                    kind: DecodeErrorKind::Invalid("bitmap_flags bit"),
-                                });
-                            }
-                            prev = Some(b);
-                            out.push((b as u8, d.text()?));
-                        }
-                        Codec::BitmapFlags(out)
-                    }
-                    _ => return Ok(false),
-                });
-                Ok(true)
+                bits.push((b as u8, self.text()?));
+            }
+            return Ok(Codec::BitmapFlags(bits));
+        }
+        let (mut day, mut tr, mut variant, mut scale, mut min, mut max) =
+            (None, None, None, None, None, None);
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "codec parameters")? {
+            match key {
+                45 => day = Some(self.u8_()?),
+                46 => tr = Some(self.u8_()?),
+                60 => min = Some(self.r.int()? as i16),
+                61 => max = Some(self.r.int()? as i16),
+                150 => variant = Some(self.code(ScheduleVariant::from_code, "variant")?),
+                159 => scale = Some(self.u16_()?),
+                _ => self.other(key, "codec parameters")?,
+            }
+        }
+        Ok(match name {
+            CodecName::TuyaScheduleDay => Codec::TuyaScheduleDay {
+                day: req(day, "day", pat)?,
+                transitions: req(tr, "transitions", pat)?,
+                variant: variant.unwrap_or(ScheduleVariant::MultiDp),
             },
-            "codec",
-        )?;
-        c.ok_or(self.inv("codec"))
+            CodecName::TuyaScheduleWeek => Codec::TuyaScheduleWeek(ScheduleWeek {
+                variant: req(variant, "variant", pat)?,
+                transitions: tr,
+                scale,
+                min,
+                max,
+            }),
+            _ => return err(at, DecodeErrorKind::Invalid("codec parameters")),
+        })
     }
 
-    fn table_ref(&mut self, table: &[&str]) -> DR<TableRef> {
-        let c: u16 = self.uint_as("table index")?;
-        Ok(if (c as usize) < table.len() {
+    fn table_ref(&mut self, len: usize) -> DR<TableRef> {
+        let c = self.u16_()?;
+        Ok(if (c as usize) < len {
             TableRef::Known(c)
         } else {
             TableRef::Unknown(c)
         })
     }
 
+    fn gp_binding(&mut self) -> DR<GpBinding> {
+        let at = self.at();
+        if self.r.map()? != 1 {
+            return err(at, DecodeErrorKind::Invalid("gp binding"));
+        }
+        Ok(match self.r.uint()? {
+            11 => GpBinding::Cmd(self.u8_()?),
+            12 => {
+                let a = self.attr_ref("gp report")?;
+                GpBinding::Report {
+                    cluster: req(a.cluster, "gp.report.cluster", a.at)?,
+                    attr: req(a.attr, "gp.report.attr", a.at)?,
+                    zcl_type: req(a.ty, "gp.report.type", a.at)?,
+                    mfr: a.mfr,
+                }
+            }
+            _ => return err(at, DecodeErrorKind::Invalid("gp binding")),
+        })
+    }
+
+    fn trigger(&mut self) -> DR<Trigger> {
+        let at = self.at();
+        let mut t = Trigger {
+            attrs: Vec::new(),
+            cmd: None,
+            gp_cmd: None,
+            tuya: None,
+            when: None,
+            event: Expr::default(),
+        };
+        let mut has_event = false;
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "trigger")? {
+            match key {
+                6 => put(&mut t.attrs, self.named_exprs()?),
+                11 => set(&mut t.cmd, self.cmd_ref()?),
+                13 => set(&mut t.gp_cmd, self.u8_()?),
+                14 => set(&mut t.when, self.expr()?),
+                15 => {
+                    t.event = self.expr()?;
+                    has_event = true;
+                }
+                147 => set(&mut t.tuya, self.tuya_dp()?),
+                _ => self.other(key, "trigger")?,
+            }
+        }
+        if !has_event {
+            return err(at, DecodeErrorKind::Missing("trigger.event"));
+        }
+        Ok(t)
+    }
+
+    fn press(&mut self) -> DR<Press> {
+        let at = self.at();
+        let (mut cmd, mut payload, mut write, mut tuya, mut value) = (None, None, None, None, None);
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "press")? {
+            match key {
+                8 => value = Some(self.scalar()?),
+                11 => cmd = Some(self.cmd_ref()?),
+                16 => write = Some(self.write_attr()?),
+                62 => payload = Some(self.expr()?),
+                147 => tuya = Some(self.tuya_dp()?),
+                _ => self.other(key, "press")?,
+            }
+        }
+        Ok(match (cmd, write, tuya) {
+            (Some(cmd), None, None) if value.is_none() => Press::Cmd { cmd, payload },
+            (None, Some(w), None) if value.is_none() && payload.is_none() => Press::Write(w),
+            (None, Some(_), None) | (Some(_), None, None) => {
+                return err(at, DecodeErrorKind::Invalid("press"));
+            }
+            (None, None, Some(dp)) if payload.is_none() => Press::Tuya {
+                dp,
+                value: req(value, "press.value", at)?,
+            },
+            _ => return err(at, DecodeErrorKind::Invalid("press")),
+        })
+    }
+
     fn entity(&mut self) -> DR<Entity> {
         let mut e = Entity::default();
-        self.map(
-            &mut |d, k| {
-                match k {
-                    0 => e.key = Some(d.text()?),
-                    1 => {
-                        let at = d.r.position();
-                        let c = d.r.uint()?;
-                        e.platform = Some(Platform::from_code(c).ok_or(DecodeError {
-                            offset: at,
-                            kind: DecodeErrorKind::Invalid("platform"),
-                        })?);
-                    }
-                    2 => e.device_class = Some(d.table_ref(enums::DEVICE_CLASSES)?),
-                    3 => e.unit = Some(d.table_ref(enums::UNITS)?),
-                    4 => {
-                        let c = d.r.uint()?;
-                        e.state_class = Some(StateClass::from_code(c).ok_or(d.inv("state_class"))?);
-                    }
-                    5 => {
-                        let c = d.r.uint()?;
-                        e.category = Some(Category::from_code(c).ok_or(d.inv("category"))?);
-                    }
-                    6 => e.name = Some(d.text()?),
-                    7 => e.ep = Some(d.uint_as("ep")?),
-                    8 => {
-                        let (mut cl, mut at, mut ty, mut mfr, mut ep) =
-                            (None, None, None, None, None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    0 => cl = Some(d.uint_as("cluster")?),
-                                    1 => at = Some(d.uint_as("attr")?),
-                                    2 => ty = Some(d.uint_as("type")?),
-                                    3 => mfr = Some(d.uint_as("mfr")?),
-                                    4 => ep = Some(d.uint_as("ep")?),
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "zcl",
-                        )?;
-                        e.zcl = Some(ZclBinding {
-                            cluster: cl.ok_or(d.inv("zcl.cluster"))?,
-                            attr: at.ok_or(d.inv("zcl.attr"))?,
-                            zcl_type: ty.ok_or(d.inv("zcl.type"))?,
-                            mfr,
-                            ep,
-                        });
-                    }
-                    9 => e.tuya = Some(d.tuya_dp()?),
-                    10 => {
-                        let (mut cl, mut at, mut mfr, mut ep, mut codec, mut tag) =
-                            (None, None, None, None, None, None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    0 => cl = Some(d.uint_as("cluster")?),
-                                    1 => at = Some(d.uint_as("attr")?),
-                                    3 => mfr = Some(d.uint_as("mfr")?),
-                                    4 => ep = Some(d.uint_as("ep")?),
-                                    9 => codec = Some(d.text()?),
-                                    10 => tag = Some(d.r.int()?),
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "struct",
-                        )?;
-                        e.struct_ = Some(StructBinding {
-                            cluster: cl.ok_or(d.inv("struct.cluster"))?,
-                            attr: at.ok_or(d.inv("struct.attr"))?,
-                            mfr,
-                            ep,
-                            codec: codec.ok_or(d.inv("struct.codec"))?,
-                            tag,
-                        });
-                    }
-                    11 => {
-                        let mut b = None;
-                        d.map(
-                            &mut |d, k| {
-                                if b.is_some() {
-                                    return Err(d.inv("gp binding"));
-                                }
-                                match k {
-                                    11 => b = Some(GpBinding::Cmd(d.uint_as("gp.cmd")?)),
-                                    12 => {
-                                        let (mut cl, mut at, mut ty, mut mfr) =
-                                            (None, None, None, None);
-                                        d.map(
-                                            &mut |d, k| {
-                                                match k {
-                                                    0 => cl = Some(d.uint_as("cluster")?),
-                                                    1 => at = Some(d.uint_as("attr")?),
-                                                    2 => ty = Some(d.uint_as("type")?),
-                                                    3 => mfr = Some(d.uint_as("mfr")?),
-                                                    _ => return Ok(false),
-                                                }
-                                                Ok(true)
-                                            },
-                                            "gp report",
-                                        )?;
-                                        b = Some(GpBinding::Report {
-                                            cluster: cl.ok_or(d.inv("gp.report.cluster"))?,
-                                            attr: at.ok_or(d.inv("gp.report.attr"))?,
-                                            zcl_type: ty.ok_or(d.inv("gp.report.type"))?,
-                                            mfr,
-                                        });
-                                    }
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "gp binding",
-                        )?;
-                        e.gp = Some(b.ok_or(d.inv("gp binding"))?);
-                    }
-                    12 => e.from = Some(d.expr()?),
-                    13 => e.to = Some(d.expr()?),
-                    14 => e.mul = Some(d.num()?),
-                    15 => e.div = Some(d.num()?),
-                    16 => e.offset = Some(d.num()?),
-                    17 => e.precision = Some(d.uint_as("precision")?),
-                    18 => e.invalid = Some(d.num()?),
-                    19 => {
-                        let n = d.r.array()?;
-                        if n % 2 != 0 {
-                            return Err(d.inv("map"));
-                        }
-                        for _ in 0..n / 2 {
-                            let raw = d.r.int()?;
-                            e.map.push((raw, d.text()?));
-                        }
-                    }
-                    20 => e.value_on = Some(d.scalar()?),
-                    21 => e.value_off = Some(d.scalar()?),
-                    22 => e.min = Some(d.num()?),
-                    23 => e.max = Some(d.num()?),
-                    24 => e.step = Some(d.num()?),
-                    25 => e.mode = Some(d.text()?),
-                    26 => e.access = Some(d.uint_as("access")?),
-                    27 => e.report = Some(d.report()?),
-                    28 => e.enabled = Some(d.bool()?),
-                    29 => e.reset_after = Some(d.expr()?),
-                    30 => {
-                        let n = d.r.map()?;
-                        let mut prev: Option<u64> = None;
-                        for _ in 0..n {
-                            let at = d.r.position();
-                            let pk = d.r.uint()?;
-                            if prev.is_some_and(|p| p >= pk) {
-                                return Err(DecodeError {
-                                    offset: at,
-                                    kind: DecodeErrorKind::Cbor(CborErrorKind::KeyOrder),
-                                });
-                            }
-                            prev = Some(pk);
-                            let name = keys::sub_name(pk).filter(|n| keys::PART_NAMES.contains(n));
-                            if name.is_none() {
-                                return Err(DecodeError {
-                                    offset: at,
-                                    kind: DecodeErrorKind::Invalid("part name"),
-                                });
-                            }
-                            e.parts.push((pk as u16, d.entity()?));
-                        }
-                    }
-                    31 => e.event_types = d.list(|d| d.const_str())?,
-                    32 => {
-                        e.triggers = d.list(|d| {
-                            let mut t = Trigger {
-                                attrs: Vec::new(),
-                                cmd: None,
-                                gp_cmd: None,
-                                tuya: None,
-                                when: None,
-                                event: Expr::default(),
-                            };
-                            let mut has_event = false;
-                            d.map(
-                                &mut |d, k| {
-                                    match k {
-                                        6 => t.attrs = d.named_exprs()?,
-                                        11 => t.cmd = Some(d.cmd_ref()?),
-                                        13 => t.gp_cmd = Some(d.uint_as("gp_cmd")?),
-                                        14 => t.when = Some(d.expr()?),
-                                        15 => {
-                                            t.event = d.expr()?;
-                                            has_event = true;
-                                        }
-                                        147 => t.tuya = Some(d.tuya_dp()?),
-                                        _ => return Ok(false),
-                                    }
-                                    Ok(true)
-                                },
-                                "trigger",
-                            )?;
-                            if !has_event {
-                                return Err(d.inv("trigger.event"));
-                            }
-                            Ok(t)
-                        })?
-                    }
-                    33 => {
-                        let (mut cmd, mut payload, mut write, mut tuya, mut value) =
-                            (None, None, None, None, None);
-                        d.map(
-                            &mut |d, k| {
-                                match k {
-                                    8 => value = Some(d.scalar()?),
-                                    11 => cmd = Some(d.cmd_ref()?),
-                                    16 => write = Some(d.write_attr()?),
-                                    62 => payload = Some(d.expr()?),
-                                    147 => tuya = Some(d.tuya_dp()?),
-                                    _ => return Ok(false),
-                                }
-                                Ok(true)
-                            },
-                            "press",
-                        )?;
-                        e.press = Some(match (cmd, write, tuya) {
-                            (Some(cmd), None, None) if value.is_none() => {
-                                Press::Cmd { cmd, payload }
-                            }
-                            (None, Some(w), None) if value.is_none() && payload.is_none() => {
-                                Press::Write(w)
-                            }
-                            (None, None, Some(dp)) if payload.is_none() => Press::Tuya {
-                                dp,
-                                value: value.ok_or(d.inv("press.value"))?,
-                            },
-                            _ => return Err(d.inv("press")),
-                        });
-                    }
-                    34 => e.codec = Some(d.codec()?),
-                    35 => e.present_if = Some(d.expr()?),
-                    36 => e.attrs = d.named_exprs()?,
-                    37 => {
-                        let mut h = HubBinding { default: None };
-                        d.map(
-                            &mut |d, k| {
-                                if k != 63 {
-                                    return Ok(false);
-                                }
-                                h.default = Some(d.scalar()?);
-                                Ok(true)
-                            },
-                            "hub",
-                        )?;
-                        e.hub = Some(h);
-                    }
-                    38 => e.invert = Some(d.bool()?),
-                    k if is_extension(k) => e.ext.push((k, d.r.skip()?.to_vec())),
-                    _ => return Ok(false),
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "entity")? {
+            match key {
+                0 => set(&mut e.key, self.text()?),
+                1 => set(&mut e.platform, self.code(Platform::from_code, "platform")?),
+                2 => set(
+                    &mut e.device_class,
+                    self.table_ref(enums::DEVICE_CLASSES.len())?,
+                ),
+                3 => set(&mut e.unit, self.table_ref(enums::UNITS.len())?),
+                4 => set(
+                    &mut e.state_class,
+                    self.code(StateClass::from_code, "state_class")?,
+                ),
+                5 => set(&mut e.category, self.code(Category::from_code, "category")?),
+                6 => set(&mut e.more_mut().name, self.text()?),
+                7 => set(&mut e.ep, self.u8_()?),
+                8 => {
+                    let a = self.attr_ref("zcl")?;
+                    e.zcl = Some(ZclBinding {
+                        cluster: req(a.cluster, "zcl.cluster", a.at)?,
+                        attr: req(a.attr, "zcl.attr", a.at)?,
+                        zcl_type: req(a.ty, "zcl.type", a.at)?,
+                        mfr: a.mfr,
+                        ep: a.ep,
+                    });
                 }
-                Ok(true)
-            },
-            "entity",
-        )?;
+                9 => set(&mut e.tuya, self.tuya_dp()?),
+                10 => {
+                    let a = self.attr_ref("struct")?;
+                    e.more_mut().struct_ = Some(StructBinding {
+                        cluster: req(a.cluster, "struct.cluster", a.at)?,
+                        attr: req(a.attr, "struct.attr", a.at)?,
+                        mfr: a.mfr,
+                        ep: a.ep,
+                        codec: req(a.codec, "struct.codec", a.at)?,
+                        tag: a.tag,
+                    });
+                }
+                11 => set(&mut e.gp, self.gp_binding()?),
+                12 => set(&mut e.from, self.expr()?),
+                13 => set(&mut e.more_mut().to, self.expr()?),
+                14 => set(&mut e.mul, self.num()?),
+                15 => set(&mut e.div, self.num()?),
+                16 => set(&mut e.offset, self.num()?),
+                17 => set(&mut e.precision, self.u8_()?),
+                18 => set(&mut e.invalid, self.num()?),
+                19 => {
+                    let n = self.r.array()?;
+                    if n % 2 != 0 {
+                        return self.inv("map");
+                    }
+                    for _ in 0..n / 2 {
+                        let raw = self.r.int()?;
+                        e.map.push((raw, self.text()?));
+                    }
+                }
+                20 => set(&mut e.more_mut().value_on, self.scalar()?),
+                21 => set(&mut e.more_mut().value_off, self.scalar()?),
+                22 => set(&mut e.min, self.num()?),
+                23 => set(&mut e.max, self.num()?),
+                24 => set(&mut e.step, self.num()?),
+                25 => set(&mut e.more_mut().mode, self.code(Mode::from_code, "mode")?),
+                26 => set(&mut e.access, self.u8_()?),
+                27 => set(&mut e.report, self.report()?),
+                28 => set(&mut e.enabled, self.bool()?),
+                29 => set(&mut e.more_mut().reset_after, self.expr()?),
+                30 => {
+                    let mut pk = self.keys()?;
+                    while let Some(part) = self.key(&mut pk, "parts")? {
+                        if !crate::keys::sub_name(part)
+                            .is_some_and(|n| crate::keys::PART_NAMES.contains(&n))
+                        {
+                            return self.inv("part name");
+                        }
+                        let p = self.entity()?;
+                        e.more_mut().parts.push((part as u16, p));
+                    }
+                }
+                31 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let t = self.const_str()?;
+                        e.more_mut().event_types.push(t);
+                    }
+                }
+                32 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let t = self.trigger()?;
+                        e.more_mut().triggers.push(t);
+                    }
+                }
+                33 => set(&mut e.more_mut().press, self.press()?),
+                34 => set(&mut e.more_mut().codec, self.codec()?),
+                35 => set(&mut e.more_mut().present_if, self.expr()?),
+                36 => put(&mut e.more_mut().attrs, self.named_exprs()?),
+                37 => {
+                    let mut h = HubBinding { default: None };
+                    let mut k2 = self.keys()?;
+                    while let Some(key2) = self.key(&mut k2, "hub")? {
+                        if key2 == 63 {
+                            h.default = Some(self.scalar()?);
+                        } else {
+                            self.other(key2, "hub")?;
+                        }
+                    }
+                    e.more_mut().hub = Some(h);
+                }
+                38 => set(&mut e.more_mut().invert, self.bool()?),
+                _ => {
+                    if is_extension(key) {
+                        let raw = self.r.skip()?.to_vec();
+                        e.more_mut().ext.push((key, raw));
+                    } else {
+                        return err(
+                            self.at(),
+                            DecodeErrorKind::UnknownKey {
+                                map: "entity",
+                                key: key.min(u32::MAX as u64) as u32,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         Ok(e)
     }
+
+    fn template(&mut self) -> DR<Template> {
+        let at = self.at();
+        let (mut name, mut params) = (None, None);
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "template")? {
+            match key {
+                157 => name = Some(self.code(TemplateName::from_code, "template name")?),
+                158 => {
+                    if !matches!(self.r.peek()?, Head::Map(_)) {
+                        return self.inv("template params");
+                    }
+                    params = Some(self.r.skip()?.to_vec());
+                }
+                _ => self.other(key, "template")?,
+            }
+        }
+        Ok(Template {
+            name: req(name, "template name", at)?,
+            params,
+        })
+    }
+
+    fn top(&mut self, consts: &[Const]) -> DR<Definition> {
+        let mut def = Definition::new(Kind::Definition);
+        let mut have_kind = false;
+        let mut k = self.keys()?;
+        while let Some(key) = self.key(&mut k, "top")? {
+            match key {
+                0 | 20 => {
+                    let at = self.at();
+                    let m = self.u8_()?;
+                    if have_kind {
+                        return self.inv("zdef");
+                    }
+                    have_kind = true;
+                    def.kind = if key == 0 {
+                        Kind::Definition
+                    } else {
+                        Kind::Fragment
+                    };
+                    def.major = m;
+                    if !SUPPORTED_MAJORS.contains(&m) {
+                        return err(at, DecodeErrorKind::UnsupportedMajor(m));
+                    }
+                }
+                1 => set(&mut def.id, self.text()?),
+                2 => set(&mut def.revision, self.u32_()?),
+                3 => set(&mut def.vendor, self.text()?),
+                4 => set(&mut def.model, self.text()?),
+                5 => set(&mut def.description, self.text()?),
+                6 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let c = self.clause()?;
+                        def.match_.push(c);
+                    }
+                    self.names = def.match_names().into_iter().map(String::from).collect();
+                }
+                7 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let w = self.white_label()?;
+                        def.white_label.push(w);
+                    }
+                }
+                8 => put(&mut def.requires, self.u16s()?),
+                9 => set(&mut def.device, self.device()?),
+                10 => set(&mut def.generic, self.generic()?),
+                11 => {
+                    let mut eps = self.keys()?;
+                    while let Some(ep) = self.key(&mut eps, "endpoints")? {
+                        if ep > 255 {
+                            return self.inv("endpoint");
+                        }
+                        let n = self.text()?;
+                        def.endpoints.push((ep as u8, n));
+                    }
+                }
+                12 => set(&mut def.tuya, self.tuya()?),
+                13 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let op = self.configure_op()?;
+                        def.configure.push(op);
+                    }
+                }
+                14 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let e = self.entity()?;
+                        def.entities.push(e);
+                    }
+                }
+                15 => set(&mut def.gp, self.gp_device()?),
+                16 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let r = self.ignore_rule()?;
+                        def.ignore.push(r);
+                    }
+                }
+                17 => {
+                    self.r.skip()?;
+                    def.consts = consts.to_vec();
+                }
+                18 => set(&mut def.source, self.text()?),
+                19 => set(&mut def.mfr, self.u16_()?),
+                21 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        let t = self.template()?;
+                        def.templates.push(t);
+                    }
+                }
+                22 => set(&mut def.priority, self.r.int()?),
+                23 => set(
+                    &mut def.self_description,
+                    self.code(SelfDescription::from_code, "self_description")?,
+                ),
+                31 => set(&mut def.x_wasm, self.r.skip()?.to_vec()),
+                _ => self.keep(key, &mut def.ext, "top")?,
+            }
+        }
+        if !have_kind {
+            return err(0, DecodeErrorKind::Missing("zdef"));
+        }
+        Ok(def)
+    }
+}
+
+/// Union of the sub-map fields of attribute, command and op references.
+#[derive(Default)]
+struct AttrRef {
+    at: usize,
+    cluster: Option<u16>,
+    attr: Option<u16>,
+    ty: Option<u8>,
+    mfr: Option<u16>,
+    ep: Option<u8>,
+    id: Option<u8>,
+    cmd_id: Option<u8>,
+    attrs: Vec<u16>,
+    clusters: Vec<u16>,
+    value: Option<Scalar>,
+    codec: Option<CodecName>,
+    tag: Option<i64>,
+    report: Option<Report>,
+    payload: Option<Expr>,
+    group: Option<u16>,
+    interval: Option<u32>,
 }
 
 // ------------------------------------------------------------------ encoder
@@ -1375,6 +1321,11 @@ impl M {
         let mut w = Writer::new();
         w.raw(item);
         self.e.push((k, w));
+    }
+    fn uint(&mut self, k: u16, v: Option<u64>) {
+        if let Some(v) = v {
+            self.put(k).uint(v);
+        }
     }
     fn finish(mut self, w: &mut Writer) {
         self.e.sort_by_key(|x| x.0);
@@ -1436,6 +1387,16 @@ fn const_scalar(w: &mut Writer, s: &Scalar) {
     }
 }
 
+fn ext(m: &mut M, ext: &[(u64, Vec<u8>)]) -> ER {
+    for (k, v) in ext {
+        if !is_extension(*k) {
+            return Err(EncodeError::Invalid("extension key"));
+        }
+        m.raw(*k, v);
+    }
+    Ok(())
+}
+
 impl E<'_> {
     fn const_index(&self, s: &str) -> Result<u64, EncodeError> {
         self.def
@@ -1456,9 +1417,7 @@ impl E<'_> {
         if let Some(v) = &d.id {
             m.put(1).text(v);
         }
-        if let Some(v) = d.revision {
-            m.put(2).uint(v as u64);
-        }
+        m.uint(2, d.revision.map(u64::from));
         if let Some(v) = &d.vendor {
             m.put(3).text(v);
         }
@@ -1472,7 +1431,7 @@ impl E<'_> {
             let w = m.put(6);
             w.array(d.match_.len());
             for c in &d.match_ {
-                self.clause(w, c);
+                self.clause(w, c)?;
             }
         }
         if !d.white_label.is_empty() {
@@ -1539,12 +1498,8 @@ impl E<'_> {
         }
         if let Some(g) = &d.gp {
             let mut mm = M::new();
-            if let Some(v) = g.security_min {
-                mm.put(41).uint(v as u64);
-            }
-            if let Some(v) = g.report_interval_s {
-                mm.put(42).uint(v as u64);
-            }
+            mm.uint(41, g.security_min.map(u64::from));
+            mm.uint(42, g.report_interval_s.map(u64::from));
             if !g.ignore_commands.is_empty() {
                 uint_list(mm.put(134), &g.ignore_commands);
             }
@@ -1556,12 +1511,8 @@ impl E<'_> {
             for r in &d.ignore {
                 let mut mm = M::new();
                 mm.put(0).uint(r.cluster as u64);
-                if let Some(v) = r.ep {
-                    mm.put(4).uint(v as u64);
-                }
-                if let Some(v) = r.cmd {
-                    mm.put(11).uint(v as u64);
-                }
+                mm.uint(4, r.ep.map(u64::from));
+                mm.uint(11, r.cmd.map(u64::from));
                 mm.finish(w);
             }
         }
@@ -1587,24 +1538,27 @@ impl E<'_> {
         if let Some(v) = &d.source {
             m.put(18).text(v);
         }
-        if let Some(v) = d.mfr {
-            m.put(19).uint(v as u64);
+        m.uint(19, d.mfr.map(u64::from));
+        if !d.templates.is_empty() {
+            let w = m.put(21);
+            w.array(d.templates.len());
+            for t in &d.templates {
+                let mut mm = M::new();
+                mm.put(157).uint(t.name.code() as u64);
+                if let Some(p) = &t.params {
+                    mm.raw(158, p);
+                }
+                mm.finish(w);
+            }
         }
         if let Some(v) = d.priority {
             m.put(22).int(v);
         }
-        if let Some(v) = d.self_description {
-            m.put(23).text(v.as_str());
-        }
+        m.uint(23, d.self_description.map(|v| v.code() as u64));
         if let Some(v) = &d.x_wasm {
             m.raw(31, v);
         }
-        for (k, v) in &d.ext {
-            if !is_extension(*k) {
-                return Err(EncodeError::Invalid("extension key"));
-            }
-            m.raw(*k, v);
-        }
+        ext(&mut m, &d.ext)?;
         m.finish(w);
         Ok(())
     }
@@ -1641,7 +1595,7 @@ impl E<'_> {
         m.finish(w);
     }
 
-    fn clause(&self, w: &mut Writer, c: &MatchClause) {
+    fn clause(&self, w: &mut Writer, c: &MatchClause) -> ER {
         let mut m = M::new();
         if let Some(n) = &c.manufacturer {
             self.name_match(m.put(19), n, true);
@@ -1661,12 +1615,8 @@ impl E<'_> {
                 }
                 c3.finish(mm.put(7));
             }
-            if let Some(v) = g.device_id {
-                mm.put(21).uint(v as u64);
-            }
-            if let Some(v) = g.manufacturer_id {
-                mm.put(22).uint(v as u64);
-            }
+            mm.uint(21, g.device_id.map(u64::from));
+            mm.uint(22, g.manufacturer_id.map(u64::from));
             if let Some(v) = g.model_id {
                 let w = mm.put(23);
                 match v.mask {
@@ -1694,12 +1644,8 @@ impl E<'_> {
             }
             mm.finish(m.put(26));
         }
-        if let Some(p) = c.power {
-            m.put(29).text(p.as_str());
-        }
-        if let Some(v) = c.mfr_code {
-            m.put(51).uint(v as u64);
-        }
+        m.uint(29, c.power.map(|p| p.code() as u64));
+        m.uint(51, c.mfr_code.map(u64::from));
         if let Some(r) = &c.app_version {
             self.range(m.put(52), r);
         }
@@ -1720,12 +1666,8 @@ impl E<'_> {
             for (ep, em) in eps {
                 w.uint(*ep as u64);
                 let mut mm = M::new();
-                if let Some(v) = em.device_id {
-                    mm.put(21).uint(v as u64);
-                }
-                if let Some(v) = em.profile {
-                    mm.put(57).uint(v as u64);
-                }
+                mm.uint(21, em.device_id.map(u64::from));
+                mm.uint(57, em.profile.map(u64::from));
                 if !em.in_clusters.is_empty() {
                     uint_list(mm.put(58), &em.in_clusters);
                 }
@@ -1735,14 +1677,15 @@ impl E<'_> {
                 mm.finish(w);
             }
         }
+        m.uint(156, c.logical_type.map(|v| v.code() as u64));
+        ext(&mut m, &c.ext)?;
         m.finish(w);
+        Ok(())
     }
 
     fn device(&self, w: &mut Writer, d: &Device) {
         let mut m = M::new();
-        if let Some(p) = d.power {
-            m.put(29).text(p.as_str());
-        }
+        m.uint(29, d.power.map(|p| p.code() as u64));
         if let Some(v) = d.sleepy {
             m.put(30).bool(v);
         }
@@ -1755,17 +1698,13 @@ impl E<'_> {
                 w.uint(*min_mv as u64);
                 w.uint(*max_mv as u64);
             }
-            Some(Battery::Curve(c)) => m.put(31).text(c),
+            Some(Battery::Curve(c)) => m.put(31).uint(c.code() as u64),
             None => {}
         }
-        if let Some(v) = d.checkin_s {
-            m.put(33).uint(v as u64);
-        }
+        m.uint(33, d.checkin_s.map(u64::from));
         if let Some(a) = &d.availability {
             let mut mm = M::new();
-            if let Some(t) = a.timeout_s {
-                mm.put(132).uint(t as u64);
-            }
+            mm.uint(132, a.timeout_s.map(u64::from));
             mm.finish(m.put(131));
         }
         if let Some(v) = d.ota {
@@ -1808,40 +1747,18 @@ impl E<'_> {
 
     fn tuya(&self, w: &mut Writer, t: &Tuya) {
         let mut m = M::new();
-        match t.time_sync {
-            Some(TimeSync::Off) => m.put(38).text("off"),
-            Some(TimeSync::Epoch1970) => m.put(38).uint(1970),
-            Some(TimeSync::Epoch2000) => m.put(38).uint(2000),
-            None => {}
-        }
+        m.uint(38, t.time_sync.map(|v| v.code() as u64));
         if let Some(v) = t.magic_packet {
             m.put(39).bool(v);
         }
-        match &t.query {
-            Some(TuyaQuery::On {
-                configure,
-                announce,
-            }) => {
-                let w = m.put(40);
-                w.array(*configure as usize + *announce as usize);
-                if *configure {
-                    w.text("configure");
-                }
-                if *announce {
-                    w.text("announce");
-                }
+        if let Some(q) = &t.query {
+            let mask = q.configure as u64 | (q.announce as u64) << 1;
+            if mask != 0 {
+                m.put(40).uint(mask);
             }
-            Some(TuyaQuery::Interval(s)) => {
-                let w = m.put(40);
-                w.map(1);
-                w.uint(146);
-                w.uint(*s as u64);
-            }
-            None => {}
+            m.uint(146, q.interval_s.map(u64::from));
         }
-        if let Some(v) = t.force_time_sync_s {
-            m.put(139).uint(v as u64);
-        }
+        m.uint(139, t.force_time_sync_s.map(u64::from));
         for (k, v) in [
             (140, t.bind_basic),
             (141, t.gateway_status),
@@ -1853,12 +1770,7 @@ impl E<'_> {
                 m.put(k).bool(v);
             }
         }
-        if let Some(s) = t.send {
-            m.put(142).text(match s {
-                TuyaSend::DataRequest => "dataRequest",
-                TuyaSend::SendData => "sendData",
-            });
-        }
+        m.uint(142, t.send.map(|v| v.code() as u64));
         m.finish(w);
     }
 
@@ -1881,26 +1793,21 @@ impl E<'_> {
         m.put(0).uint(a.cluster as u64);
         m.put(1).uint(a.attr as u64);
         m.put(2).uint(a.zcl_type as u64);
-        if let Some(v) = a.mfr {
-            m.put(3).uint(v as u64);
-        }
-        if let Some(v) = a.ep {
-            m.put(4).uint(v as u64);
-        }
+        m.uint(3, a.mfr.map(u64::from));
+        m.uint(4, a.ep.map(u64::from));
         scalar(m.put(8), &a.value);
         m.finish(w);
     }
 
-    fn cmd_ref(&self, w: &mut Writer, c: &CmdRef) {
+    fn cmd_ref(&self, w: &mut Writer, c: &CmdRef, payload: Option<&Expr>) {
         let mut m = M::new();
         m.put(0).uint(c.cluster as u64);
-        if let Some(v) = c.mfr {
-            m.put(3).uint(v as u64);
-        }
-        if let Some(v) = c.ep {
-            m.put(4).uint(v as u64);
-        }
+        m.uint(3, c.mfr.map(u64::from));
+        m.uint(4, c.ep.map(u64::from));
         m.put(5).uint(c.id as u64);
+        if let Some(p) = payload {
+            m.put(62).bytes(&p.0);
+        }
         m.finish(w);
     }
 
@@ -1912,6 +1819,7 @@ impl E<'_> {
                 cluster,
                 id,
                 mfr,
+                payload,
             } => self.cmd_ref(
                 outer.put(11),
                 &CmdRef {
@@ -1920,6 +1828,7 @@ impl E<'_> {
                     mfr: *mfr,
                     ep: *ep,
                 },
+                payload.as_ref(),
             ),
             ConfigureOp::Report {
                 ep,
@@ -1933,21 +1842,15 @@ impl E<'_> {
                 m.put(0).uint(*cluster as u64);
                 m.put(1).uint(*attr as u64);
                 m.put(2).uint(*zcl_type as u64);
-                if let Some(v) = mfr {
-                    m.put(3).uint(*v as u64);
-                }
-                if let Some(v) = ep {
-                    m.put(4).uint(*v as u64);
-                }
+                m.uint(3, mfr.map(u64::from));
+                m.uint(4, ep.map(u64::from));
                 self.report(m.put(12), report);
                 m.finish(outer.put(12));
             }
             ConfigureOp::Write(a) => self.write_attr(outer.put(16), a),
             ConfigureOp::Bind { ep, clusters } => {
                 let mut m = M::new();
-                if let Some(v) = ep {
-                    m.put(4).uint(*v as u64);
-                }
+                m.uint(4, ep.map(u64::from));
                 if !clusters.is_empty() {
                     uint_list(m.put(7), clusters);
                 }
@@ -1961,12 +1864,8 @@ impl E<'_> {
             } => {
                 let mut m = M::new();
                 m.put(0).uint(*cluster as u64);
-                if let Some(v) = mfr {
-                    m.put(3).uint(*v as u64);
-                }
-                if let Some(v) = ep {
-                    m.put(4).uint(*v as u64);
-                }
+                m.uint(3, mfr.map(u64::from));
+                m.uint(4, ep.map(u64::from));
                 if !attrs.is_empty() {
                     uint_list(m.put(6), attrs);
                 }
@@ -1974,9 +1873,7 @@ impl E<'_> {
             }
             ConfigureOp::Group { ep, group } => {
                 let mut m = M::new();
-                if let Some(v) = ep {
-                    m.put(4).uint(*v as u64);
-                }
+                m.uint(4, ep.map(u64::from));
                 m.put(128).uint(*group as u64);
                 m.finish(outer.put(128));
             }
@@ -2009,59 +1906,88 @@ impl E<'_> {
         Ok(())
     }
 
+    fn codec(&self, w: &mut Writer, c: &Codec) {
+        let code = c.kind().code() as u64;
+        match c {
+            Codec::TuyaScheduleDay {
+                day,
+                transitions,
+                variant,
+            } => {
+                w.map(1);
+                w.uint(code);
+                let mut m = M::new();
+                m.put(45).uint(*day as u64);
+                m.put(46).uint(*transitions as u64);
+                if *variant != ScheduleVariant::MultiDp {
+                    m.put(150).uint(variant.code() as u64);
+                }
+                m.finish(w);
+            }
+            Codec::TuyaScheduleWeek(s) => {
+                w.map(1);
+                w.uint(code);
+                let mut m = M::new();
+                m.uint(46, s.transitions.map(u64::from));
+                if let Some(v) = s.min {
+                    m.put(60).int(v as i64);
+                }
+                if let Some(v) = s.max {
+                    m.put(61).int(v as i64);
+                }
+                m.put(150).uint(s.variant.code() as u64);
+                m.uint(159, s.scale.map(u64::from));
+                m.finish(w);
+            }
+            Codec::BitmapFlags(bits) => {
+                let mut b = bits.clone();
+                b.sort_by_key(|x| x.0);
+                w.map(1);
+                w.uint(code);
+                w.map(b.len());
+                for (bit, label) in b {
+                    w.uint(bit as u64);
+                    w.text(&label);
+                }
+            }
+            _ => w.uint(code),
+        }
+    }
+
     fn entity(&self, w: &mut Writer, e: &Entity) -> ER {
+        let x = e.more();
         let mut m = M::new();
         if let Some(v) = &e.key {
             m.put(0).text(v);
         }
-        if let Some(v) = e.platform {
-            m.put(1).uint(v.code() as u64);
-        }
-        if let Some(v) = e.device_class {
-            m.put(2).uint(v.code() as u64);
-        }
-        if let Some(v) = e.unit {
-            m.put(3).uint(v.code() as u64);
-        }
-        if let Some(v) = e.state_class {
-            m.put(4).uint(v.code() as u64);
-        }
-        if let Some(v) = e.category {
-            m.put(5).uint(v.code() as u64);
-        }
-        if let Some(v) = &e.name {
+        m.uint(1, e.platform.map(|v| v.code() as u64));
+        m.uint(2, e.device_class.map(|v| v.code() as u64));
+        m.uint(3, e.unit.map(|v| v.code() as u64));
+        m.uint(4, e.state_class.map(|v| v.code() as u64));
+        m.uint(5, e.category.map(|v| v.code() as u64));
+        if let Some(v) = &x.name {
             m.put(6).text(v);
         }
-        if let Some(v) = e.ep {
-            m.put(7).uint(v as u64);
-        }
+        m.uint(7, e.ep.map(u64::from));
         if let Some(z) = &e.zcl {
             let mut mm = M::new();
             mm.put(0).uint(z.cluster as u64);
             mm.put(1).uint(z.attr as u64);
             mm.put(2).uint(z.zcl_type as u64);
-            if let Some(v) = z.mfr {
-                mm.put(3).uint(v as u64);
-            }
-            if let Some(v) = z.ep {
-                mm.put(4).uint(v as u64);
-            }
+            mm.uint(3, z.mfr.map(u64::from));
+            mm.uint(4, z.ep.map(u64::from));
             mm.finish(m.put(8));
         }
         if let Some(t) = &e.tuya {
             self.tuya_dp(m.put(9), t);
         }
-        if let Some(s) = &e.struct_ {
+        if let Some(s) = &x.struct_ {
             let mut mm = M::new();
             mm.put(0).uint(s.cluster as u64);
             mm.put(1).uint(s.attr as u64);
-            if let Some(v) = s.mfr {
-                mm.put(3).uint(v as u64);
-            }
-            if let Some(v) = s.ep {
-                mm.put(4).uint(v as u64);
-            }
-            mm.put(9).text(&s.codec);
+            mm.uint(3, s.mfr.map(u64::from));
+            mm.uint(4, s.ep.map(u64::from));
+            mm.put(9).uint(s.codec.code() as u64);
             if let Some(v) = s.tag {
                 mm.put(10).int(v);
             }
@@ -2086,27 +2012,23 @@ impl E<'_> {
                     mm.put(0).uint(*cluster as u64);
                     mm.put(1).uint(*attr as u64);
                     mm.put(2).uint(*zcl_type as u64);
-                    if let Some(v) = mfr {
-                        mm.put(3).uint(*v as u64);
-                    }
+                    mm.uint(3, mfr.map(u64::from));
                     mm.finish(w);
                 }
             }
         }
-        if let Some(x) = &e.from {
-            m.put(12).bytes(&x.0);
+        if let Some(v) = &e.from {
+            m.put(12).bytes(&v.0);
         }
-        if let Some(x) = &e.to {
-            m.put(13).bytes(&x.0);
+        if let Some(v) = &x.to {
+            m.put(13).bytes(&v.0);
         }
         for (k, v) in [(14, e.mul), (15, e.div), (16, e.offset)] {
             if let Some(v) = v {
                 write_num(m.put(k), v);
             }
         }
-        if let Some(v) = e.precision {
-            m.put(17).uint(v as u64);
-        }
+        m.uint(17, e.precision.map(u64::from));
         if let Some(v) = e.invalid {
             write_num(m.put(18), v);
         }
@@ -2118,10 +2040,10 @@ impl E<'_> {
                 w.text(label);
             }
         }
-        if let Some(v) = &e.value_on {
+        if let Some(v) = &x.value_on {
             scalar(m.put(20), v);
         }
-        if let Some(v) = &e.value_off {
+        if let Some(v) = &x.value_off {
             scalar(m.put(21), v);
         }
         for (k, v) in [(22, e.min), (23, e.max), (24, e.step)] {
@@ -2129,23 +2051,19 @@ impl E<'_> {
                 write_num(m.put(k), v);
             }
         }
-        if let Some(v) = &e.mode {
-            m.put(25).text(v);
-        }
-        if let Some(v) = e.access {
-            m.put(26).uint(v as u64);
-        }
+        m.uint(25, x.mode.map(|v| v.code() as u64));
+        m.uint(26, e.access.map(u64::from));
         if let Some(r) = &e.report {
             self.report(m.put(27), r);
         }
         if let Some(v) = e.enabled {
             m.put(28).bool(v);
         }
-        if let Some(x) = &e.reset_after {
-            m.put(29).bytes(&x.0);
+        if let Some(v) = &x.reset_after {
+            m.put(29).bytes(&v.0);
         }
-        if !e.parts.is_empty() {
-            let mut parts: Vec<&(u16, Entity)> = e.parts.iter().collect();
+        if !x.parts.is_empty() {
+            let mut parts: Vec<&(u16, Entity)> = x.parts.iter().collect();
             parts.sort_by_key(|p| p.0);
             let w = m.put(30);
             w.map(parts.len());
@@ -2154,29 +2072,27 @@ impl E<'_> {
                 self.entity(w, p)?;
             }
         }
-        if !e.event_types.is_empty() {
+        if !x.event_types.is_empty() {
             let w = m.put(31);
-            w.array(e.event_types.len());
-            for s in &e.event_types {
+            w.array(x.event_types.len());
+            for s in &x.event_types {
                 w.uint(self.const_index(s)?);
             }
         }
-        if !e.triggers.is_empty() {
+        if !x.triggers.is_empty() {
             let w = m.put(32);
-            w.array(e.triggers.len());
-            for t in &e.triggers {
+            w.array(x.triggers.len());
+            for t in &x.triggers {
                 let mut mm = M::new();
                 if !t.attrs.is_empty() {
                     self.named_exprs(mm.put(6), &t.attrs)?;
                 }
                 if let Some(c) = &t.cmd {
-                    self.cmd_ref(mm.put(11), c);
+                    self.cmd_ref(mm.put(11), c, None);
                 }
-                if let Some(v) = t.gp_cmd {
-                    mm.put(13).uint(v as u64);
-                }
-                if let Some(x) = &t.when {
-                    mm.put(14).bytes(&x.0);
+                mm.uint(13, t.gp_cmd.map(u64::from));
+                if let Some(v) = &t.when {
+                    mm.put(14).bytes(&v.0);
                 }
                 mm.put(15).bytes(&t.event.0);
                 if let Some(dp) = &t.tuya {
@@ -2185,13 +2101,13 @@ impl E<'_> {
                 mm.finish(w);
             }
         }
-        if let Some(p) = &e.press {
+        if let Some(p) = &x.press {
             let mut mm = M::new();
             match p {
                 Press::Cmd { cmd, payload } => {
-                    self.cmd_ref(mm.put(11), cmd);
-                    if let Some(x) = payload {
-                        mm.put(62).bytes(&x.0);
+                    self.cmd_ref(mm.put(11), cmd, None);
+                    if let Some(v) = payload {
+                        mm.put(62).bytes(&v.0);
                     }
                 }
                 Press::Write(a) => self.write_attr(mm.put(16), a),
@@ -2202,65 +2118,26 @@ impl E<'_> {
             }
             mm.finish(m.put(33));
         }
-        if let Some(c) = &e.codec {
-            let w = m.put(34);
-            match c {
-                Codec::ZclTagged
-                | Codec::BcdTime
-                | Codec::Hhmm
-                | Codec::Ascii
-                | Codec::Utf16beHex => w.text(c.name()),
-                Codec::TuyaScheduleDay { day, transitions } => {
-                    w.map(1);
-                    w.uint(44);
-                    w.map(2);
-                    w.uint(45);
-                    w.uint(*day as u64);
-                    w.uint(46);
-                    w.uint(*transitions as u64);
-                }
-                Codec::TuyaScheduleWeek { variant } => {
-                    w.map(1);
-                    w.uint(149);
-                    w.map(1);
-                    w.uint(150);
-                    w.text(variant);
-                }
-                Codec::BitmapFlags(bits) => {
-                    let mut b = bits.clone();
-                    b.sort_by_key(|x| x.0);
-                    w.map(1);
-                    w.uint(155);
-                    w.map(b.len());
-                    for (bit, label) in b {
-                        w.uint(bit as u64);
-                        w.text(&label);
-                    }
-                }
-            }
+        if let Some(c) = &x.codec {
+            self.codec(m.put(34), c);
         }
-        if let Some(x) = &e.present_if {
-            m.put(35).bytes(&x.0);
+        if let Some(v) = &x.present_if {
+            m.put(35).bytes(&v.0);
         }
-        if !e.attrs.is_empty() {
-            self.named_exprs(m.put(36), &e.attrs)?;
+        if !x.attrs.is_empty() {
+            self.named_exprs(m.put(36), &x.attrs)?;
         }
-        if let Some(h) = &e.hub {
+        if let Some(h) = &x.hub {
             let mut mm = M::new();
             if let Some(v) = &h.default {
                 scalar(mm.put(63), v);
             }
             mm.finish(m.put(37));
         }
-        if let Some(v) = e.invert {
+        if let Some(v) = x.invert {
             m.put(38).bool(v);
         }
-        for (k, v) in &e.ext {
-            if !is_extension(*k) {
-                return Err(EncodeError::Invalid("extension key"));
-            }
-            m.raw(*k, v);
-        }
+        ext(&mut m, &x.ext)?;
         m.finish(w);
         Ok(())
     }

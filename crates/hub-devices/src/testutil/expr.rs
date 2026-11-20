@@ -706,7 +706,10 @@ impl SourceExpr {
                 .map_or(Null, |x| Float(x.log10())),
             "str" => match arg(0) {
                 Int(i) => Str(i.to_string()),
-                Float(x) => Str(x.to_string()),
+                Float(x) => {
+                    let mut b = [0u8; 32];
+                    Str(zdef::num::format_number(zdef::model::Num::Float(x), &mut b).into())
+                }
                 Bool(b) => Str(b.to_string()),
                 Str(s) => Str(s),
                 _ => Null,

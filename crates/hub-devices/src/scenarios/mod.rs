@@ -97,6 +97,41 @@ pub fn keys(hub: &Hub<MockTransport>, id: &str) -> Vec<String> {
         .collect()
 }
 
+/// Differential check of the merge (README "zdef::resolve"): the entities
+/// a catalog definition contributes, as `ep:key`, are the same in the
+/// engine's resolution and in `zdef::resolve` given only that definition.
+/// The engine keeps its own merge for the generic tier; this pins the
+/// definition-layer semantics (default endpoints, `present_if`, `parts`)
+/// to the reference implementation.
+pub fn assert_zdef_resolve_agrees(hub: &Hub<MockTransport>, id: &str, example: &str) {
+    let d = hub.device(id).unwrap();
+    let mut engine: Vec<String> = d
+        .entities
+        .iter()
+        .filter(|e| !e.orphaned && e.r.source == crate::model::LayerSource::Catalog)
+        .map(|e| format!("{}:{}", e.r.ep, e.r.def.key))
+        .collect();
+    engine.sort();
+    let zd = zdef::load(&golden_cbor(example), &crate::zdef_adapter::hub_features()).unwrap();
+    let fp = crate::zdef_adapter::zdef_fingerprint(&d.fp);
+    let layers = zdef::resolve::Layers {
+        generic: &[],
+        generic_consts: &[],
+        catalog: Some((zdef::matching::Source::Catalog, &zd)),
+        self_description: None,
+        user: None,
+        overrides: None,
+    };
+    let r = zdef::resolve::resolve(&layers, zdef::resolve::Target::Zigbee(&fp));
+    let mut reference: Vec<String> = r
+        .entities
+        .iter()
+        .map(|e| format!("{}:{}", e.ep, e.key()))
+        .collect();
+    reference.sort();
+    assert_eq!(engine, reference, "{example}: engine vs zdef::resolve");
+}
+
 /// Current state value of a uid.
 pub fn state(hub: &Hub<MockTransport>, uid: &str) -> J {
     hub.state_of(uid)

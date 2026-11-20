@@ -18,7 +18,10 @@
 
 use crate::codec::{self, DecodeError, DecodeOptions, StringTable};
 use crate::model::Definition;
-use crate::sign::{self, SignError, TrustedKey};
+use crate::sign::SignError;
+#[cfg(feature = "sign")]
+use crate::sign::{self, TrustedKey};
+#[cfg(feature = "miniz")]
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -29,8 +32,7 @@ pub const HEADER_LEN: usize = 64;
 /// Largest inflated block.
 pub const BLOCK_MAX: usize = 4096;
 pub const INDEX_ENTRY_LEN: usize = 12;
-/// Fixed public SipHash key of the index (spec 9.1).
-pub const INDEX_KEY: [u8; 16] = *b"zdef-index-v1\0\0\0";
+pub use crate::siphash::INDEX_KEY;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BankError {
@@ -166,16 +168,19 @@ pub trait Inflate {
 }
 
 /// `miniz_oxide` inflater (~11 KiB of state, boxed).
+#[cfg(feature = "miniz")]
 pub struct MinizInflate {
     state: Box<miniz_oxide::inflate::core::DecompressorOxide>,
 }
 
+#[cfg(feature = "miniz")]
 impl Default for MinizInflate {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "miniz")]
 impl MinizInflate {
     pub fn new() -> Self {
         MinizInflate {
@@ -184,6 +189,7 @@ impl MinizInflate {
     }
 }
 
+#[cfg(feature = "miniz")]
 impl Inflate for MinizInflate {
     fn inflate(&mut self, input: &[u8], out: &mut [u8]) -> Result<usize, BankError> {
         use miniz_oxide::inflate::TINFLStatus;
@@ -252,8 +258,10 @@ impl StringTable for BankStrings {
 /// A bank held in memory (memory-mapped flash, PSRAM or a host file).
 pub struct Bank<'a> {
     pub header: Header,
-    header_bytes: &'a [u8],
-    signature: &'a [u8],
+    /// The 64 signed header bytes (detached COSE payload).
+    pub header_bytes: &'a [u8],
+    /// COSE_Sign1 of the header (empty when unsigned).
+    pub signature: &'a [u8],
     body: &'a [u8],
     strings: &'a [u8],
     index: &'a [u8],
@@ -305,8 +313,18 @@ impl<'a> Bank<'a> {
     }
 
     /// Checks the body hash and the header signature against trusted keys.
+    #[cfg(all(feature = "sign", feature = "soft-sha256"))]
     pub fn verify(&self, keys: &[TrustedKey]) -> Result<(), BankError> {
-        if crate::hash::sha256(self.body) != self.header.body_sha256 {
+        self.verify_with::<crate::hash::SoftSha256>(keys)
+    }
+
+    /// [`Bank::verify`] with a SHA-256 implementation of the hub.
+    #[cfg(feature = "sign")]
+    pub fn verify_with<H: crate::hash::Sha256>(
+        &self,
+        keys: &[TrustedKey],
+    ) -> Result<(), BankError> {
+        if crate::hash::sha256_with::<H>(self.body) != self.header.body_sha256 {
             return Err(BankError::BodyHash);
         }
         sign::verify_cose_sign1(self.signature, Some(self.header_bytes), keys)?;
@@ -437,55 +455,7 @@ pub fn block_slots(block: &[u8]) -> Result<usize, BankError> {
     Ok(n)
 }
 
-/// SipHash-2-4 (Aumasson & Bernstein), 64-bit output.
-pub fn siphash24(key: &[u8; 16], data: &[u8]) -> u64 {
-    let k0 = u64::from_le_bytes(key[..8].try_into().unwrap());
-    let k1 = u64::from_le_bytes(key[8..].try_into().unwrap());
-    let mut v0 = 0x736f6d6570736575u64 ^ k0;
-    let mut v1 = 0x646f72616e646f6du64 ^ k1;
-    let mut v2 = 0x6c7967656e657261u64 ^ k0;
-    let mut v3 = 0x7465646279746573u64 ^ k1;
-    macro_rules! round {
-        () => {
-            v0 = v0.wrapping_add(v1);
-            v1 = v1.rotate_left(13);
-            v1 ^= v0;
-            v0 = v0.rotate_left(32);
-            v2 = v2.wrapping_add(v3);
-            v3 = v3.rotate_left(16);
-            v3 ^= v2;
-            v0 = v0.wrapping_add(v3);
-            v3 = v3.rotate_left(21);
-            v3 ^= v0;
-            v2 = v2.wrapping_add(v1);
-            v1 = v1.rotate_left(17);
-            v1 ^= v2;
-            v2 = v2.rotate_left(32);
-        };
-    }
-    let (chunks, rem) = data.as_chunks::<8>();
-    for c in chunks {
-        let m = u64::from_le_bytes(*c);
-        v3 ^= m;
-        round!();
-        round!();
-        v0 ^= m;
-    }
-    let mut last = (data.len() as u64 & 0xff) << 56;
-    for (i, b) in rem.iter().enumerate() {
-        last |= (*b as u64) << (8 * i);
-    }
-    v3 ^= last;
-    round!();
-    round!();
-    v0 ^= last;
-    v2 ^= 0xff;
-    round!();
-    round!();
-    round!();
-    round!();
-    v0 ^ v1 ^ v2 ^ v3
-}
+pub use crate::siphash::siphash24;
 
 /// Shard number (first byte of the key hash, big-endian view) for on-demand
 /// fetch (spec 9.3).
@@ -493,33 +463,58 @@ pub fn shard_of(key_hash: u64) -> u8 {
     (key_hash >> 56) as u8
 }
 
-/// One record of `shard-{hh}.cbor`: `[key hash, requires, standalone definition]`.
+/// One record of `shard-{hh}.cbor` (spec 9.3): `[key hashes, requires,
+/// standalone definition]`. A definition has one record per shard it has
+/// keys in; `key hashes` is a uint for one key and an ascending array for
+/// several. Records are ordered by definition ID, then content hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShardRecord {
-    pub key_hash: u64,
+    pub key_hashes: Vec<u64>,
     pub requires: Vec<u16>,
     pub definition: Vec<u8>,
 }
 
+impl ShardRecord {
+    pub fn has_key(&self, h: u64) -> bool {
+        self.key_hashes.contains(&h)
+    }
+}
+
 pub fn decode_shard(bytes: &[u8]) -> Result<Vec<ShardRecord>, DecodeError> {
     let mut r = crate::cbor::Reader::new(bytes);
+    let inv = |r: &crate::cbor::Reader<'_>| DecodeError {
+        offset: r.position(),
+        kind: codec::DecodeErrorKind::Invalid("shard record"),
+    };
     let n = r.array()?;
     let mut out = Vec::with_capacity(n.min(1024));
     for _ in 0..n {
         if r.array()? != 3 {
-            return Err(DecodeError {
-                offset: r.position(),
-                kind: codec::DecodeErrorKind::Invalid("shard record"),
-            });
+            return Err(inv(&r));
         }
-        let key_hash = r.uint()?;
+        let mut key_hashes = Vec::new();
+        if matches!(r.peek()?, crate::cbor::Head::Array(_)) {
+            let k = r.array()?;
+            if k < 2 {
+                return Err(inv(&r));
+            }
+            for _ in 0..k {
+                let h = r.uint()?;
+                if key_hashes.last().is_some_and(|p| *p >= h) {
+                    return Err(inv(&r));
+                }
+                key_hashes.push(h);
+            }
+        } else {
+            key_hashes.push(r.uint()?);
+        }
         let k = r.array()?;
         let mut requires = Vec::with_capacity(k);
         for _ in 0..k {
             requires.push(r.uint()? as u16);
         }
         out.push(ShardRecord {
-            key_hash,
+            key_hashes,
             requires,
             definition: r.bytes()?.to_vec(),
         });
@@ -533,7 +528,14 @@ pub fn encode_shard(records: &[ShardRecord]) -> Vec<u8> {
     w.array(records.len());
     for rec in records {
         w.array(3);
-        w.uint(rec.key_hash);
+        if let [h] = rec.key_hashes[..] {
+            w.uint(h);
+        } else {
+            w.array(rec.key_hashes.len());
+            for h in &rec.key_hashes {
+                w.uint(*h);
+            }
+        }
         w.array(rec.requires.len());
         for f in &rec.requires {
             w.uint(*f as u64);
@@ -555,18 +557,4 @@ pub fn describe(h: &Header) -> String {
         h.blocks,
         h.strings
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn siphash_reference_vector() {
-        // Reference vector from the SipHash paper (key 00..0f, message 00..0e).
-        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
-        let msg: alloc::vec::Vec<u8> = (0u8..15).collect();
-        assert_eq!(siphash24(&key, &msg), 0xa129ca6149be45e5);
-        assert_eq!(siphash24(&key, &[]), 0x726fdb47dd0e0e31);
-    }
 }

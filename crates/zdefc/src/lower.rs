@@ -42,6 +42,9 @@ pub struct Lowered {
 
 struct L {
     errs: Vec<Diag>,
+    /// Source of each `configure` cmd payload, in op order (`None` for
+    /// cmd ops without one).
+    cmd_payload: Vec<Option<(String, Pos)>>,
 }
 
 type Fields<'n> = &'n [(Key, Pos, Node)];
@@ -292,6 +295,36 @@ impl L {
         out
     }
 
+    /// `map` keys: integers, or `true`/`false` (lowered to 1/0).
+    fn map_keyed<'n>(&mut self, n: &'n Node, path: &str) -> Vec<(i64, &'n Node)> {
+        let mut out: Vec<(i64, &'n Node)> = Vec::new();
+        let Value::Map(m) = &n.v else {
+            self.e(n, path, "expected an object");
+            return out;
+        };
+        for (k, kp, v) in m {
+            let raw = k.as_int().or(match k.as_json().as_str() {
+                "true" => Some(1),
+                "false" => Some(0),
+                _ => None,
+            });
+            match raw {
+                Some(i) if out.iter().all(|x| x.0 != i) => out.push((i, v)),
+                Some(i) => self.errs.push(Diag {
+                    pos: *kp,
+                    path: path.into(),
+                    message: format!("duplicate key {i}"),
+                }),
+                None => self.errs.push(Diag {
+                    pos: *kp,
+                    path: path.into(),
+                    message: format!("map key {:?} must be an integer or a boolean", k.as_json()),
+                }),
+            }
+        }
+        out
+    }
+
     fn clause(&mut self, n: &Node, path: &str) -> Option<MatchClause> {
         let f = self.obj(
             n,
@@ -305,14 +338,21 @@ impl L {
                 "hw_version",
                 "sw_build",
                 "power",
+                "logical_type",
                 "endpoints",
                 "gp",
+                "x-priority",
             ],
         )?;
         let mut c = MatchClause::default();
         for (k, _, v) in f {
             let p = format!("{path}/{}", k.as_json());
-            match k.as_str().unwrap_or("") {
+            let ks = k.as_str().unwrap_or("");
+            if let Some(ek) = ext_key(keys::CLAUSE_EXT, ks) {
+                c.ext.push((ek, ext_value(v)));
+                continue;
+            }
+            match ks {
                 "manufacturer" => c.manufacturer = self.name_match(v, &p),
                 "model" => c.model = self.name_match(v, &p),
                 "mfr_code" => c.mfr_code = self.u16_(v, &p),
@@ -332,6 +372,9 @@ impl L {
                         |s| Power::parse(s).filter(|x| *x != Power::EnergyHarvesting),
                         "power",
                     )
+                }
+                "logical_type" => {
+                    c.logical_type = self.enum_str(v, &p, LogicalType::parse, "logical type")
                 }
                 "endpoints" => {
                     for (ep, en) in self.int_keyed(v, &p, 1, 254) {
@@ -449,6 +492,43 @@ impl L {
         Some(g)
     }
 
+    /// `query`: a list of `configure`, `announce` and `{interval_s: N}`
+    /// (a bare `{interval_s: N}` is the one-item list).
+    fn tuya_query(&mut self, n: &Node, path: &str) -> Option<TuyaQuery> {
+        let mut q = TuyaQuery {
+            configure: false,
+            announce: false,
+            interval_s: None,
+        };
+        let one = |l: &mut Self, q: &mut TuyaQuery, n: &Node, p: &str| match &n.v {
+            Value::Str(s) if s == "configure" && !q.configure => q.configure = true,
+            Value::Str(s) if s == "announce" && !q.announce => q.announce = true,
+            Value::Map(_) if q.interval_s.is_none() => {
+                let f = l.obj(n, p, &["interval_s"]);
+                q.interval_s = f
+                    .and_then(|f| f.first())
+                    .map(|x| x.2.clone())
+                    .and_then(|x| l.int(&x, &format!("{p}/interval_s"), 1, 0xffff_ffff))
+                    .map(|x| x as u32);
+            }
+            _ => l.e(
+                n,
+                p,
+                "query items are configure, announce and {interval_s} (once each)",
+            ),
+        };
+        match &n.v {
+            Value::Map(_) => one(self, &mut q, n, path),
+            _ => {
+                let items = self.seq(n, path).to_vec();
+                for (i, it) in items.iter().enumerate() {
+                    one(self, &mut q, it, &format!("{path}/{i}"));
+                }
+            }
+        }
+        Some(q)
+    }
+
     fn report(&mut self, n: &Node, path: &str) -> Option<Report> {
         match &n.v {
             Value::Str(s) if s == "off" => Some(Report::Off),
@@ -562,12 +642,26 @@ impl L {
         Some(match kind {
             "write" => ConfigureOp::Write(self.write_attr(v, &p)?),
             "cmd" => {
-                let c = self.cmd_ref(v, &p)?;
+                let payload = match &v.v {
+                    Value::Map(m) => m
+                        .iter()
+                        .position(|x| x.0.as_str() == Some("payload"))
+                        .map(|i| m[i].2.clone()),
+                    _ => None,
+                };
+                let mut bare = v.clone();
+                if let Value::Map(m) = &mut bare.v {
+                    m.retain(|x| x.0.as_str() != Some("payload"));
+                }
+                let c = self.cmd_ref(&bare, &p)?;
+                let src = payload.and_then(|pl| self.expr_src(&pl, &format!("{p}/payload")));
+                self.cmd_payload.push(src);
                 ConfigureOp::Cmd {
                     ep: c.ep,
                     cluster: c.cluster,
                     id: c.id,
                     mfr: c.mfr,
+                    payload: None,
                 }
             }
             "bind" => {
@@ -656,12 +750,12 @@ impl L {
 
     fn codec(&mut self, n: &Node, path: &str) -> Option<Codec> {
         match &n.v {
-            Value::Str(s) => Some(match s.as_str() {
-                "zcl_tagged" => Codec::ZclTagged,
-                "bcd_time" => Codec::BcdTime,
-                "hhmm" => Codec::Hhmm,
-                "ascii" => Codec::Ascii,
-                "utf16be_hex" => Codec::Utf16beHex,
+            Value::Str(s) => Some(match CodecName::parse(s) {
+                Some(CodecName::ZclTagged) => Codec::ZclTagged,
+                Some(CodecName::BcdTime) => Codec::BcdTime,
+                Some(CodecName::Hhmm) => Codec::Hhmm,
+                Some(CodecName::Ascii) => Codec::Ascii,
+                Some(CodecName::Utf16beHex) => Codec::Utf16beHex,
                 _ => {
                     self.e(
                         n,
@@ -683,26 +777,27 @@ impl L {
                 }
                 let (k, _, v) = &f[0];
                 let p = format!("{path}/{}", k.as_json());
+                let variant = |l: &mut Self, n: &Node, p: &str| {
+                    l.enum_str(n, p, ScheduleVariant::parse, "schedule variant")
+                };
                 match k.as_str().unwrap_or("") {
                     "tuya_schedule_day" => {
-                        let pf = self.obj(v, &p, &["day", "transitions"])?;
-                        let (mut day, mut tr) = (None, None);
+                        let pf = self.obj(v, &p, &["day", "transitions", "variant"])?;
+                        let (mut day, mut tr, mut var) = (None, None, ScheduleVariant::MultiDp);
                         for (k2, _, v2) in pf {
+                            let p2 = format!("{p}/{}", k2.as_json());
                             match k2.as_str().unwrap_or("") {
-                                "day" => {
-                                    day = self.int(v2, &format!("{p}/day"), 1, 7).map(|x| x as u8)
-                                }
-                                _ => {
-                                    tr = self
-                                        .int(v2, &format!("{p}/transitions"), 1, 10)
-                                        .map(|x| x as u8)
-                                }
+                                "day" => day = self.int(v2, &p2, 1, 7).map(|x| x as u8),
+                                "variant" => var = variant(self, v2, &p2)?,
+                                _ => tr = self.int(v2, &p2, 1, 10).map(|x| x as u8),
                             }
                         }
                         match (day, tr) {
-                            (Some(day), Some(transitions)) => {
-                                Some(Codec::TuyaScheduleDay { day, transitions })
-                            }
+                            (Some(day), Some(transitions)) => Some(Codec::TuyaScheduleDay {
+                                day,
+                                transitions,
+                                variant: var,
+                            }),
                             _ => {
                                 self.e(v, &p, "needs day and transitions");
                                 None
@@ -710,11 +805,36 @@ impl L {
                         }
                     }
                     "tuya_schedule_week" => {
-                        let pf = self.obj(v, &p, &["variant"])?;
-                        let variant = pf
-                            .first()
-                            .and_then(|e| self.str_(&e.2.clone(), &format!("{p}/variant")))?;
-                        Some(Codec::TuyaScheduleWeek { variant })
+                        let pf =
+                            self.obj(v, &p, &["variant", "transitions", "scale", "min", "max"])?;
+                        let mut w = ScheduleWeek {
+                            variant: ScheduleVariant::MultiDp,
+                            transitions: None,
+                            scale: None,
+                            min: None,
+                            max: None,
+                        };
+                        let mut has_variant = false;
+                        for (k2, _, v2) in pf {
+                            let p2 = format!("{p}/{}", k2.as_json());
+                            match k2.as_str().unwrap_or("") {
+                                "variant" => {
+                                    w.variant = variant(self, v2, &p2)?;
+                                    has_variant = true;
+                                }
+                                "transitions" => {
+                                    w.transitions = self.int(v2, &p2, 1, 10).map(|x| x as u8)
+                                }
+                                "scale" => w.scale = self.int(v2, &p2, 1, 1000).map(|x| x as u16),
+                                "min" => w.min = self.int(v2, &p2, -1000, 1000).map(|x| x as i16),
+                                _ => w.max = self.int(v2, &p2, -1000, 1000).map(|x| x as i16),
+                            }
+                        }
+                        if !has_variant {
+                            self.e(v, &p, "tuya_schedule_week needs variant");
+                            return None;
+                        }
+                        Some(Codec::TuyaScheduleWeek(w))
                     }
                     _ => {
                         let mut bits: Vec<(u8, String)> = Vec::new();
@@ -826,7 +946,7 @@ impl L {
                     e.state_class = self.enum_str(v, &p, StateClass::parse, "state class")
                 }
                 "category" => e.category = self.enum_str(v, &p, Category::parse, "category"),
-                "name" => e.name = self.str_(v, &p),
+                "name" => e.more_mut().name = self.str_(v, &p),
                 "ep" => e.ep = self.int(v, &p, 1, 254).map(|x| x as u8),
                 "zcl" => {
                     let zf = self.obj(v, &p, &["cluster", "attr", "type", "mfr", "ep"])?;
@@ -870,7 +990,7 @@ impl L {
                                 codec = self.enum_str(
                                     v2,
                                     &p2,
-                                    |s| STRUCT_CODECS.contains(&s).then(|| s.to_string()),
+                                    |s| CodecName::parse(s).filter(|c| STRUCT_CODECS.contains(c)),
                                     "struct codec",
                                 )
                             }
@@ -879,7 +999,7 @@ impl L {
                     }
                     match (cl, at, codec) {
                         (Some(cluster), Some(attr), Some(codec)) => {
-                            e.struct_ = Some(StructBinding {
+                            e.more_mut().struct_ = Some(StructBinding {
                                 cluster,
                                 attr,
                                 mfr,
@@ -941,7 +1061,7 @@ impl L {
                 "precision" => e.precision = self.int(v, &p, 0, 15).map(|x| x as u8),
                 "invalid" => e.invalid = self.num(v, &p),
                 "map" => {
-                    for (raw, ln) in self.int_keyed(v, &p, i64::MIN, i64::MAX) {
+                    for (raw, ln) in self.map_keyed(v, &p) {
                         if let Some(l) = self.str_(ln, &format!("{p}/{raw}")) {
                             e.map.push((raw, l));
                         }
@@ -950,23 +1070,12 @@ impl L {
                         self.e(v, &p, "empty map");
                     }
                 }
-                "value_on" => e.value_on = self.scalar(v, &p),
-                "value_off" => e.value_off = self.scalar(v, &p),
+                "value_on" => e.more_mut().value_on = self.scalar(v, &p),
+                "value_off" => e.more_mut().value_off = self.scalar(v, &p),
                 "min" => e.min = self.num(v, &p),
                 "max" => e.max = self.num(v, &p),
                 "step" => e.step = self.num(v, &p),
-                "mode" => {
-                    e.mode = self.enum_str(
-                        v,
-                        &p,
-                        |s| {
-                            ["auto", "box", "slider", "text", "password"]
-                                .contains(&s)
-                                .then(|| s.to_string())
-                        },
-                        "mode",
-                    )
-                }
+                "mode" => e.more_mut().mode = self.enum_str(v, &p, Mode::parse, "mode"),
                 "access" => {
                     if let Some(a) = self.str_(v, &p) {
                         let mut bits = 0u8;
@@ -987,7 +1096,7 @@ impl L {
                 }
                 "report" => e.report = self.report(v, &p),
                 "enabled" => e.enabled = self.bool_(v, &p),
-                "invert" => e.invert = self.bool_(v, &p),
+                "invert" => e.more_mut().invert = self.bool_(v, &p),
                 "parts" => {
                     if let Some(pf) = self.obj(v, &p, keys::PART_NAMES) {
                         for (k2, _, v2) in pf {
@@ -996,15 +1105,17 @@ impl L {
                                 continue;
                             };
                             if let Some((pe, ps)) = self.entity(v2, &format!("{p}/{name}"), false) {
-                                e.parts.push((pk, pe));
+                                e.more_mut().parts.push((pk, pe));
                                 s.parts.push((pk, ps));
                             }
                         }
                     }
-                    e.parts.sort_by_key(|x| x.0);
+                    e.more_mut().parts.sort_by_key(|x| x.0);
                     s.parts.sort_by_key(|x| x.0);
                 }
-                "event_types" => e.event_types = self.list(v, &p, |l, n, p| l.str_(n, p)),
+                "event_types" => {
+                    e.more_mut().event_types = self.list(v, &p, |l, n, p| l.str_(n, p))
+                }
                 "triggers" => {
                     let items = self.seq(v, &p).to_vec();
                     for (i, t) in items.iter().enumerate() {
@@ -1037,7 +1148,7 @@ impl L {
                         if ts.event.is_none() {
                             self.e(t, &tp, "trigger needs event");
                         }
-                        e.triggers.push(tr);
+                        e.more_mut().triggers.push(tr);
                         s.triggers.push(ts);
                     }
                 }
@@ -1053,7 +1164,7 @@ impl L {
                     };
                     if let Some(c) = get("cmd") {
                         if let Some(cmd) = self.cmd_ref(&c, &format!("{p}/cmd")) {
-                            e.press = Some(Press::Cmd { cmd, payload: None });
+                            e.more_mut().press = Some(Press::Cmd { cmd, payload: None });
                         }
                         if let Some(pl) = get("payload") {
                             s.press_payload = self.expr_src(&pl, &format!("{p}/payload"));
@@ -1065,7 +1176,8 @@ impl L {
                         if pf.len() != 1 {
                             self.e(v, &p, "press is {cmd, payload?}, {write} or {tuya, value}");
                         }
-                        e.press = self.write_attr(&w, &format!("{p}/write")).map(Press::Write);
+                        e.more_mut().press =
+                            self.write_attr(&w, &format!("{p}/write")).map(Press::Write);
                     } else if let (Some(t), Some(val)) = (get("tuya"), get("value")) {
                         if pf.len() != 2 {
                             self.e(v, &p, "press is {cmd, payload?}, {write} or {tuya, value}");
@@ -1074,13 +1186,13 @@ impl L {
                             self.tuya_dp(&t, &format!("{p}/tuya")),
                             self.scalar(&val, &format!("{p}/value")),
                         ) {
-                            e.press = Some(Press::Tuya { dp, value });
+                            e.more_mut().press = Some(Press::Tuya { dp, value });
                         }
                     } else {
                         self.e(v, &p, "press is {cmd, payload?}, {write} or {tuya, value}");
                     }
                 }
-                "codec" => e.codec = self.codec(v, &p),
+                "codec" => e.more_mut().codec = self.codec(v, &p),
                 "attrs" => s.attrs = self.named_exprs(v, &p),
                 "hub" => {
                     let Some(hf) = self.obj(v, &p, &["default"]) else {
@@ -1089,11 +1201,12 @@ impl L {
                     let default = hf
                         .first()
                         .and_then(|x| self.scalar(&x.2.clone(), &format!("{p}/default")));
-                    e.hub = Some(HubBinding { default });
+                    e.more_mut().hub = Some(HubBinding { default });
                 }
                 _ => {}
             }
         }
+        e.compact();
         if full && (e.key.is_none() || e.platform.is_none()) {
             self.e(n, path, "an entity needs key and platform");
         }
@@ -1114,7 +1227,16 @@ struct Fill<'p> {
 impl Fill<'_> {
     fn one(&mut self, e: &Entity, site: Site, src: &(String, Pos), path: &str) -> Option<Expr> {
         let ctx = zdef::validate::context_for(e, site, self.gp);
-        match expr::compile(&src.0, self.pool, &ctx) {
+        self.compile(src, &ctx, path)
+    }
+
+    fn compile(
+        &mut self,
+        src: &(String, Pos),
+        ctx: &zdef::expr::Context,
+        path: &str,
+    ) -> Option<Expr> {
+        match expr::compile(&src.0, self.pool, ctx) {
             Ok(c) => {
                 self.longest = self.longest.max(c.len());
                 Some(Expr(c))
@@ -1156,44 +1278,67 @@ impl Fill<'_> {
             e.from = self.one(e, Site::From, x, &format!("{path}/from"));
         }
         if let Some(x) = &s.to {
-            e.to = self.one(e, Site::To, x, &format!("{path}/to"));
+            let c = self.one(e, Site::To, x, &format!("{path}/to"));
+            e.more_mut().to = c;
         }
         if let Some(x) = &s.reset_after {
-            e.reset_after = self.one(e, Site::ResetAfter, x, &format!("{path}/reset_after"));
+            let c = self.one(e, Site::ResetAfter, x, &format!("{path}/reset_after"));
+            e.more_mut().reset_after = c;
         }
-        for ((k, pe), (_, ps)) in e.parts.iter_mut().zip(&s.parts) {
-            let name = keys::sub_name(*k as u64).unwrap_or("?");
-            self.entity(pe, ps, &format!("{path}/parts/{name}"));
+        if let Some(m) = e.more.as_deref_mut() {
+            for ((k, pe), (_, ps)) in m.parts.iter_mut().zip(&s.parts) {
+                let name = keys::sub_name(*k as u64).unwrap_or("?");
+                self.entity(pe, ps, &format!("{path}/parts/{name}"));
+            }
         }
-        for t in &e.event_types {
+        for t in &e.more().event_types {
             expr::intern(self.pool, Const::Str(t.clone()));
         }
         let snapshot = e.clone();
-        for (i, (t, ts)) in e.triggers.iter_mut().zip(&s.triggers).enumerate() {
-            let tp = format!("{path}/triggers/{i}");
-            t.attrs = self.named(&snapshot, &ts.attrs, &format!("{tp}/attrs"));
-            if let Some(x) = &ts.when {
-                t.when = self.one(&snapshot, Site::When, x, &format!("{tp}/when"));
-            }
-            if let Some(x) = &ts.event {
-                if let Some(c) = self.one(&snapshot, Site::Event, x, &format!("{tp}/event")) {
-                    t.event = c;
+        if let Some(m) = e.more.as_deref_mut() {
+            for (i, (t, ts)) in m.triggers.iter_mut().zip(&s.triggers).enumerate() {
+                let tp = format!("{path}/triggers/{i}");
+                t.attrs = self.named(&snapshot, &ts.attrs, &format!("{tp}/attrs"));
+                if let Some(x) = &ts.when {
+                    t.when = self.one(&snapshot, Site::When, x, &format!("{tp}/when"));
+                }
+                if let Some(x) = &ts.event {
+                    if let Some(c) = self.one(&snapshot, Site::Event, x, &format!("{tp}/event")) {
+                        t.event = c;
+                    }
                 }
             }
-        }
-        if let (Some(Press::Cmd { payload, .. }), Some(x)) = (&mut e.press, &s.press_payload) {
-            *payload = self.one(
-                &snapshot,
-                Site::PressPayload,
-                x,
-                &format!("{path}/press/payload"),
-            );
+            if let (Some(Press::Cmd { payload, .. }), Some(x)) = (&mut m.press, &s.press_payload) {
+                *payload = self.one(
+                    &snapshot,
+                    Site::PressPayload,
+                    x,
+                    &format!("{path}/press/payload"),
+                );
+            }
         }
         if let Some(x) = &s.present_if {
-            e.present_if = self.one(&snapshot, Site::PresentIf, x, &format!("{path}/present_if"));
+            let c = self.one(&snapshot, Site::PresentIf, x, &format!("{path}/present_if"));
+            e.more_mut().present_if = c;
         }
-        e.attrs = self.named(&snapshot, &s.attrs, &format!("{path}/attrs"));
+        let attrs = self.named(&snapshot, &s.attrs, &format!("{path}/attrs"));
+        if !attrs.is_empty() {
+            e.more_mut().attrs = attrs;
+        }
+        e.compact();
     }
+}
+
+/// Source key of a named optional extension -> CBOR key.
+fn ext_key(table: &[(u16, &str)], name: &str) -> Option<u64> {
+    table.iter().find(|x| x.1 == name).map(|x| x.0 as u64)
+}
+
+/// Extension value: canonical CBOR with text keys.
+fn ext_value(n: &Node) -> Vec<u8> {
+    let mut w = zdef::cbor::Writer::new();
+    raw_cbor(n, &mut w);
+    w.into_vec()
 }
 
 /// Generic tree -> CBOR (text keys), for the reserved `x-wasm` block.
@@ -1254,7 +1399,9 @@ const TOP_FIELDS: &[&str] = &[
     "mfr",
     "priority",
     "self_description",
+    "templates",
     "x-wasm",
+    "x-partial",
 ];
 
 fn source_is_gp(root: &Node) -> bool {
@@ -1284,7 +1431,10 @@ fn source_is_gp(root: &Node) -> bool {
 /// Lowers a parsed source tree into a definition (expressions compiled,
 /// `requires` computed and merged with the written list).
 pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
-    let mut l = L { errs: Vec::new() };
+    let mut l = L {
+        errs: Vec::new(),
+        cmd_payload: Vec::new(),
+    };
     let Some(top) = l.obj(root, "", TOP_FIELDS) else {
         return Err(l.errs);
     };
@@ -1369,12 +1519,9 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                         "sleepy" => dev.sleepy = l.bool_(v2, &p2),
                         "battery" => {
                             dev.battery = match &v2.v {
-                                Value::Str(s) => {
-                                    if !BATTERY_CURVES.contains(&s.as_str()) {
-                                        l.e(v2, &p2, format!("unknown battery curve {s:?}"));
-                                    }
-                                    Some(Battery::Curve(s.clone()))
-                                }
+                                Value::Str(_) => l
+                                    .enum_str(v2, &p2, BatteryCurve::parse, "battery curve")
+                                    .map(Battery::Curve),
                                 _ => {
                                     let bf = l.obj(v2, &p2, &["voltage_to_percent"]);
                                     match bf.and_then(|b| b.first()).map(|x| x.2.clone()) {
@@ -1501,7 +1648,7 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                             t.time_sync = match &v2.v {
                                 Value::Int(1970) => Some(TimeSync::Epoch1970),
                                 Value::Int(2000) => Some(TimeSync::Epoch2000),
-                                Value::Str(s) if s == "off" => Some(TimeSync::Off),
+                                Value::Str(s) if TimeSync::parse(s).is_some() => TimeSync::parse(s),
                                 _ => {
                                     l.e(v2, &p2, "time_sync is \"off\", 1970 or 2000");
                                     None
@@ -1510,52 +1657,13 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                         }
                         "force_time_sync_s" => t.force_time_sync_s = l.u32_(v2, &p2),
                         "magic_packet" => t.magic_packet = l.bool_(v2, &p2),
-                        "query" => {
-                            t.query = match &v2.v {
-                                Value::Map(_) => {
-                                    let qf = l.obj(v2, &p2, &["interval_s"]);
-                                    qf.and_then(|q| q.first())
-                                        .map(|x| x.2.clone())
-                                        .and_then(|n| l.u32_(&n, &format!("{p2}/interval_s")))
-                                        .map(TuyaQuery::Interval)
-                                }
-                                _ => {
-                                    let items = l.list(v2, &p2, |l, n, p| {
-                                        l.enum_str(
-                                            n,
-                                            p,
-                                            |s| {
-                                                ["configure", "announce"]
-                                                    .contains(&s)
-                                                    .then(|| s.to_string())
-                                            },
-                                            "query event",
-                                        )
-                                    });
-                                    Some(TuyaQuery::On {
-                                        configure: items.iter().any(|s| s == "configure"),
-                                        announce: items.iter().any(|s| s == "announce"),
-                                    })
-                                }
-                            }
-                        }
+                        "query" => t.query = l.tuya_query(v2, &p2),
                         "bind_basic" => t.bind_basic = l.bool_(v2, &p2),
                         "gateway_status" => t.gateway_status = l.bool_(v2, &p2),
                         "mcu_version" => t.mcu_version = l.bool_(v2, &p2),
                         "optimistic" => t.optimistic = l.bool_(v2, &p2),
                         "dedup" => t.dedup = l.bool_(v2, &p2),
-                        _ => {
-                            t.send = l.enum_str(
-                                v2,
-                                &p2,
-                                |s| match s {
-                                    "dataRequest" => Some(TuyaSend::DataRequest),
-                                    "sendData" => Some(TuyaSend::SendData),
-                                    _ => None,
-                                },
-                                "send command",
-                            )
-                        }
+                        _ => t.send = l.enum_str(v2, &p2, TuyaSend::parse, "send command"),
                     }
                 }
                 d.tuya = Some(t);
@@ -1608,6 +1716,31 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                     Some(IgnoreRule { ep, cluster, cmd })
                 })
             }
+            "templates" => {
+                d.templates = l.list(v, &p, |l, n, p| {
+                    let f = l.obj(n, p, &["name", "params"])?;
+                    let mut name = None;
+                    let mut params = None;
+                    for (k2, _, v2) in f {
+                        let p2 = format!("{p}/{}", k2.as_json());
+                        match k2.as_str().unwrap_or("") {
+                            "name" => name = l.enum_str(v2, &p2, TemplateName::parse, "template"),
+                            _ => params = Some(ext_value(v2)),
+                        }
+                    }
+                    match name {
+                        Some(name) => Some(Template { name, params }),
+                        None => {
+                            l.e(n, p, "a template needs name");
+                            None
+                        }
+                    }
+                })
+            }
+            "x-partial" => {
+                let ek = ext_key(keys::TOP_EXT, key).unwrap_or(64);
+                d.ext.push((ek, ext_value(v)));
+            }
             "x-wasm" => {
                 let mut w = zdef::cbor::Writer::new();
                 raw_cbor(v, &mut w);
@@ -1645,6 +1778,15 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
     if let Some(g) = &mut d.generic {
         for ((k, e), s) in g.patch.iter_mut().zip(&patch_src) {
             fill.entity(e, s, &format!("/generic/patch/{k}"));
+        }
+    }
+    let mut cmd_src = l.cmd_payload.iter();
+    for (i, op) in d.configure.iter_mut().enumerate() {
+        if let ConfigureOp::Cmd { payload, .. } = op {
+            if let Some(Some(x)) = cmd_src.next() {
+                let ctx = zdef::validate::configure_payload_context(gp);
+                *payload = fill.compile(x, &ctx, &format!("/configure/{i}/cmd/payload"));
+            }
         }
     }
     for (i, (e, s)) in d.entities.iter_mut().zip(&esrc).enumerate() {

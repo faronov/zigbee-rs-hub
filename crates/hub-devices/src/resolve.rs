@@ -99,6 +99,18 @@ impl ExprEnv for FpEnv<'_> {
             "stack_version" => o(self.0.stack_version),
             "mfr_code" => o(self.0.mfr_code.map(u32::from)),
             "sw_build" => self.0.sw_build_id.clone().map_or(Value::Null, Value::Str),
+            "zcl_version" => o(self.0.zcl_version),
+            "date_code" => self.0.date_code.clone().map_or(Value::Null, Value::Str),
+            "manufacturer" => self
+                .0
+                .manufacturer_name
+                .as_deref()
+                .map_or(Value::Null, |m| {
+                    Value::Str(zdef::matching::trim_name(m).to_string())
+                }),
+            "model" => self.0.model_id.as_deref().map_or(Value::Null, |m| {
+                Value::Str(zdef::matching::trim_name(m).to_string())
+            }),
             _ => Value::Null,
         }
     }

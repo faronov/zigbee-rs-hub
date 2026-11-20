@@ -227,9 +227,10 @@ fn bank_build_lookup_tamper() {
         )
         .unwrap();
         if !c.def.is_fragment() {
-            defs.push((p.display().to_string(), c.cbor));
+            defs.push(zdefc::bank::Item::new(&p.display().to_string(), c.cbor).unwrap());
         }
     }
+    let defs: Vec<&zdefc::bank::Item> = defs.iter().collect();
     let key = zdefc::bank::SigningKey::from_seed([7; 32]);
     let params = zdefc::bank::BankParams {
         generation: 3,
@@ -237,9 +238,14 @@ fn bank_build_lookup_tamper() {
         catalog_serial: 1,
         max_size: 256 * 1024,
     };
-    let built = zdefc::bank::build_bank(&defs, &params, &key).unwrap();
+    let unsigned = zdefc::bank::build_bank(&defs, &params).unwrap();
+    assert_eq!(Bank::parse(&unsigned.bytes).unwrap().header.sig_len, 0);
+    let signed = zdefc::bank::sign_bank(&unsigned.bytes, &key).unwrap();
+    assert_eq!(signed.len(), unsigned.report.total);
+    // re-signing replaces the signature
+    assert_eq!(zdefc::bank::sign_bank(&signed, &key).unwrap(), signed);
     let keys = [zdef::sign::TrustedKey::new(key.public())];
-    let bank = Bank::parse(&built.bytes).unwrap();
+    let bank = Bank::parse(&signed).unwrap();
     bank.verify(&keys).unwrap();
     assert_eq!(bank.header.definitions as usize, defs.len());
     let mut inf = MinizInflate::new();
@@ -268,6 +274,8 @@ fn bank_build_lookup_tamper() {
         commands: vec![],
         server_clusters: vec![],
         client_clusters: vec![],
+        switch_info: None,
+        security_level: None,
     };
     let found: Vec<String> = lookup_hashes(Identity::Gp(&g))
         .into_iter()
@@ -278,14 +286,14 @@ fn bank_build_lookup_tamper() {
         .collect();
     assert_eq!(found, ["efektalab/bgt1-gp"]);
     // tampering: body byte, header byte, wrong key
-    let mut t = built.bytes.clone();
+    let mut t = signed.clone();
     let n = t.len();
     t[n - 10] ^= 1;
     assert_eq!(
         Bank::parse(&t).unwrap().verify(&keys),
         Err(zdef::bank::BankError::BodyHash)
     );
-    let mut t = built.bytes.clone();
+    let mut t = signed.clone();
     t[8] ^= 1; // generation
     assert!(matches!(
         Bank::parse(&t).unwrap().verify(&keys),
@@ -303,23 +311,47 @@ fn bank_build_lookup_tamper() {
         ))
     ));
     // manifest and shards
-    let m = zdefc::bank::build_manifest(
+    let (shards, content) = zdefc::bank::build_shards(&defs).unwrap();
+    let man0 = zdefc::bank::manifest(
         &params,
-        &[("bank-4m.zdb".into(), &built.bytes)],
-        &built.shards,
+        &[zdefc::bank::BankFile {
+            name: "bank-4m.zdb".into(),
+            bytes: &signed,
+            definitions: defs.len() as u32,
+            generation: 3,
+        }],
+        &shards,
         vec![1],
-        &key,
+        Some(content),
+        vec![
+            ("commit".into(), "abc".into()),
+            ("zhc".into(), "25.1.0".into()),
+        ],
     );
+    let m = key.cose_sign1(&man0.encode(), false);
     let man = zdef::sign::Manifest::verify(&m, &keys).unwrap();
-    assert_eq!(man.banks[0].sha256, zdef::hash::sha256(&built.bytes));
+    assert_eq!(man, man0);
+    assert_eq!(man.banks[0].sha256, zdef::hash::sha256(&signed));
     assert_eq!(man.shards.len(), 256);
-    for (h, s) in &built.shards {
+    let mut recs = 0;
+    for (h, s) in &shards {
         assert_eq!(man.shards[*h as usize], Some(zdef::hash::sha256(s)));
         for rec in zdef::bank::decode_shard(s).unwrap() {
-            assert_eq!(zdef::bank::shard_of(rec.key_hash), *h);
+            assert!(
+                rec.key_hashes
+                    .iter()
+                    .all(|k| zdef::bank::shard_of(*k) == *h)
+            );
+            assert!(rec.key_hashes.windows(2).all(|w| w[0] < w[1]));
             zdef::load_canonical(&rec.definition, &zdef::HubFeatures::v1()).unwrap();
+            recs += 1;
         }
+        assert_eq!(
+            zdef::bank::encode_shard(&zdef::bank::decode_shard(s).unwrap()),
+            *s
+        );
     }
+    assert!(recs >= defs.len());
     let mut bad = m.clone();
     let k = bad.len() - 70;
     bad[k] ^= 1;
@@ -330,9 +362,90 @@ fn bank_build_lookup_tamper() {
         ..params
     };
     assert!(
-        zdefc::bank::build_bank(&defs, &small, &key)
+        zdefc::bank::build_bank(&defs, &small)
             .err()
             .unwrap()
             .contains("above")
     );
+}
+
+/// The committed catalog public key (keys/zdef-catalog-ed25519.pub.pem) is
+/// the one the user confirmed; its key ID is what manifests carry.
+#[test]
+fn committed_catalog_public_key() {
+    let pem = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../keys/zdef-catalog-ed25519.pub.pem"),
+    )
+    .unwrap();
+    let pk = zdefc::keys::parse_public(&pem).unwrap();
+    assert_eq!(
+        zdefc::hex(&pk),
+        "ff931767df347a7bccd14b69602d4eb7841ef8503f771248b717f4554f63c6a2"
+    );
+    assert_eq!(zdefc::hex(&zdef::sign::key_id(&pk)), "66f64ac1cbfc9e27");
+    assert_eq!(zdefc::keys::public_pem(&pk), pem);
+}
+
+/// `catalog build` from a plan, `sign`, `verify`: banks hold the largest
+/// priority prefix that fits, shards hold everything.
+#[test]
+fn catalog_plan_sign_verify() {
+    let dir = std::env::temp_dir().join(format!("zdefc-catalog-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let ex = root().join("../../definitions/examples");
+    let mut files: Vec<String> = fs::read_dir(&ex)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| !p.to_string_lossy().contains("selfdesc"))
+        .map(|p| p.display().to_string())
+        .collect();
+    files.sort();
+    let q = |v: &[String]| {
+        v.iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let plan = format!(
+        r#"{{"date": 20261121, "serial": 2, "requires": ["expr-v1"], "source": {{"commit": "abc"}},
+            "definitions": [{}],
+            "banks": [{{"name": "bank-small.zdb", "max_size": 2500, "candidates": [{}]}},
+                      {{"name": "bank-big.zdb", "max_size": 262144, "candidates": [{}]}}]}}"#,
+        q(&files),
+        q(&files),
+        q(&files)
+    );
+    let plan = zdefc::catalog::Plan::parse(&plan, std::path::Path::new("/")).unwrap();
+    assert_eq!(plan.params.generation, 2026112102);
+    let o = zdefc::catalog::build(&plan, &dir, None).unwrap();
+    assert!(!o.signed && !dir.join("manifest.cose").exists());
+    let small = &o.banks[0];
+    assert!(small.size <= 2500 && !small.included.is_empty() && !small.no_room.is_empty());
+    assert_eq!(o.banks[1].included.len(), files.len());
+    assert!(
+        fs::read_to_string(dir.join("catalog.json"))
+            .unwrap()
+            .contains("\"no_room\"")
+    );
+    let key = zdefc::bank::SigningKey::from_seed([9; 32]);
+    zdefc::catalog::sign(&dir, &key).unwrap();
+    let m = zdefc::catalog::verify(&dir, key.public()).unwrap();
+    assert_eq!((m.catalog_date, m.catalog_serial), (20261121, 2));
+    assert_eq!(m.banks[1].definitions as usize, files.len());
+    assert!(
+        zdefc::catalog::verify(&dir, zdefc::bank::SigningKey::from_seed([1; 32]).public()).is_err()
+    );
+    // a changed shard is caught
+    let shard = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains("shard-"))
+        .unwrap();
+    let mut b = fs::read(&shard).unwrap();
+    let n = b.len();
+    b[n - 1] ^= 1;
+    fs::write(&shard, b).unwrap();
+    assert!(zdefc::catalog::verify(&dir, key.public()).is_err());
+    let _ = fs::remove_dir_all(&dir);
 }

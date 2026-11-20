@@ -9,9 +9,11 @@
 #![allow(clippy::collapsible_if)]
 
 pub mod bank;
+pub mod catalog;
 pub mod emit;
 pub mod expr;
 pub mod json5;
+pub mod keys;
 pub mod lower;
 pub mod raise;
 pub mod schema;
@@ -101,11 +103,19 @@ pub fn compile_tree(root: &Node, opts: &Options) -> Result<Compiled, Vec<Diag>> 
         let ignore_requires = !opts.emit_requires;
         let v: Vec<Diag> = v
             .into_iter()
-            .filter(|e| !(ignore_requires && e.path == "requires"))
-            .map(|e| Diag {
-                pos: Default::default(),
-                path: format!("/{}", e.path.replace(['.', '['], "/").replace(']', "")),
-                message: e.message,
+            .filter(|e| !(ignore_requires && e.path.section == "requires"))
+            .map(|e| {
+                let path = e.path.to_string();
+                let full = e.to_string();
+                let message = full
+                    .strip_prefix(&format!("{path}: "))
+                    .unwrap_or(&full)
+                    .to_string();
+                Diag {
+                    pos: Default::default(),
+                    path: format!("/{}", path.replace(['.', '['], "/").replace(']', "")),
+                    message,
+                }
             })
             .collect();
         if !v.is_empty() {

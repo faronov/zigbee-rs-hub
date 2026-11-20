@@ -13,7 +13,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use crate::enums::{Category, Platform, StateClass, TableRef, TuyaType};
+pub use crate::enums::{
+    BatteryCurve, Category, CodecName, LogicalType, Mode, Platform, Power, ScheduleVariant,
+    SelfDescription, StateClass, TableRef, TemplateName, TimeSync, TuyaSend, TuyaType,
+};
 
 /// A number field: `mul`, `div`, `offset`, `min`, `max`, `step`, `invalid`,
 /// reportable change. Integral values are always `Int` (spec 8.1).
@@ -88,56 +91,6 @@ pub enum Kind {
     Fragment,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Power {
-    Mains,
-    Battery,
-    EnergyHarvesting,
-}
-
-impl Power {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Power::Mains => "mains",
-            Power::Battery => "battery",
-            Power::EnergyHarvesting => "energy_harvesting",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "mains" => Power::Mains,
-            "battery" => Power::Battery,
-            "energy_harvesting" => Power::EnergyHarvesting,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelfDescription {
-    Ignore,
-    Under,
-    Over,
-}
-
-impl SelfDescription {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SelfDescription::Ignore => "ignore",
-            SelfDescription::Under => "under",
-            SelfDescription::Over => "over",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "ignore" => SelfDescription::Ignore,
-            "under" => SelfDescription::Under,
-            "over" => SelfDescription::Over,
-            _ => return None,
-        })
-    }
-}
-
 /// A complete definition or a self-description fragment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Definition {
@@ -166,6 +119,8 @@ pub struct Definition {
     pub mfr: Option<u16>,
     pub priority: Option<i64>,
     pub self_description: Option<SelfDescription>,
+    /// Vendor templates (C tier, spec 17.4), key 21.
+    pub templates: Vec<Template>,
     /// Reserved `x-wasm` block (spec 6.9), kept as raw CBOR.
     pub x_wasm: Option<Vec<u8>>,
     /// Optional-extension keys 64..=127 (raw CBOR values), ascending.
@@ -198,6 +153,7 @@ impl Definition {
             mfr: None,
             priority: None,
             self_description: None,
+            templates: Vec::new(),
             x_wasm: None,
             ext: Vec::new(),
         }
@@ -256,8 +212,11 @@ pub struct MatchClause {
     pub hw_version: Option<VersionRange>,
     pub sw_build: Option<NameMatch>,
     pub power: Option<Power>,
+    pub logical_type: Option<LogicalType>,
     pub endpoints: Vec<(u8, EpMatch)>,
     pub gp: Option<GpMatch>,
+    /// Optional-extension keys 64..=127 (raw CBOR values), e.g. `x-priority`.
+    pub ext: Vec<(u64, Vec<u8>)>,
 }
 
 /// String matcher. CBOR: text = exact, array = any of, `{18: s}` = prefix.
@@ -338,11 +297,9 @@ pub struct Device {
 pub enum Battery {
     /// `{voltage_to_percent: [min_mV, max_mV]}`
     Linear { min_mv: u32, max_mv: u32 },
-    /// Named curve (`3V_2100`, `3V_1500_2800`, `CR2032`).
-    Curve(String),
+    /// Named curve.
+    Curve(BatteryCurve),
 }
-
-pub const BATTERY_CURVES: &[&str] = &["3V_2100", "3V_1500_2800", "CR2032"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Availability {
@@ -374,25 +331,14 @@ pub struct Tuya {
     pub dedup: Option<bool>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimeSync {
-    Off,
-    Epoch1970,
-    Epoch2000,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TuyaQuery {
-    /// `[configure, announce]`
-    On { configure: bool, announce: bool },
-    /// `{interval_s}`
-    Interval(u32),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TuyaSend {
-    DataRequest,
-    SendData,
+/// `tuya.query`: dataQuery after configure / Device_annce and/or periodically.
+/// Source: a list of `configure`, `announce` and `{interval_s: n}` items.
+/// CBOR: `query` (40) = bitmask (1 configure, 2 announce), `interval_s` (146).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TuyaQuery {
+    pub configure: bool,
+    pub announce: bool,
+    pub interval_s: Option<u32>,
 }
 
 /// Configure op (spec 6.8), one kind per list item.
@@ -417,11 +363,13 @@ pub enum ConfigureOp {
         report: Report,
         mfr: Option<u16>,
     },
+    /// ZCL command; `payload` is an expression evaluated like `press.payload`.
     Cmd {
         ep: Option<u8>,
         cluster: u16,
         id: u8,
         mfr: Option<u16>,
+        payload: Option<Expr>,
     },
     Group {
         ep: Option<u8>,
@@ -458,6 +406,10 @@ pub struct IgnoreRule {
 
 /// Entity, `parts` entry or `generic.patch` entry (spec 6.3). In a full
 /// entity `key` and `platform` are present; parts and patches omit them.
+///
+/// Fields most entities use are inline; the rest live in [`EntityMore`]
+/// behind one pointer (`more()` / `more_mut()`), which keeps a sensor entity
+/// small while loaded.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Entity {
     pub key: Option<String>,
@@ -466,31 +418,39 @@ pub struct Entity {
     pub unit: Option<TableRef>,
     pub state_class: Option<StateClass>,
     pub category: Option<Category>,
-    pub name: Option<String>,
     pub ep: Option<u8>,
+    pub precision: Option<u8>,
+    /// Access bits (`enums::ACCESS_*`).
+    pub access: Option<u8>,
+    pub enabled: Option<bool>,
     pub zcl: Option<ZclBinding>,
     pub tuya: Option<TuyaDp>,
-    pub struct_: Option<StructBinding>,
     pub gp: Option<GpBinding>,
     pub from: Option<Expr>,
-    pub to: Option<Expr>,
     pub mul: Option<Num>,
     pub div: Option<Num>,
     pub offset: Option<Num>,
-    pub precision: Option<u8>,
     pub invalid: Option<Num>,
-    /// `map` transform: raw value -> label, in source (option) order.
-    pub map: Vec<(i64, String)>,
-    pub value_on: Option<Scalar>,
-    pub value_off: Option<Scalar>,
     pub min: Option<Num>,
     pub max: Option<Num>,
     pub step: Option<Num>,
-    pub mode: Option<String>,
-    /// Access bits (`enums::ACCESS_*`).
-    pub access: Option<u8>,
     pub report: Option<Report>,
-    pub enabled: Option<bool>,
+    /// `map` transform: raw value -> label, in source (option) order.
+    /// Source `true`/`false` raw values are stored as 1/0.
+    pub map: Vec<(i64, String)>,
+    /// Rarely used fields; `None` when all of them are absent.
+    pub more: Option<alloc::boxed::Box<EntityMore>>,
+}
+
+/// The out-of-line part of an [`Entity`].
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct EntityMore {
+    pub name: Option<String>,
+    pub struct_: Option<StructBinding>,
+    pub to: Option<Expr>,
+    pub value_on: Option<Scalar>,
+    pub value_off: Option<Scalar>,
+    pub mode: Option<Mode>,
     pub reset_after: Option<Expr>,
     /// Composite parts by part key (a [`crate::keys::SUB`] key, see `keys::PART_NAMES`).
     pub parts: Vec<(u16, Entity)>,
@@ -506,7 +466,52 @@ pub struct Entity {
     pub ext: Vec<(u64, Vec<u8>)>,
 }
 
+impl EntityMore {
+    pub const EMPTY: EntityMore = EntityMore {
+        name: None,
+        struct_: None,
+        to: None,
+        value_on: None,
+        value_off: None,
+        mode: None,
+        reset_after: None,
+        parts: Vec::new(),
+        event_types: Vec::new(),
+        triggers: Vec::new(),
+        press: None,
+        codec: None,
+        present_if: None,
+        attrs: Vec::new(),
+        hub: None,
+        invert: None,
+        ext: Vec::new(),
+    };
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::EMPTY
+    }
+}
+
+static EMPTY_MORE: EntityMore = EntityMore::EMPTY;
+
 impl Entity {
+    /// The out-of-line fields (an empty set when there are none).
+    pub fn more(&self) -> &EntityMore {
+        self.more.as_deref().unwrap_or(&EMPTY_MORE)
+    }
+
+    /// Mutable out-of-line fields, allocated on first use.
+    pub fn more_mut(&mut self) -> &mut EntityMore {
+        self.more.get_or_insert_with(Default::default)
+    }
+
+    /// Drops an empty out-of-line block (keeps `PartialEq` meaningful).
+    pub fn compact(&mut self) {
+        if self.more.as_ref().is_some_and(|m| m.is_empty()) {
+            self.more = None;
+        }
+    }
+
     /// Effective access bits.
     pub fn access_bits(&self) -> u8 {
         self.access
@@ -516,25 +521,26 @@ impl Entity {
 
     pub fn part(&self, name: &str) -> Option<&Entity> {
         let k = crate::keys::sub_key(name)?;
-        self.parts.iter().find(|p| p.0 == k).map(|p| &p.1)
+        self.more().parts.iter().find(|p| p.0 == k).map(|p| &p.1)
     }
 
     /// Visits every expression of this entity (and its parts) in canonical order.
     pub fn for_each_expr<'s>(&'s self, f: &mut dyn FnMut(crate::expr::Site, &'s Expr)) {
         use crate::expr::Site;
+        let m = self.more();
         if let Some(e) = &self.from {
             f(Site::From, e);
         }
-        if let Some(e) = &self.to {
+        if let Some(e) = &m.to {
             f(Site::To, e);
         }
-        if let Some(e) = &self.reset_after {
+        if let Some(e) = &m.reset_after {
             f(Site::ResetAfter, e);
         }
-        for (_, p) in &self.parts {
+        for (_, p) in &m.parts {
             p.for_each_expr(f);
         }
-        for t in &self.triggers {
+        for t in &m.triggers {
             for (_, e) in &t.attrs {
                 f(Site::Attr, e);
             }
@@ -545,14 +551,14 @@ impl Entity {
         }
         if let Some(Press::Cmd {
             payload: Some(e), ..
-        }) = &self.press
+        }) = &m.press
         {
             f(Site::PressPayload, e);
         }
-        if let Some(e) = &self.present_if {
+        if let Some(e) = &m.present_if {
             f(Site::PresentIf, e);
         }
-        for (_, e) in &self.attrs {
+        for (_, e) in &m.attrs {
             f(Site::Attr, e);
         }
     }
@@ -580,8 +586,8 @@ pub struct StructBinding {
     pub attr: u16,
     pub mfr: Option<u16>,
     pub ep: Option<u8>,
-    /// Named struct codec (`zcl_tagged`).
-    pub codec: String,
+    /// Named struct codec (only `zcl_tagged` in v1).
+    pub codec: CodecName,
     pub tag: Option<i64>,
 }
 
@@ -639,12 +645,20 @@ pub enum Press {
     Tuya { dp: TuyaDp, value: Scalar },
 }
 
-/// Named codec (spec 6.6).
+/// Named codec (spec 6.6). CBOR: the codec code (`CodecName`) or, with
+/// parameters, `{code: {param: value}}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Codec {
     ZclTagged,
-    TuyaScheduleDay { day: u8, transitions: u8 },
-    TuyaScheduleWeek { variant: String },
+    /// One day per DP with a day number (`multi_dp`: herdsman
+    /// `thermostatScheduleDayMultiDPWithDayNumber`; `trv602z`).
+    TuyaScheduleDay {
+        day: u8,
+        transitions: u8,
+        variant: ScheduleVariant,
+    },
+    /// A day schedule without day number (all variants), see [`ScheduleVariant`].
+    TuyaScheduleWeek(ScheduleWeek),
     BcdTime,
     Hhmm,
     Ascii,
@@ -652,34 +666,64 @@ pub enum Codec {
     BitmapFlags(Vec<(u8, String)>),
 }
 
+/// Parameters of `tuya_schedule_week`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduleWeek {
+    pub variant: ScheduleVariant,
+    /// Transitions per day (`multi_dp`, default 4).
+    pub transitions: Option<u8>,
+    /// Temperature scale (`multi_dp`, default 10).
+    pub scale: Option<u16>,
+    /// Allowed temperature range in °C (`multi_dp`, defaults 5 and 35).
+    pub min: Option<i16>,
+    pub max: Option<i16>,
+}
+
 impl Codec {
-    pub fn name(&self) -> &'static str {
+    pub fn kind(&self) -> CodecName {
         match self {
-            Codec::ZclTagged => "zcl_tagged",
-            Codec::TuyaScheduleDay { .. } => "tuya_schedule_day",
-            Codec::TuyaScheduleWeek { .. } => "tuya_schedule_week",
-            Codec::BcdTime => "bcd_time",
-            Codec::Hhmm => "hhmm",
-            Codec::Ascii => "ascii",
-            Codec::Utf16beHex => "utf16be_hex",
-            Codec::BitmapFlags(_) => "bitmap_flags",
+            Codec::ZclTagged => CodecName::ZclTagged,
+            Codec::TuyaScheduleDay { .. } => CodecName::TuyaScheduleDay,
+            Codec::TuyaScheduleWeek(_) => CodecName::TuyaScheduleWeek,
+            Codec::BcdTime => CodecName::BcdTime,
+            Codec::Hhmm => CodecName::Hhmm,
+            Codec::Ascii => CodecName::Ascii,
+            Codec::Utf16beHex => CodecName::Utf16beHex,
+            Codec::BitmapFlags(_) => CodecName::BitmapFlags,
         }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.kind().as_str()
     }
 
     pub fn feature(&self) -> crate::enums::Feature {
-        use crate::enums::Feature as F;
-        match self {
-            Codec::ZclTagged => F::StructZclTagged,
-            Codec::TuyaScheduleDay { .. } => F::CodecTuyaScheduleDay,
-            Codec::TuyaScheduleWeek { .. } => F::CodecTuyaScheduleWeek,
-            Codec::BcdTime => F::CodecBcdTime,
-            Codec::Hhmm => F::CodecHhmm,
-            Codec::Ascii => F::CodecAscii,
-            Codec::Utf16beHex => F::CodecUtf16beHex,
-            Codec::BitmapFlags(_) => F::CodecBitmapFlags,
-        }
+        codec_feature(self.kind())
     }
 }
 
+/// Feature ID of a codec (spec 8.5).
+pub fn codec_feature(c: CodecName) -> crate::enums::Feature {
+    use crate::enums::Feature as F;
+    match c {
+        CodecName::ZclTagged => F::StructZclTagged,
+        CodecName::TuyaScheduleDay => F::CodecTuyaScheduleDay,
+        CodecName::TuyaScheduleWeek => F::CodecTuyaScheduleWeek,
+        CodecName::BcdTime => F::CodecBcdTime,
+        CodecName::Hhmm => F::CodecHhmm,
+        CodecName::Ascii => F::CodecAscii,
+        CodecName::Utf16beHex => F::CodecUtf16beHex,
+        CodecName::BitmapFlags => F::CodecBitmapFlags,
+    }
+}
+
+/// A vendor template reference (spec 17.4): name and free-form parameters
+/// (canonical CBOR map with text keys, kept raw).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Template {
+    pub name: TemplateName,
+    pub params: Option<Vec<u8>>,
+}
+
 /// Struct codecs usable in `struct.codec`.
-pub const STRUCT_CODECS: &[&str] = &["zcl_tagged"];
+pub const STRUCT_CODECS: &[CodecName] = &[CodecName::ZclTagged];

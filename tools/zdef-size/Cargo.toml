@@ -15,9 +15,11 @@ vm = []
 matching = []
 resolve = []
 bank = []
+# Software SHA-256 and miniz_oxide instead of the ROM/accelerator stand-ins.
+soft = ["zdef/miniz", "zdef/soft-sha256"]
 
 [dependencies]
-zdef = { path = "../../crates/zdef" }
+zdef = { path = "../../crates/zdef", default-features = false, features = ["bank", "sign"] }
 
 [profile.release]
 opt-level = "s"

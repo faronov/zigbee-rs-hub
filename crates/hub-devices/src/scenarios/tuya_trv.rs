@@ -34,6 +34,7 @@ fn tuya_trv_me167() {
     sim.devices.push(trv());
     sim.join(&mut hub, TRV, T0);
     let id = "zb:a4c138aabbccddee";
+    super::assert_zdef_resolve_agrees(&hub, id, "tuya-ts0601-trv-me167");
     let d = hub.device(id).unwrap();
     assert_eq!(d.resolution.layers[1].id, "tuya/ts0601-thermostat-3");
     assert_eq!(d.resolution.layers[1].score, Some(500));
@@ -274,6 +275,7 @@ fn tuya_th_sensor_queries_on_configure_and_announce() {
     );
     sim.join(&mut hub, ieee, T0);
     let id = "zb:a4c1380102030405";
+    super::assert_zdef_resolve_agrees(&hub, id, "tuya-ts0601-th-sensor");
     let d = hub.device(id).unwrap();
     assert_eq!(
         d.record()["model"],

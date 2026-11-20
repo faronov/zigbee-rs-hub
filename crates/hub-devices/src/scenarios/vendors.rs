@@ -57,6 +57,7 @@ fn efekta_co2_settings_device() {
         T0,
     );
     let id = "zb:00124b0012345678";
+    super::assert_zdef_resolve_agrees(&hub, id, "efekta-co2-smart-monitor");
     let d = hub.device(id).unwrap();
     assert_eq!(d.resolution.layers[1].id, "efekta/co2-smart-monitor");
     assert_eq!(d.resolution.layers[1].score, Some(300));
@@ -219,6 +220,7 @@ fn aqara_motion_p1_struct_reset_and_sleepy_writes() {
     let mut hub = hub_with(&["aqara-rtcgq14lm-motion-p1"]);
     let mut sim = sim_join_one(&mut hub, aqara(ieee), T0);
     let id = "zb:54ef441000aabbcc";
+    super::assert_zdef_resolve_agrees(&hub, id, "aqara-rtcgq14lm-motion-p1");
     let d = hub.device(id).unwrap();
     assert_eq!(d.record()["manufacturer"], "Aqara");
     assert_eq!(d.record()["model"], "RTCGQ14LM");
@@ -348,6 +350,7 @@ fn philips_rwl022_remote_events() {
         T0,
     );
     let id = "zb:0017880104aabbcc";
+    super::assert_zdef_resolve_agrees(&hub, id, "philips-rwl022-dimmer");
     let s = sim.dev(ieee).clone();
     for c in [0x0006, 0x0008, 0xFC00, 0x0001] {
         assert!(s.binds.contains(&(1, c)), "bind {c:04x}");
@@ -558,6 +561,7 @@ fn philips_sml001_only_endpoints_and_mfr_settings() {
     );
     sim_join_one(&mut hub, dev, T0);
     let id = "zb:0017880103334444";
+    super::assert_zdef_resolve_agrees(&hub, id, "philips-sml001-motion");
     let k = keys(&hub, id);
     assert!(
         !k.iter().any(|k| k.starts_with("1:")),
@@ -607,6 +611,7 @@ fn innr_plug_fixed_divisors() {
         T0,
     );
     let id = "zb:00158d0000aa0001";
+    super::assert_zdef_resolve_agrees(&hub, id, "innr-sp120");
     let k = keys(&hub, id);
     assert!(!k.contains(&"1:power_on_behavior".to_string()), "excluded");
     assert_eq!(state(&hub, &format!("{id}:1:switch")), true);

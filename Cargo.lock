@@ -1085,6 +1085,7 @@ dependencies = [
  "sha2",
  "typed-arena",
  "zdef",
+ "zdefc",
  "zigbee-gp",
 ]
 

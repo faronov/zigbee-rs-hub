@@ -77,6 +77,80 @@ str_enum!(
 );
 
 str_enum!(
+    /// Power source (`device.power`, match `power`).
+    Power { Mains = 0 => "mains", Battery = 1 => "battery", EnergyHarvesting = 2 => "energy_harvesting" }
+);
+
+str_enum!(
+    /// `mode` of number and text entities (HA `NumberMode` / `TextMode`).
+    Mode { Auto = 0 => "auto", Box = 1 => "box", Slider = 2 => "slider", Text = 3 => "text", Password = 4 => "password" }
+);
+
+str_enum!(
+    /// `self_description` policy of a catalog or user definition (spec 3.3).
+    SelfDescription { Ignore = 0 => "ignore", Under = 1 => "under", Over = 2 => "over" }
+);
+
+str_enum!(
+    /// Tuya `time_sync` epoch (spec 10.3); the source writes `off`, `1970`, `2000`.
+    TimeSync { Off = 0 => "off", Epoch1970 = 1 => "1970", Epoch2000 = 2 => "2000" }
+);
+
+str_enum!(
+    /// Tuya write command (spec 10.3).
+    TuyaSend { DataRequest = 0 => "dataRequest", SendData = 1 => "sendData" }
+);
+
+str_enum!(
+    /// Node descriptor logical type (match `logical_type`).
+    LogicalType { Coordinator = 0 => "coordinator", Router = 1 => "router", EndDevice = 2 => "end_device" }
+);
+
+str_enum!(
+    /// Named battery curve (`device.battery`, spec 6.1).
+    BatteryCurve { V3_2100 = 0 => "3V_2100", V3_1500_2800 = 1 => "3V_1500_2800", Cr2032 = 2 => "CR2032" }
+);
+
+impl BatteryCurve {
+    /// Linear range (mV) the hub uses for the curve.
+    pub fn range_mv(self) -> (u32, u32) {
+        match self {
+            BatteryCurve::V3_2100 => (2100, 3000),
+            BatteryCurve::V3_1500_2800 => (1500, 2800),
+            BatteryCurve::Cr2032 => (2000, 3000),
+        }
+    }
+}
+
+str_enum!(
+    /// Named codecs (spec 6.6); also the `struct.codec` value.
+    CodecName {
+        ZclTagged = 0 => "zcl_tagged", TuyaScheduleDay = 1 => "tuya_schedule_day",
+        TuyaScheduleWeek = 2 => "tuya_schedule_week", BcdTime = 3 => "bcd_time", Hhmm = 4 => "hhmm",
+        Ascii = 5 => "ascii", Utf16beHex = 6 => "utf16be_hex", BitmapFlags = 7 => "bitmap_flags",
+    }
+);
+
+str_enum!(
+    /// Byte layout of a Tuya schedule DP (zigbee-herdsman-converters value
+    /// converters): `multi_dp` = `thermostatScheduleDayMultiDP[WithTransitionCount]`
+    /// (`WithDayNumber` for `tuya_schedule_day`), `single_dp` =
+    /// `thermostatScheduleDaySingleDP`, `trv602z` = `…_TRV602Z`, `trv603wz` = `…_TRV603WZ`.
+    ScheduleVariant { MultiDp = 0 => "multi_dp", SingleDp = 1 => "single_dp", Trv602z = 2 => "trv602z", Trv603wz = 3 => "trv603wz" }
+);
+
+str_enum!(
+    /// Vendor templates (C tier, spec 17.4); feature ID = 20 + code.
+    TemplateName { HueLight = 0 => "hue_light", Lumi = 1 => "lumi", Tuya = 2 => "tuya", TuyaMeteringZeroDebounce = 3 => "tuya_metering_zero_debounce" }
+);
+
+impl TemplateName {
+    pub fn feature(self) -> u16 {
+        20 + self.code() as u16
+    }
+}
+
+str_enum!(
     /// Tuya DP type codes (spec 10.1).
     TuyaType {
         Raw = 0 => "raw", Bool = 1 => "bool", Value = 2 => "value", String = 3 => "string",
@@ -416,6 +490,8 @@ str_enum!(
         CodecTuyaScheduleWeek = 6 => "codec.tuya_schedule_week", CodecBcdTime = 7 => "codec.bcd_time",
         CodecHhmm = 8 => "codec.hhmm", CodecAscii = 9 => "codec.ascii",
         CodecUtf16beHex = 10 => "codec.utf16be_hex", CodecBitmapFlags = 11 => "codec.bitmap_flags",
+        TemplateHueLight = 20 => "template.hue_light", TemplateLumi = 21 => "template.lumi",
+        TemplateTuya = 22 => "template.tuya", TemplateTuyaMeteringZeroDebounce = 23 => "template.tuya_metering_zero_debounce",
         Wasm = 60 => "wasm",
     }
 );

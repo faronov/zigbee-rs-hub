@@ -202,6 +202,7 @@ fn codec(v: &Y) -> R<Codec> {
                 "tuya_schedule_day" => Ok(Codec::TuyaScheduleDay {
                     day: opt_int(p, "day")?.ok_or("day")? as u8,
                     transitions: opt_int(p, "transitions")?.unwrap_or(4) as u8,
+                    variant: crate::model::ScheduleVariant::MultiDp,
                 }),
                 "bitmap_flags" => Ok(Codec::BitmapFlags(
                     p.as_mapping()
@@ -444,6 +445,7 @@ fn configure_op(v: &Y) -> R<ConfigureOp> {
                 .collect::<R<_>>()?,
             _ => Vec::new(),
         };
+        let payload = crate::model::PressPayload::Bytes(payload);
         return Ok(ConfigureOp::Cmd {
             ep: ep(c)?,
             cluster: opt_u16(c, "cluster")?.ok_or("cmd.cluster")?,

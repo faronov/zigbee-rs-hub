@@ -36,14 +36,22 @@ Lower-level: `codec::decode` (no re-encode check), `codec::decode_with`
 `Definition { kind: Definition|Fragment, major, id, revision, vendor, model,
 description, match_, white_label, requires, device, generic, endpoints,
 tuya, configure, entities, gp, ignore, consts, source, mfr, priority,
-self_description, x_wasm, ext }`.
+self_description, templates, x_wasm, ext }`. Closed sets are enums from
+`zdef::enums` (`Power`, `Mode`, `SelfDescription`, `TimeSync`, `TuyaSend`,
+`LogicalType`, `BatteryCurve`, `CodecName`, `ScheduleVariant`,
+`TemplateName`), encoded as integers.
 
-`Entity` carries the HA fields (`platform`, `device_class`/`unit` as
-`TableRef` into `enums::DEVICE_CLASSES`/`UNITS`, `state_class`, `category`),
-exactly one binding (`zcl`, `tuya`, `struct_`, `gp`, `hub`, `parts`,
-`triggers`, `press`), the transforms (`from`/`to` expressions, `mul`, `div`,
-`offset`, `precision`, `invalid`, `map`, `value_on`/`value_off`, `codec`),
-limits, `report`, `reset_after`, `present_if`, `event_types`, `attrs`.
+`Entity` keeps the fields most entities use inline (`key`, `platform`,
+`device_class`/`unit` as `TableRef` into `enums::DEVICE_CLASSES`/`UNITS`,
+`state_class`, `category`, `ep`, `precision`, `access`, `enabled`, the
+bindings `zcl`/`tuya`/`gp`, `from`, `mul`, `div`, `offset`, `invalid`, `min`,
+`max`, `step`, `report`, `map`) and the rest out of line in
+`more: Option<Box<EntityMore>>` (`name`, `struct_`, `to`,
+`value_on`/`value_off`, `mode`, `reset_after`, `parts`, `event_types`,
+`triggers`, `press`, `codec`, `present_if`, `attrs`, `hub`, `invert`, `ext`;
+used by ~7 % of catalog entities). Read with `e.more()` (an empty static
+block when absent), write with `e.more_mut()`, drop an empty block with
+`e.compact()`.
 Strings are resolved: packed Tuya names, white-label indices and the
 constant references of `event_types`/`attrs` are plain strings in the model.
 `parts` keys are `keys::SUB` part keys (`entity.part("target_temperature")`).
@@ -109,7 +117,8 @@ the fingerprint or GP identity; default endpoints follow spec 6.3 (GP: 242).
 ```rust
 let bank = Bank::parse(&bytes)?;
 bank.verify(&[TrustedKey::new(PUBLIC_KEY)])?;          // body SHA-256 + COSE_Sign1 Ed25519
-let mut inf = MinizInflate::new();                     // or a ROM-tinfl `Inflate` impl
+let mut inf = MinizInflate::new();                     // feature `miniz`, or a ROM-tinfl `Inflate` impl
+// without `soft-sha256`: bank.verify_with::<HwSha>(..), TrustedKey::new_with::<HwSha>(..)
 let strings = bank.load_strings(&mut inf)?;
 let mut buf = [0u8; BLOCK_MAX];
 for h in lookup_hashes(id) {
@@ -117,6 +126,19 @@ for h in lookup_hashes(id) {
 }
 let manifest = Manifest::verify(&manifest_cose, &keys)?;
 ```
+
+Shard records carry `key_hashes` (one record per definition and shard);
+`Manifest` adds `content` (digest of all definition content hashes) and
+`source`, `ManifestAsset` adds `definitions` and `generation`; both derive
+`Default`.
+
+### Features
+
+`default = ["bank", "sign", "miniz", "soft-sha256"]`. The hub build can use
+`default-features = false, features = ["bank", "sign"]` and supply SHA-256
+(`hash::Sha256`, e.g. the S3 accelerator or mbedTLS) and inflate
+(`bank::Inflate`, e.g. ROM `tinfl`) itself; the `*_with::<H>` functions take
+the SHA-256 implementation. `std` adds `std::error::Error` impls.
 
 ## Sizes
 
@@ -129,3 +151,17 @@ xtensa-esp32s3 (`tools/zdef-size/measure.sh`) and RAM per loaded definition.
 - 2026-11-20: `load` no longer re-encodes (smaller hub image);
   `load_canonical` added with the old behaviour. Decoder internals only
   otherwise.
+- 2026-11-20 (`zdef-size`): v1 freeze. Closed string sets are integer
+  enums; `Entity` rare fields moved to `EntityMore` (`e.more()`,
+  `e.more_mut()`); `ValidationError { path: ErrPath, message: &'static str,
+  verify, feature }` with `Display` (no `format!` in the crate); `Codec`
+  schedule parameters (`TuyaScheduleDay { day, transitions, variant }`,
+  `TuyaScheduleWeek(ScheduleWeek)`), `StructBinding.codec: CodecName`;
+  `TuyaQuery { configure, announce, interval_s }`; `Battery::Curve(BatteryCurve)`;
+  `ConfigureOp::Cmd { payload }`; `MatchClause { logical_type, ext }`;
+  `Definition.templates`; `GpFingerprint { switch_info, security_level }`
+  (`GpFingerprint::new`); GP scores without extras; `IndexKey::Manufacturer`;
+  `ShardRecord.key_hashes`; manifest `content`/`source` and bank
+  `definitions`/`generation`; features `bank`, `sign`, `miniz`,
+  `soft-sha256` with `Sha256`/`Inflate` traits; `num::format_number`
+  (`str()` without `core::fmt`); `LoadError::Requires` names the feature.

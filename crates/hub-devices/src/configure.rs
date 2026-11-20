@@ -30,7 +30,12 @@ fn first_ep_with(d: &Device, cluster: u16) -> u8 {
 }
 
 /// Builds the configure op list of a device (in execution order).
-pub fn build_ops(d: &Device, coordinator: u64, hub_ep: u8) -> Vec<OpRun> {
+pub fn build_ops(
+    d: &Device,
+    coordinator: u64,
+    hub_ep: u8,
+    env: &dyn crate::expr::ExprEnv,
+) -> Vec<OpRun> {
     let mut ops: Vec<OpRun> = Vec::new();
     let push = |ops: &mut Vec<OpRun>, key: String, kind: OpKind| {
         if !ops.iter().any(|o| o.key == key) {
@@ -308,22 +313,41 @@ pub fn build_ops(d: &Device, coordinator: u64, hub_ep: u8) -> Vec<OpRun> {
                 payload,
             } => {
                 let ep = ep.unwrap_or_else(|| first_ep_with(d, *cluster));
-                push(
-                    &mut ops,
-                    format!(
-                        "cmd:{ep}:{cluster:04x}:{}:{id:02x}:{}",
-                        mfr_s(*mfr),
-                        crate::expr::hex(payload)
-                    ),
-                    OpKind::Cmd {
-                        ep,
-                        cluster: *cluster,
-                        mfr: *mfr,
-                        id: *id,
-                        payload: payload.clone(),
-                        no_rsp: *cluster == cl::TUYA,
+                let payload = match payload {
+                    PressPayload::Bytes(b) => Ok(b.clone()),
+                    PressPayload::Expr(x) => match x.eval(&crate::expr::ExprCtx {
+                        x: crate::expr::Value::Null,
+                        payload: None,
+                        last: None,
+                        env,
+                    }) {
+                        crate::expr::Value::Bytes(b) => Ok(b),
+                        _ => Err("payload expression did not yield bytes".to_string()),
                     },
-                );
+                };
+                match payload {
+                    Ok(payload) => push(
+                        &mut ops,
+                        format!(
+                            "cmd:{ep}:{cluster:04x}:{}:{id:02x}:{}",
+                            mfr_s(*mfr),
+                            crate::expr::hex(&payload)
+                        ),
+                        OpKind::Cmd {
+                            ep,
+                            cluster: *cluster,
+                            mfr: *mfr,
+                            id: *id,
+                            payload,
+                            no_rsp: *cluster == cl::TUYA,
+                        },
+                    ),
+                    Err(reason) => push(
+                        &mut ops,
+                        format!("cmd:{ep}:{cluster:04x}:{}:{id:02x}:invalid", mfr_s(*mfr)),
+                        OpKind::Invalid { reason },
+                    ),
+                }
             }
             ConfigureOp::Group { ep, group } => {
                 let ep = ep.unwrap_or(hub_ep);
@@ -426,7 +450,11 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Rebuilds the op list and queues what has not succeeded yet.
     pub(crate) fn redo_configure(&mut self, id: &str, now: Millis) {
-        let (coord, hub_ep) = (self.cfg.coordinator_ieee, self.cfg.hub_endpoint);
+        let (coord, hub_ep, tz) = (
+            self.cfg.coordinator_ieee,
+            self.cfg.hub_endpoint,
+            self.cfg.tz_offset_s,
+        );
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
@@ -441,7 +469,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         {
             return;
         }
-        let ops = build_ops(d, coord, hub_ep);
+        let ops = build_ops(d, coord, hub_ep, &crate::hub::DevEnv { dev: d, now, tz });
         d.configure.hash = Some(configure_hash(&ops));
         let queued: Vec<String> = d.configure.queue.iter().map(|o| o.key.clone()).collect();
         for op in ops {
@@ -486,6 +514,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             let key = op.key.clone();
             let purpose = Purpose::Configure(key.clone());
             match op.kind {
+                OpKind::Invalid { reason } => {
+                    self.configure_done(id, &key, false, format!("INVALID: {reason}"), now);
+                    continue;
+                }
                 OpKind::Bind { ep, cluster } => {
                     let tsn = self.next_zdo_tsn();
                     let p = zdo::bind_req(

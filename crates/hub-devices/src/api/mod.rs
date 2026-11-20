@@ -585,7 +585,12 @@ impl ApiServer {
             },
             Err(zdef::LoadError::Invalid(v)) => json!({
                 "ok": false,
-                "errors": v.iter().map(|e| json!({"path": e.path, "message": e.message})).collect::<Vec<_>>(),
+                "errors": v.iter().map(|e| {
+                    let path = e.path.to_string();
+                    let full = e.to_string();
+                    let message = full.strip_prefix(&format!("{path}: ")).unwrap_or(&full).to_string();
+                    json!({"path": path, "message": message})
+                }).collect::<Vec<_>>(),
                 "warnings": [],
                 "size": bytes.len(),
             }),

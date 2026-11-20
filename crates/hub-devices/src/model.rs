@@ -301,17 +301,36 @@ impl TuyaType {
     }
 }
 
+pub use zdef::enums::ScheduleVariant;
+
 /// Named codecs (6.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Codec {
     /// `(tag u8, ZCL type u8, value)*` → tag → value.
     ZclTagged,
-    /// Tuya per-day schedule ↔ `HH:MM/T …`.
+    /// Tuya per-day schedule ↔ `HH:MM/T …` (`multi_dp`) or `HH:MM/T/P …`
+    /// (`trv602z`); the day number is written as the first byte.
     TuyaScheduleDay {
         /// Day number written as the first byte.
         day: u8,
         /// Transitions per day.
         transitions: u8,
+        /// Byte layout.
+        variant: ScheduleVariant,
+    },
+    /// Tuya schedule DP without a day number (`multi_dp`, `single_dp`,
+    /// `trv602z`, `trv603wz`; see [`crate::codec`]).
+    TuyaScheduleWeek {
+        /// Byte layout.
+        variant: ScheduleVariant,
+        /// Transitions (`multi_dp`: exact count; others: the variant's).
+        transitions: u8,
+        /// Temperature scale (`multi_dp`).
+        scale: u16,
+        /// Lowest accepted temperature, °C (`multi_dp`).
+        min: i16,
+        /// Highest accepted temperature, °C (`multi_dp`).
+        max: i16,
     },
     /// Packed BCD time `HH:MM`.
     BcdTime,
@@ -331,6 +350,7 @@ impl Codec {
         match self {
             Self::ZclTagged => "struct.zcl_tagged",
             Self::TuyaScheduleDay { .. } => "codec.tuya_schedule_day",
+            Self::TuyaScheduleWeek { .. } => "codec.tuya_schedule_week",
             Self::BcdTime => "codec.bcd_time",
             Self::Hhmm => "codec.hhmm",
             Self::Ascii => "codec.ascii",
@@ -864,8 +884,9 @@ pub enum ConfigureOp {
         id: u8,
         /// Manufacturer code.
         mfr: Option<u16>,
-        /// Payload.
-        payload: Vec<u8>,
+        /// Payload: bytes, or an expression evaluated when the configure
+        /// plan is built (options and state, no time).
+        payload: PressPayload,
     },
     /// The hub joins a group the remote sends to.
     Group {

@@ -254,6 +254,8 @@ pub const FP_FIELDS: &[(&str, Ty)] = &[
     ("stack_version", Ty::INT),
     ("zcl_version", Ty::INT),
     ("date_code", Ty::STR),
+    ("manufacturer", Ty::STR),
+    ("model", Ty::STR),
 ];
 
 /// Built-in function (immediate `f` of `CALL f n`).

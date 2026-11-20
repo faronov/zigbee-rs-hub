@@ -98,7 +98,7 @@ impl R<'_> {
         flow(map(e))
     }
 
-    fn clause(&self, c: &MatchClause) -> Node {
+    fn clause(&mut self, c: &MatchClause) -> Node {
         let mut e = Vec::new();
         if let Some(n) = &c.manufacturer {
             e.push(("manufacturer", self.name_match(n)));
@@ -123,6 +123,9 @@ impl R<'_> {
         }
         if let Some(p) = c.power {
             e.push(("power", s(p.as_str())));
+        }
+        if let Some(p) = c.logical_type {
+            e.push(("logical_type", s(p.as_str())));
         }
         if !c.endpoints.is_empty() {
             let eps = c
@@ -191,6 +194,7 @@ impl R<'_> {
             }
             e.push(("gp", flow(map(f))));
         }
+        self.ext(&mut e, keys::CLAUSE_EXT, &c.ext);
         flow(map(e))
     }
 
@@ -251,6 +255,7 @@ impl R<'_> {
 
     fn entity(&mut self, e: &Entity) -> Node {
         let mut f: Vec<(&str, Node)> = Vec::new();
+        let m = e.more();
         if let Some(v) = &e.key {
             f.push(("key", s(v)));
         }
@@ -272,7 +277,7 @@ impl R<'_> {
         if let Some(v) = e.category {
             f.push(("category", s(v.as_str())));
         }
-        if let Some(v) = &e.name {
+        if let Some(v) = &m.name {
             f.push(("name", s(v)));
         }
         if let Some(v) = e.ep {
@@ -295,7 +300,7 @@ impl R<'_> {
         if let Some(t) = &e.tuya {
             f.push(("tuya", self.tuya_dp(t)));
         }
-        if let Some(st) = &e.struct_ {
+        if let Some(st) = &m.struct_ {
             let mut b = vec![
                 ("cluster", Node::hex(st.cluster as i64, 4)),
                 ("attr", Node::hex(st.attr as i64, 4)),
@@ -306,7 +311,7 @@ impl R<'_> {
             if let Some(v) = st.ep {
                 b.push(("ep", Node::int(v as i64)));
             }
-            b.push(("codec", s(&st.codec)));
+            b.push(("codec", s(st.codec.as_str())));
             if let Some(v) = st.tag {
                 b.push(("tag", Node::int(v)));
             }
@@ -335,13 +340,13 @@ impl R<'_> {
             }
             None => {}
         }
-        if let Some(x) = &e.present_if {
+        if let Some(x) = &m.present_if {
             f.push(("present_if", self.expr(x)));
         }
         if let Some(x) = &e.from {
             f.push(("from", self.expr(x)));
         }
-        if let Some(x) = &e.to {
+        if let Some(x) = &m.to {
             f.push(("to", self.expr(x)));
         }
         for (k, v) in [("mul", e.mul), ("div", e.div), ("offset", e.offset)] {
@@ -363,10 +368,10 @@ impl R<'_> {
                 .collect();
             f.push(("map", flow(Node::synth(Value::Map(m)))));
         }
-        if let Some(v) = &e.value_on {
+        if let Some(v) = &m.value_on {
             f.push(("value_on", scalar(v)));
         }
-        if let Some(v) = &e.value_off {
+        if let Some(v) = &m.value_off {
             f.push(("value_off", scalar(v)));
         }
         for (k, v) in [("min", e.min), ("max", e.max), ("step", e.step)] {
@@ -374,8 +379,8 @@ impl R<'_> {
                 f.push((k, num(v)));
             }
         }
-        if let Some(v) = &e.mode {
-            f.push(("mode", s(v)));
+        if let Some(v) = m.mode {
+            f.push(("mode", s(v.as_str())));
         }
         if let Some(a) = e.access {
             let mut t = String::new();
@@ -396,13 +401,13 @@ impl R<'_> {
         if let Some(v) = e.enabled {
             f.push(("enabled", Node::synth(Value::Bool(v))));
         }
-        if let Some(x) = &e.reset_after {
+        if let Some(x) = &m.reset_after {
             f.push(("reset_after", self.expr(x)));
         }
-        if let Some(v) = e.invert {
+        if let Some(v) = m.invert {
             f.push(("invert", Node::synth(Value::Bool(v))));
         }
-        if let Some(h) = &e.hub {
+        if let Some(h) = &m.hub {
             f.push((
                 "hub",
                 flow(map(h
@@ -412,21 +417,40 @@ impl R<'_> {
                     .collect())),
             ));
         }
-        if let Some(c) = &e.codec {
+        if let Some(c) = &m.codec {
             f.push((
                 "codec",
                 match c {
-                    Codec::TuyaScheduleDay { day, transitions } => flow(map(vec![(
-                        "tuya_schedule_day",
-                        flow(map(vec![
+                    Codec::TuyaScheduleDay {
+                        day,
+                        transitions,
+                        variant,
+                    } => {
+                        let mut b = vec![
                             ("day", Node::int(*day as i64)),
                             ("transitions", Node::int(*transitions as i64)),
-                        ])),
-                    )])),
-                    Codec::TuyaScheduleWeek { variant } => flow(map(vec![(
-                        "tuya_schedule_week",
-                        flow(map(vec![("variant", s(variant))])),
-                    )])),
+                        ];
+                        if *variant != ScheduleVariant::MultiDp {
+                            b.push(("variant", s(variant.as_str())));
+                        }
+                        flow(map(vec![("tuya_schedule_day", flow(map(b)))]))
+                    }
+                    Codec::TuyaScheduleWeek(w) => {
+                        let mut b = vec![("variant", s(w.variant.as_str()))];
+                        if let Some(v) = w.transitions {
+                            b.push(("transitions", Node::int(v as i64)));
+                        }
+                        if let Some(v) = w.scale {
+                            b.push(("scale", Node::int(v as i64)));
+                        }
+                        if let Some(v) = w.min {
+                            b.push(("min", Node::int(v as i64)));
+                        }
+                        if let Some(v) = w.max {
+                            b.push(("max", Node::int(v as i64)));
+                        }
+                        flow(map(vec![("tuya_schedule_week", flow(map(b)))]))
+                    }
                     Codec::BitmapFlags(b) => {
                         let m = b
                             .iter()
@@ -441,23 +465,23 @@ impl R<'_> {
                 },
             ));
         }
-        if !e.parts.is_empty() {
+        if !m.parts.is_empty() {
             let mut parts = Vec::new();
-            for (k, p) in &e.parts {
+            for (k, p) in &m.parts {
                 let name = keys::sub_name(*k as u64).unwrap_or("?").to_string();
                 parts.push((Key::Str(name), Default::default(), self.entity(p)));
             }
             f.push(("parts", Node::synth(Value::Map(parts))));
         }
-        if !e.event_types.is_empty() {
+        if !m.event_types.is_empty() {
             f.push((
                 "event_types",
-                flow(seq(e.event_types.iter().map(|x| s(x)).collect())),
+                flow(seq(m.event_types.iter().map(|x| s(x)).collect())),
             ));
         }
-        if !e.triggers.is_empty() {
+        if !m.triggers.is_empty() {
             let mut ts = Vec::new();
-            for t in &e.triggers {
+            for t in &m.triggers {
                 let mut b = Vec::new();
                 if let Some(c) = &t.cmd {
                     b.push(("cmd", self.cmd_ref(c)));
@@ -479,7 +503,7 @@ impl R<'_> {
             }
             f.push(("triggers", seq(ts)));
         }
-        if let Some(p) = &e.press {
+        if let Some(p) = &m.press {
             f.push((
                 "press",
                 flow(match p {
@@ -497,24 +521,24 @@ impl R<'_> {
                 }),
             ));
         }
-        if !e.attrs.is_empty() {
-            f.push(("attrs", self.named(&e.attrs)));
+        if !m.attrs.is_empty() {
+            f.push(("attrs", self.named(&m.attrs)));
         }
-        if !e.ext.is_empty() {
+        if !m.ext.is_empty() {
             self.errs
-                .push("entity extension keys (64..127) cannot be written as source".into());
+                .push("unnamed entity extension keys (64..127) cannot be written as source".into());
         }
         map(f)
     }
 
-    fn configure_op(&self, op: &ConfigureOp) -> Node {
+    fn configure_op(&mut self, op: &ConfigureOp) -> Node {
         let ep_first = |ep: &Option<u8>, mut rest: Vec<(&'static str, Node)>| {
             if let Some(v) = ep {
                 rest.insert(0, ("ep", Node::int(*v as i64)));
             }
             flow(map(rest))
         };
-        flow(match op {
+        let op_node = match op {
             ConfigureOp::Bind { ep, clusters } => map(vec![(
                 "bind",
                 ep_first(ep, vec![("clusters", hex_list(clusters, 4))]),
@@ -559,15 +583,20 @@ impl R<'_> {
                 cluster,
                 id,
                 mfr,
-            } => map(vec![(
-                "cmd",
-                self.cmd_ref(&CmdRef {
+                payload,
+            } => {
+                let mut c = self.cmd_ref(&CmdRef {
                     cluster: *cluster,
                     id: *id,
                     mfr: *mfr,
                     ep: *ep,
-                }),
-            )]),
+                });
+                if let (Some(x), Value::Map(m)) = (payload, &mut c.v) {
+                    let pl = self.expr(x);
+                    m.push((Key::Str("payload".into()), Default::default(), pl));
+                }
+                map(vec![("cmd", c)])
+            }
             ConfigureOp::Group { ep, group } => map(vec![(
                 "group",
                 ep_first(ep, vec![("group", Node::hex(*group as i64, 4))]),
@@ -576,7 +605,27 @@ impl R<'_> {
                 "checkin",
                 flow(map(vec![("interval_qs", Node::int(*interval_qs as i64))])),
             )]),
-        })
+        };
+        flow(op_node)
+    }
+
+    fn ext(
+        &mut self,
+        out: &mut Vec<(&'static str, Node)>,
+        table: &[(u16, &'static str)],
+        ext: &[(u64, Vec<u8>)],
+    ) {
+        for (k, raw) in ext {
+            match table.iter().find(|x| x.0 as u64 == *k) {
+                Some((_, name)) => match raw_node(&mut Reader::new(raw)) {
+                    Ok(n) => out.push((name, n)),
+                    Err(e) => self.errs.push(e),
+                },
+                None => self.errs.push(format!(
+                    "unnamed extension key {k} cannot be written as source"
+                )),
+            }
+        }
     }
 }
 
@@ -717,7 +766,7 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
                     ])),
                 )])),
             )),
-            Some(Battery::Curve(c)) => b.push(("battery", s(c))),
+            Some(Battery::Curve(c)) => b.push(("battery", s(c.as_str()))),
             None => {}
         }
         if let Some(v) = d.checkin_s {
@@ -765,25 +814,18 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
         if let Some(v) = t.magic_packet {
             b.push(("magic_packet", Node::synth(Value::Bool(v))));
         }
-        match &t.query {
-            Some(TuyaQuery::On {
-                configure,
-                announce,
-            }) => {
-                let mut q = Vec::new();
-                if *configure {
-                    q.push(s("configure"));
-                }
-                if *announce {
-                    q.push(s("announce"));
-                }
-                b.push(("query", flow(seq(q))));
+        if let Some(q) = &t.query {
+            let mut v = Vec::new();
+            if q.configure {
+                v.push(s("configure"));
             }
-            Some(TuyaQuery::Interval(i)) => b.push((
-                "query",
-                flow(map(vec![("interval_s", Node::int(*i as i64))])),
-            )),
-            None => {}
+            if q.announce {
+                v.push(s("announce"));
+            }
+            if let Some(i) = q.interval_s {
+                v.push(flow(map(vec![("interval_s", Node::int(i as i64))])));
+            }
+            b.push(("query", flow(seq(v))));
         }
         for (k, v) in [
             ("bind_basic", t.bind_basic),
@@ -797,14 +839,7 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
             }
         }
         if let Some(v) = t.send {
-            b.push((
-                "send",
-                s(if v == TuyaSend::SendData {
-                    "sendData"
-                } else {
-                    "dataRequest"
-                }),
-            ));
+            b.push(("send", s(v.as_str())));
         }
         f.push(("tuya", map(b)));
     }
@@ -875,16 +910,29 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
             .collect();
         f.push(("ignore", seq(v)));
     }
+    if !def.templates.is_empty() {
+        let mut v = Vec::new();
+        for t in &def.templates {
+            let mut b = vec![("name", s(t.name.as_str()))];
+            if let Some(p) = &t.params {
+                match raw_node(&mut Reader::new(p)) {
+                    Ok(n) => b.push(("params", n)),
+                    Err(e) => r.errs.push(e),
+                }
+            }
+            v.push(map(b));
+        }
+        f.push(("templates", seq(v)));
+    }
     if let Some(x) = &def.x_wasm {
         match raw_node(&mut Reader::new(x)) {
             Ok(n) => f.push(("x-wasm", n)),
             Err(e) => r.errs.push(e),
         }
     }
-    if !def.ext.is_empty() {
-        r.errs
-            .push("top-level extension keys (64..127) cannot be written as source".into());
-    }
+    let mut ext = Vec::new();
+    r.ext(&mut ext, keys::TOP_EXT, &def.ext);
+    f.extend(ext);
     if r.errs.is_empty() {
         Ok(map(f))
     } else {

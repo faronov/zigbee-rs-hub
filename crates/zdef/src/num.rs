@@ -6,6 +6,138 @@ use crate::model::Num;
 use alloc::string::String;
 use core::fmt::Write;
 
+/// Significant digits of `str(float)` (spec 7.1).
+pub const STR_FLOAT_DIGITS: i32 = 15;
+
+/// `str()` of a number (spec 7.1), into `buf`; no `core::fmt`, so the VM
+/// does not link the float formatter. Integers print in full. Floats print
+/// with at most 15 significant digits (rounded, trailing zeros dropped):
+/// plain decimal for 1e-6 <= |x| < 1e21, otherwise `d.ddde+N` / `d.ddde-N`
+/// (JavaScript layout); integral values have no fraction (`21`, not `21.0`).
+pub fn format_number(n: Num, buf: &mut [u8; 32]) -> &str {
+    let mut w = 0usize;
+    let mut push = |b: &[u8], w: &mut usize| {
+        buf[*w..*w + b.len()].copy_from_slice(b);
+        *w += b.len();
+    };
+    match n {
+        Num::Int(i) => {
+            if i < 0 {
+                push(b"-", &mut w);
+            }
+            let mut d = [0u8; 20];
+            let mut k = 20;
+            let mut u = i.unsigned_abs();
+            loop {
+                k -= 1;
+                d[k] = b'0' + (u % 10) as u8;
+                u /= 10;
+                if u == 0 {
+                    break;
+                }
+            }
+            push(&d[k..], &mut w);
+        }
+        Num::Float(x) => {
+            if x.is_nan() || x.is_infinite() {
+                push(
+                    if x.is_nan() {
+                        b"NaN"
+                    } else if x > 0.0 {
+                        b"Infinity"
+                    } else {
+                        b"-Infinity"
+                    },
+                    &mut w,
+                );
+            } else if x == 0.0 {
+                push(b"0", &mut w);
+            } else {
+                if x < 0.0 {
+                    push(b"-", &mut w);
+                }
+                let (digits, e) = float_digits(libm::fabs(x));
+                let mut d = [0u8; STR_FLOAT_DIGITS as usize];
+                let mut u = digits;
+                for i in (0..d.len()).rev() {
+                    d[i] = b'0' + (u % 10) as u8;
+                    u /= 10;
+                }
+                let mut k = d.len();
+                while k > 1 && d[k - 1] == b'0' {
+                    k -= 1;
+                }
+                if (-6..21).contains(&e) {
+                    if e < 0 {
+                        push(b"0.", &mut w);
+                        for _ in 0..(-e - 1) {
+                            push(b"0", &mut w);
+                        }
+                        push(&d[..k], &mut w);
+                    } else {
+                        let int_len = e as usize + 1;
+                        for i in 0..int_len {
+                            push(if i < k { &d[i..i + 1] } else { b"0" }, &mut w);
+                        }
+                        if k > int_len {
+                            push(b".", &mut w);
+                            push(&d[int_len..k], &mut w);
+                        }
+                    }
+                } else {
+                    push(&d[..1], &mut w);
+                    if k > 1 {
+                        push(b".", &mut w);
+                        push(&d[1..k], &mut w);
+                    }
+                    push(if e < 0 { b"e-" } else { b"e+" }, &mut w);
+                    let mut ebuf = [0u8; 32];
+                    let es = format_number(Num::Int(e.unsigned_abs() as i64), &mut ebuf);
+                    push(es.as_bytes(), &mut w);
+                }
+            }
+        }
+    }
+    // only ASCII was written
+    core::str::from_utf8(&buf[..w]).unwrap_or("")
+}
+
+/// `x * 10^n` without overflowing the intermediate power.
+fn scale10(x: f64, n: i32) -> f64 {
+    if n > 300 {
+        x * 1e300 * libm::pow(10.0, (n - 300) as f64)
+    } else if n < -300 {
+        x * 1e-300 * libm::pow(10.0, (n + 300) as f64)
+    } else {
+        x * libm::pow(10.0, n as f64)
+    }
+}
+
+/// `x > 0` as `(digits, e)`: `x ≈ digits * 10^(e - 14)` with exactly 15
+/// digits (`10^14 <= digits < 10^15`), rounded half away from zero.
+fn float_digits(x: f64) -> (u64, i32) {
+    const LO: f64 = 1e14;
+    const HI: f64 = 1e15;
+    let mut e = libm::floor(libm::log10(x)) as i32;
+    let mut d = libm::round(scale10(x, STR_FLOAT_DIGITS - 1 - e));
+    for _ in 0..2 {
+        if d >= HI {
+            e += 1;
+        } else if d < LO {
+            e -= 1;
+        } else {
+            break;
+        }
+        d = libm::round(scale10(x, STR_FLOAT_DIGITS - 1 - e));
+    }
+    if d >= HI {
+        // rounding carried into a 16th digit (e.g. 9.999999999999999e2)
+        d = LO;
+        e += 1;
+    }
+    (d as u64, e)
+}
+
 /// Shortest decimal `(mantissa, k)` with `v == mantissa / 10^k`, `1 <= k <= 9`,
 /// using the shortest round-trip representation of `v`.
 pub fn decimal_fraction(v: f64) -> Option<(i64, u8)> {
@@ -186,5 +318,42 @@ mod tests {
         assert_eq!(unpack_tuya_name(&p).unwrap(), "_TZE200_bvu2wnxz");
         assert!(pack_tuya_name("_TZE200_4utwoz2").is_none());
         assert!(pack_tuya_name("_TZE200_BVU2WNXZ").is_none());
+    }
+}
+
+#[cfg(test)]
+mod str_tests {
+    use super::*;
+
+    fn f(n: Num) -> alloc::string::String {
+        let mut b = [0u8; 32];
+        format_number(n, &mut b).into()
+    }
+
+    #[test]
+    fn number_strings() {
+        for (x, s) in [
+            (21.0, "21"),
+            (21.5, "21.5"),
+            (-0.25, "-0.25"),
+            (0.1 + 0.2, "0.3"),
+            (1.0 / 3.0, "0.333333333333333"),
+            (2.0 / 3.0, "0.666666666666667"),
+            (123456.789, "123456.789"),
+            (1e20, "100000000000000000000"),
+            (1e21, "1e+21"),
+            (1.5e-7, "1.5e-7"),
+            (1e-6, "0.000001"),
+            (0.000123, "0.000123"),
+            (999.9999999999999, "1000"),
+            (-1.7976931348623157e308, "-1.79769313486232e+308"),
+            (5e-324, "4.94065645841247e-324"),
+            (2.71, "2.71"),
+        ] {
+            assert_eq!(f(Num::Float(x)), s, "{x:e}");
+        }
+        assert_eq!(f(Num::Int(0)), "0");
+        assert_eq!(f(Num::Int(-42)), "-42");
+        assert_eq!(f(Num::Int(i64::MIN)), "-9223372036854775808");
     }
 }

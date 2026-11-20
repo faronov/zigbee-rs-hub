@@ -79,6 +79,12 @@
           "power": {
             "enum": ["mains", "battery"]
           },
+          "logical_type": {
+            "enum": ["coordinator", "router", "end_device"]
+          },
+          "x-priority": {
+            "type": "integer"
+          },
           "endpoints": {
             "type": "object",
             "minProperties": 1,
@@ -230,6 +236,10 @@
           "codec.ascii",
           "codec.utf16be_hex",
           "codec.bitmap_flags",
+          "template.hue_light",
+          "template.lumi",
+          "template.tuya",
+          "template.tuya_metering_zero_debounce",
           "wasm"
         ]
       }
@@ -345,7 +355,7 @@
         "time_sync": {
           "oneOf": [
             {
-              "const": "off"
+              "enum": ["off", "1970", "2000"]
             },
             {
               "const": 1970
@@ -367,7 +377,21 @@
               "type": "array",
               "minItems": 1,
               "items": {
-                "enum": ["configure", "announce"]
+                "oneOf": [
+                  {
+                    "enum": ["configure", "announce"]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "interval_s": {
+                        "$ref": "#/$defs/u32"
+                      }
+                    },
+                    "required": ["interval_s"]
+                  }
+                ]
               }
             },
             {
@@ -554,6 +578,9 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 254
+                  },
+                  "payload": {
+                    "$ref": "#/$defs/expr"
                   }
                 },
                 "required": ["cluster", "id"]
@@ -653,8 +680,28 @@
         "required": ["cluster"]
       }
     },
+    "templates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": ["hue_light", "lumi", "tuya", "tuya_metering_zero_debounce"]
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "required": ["name"]
+      }
+    },
     "x-wasm": {
       "type": "object"
+    },
+    "x-partial": {
+      "type": "boolean"
     }
   },
   "oneOf": [
@@ -1223,6 +1270,9 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 10
+                },
+                "variant": {
+                  "enum": ["multi_dp", "single_dp", "trv602z", "trv603wz"]
                 }
               },
               "required": ["day", "transitions"]
@@ -1239,7 +1289,27 @@
               "additionalProperties": false,
               "properties": {
                 "variant": {
-                  "type": "string"
+                  "enum": ["multi_dp", "single_dp", "trv602z", "trv603wz"]
+                },
+                "transitions": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10
+                },
+                "scale": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000
+                },
+                "min": {
+                  "type": "integer",
+                  "minimum": -1000,
+                  "maximum": 1000
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": -1000,
+                  "maximum": 1000
                 }
               },
               "required": ["variant"]
@@ -1439,7 +1509,7 @@
           "type": "object",
           "minProperties": 1,
           "propertyNames": {
-            "pattern": "^(0|-?[1-9][0-9]*|0x[0-9a-fA-F]+)$"
+            "pattern": "^(0|-?[1-9][0-9]*|0x[0-9a-fA-F]+|true|false)$"
           },
           "additionalProperties": {
             "type": "string"
@@ -1509,7 +1579,12 @@
               "volume",
               "duration",
               "valve_position",
-              "running_state"
+              "running_state",
+              "color_x",
+              "color_y",
+              "hue",
+              "saturation",
+              "command"
             ]
           },
           "additionalProperties": {
@@ -1705,7 +1780,7 @@
           "type": "object",
           "minProperties": 1,
           "propertyNames": {
-            "pattern": "^(0|-?[1-9][0-9]*|0x[0-9a-fA-F]+)$"
+            "pattern": "^(0|-?[1-9][0-9]*|0x[0-9a-fA-F]+|true|false)$"
           },
           "additionalProperties": {
             "type": "string"
@@ -1775,7 +1850,12 @@
               "volume",
               "duration",
               "valve_position",
-              "running_state"
+              "running_state",
+              "color_x",
+              "color_y",
+              "hue",
+              "saturation",
+              "command"
             ]
           },
           "additionalProperties": {
