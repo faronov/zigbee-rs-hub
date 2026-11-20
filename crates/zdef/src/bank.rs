@@ -463,10 +463,9 @@ pub fn siphash24(key: &[u8; 16], data: &[u8]) -> u64 {
             v2 = v2.rotate_left(32);
         };
     }
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<8>();
     for c in chunks {
-        let m = u64::from_le_bytes(c.try_into().unwrap());
+        let m = u64::from_le_bytes(*c);
         v3 ^= m;
         round!();
         round!();

@@ -45,6 +45,9 @@ jobs:
           components: llvm-tools
       - run: cargo build -p zdef --release --target thumbv7em-none-eabihf
       - uses: esp-rs/xtensa-toolchain@v1.7.0
+        env:
+          # espup queries the GitHub API; unauthenticated calls hit the rate limit
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           default: false
           buildtargets: esp32s3
@@ -89,6 +92,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: esp-rs/xtensa-toolchain@v1.7.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           default: true
           buildtargets: esp32s3
