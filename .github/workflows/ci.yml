@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p hub-core -p hub-ncp -p hubctl
+      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hubctl
 
   hub-devices:
     name: hub-devices (engine host tests, clippy, fmt)

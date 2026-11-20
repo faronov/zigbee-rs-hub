@@ -140,15 +140,24 @@ impl DeviceSnapshot {
             .iter()
             .filter(|(_, e)| e.support != Support::Unknown)
             .map(|(&(ep, cl, at, mfr), e)| {
-                let value = if persistent_value(cl, at) { e.value.clone() } else { None };
+                let value = if persistent_value(cl, at) {
+                    e.value.clone()
+                } else {
+                    None
+                };
                 (ep, cl, at, mfr, e.support == Support::Supported, value)
             })
             .collect();
         let schema = match (&d.schema.hash, &d.schema.fragment) {
-            (Some(hash), Some(frag)) => frag.zdef.as_ref().and_then(|z| z.encode().ok()).map(|cbor| SchemaSnap {
-                hash: hash.clone(),
-                cbor,
-            }),
+            (Some(hash), Some(frag)) => {
+                frag.zdef
+                    .as_ref()
+                    .and_then(|z| z.encode().ok())
+                    .map(|cbor| SchemaSnap {
+                        hash: hash.clone(),
+                        cbor,
+                    })
+            }
             _ => None,
         };
         Self {
@@ -164,7 +173,11 @@ impl DeviceSnapshot {
             user_name: d.user_name.clone(),
             disabled: d.disabled,
             pinned: d.pinned.clone(),
-            options: d.options.iter().map(|(k, v)| (k.clone(), v.to_json())).collect(),
+            options: d
+                .options
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_json()))
+                .collect(),
             configure_hash: d.configure.hash.clone(),
             configure_done: d.configure.done.clone(),
             unreportable: d.configure.unreportable.clone(),
@@ -178,7 +191,11 @@ impl DeviceSnapshot {
                 .entities
                 .iter()
                 .filter(|e| !e.orphaned && (e.user_name.is_some() || e.user_enabled.is_some()))
-                .map(|e| EntitySnap { uid: e.uid.clone(), name: e.user_name.clone(), enabled: e.user_enabled })
+                .map(|e| EntitySnap {
+                    uid: e.uid.clone(),
+                    name: e.user_name.clone(),
+                    enabled: e.user_enabled,
+                })
                 .collect(),
         }
     }
@@ -208,7 +225,12 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// the current definitions, re-applies entity overrides and, when the
     /// interview had not finished, restarts it. Emits the usual
     /// `device_added`/`entity_added` events.
-    pub fn restore_device(&mut self, s: DeviceSnapshot, decoder: Option<&dyn SchemaDecoder>, now: Millis) -> Result<(), String> {
+    pub fn restore_device(
+        &mut self,
+        s: DeviceSnapshot,
+        decoder: Option<&dyn SchemaDecoder>,
+        now: Millis,
+    ) -> Result<(), String> {
         if self.devices.contains_key(&s.id) {
             return Err(format!("device {} exists", s.id));
         }
@@ -216,16 +238,31 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.fp = s.fp;
         d.node_desc = s.node_desc;
         d.active_eps = s.active_eps;
-        d.interview = if s.interviewed { InterviewStep::Done } else { InterviewStep::NodeDesc };
+        d.interview = if s.interviewed {
+            InterviewStep::Done
+        } else {
+            InterviewStep::NodeDesc
+        };
         d.interview_partial = s.interview_partial;
         for (ep, cl, at, mfr, supported, value) in s.attrs {
-            let support = if supported { Support::Supported } else { Support::Unsupported };
-            d.attrs.map.insert((ep, cl, at, mfr), crate::device::AttrEntry { support, value });
+            let support = if supported {
+                Support::Supported
+            } else {
+                Support::Unsupported
+            };
+            d.attrs.map.insert(
+                (ep, cl, at, mfr),
+                crate::device::AttrEntry { support, value },
+            );
         }
         d.user_name = s.user_name;
         d.disabled = s.disabled;
         d.pinned = s.pinned;
-        d.options = s.options.iter().map(|(k, v)| (k.clone(), Value::from_json(v))).collect();
+        d.options = s
+            .options
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::from_json(v)))
+            .collect();
         d.configure.hash = s.configure_hash;
         d.configure.done = s.configure_done;
         d.configure.unreportable = s.unreportable;
@@ -282,8 +319,21 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_through_json() {
-        let mut d = Device::new("zb:00124b0001020304".into(), DeviceKind::Zigbee { ieee: 0x00124b0001020304, nwk: 0x1234 }, 5);
-        d.attrs.set(1, 0x0000, 0x0005, None, Some(ZclValue::String("lumi.sensor".into())));
+        let mut d = Device::new(
+            "zb:00124b0001020304".into(),
+            DeviceKind::Zigbee {
+                ieee: 0x00124b0001020304,
+                nwk: 0x1234,
+            },
+            5,
+        );
+        d.attrs.set(
+            1,
+            0x0000,
+            0x0005,
+            None,
+            Some(ZclValue::String("lumi.sensor".into())),
+        );
         d.attrs.set(1, 0x0402, 0x0000, None, None);
         d.user_name = Some("Kitchen".into());
         d.options.insert("offset".into(), Value::Float(0.5));
@@ -293,11 +343,17 @@ mod tests {
         let back = DeviceSnapshot::from_bytes(&s.to_bytes()).unwrap();
         assert_eq!(back, s);
         assert_eq!(back.attrs.len(), 2);
-        assert!(back.attrs.iter().any(|a| a.2 == 0x0005 && a.4 && a.5.is_some()));
+        assert!(
+            back.attrs
+                .iter()
+                .any(|a| a.2 == 0x0005 && a.4 && a.5.is_some())
+        );
         // Measured values are not kept: a report does not change the snapshot.
-        d.attrs.set(1, 0x0402, 0x0000, None, Some(ZclValue::Int(2137)));
+        d.attrs
+            .set(1, 0x0402, 0x0000, None, Some(ZclValue::Int(2137)));
         let with_value = DeviceSnapshot::of(&d);
-        d.attrs.set(1, 0x0402, 0x0000, None, Some(ZclValue::Int(2250)));
+        d.attrs
+            .set(1, 0x0402, 0x0000, None, Some(ZclValue::Int(2250)));
         assert_eq!(DeviceSnapshot::of(&d), with_value);
     }
 }
