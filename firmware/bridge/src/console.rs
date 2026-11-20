@@ -4,6 +4,7 @@
 //! stream on CDC 0. Setting this port to 1200 baud ("1200 bps touch") hands
 //! the USB PHY back to USB-Serial-JTAG (hwlab recovery), like `s3 usj`.
 
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -29,6 +30,17 @@ commands:\r
                        running, bridge off; hwlab can flash, an RTS reset reboots)\r
   s3 reset             reboot the S3 (bridge restarts)\r
 ";
+
+/// A console extension (the hub firmware's commands). It sees every
+/// command first; `Some(reply)` means it handled it.
+pub type Extension = fn(&[&str]) -> Option<String>;
+
+static EXTENSION: OnceLock<(Extension, &'static str)> = OnceLock::new();
+
+/// Install an extension and its help text (once, before [`run`]).
+pub fn set_extension(ext: Extension, help: &'static str) {
+    let _ = EXTENSION.set((ext, help));
+}
 
 pub fn run() -> ! {
     let mut line = Vec::<u8>::with_capacity(128);
@@ -76,8 +88,19 @@ fn reply(s: &str) {
 
 fn execute(cmd: &str) {
     let words: Vec<&str> = cmd.split_whitespace().collect();
+    if let Some((ext, _)) = EXTENSION.get() {
+        if let Some(text) = ext(&words) {
+            reply(&text);
+            return;
+        }
+    }
     match words.as_slice() {
-        ["help"] | ["?"] => reply(HELP),
+        ["help"] | ["?"] => {
+            reply(HELP);
+            if let Some((_, help)) = EXTENSION.get() {
+                reply(help);
+            }
+        }
         ["info"] => reply(&info()),
         ["diag"] => {
             reply(&diag::current());
@@ -141,7 +164,7 @@ fn execute(cmd: &str) {
     }
 }
 
-fn info() -> String {
+pub fn info() -> String {
     let (en, boot) = h2::levels();
     let (rts, cts) = uart::flow_levels();
     let s = stats::snapshot();

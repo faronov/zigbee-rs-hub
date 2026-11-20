@@ -1,12 +1,18 @@
 [package]
 name = "tbr-bridge"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Phase 0: ESP32-S3 USB CDC-ACM <-> ESP32-H2 UART bridge with esptool auto-reset (Espressif Thread BR board)"
 publish = false
+
+[lib]
+name = "tbr_bridge"
+harness = false
+test = false
+doctest = false
 
 [[bin]]
 name = "tbr-bridge"

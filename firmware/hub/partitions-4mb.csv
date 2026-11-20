@@ -1,0 +1,10 @@
+# zigbee-rs-hub S3 layout for 4 MB flash (README "S3 flash layout", ZRHP spec 3.4).
+# Not used by the build: provisioning only (the hwlab board keeps the stock table).
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x6000
+otadata,  data, ota,      0xF000,   0x2000
+phy_init, data, phy,      0x11000,  0x1000
+coredump, data, coredump, 0x12000,  0xE000
+ota_0,    app,  ota_0,    0x20000,  0x180000
+ota_1,    app,  ota_1,    0x1A0000, 0x180000
+hubdata,  data, 0x40,     0x320000, 0xE0000
