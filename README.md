@@ -627,6 +627,21 @@ pushes through detached senders) once Wi-Fi credentials are stored
 same API as JSON lines on CDC 0 while a host holds the port (a test path
 without network).
 
+**RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
+application lives in ~295 KB of internal heap. On the first hardware run
+(2026-11-20, 4 MB dev table) it ran out of memory within a second: the
+registry's deflate compressor (~250 KB) and the decoded example catalog
+(~90 KB). Now the registry stores plain JSON (deflated values of earlier
+builds are still read), the example catalog loads only with PSRAM, the app
+thread has 40 KiB of stack and the hub-mode UART rings are 4/2 KiB. In hub
+mode, after the C6 sensor was imported and interviewed: ~106 KB internal
+heap free (minimum 103 KB), Wi-Fi not yet started. PSRAM support is on
+(`CONFIG_SPIRAM`, ignored when absent) for boards that have it. For the next
+crash, `info` shows the previous boot's start-up stage, free heap per stage,
+the last stack/heap watch, the last Rust panic message and the crash reset
+reason (RTC memory; hub-mode logs go to UART0, which the lab host cannot
+see); `hub stacks` shows the live picture.
+
 **Size.** The application is the default `tbr-hub` build; it targets the
 8 MB production layout (3 MiB slots) and the 4 MB dev layout (2 944 KiB).
 
