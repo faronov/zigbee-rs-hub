@@ -3,3 +3,4 @@
 
 pub mod expr;
 pub mod yaml;
+pub mod sim;
