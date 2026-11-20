@@ -2,3 +2,6 @@
 # identity, so the bridge mode looks exactly like tbr-bridge to the host).
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
 CONFIG_APP_PROJECT_VER="tbr-hub-0.1.0"
+
+# WebSocket JSON API (esp_http_server).
+CONFIG_HTTPD_WS_SUPPORT=y

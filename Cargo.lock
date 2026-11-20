@@ -686,9 +686,11 @@ dependencies = [
  "embedded-io-async",
  "enumset",
  "heapless",
+ "log",
  "num_enum",
  "serde",
  "strum 0.27.2",
+ "strum_macros 0.27.2",
 ]
 
 [[package]]
@@ -723,6 +725,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e6bd2d7c76d078cd7a460fa169f778c42c026fe16d90e37d7a45d37181bdce5"
 dependencies = [
  "enumset_derive",
+ "serde",
 ]
 
 [[package]]
@@ -1046,6 +1049,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
 dependencies = [
  "hash32",
+ "serde_core",
  "stable_deref_trait",
 ]
 
@@ -2241,8 +2245,10 @@ dependencies = [
 name = "tbr-hub"
 version = "0.1.0"
 dependencies = [
+ "embedded-svc",
  "embuild",
  "esp-idf-svc",
+ "hub-app",
  "hub-core",
  "hub-ncp",
  "log",

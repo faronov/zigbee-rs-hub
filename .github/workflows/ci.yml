@@ -131,7 +131,7 @@ jobs:
       - name: Build tbr-bridge
         working-directory: firmware/bridge
         run: cargo build --release
-      - name: Build tbr-hub
+      - name: Build tbr-hub (4 MB boards)
         working-directory: firmware/hub
         run: cargo build --release
       - name: App images (ota_0; tbr-hub must fit the 1.5 MiB slot of the 4 MB layout)
@@ -139,11 +139,17 @@ jobs:
           pip install --quiet "esptool>=5,<6"
           tools/make-app-image.sh release target/tbr-bridge-app.bin tbr-bridge
           MAX_APP_BYTES=1572864 tools/make-app-image.sh release target/tbr-hub-app.bin tbr-hub
+      - name: Build tbr-hub with the application (8 MB boards)
+        working-directory: firmware/hub
+        run: cargo build --release --features app
+      - name: App image (must fit the 3 MiB slot of the 8 MB layout)
+        run: MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-app-8mb.bin tbr-hub
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
           path: |
             target/tbr-bridge-app.bin
             target/tbr-hub-app.bin
+            target/tbr-hub-app-8mb.bin
             target/xtensa-esp32s3-espidf/release/tbr-bridge
             target/xtensa-esp32s3-espidf/release/tbr-hub
