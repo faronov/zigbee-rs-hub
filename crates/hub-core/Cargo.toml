@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Portable core of zigbee-rs-hub: Thread BR board wiring, NCP reset/boot line logic and the ZRHP protocol crate"
+description = "Portable core of zigbee-rs-hub: board profiles, flash layouts, NCP reset/boot line logic and the ZRHP protocol crate"
 publish = false
 
 [dependencies]
