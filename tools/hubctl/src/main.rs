@@ -394,8 +394,8 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             let st = app.status();
             app.shutdown();
             println!(
-                "app: {} devices ({} restored), registry writes {} errors {}, APS accepted {} busy {} failed {}",
-                st.devices, st.restored, st.registry_writes, st.registry_errors, st.aps.accepted, st.aps.busy, st.aps.failed
+                "app: {} devices ({} restored, {} imported from the NCP), registry writes {} errors {}, APS accepted {} busy {} failed {}",
+                st.devices, st.restored, st.imported, st.registry_writes, st.registry_errors, st.aps.accepted, st.aps.busy, st.aps.failed
             );
             result?;
         }

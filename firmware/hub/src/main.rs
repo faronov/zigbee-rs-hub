@@ -111,6 +111,15 @@ fn status_text(hub: &Hub) -> String {
         c.rx_frames,
         c.rx_bad_frame
     );
+    out += &unsafe {
+        format!(
+            "ram: internal free {} (min {}), PSRAM {} of {}\r\n",
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL),
+            esp_idf_svc::sys::heap_caps_get_minimum_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL),
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM),
+            esp_idf_svc::sys::heap_caps_get_total_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
+        )
+    };
     if let Some(e) = &s.last_error {
         out += &format!("last error: {e}\r\n");
     }
@@ -118,9 +127,10 @@ fn status_text(hub: &Hub) -> String {
     if let Some(app) = APP.get() {
         let a = app.status();
         out += &format!(
-            "app: {} devices ({} restored), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {}, endpoint {}\r\n",
+            "app: {} devices ({} restored, {} imported), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {}, endpoint {}\r\n",
             a.devices,
             a.restored,
+            a.imported,
             a.sessions,
             a.registry_writes,
             a.registry_errors,
@@ -172,6 +182,13 @@ fn extension(words: &[&str]) -> Option<String> {
                 if boot.once { " once" } else { "" },
                 mode::stored()
             );
+            s += &format!("{}\r\n", prev_stage());
+            if let Some(Some(t)) = PREV_TASKS.get() {
+                s += &format!("previous boot, last stack watch (free bytes): {t}\r\n");
+            }
+            if let Some(p) = last_panic() {
+                s += &format!("last recorded panic: {p}\r\n");
+            }
             if let Some(hub) = hub {
                 s += &status_text(hub);
             }
@@ -199,6 +216,7 @@ fn extension(words: &[&str]) -> Option<String> {
             None => not_hub(),
         },
         ["hub"] | ["hub", "status"] => status_text(hub?),
+        ["hub", "stacks"] => format!("{}\r\n", tasks_snapshot()),
         ["hub", "echo", rest @ ..] => {
             let n: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 200);
             let t = std::time::Instant::now();
@@ -308,8 +326,10 @@ fn start_hub() {
     };
     let mut cfg = HubConfig::default();
     cfg.driver.host_name = format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION"));
+    stage(3);
     let hub = Hub::start(cfg, esp::UartRx, esp::UartTx, Some(Box::new(esp::H2Lines)), store, esp::rng());
     let _ = HUB.set(hub.clone());
+    stage(4);
     #[cfg(feature = "app")]
     start_app(hub);
 }
@@ -341,15 +361,22 @@ fn start_app(hub: Hub) {
         }
         t
     });
+    // The example definitions take ~90 KB decoded: only with PSRAM (the 4 MB
+    // early sample has none; its devices resolve through the generic tier).
+    let psram = unsafe { esp_idf_svc::sys::heap_caps_get_total_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM) };
     let app_cfg = hub_app::AppConfig {
         hub_name: format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION")),
         api_token: token,
         stack_size: APP_STACK,
+        builtin_catalog: psram > 0,
         ..Default::default()
     };
+    stage(5);
     let app = hub_app::App::start(hub.clone(), app_cfg);
     let _ = APP.set(app.clone());
+    stage(6);
     usbapi::start(app.clone());
+    stage(7);
     match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(p) => net::start(app, p.modem, move |up| {
             if let Err(e) = hub.set_coex(up) {
@@ -362,13 +389,156 @@ fn start_app(hub: Hub) {
 
 /// Stack of the application thread (engine handlers, serde_json).
 #[cfg(feature = "app")]
-const APP_STACK: usize = 64 * 1024;
+const APP_STACK: usize = 40 * 1024;
+
+/// The last Rust panic message, kept in RTC memory across the panic reset
+/// (hub-mode logs go to UART0, which the hwlab host cannot see).
+#[unsafe(link_section = ".rtc_noinit")]
+static mut PANIC_MSG: [u8; 256] = [0; 256];
+const PANIC_MAGIC: &[u8; 4] = b"PNC1";
+
+fn record_panics() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = format!("{info}");
+        let n = text.len().min(250);
+        let p = &raw mut PANIC_MSG;
+        // SAFETY: written once by the panicking thread right before the reset.
+        let buf = unsafe { &mut *p };
+        buf[..4].copy_from_slice(PANIC_MAGIC);
+        buf[4] = n as u8;
+        buf[5..5 + n].copy_from_slice(&text.as_bytes()[..n]);
+        prev(info);
+    }));
+}
+
+fn last_panic() -> Option<String> {
+    static LAST: OnceLock<Option<String>> = OnceLock::new();
+    LAST.get_or_init(|| {
+        let p = &raw mut PANIC_MSG;
+        // SAFETY: read and cleared once at the first use, before any panic of this boot.
+        let buf = unsafe { &*p };
+        if &buf[..4] != PANIC_MAGIC {
+            return None;
+        }
+        let n = (buf[4] as usize).min(250);
+        Some(String::from_utf8_lossy(&buf[5..5 + n]).into_owned())
+    })
+    .clone()
+}
+
+/// Task stack and heap watch: the free stack of every task and the free
+/// internal heap go to RTC memory (every 20 ms while starting, then every
+/// second), so a crash in hub mode (its log is on UART0, which the lab host
+/// cannot see) leaves the last picture for `info` after the next boot.
+#[unsafe(link_section = ".rtc_noinit")]
+static mut TASKS: [u8; 512] = [0; 512];
+const TASKS_MAGIC: &[u8; 4] = b"TSK1";
+static PREV_TASKS: OnceLock<Option<String>> = OnceLock::new();
+
+fn tasks_snapshot() -> String {
+    let mut s = unsafe {
+        format!(
+            "t={}ms internal heap free {} (min {}), PSRAM free {}",
+            esp_idf_svc::sys::esp_timer_get_time() / 1000,
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL),
+            esp_idf_svc::sys::heap_caps_get_minimum_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL),
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
+        )
+    };
+    unsafe {
+        let n = esp_idf_svc::sys::uxTaskGetNumberOfTasks() as usize;
+        let mut tasks: Vec<esp_idf_svc::sys::TaskStatus_t> = vec![core::mem::zeroed(); n + 4];
+        let got = esp_idf_svc::sys::uxTaskGetSystemState(tasks.as_mut_ptr(), tasks.len() as u32, core::ptr::null_mut()) as usize;
+        for t in &tasks[..got] {
+            let name = core::ffi::CStr::from_ptr(t.pcTaskName).to_string_lossy();
+            s += &format!(" {name}:{}", t.usStackHighWaterMark);
+        }
+    }
+    s
+}
+
+fn load_prev_tasks() {
+    // SAFETY: read at boot, before the watch thread starts writing.
+    let buf = unsafe { &*(&raw const TASKS) };
+    let _ = PREV_TASKS.set((&buf[..4] == TASKS_MAGIC).then(|| {
+        let n = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+        String::from_utf8_lossy(&buf[6..6 + n.min(buf.len() - 6)]).into_owned()
+    }));
+}
+
+fn watch_stacks() {
+    let _ = std::thread::Builder::new().stack_size(4096).spawn(move || loop {
+        let p = &raw mut TASKS;
+        let text = tasks_snapshot();
+        let n = text.len().min(512 - 6);
+        // SAFETY: only this thread writes the buffer after start-up.
+        let buf = unsafe { &mut *p };
+        buf[..4].copy_from_slice(TASKS_MAGIC);
+        buf[4..6].copy_from_slice(&(n as u16).to_le_bytes());
+        buf[6..6 + n].copy_from_slice(&text.as_bytes()[..n]);
+        // Fine-grained while starting up (where the crashes were), then 1 s.
+        let up = unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000;
+        std::thread::sleep(Duration::from_millis(if up < 10_000 { 20 } else { 1000 }));
+    });
+}
+
+/// Start-up stage of this boot and of the previous one (RTC memory).
+#[unsafe(link_section = ".rtc_noinit")]
+static mut STAGE: u32 = 0;
+static PREV_STAGE: OnceLock<u32> = OnceLock::new();
+/// Reset reason of the last crash (written by the safe-mode boot).
+#[unsafe(link_section = ".rtc_noinit")]
+static mut CRASH_REASON: u32 = 0;
+
+/// Free internal heap at each start-up stage (RTC memory, for the next boot).
+#[unsafe(link_section = ".rtc_noinit")]
+static mut STAGE_HEAP: [u32; 10] = [0; 10];
+static PREV_STAGE_HEAP: OnceLock<[u32; 10]> = OnceLock::new();
+
+fn stage(n: u32) {
+    // SAFETY: plain word stores; only the main thread writes them.
+    unsafe {
+        (&raw mut STAGE).write_volatile(0x5354_0000 | n);
+        if (n as usize) < 10 {
+            let heap = esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL) as u32;
+            (*(&raw mut STAGE_HEAP))[n as usize] = heap;
+        }
+    }
+}
+
+fn prev_stage() -> String {
+    let s = *PREV_STAGE.get().unwrap_or(&0);
+    let reason = unsafe { esp_idf_svc::sys::esp_reset_reason() };
+    let crash = unsafe { (&raw const CRASH_REASON).read_volatile() };
+    let crash = if crash >> 16 == 0x4352 { format!("; last crash: reset reason {}", crash & 0xFFFF) } else { String::new() };
+    if s >> 16 == 0x5354 {
+        let heap: String = PREV_STAGE_HEAP
+            .get()
+            .map(|h| h.iter().enumerate().filter(|(_, v)| **v != 0).map(|(i, v)| format!(" {i}:{v}")).collect())
+            .unwrap_or_default();
+        format!("previous boot reached start-up stage {}; free internal heap by stage{heap}; reset reason {reason}{crash}", s & 0xFFFF)
+    } else {
+        format!("reset reason {reason}{crash}")
+    }
+}
 
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
+    let _ = PREV_STAGE.set(unsafe { (&raw const STAGE).read_volatile() });
+    let _ = PREV_STAGE_HEAP.set(unsafe { (&raw const STAGE_HEAP).read_volatile() });
+    load_prev_tasks();
+    let _ = last_panic();
+    record_panics();
     info!("tbr-hub {} starting", env!("CARGO_PKG_VERSION"));
+    // Safe mode never returns, so the crashed boot's stage survives it.
+    if tbr_bridge::recovery::crashed_last_boot() {
+        unsafe { (&raw mut CRASH_REASON).write_volatile(0x4352_0000 | esp_idf_svc::sys::esp_reset_reason()) };
+    }
     tbr_bridge::safe_mode_if_crashed();
+    unsafe { (&raw mut STAGE_HEAP).write_volatile([0; 10]) };
+    stage(1);
 
     let boot = mode::boot();
     let _ = BOOT.set(boot);
@@ -391,11 +561,16 @@ fn main() {
         Mode::Hub => {
             usb::BRIDGE_ENABLED.store(false, Ordering::SeqCst);
             h2::AUTO_LINES.store(false, Ordering::SeqCst);
-            uart::init(hub_ncp::transport::Line::BR_DEFAULT.baud).expect("H2 UART");
+            // The host link has RTS/CTS and credits: small rings save RAM
+            // (the 4 MB early sample has no PSRAM).
+            uart::init_with_rings(hub_ncp::transport::Line::BR_DEFAULT.baud, 4096, 2048).expect("H2 UART");
             usb::init().expect("TinyUSB");
+            stage(2);
+            watch_stacks();
             tbr_bridge::start_console();
             start_hub();
         }
     }
+    stage(9);
     tbr_bridge::park()
 }

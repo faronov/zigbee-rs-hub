@@ -446,6 +446,13 @@ the PHY, then puts the USJ pull-up registers back to their reset state
 - **0.2.3** (not flashed): the bridge became a library as well, so `tbr-hub`
   runs it as its default mode; a console extension hook and a CDC 0
   "bridge enabled" switch (always on in `tbr-bridge`). No functional change.
+- **0.2.4** (not flashed yet): fix for the "5 s silence after opening the
+  bridge port" (zigbee-rs Z14). With flow control on and DTR set, the UART
+  reader kept retrying a CDC 0 write while the host had not drained the TX
+  FIFO, so it stopped reading the UART until the port was reopened. Now it
+  waits at most 200 ms without progress, then flushes the TX FIFO, counts
+  a stall and goes on; a DTR edge (port opened or closed) flushes the FIFO
+  too. `info` shows both counters (`stalls`, `DTR flushes`).
 
 ## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
 
@@ -466,6 +473,7 @@ bridge (fast development loop) and on the S3 talking to UART1 directly.
 | `transport` | `PortRx` (reader thread) / `PortTx` (driver: writes, line rate, RTS/CTS), `NcpControl` (EN/BOOT), in-memory pipe |
 | `driver` | One thread owns `zigbee_zrhp::link::Link<8, 8>` (embedded profile: RX window 8, LOG credit 0, BULK 2; credits returned on delivery). It answers `EVT_NCP_READY` with `SYS_NEGOTIATE` + `SYS_GET_INFO` itself, then reports the session. Requests are **gated** until the lifecycle has resumed the NCP, bounded by the 20 s resume budget. A dropped session makes transmitted requests "in doubt": same NCP cookie (`PEER_RESYNC`) ⇒ re-sent with the same TID and `RETRY` (the NCP's retry cache answers), new cookie ⇒ `LINK_RESET` (delivery unknown, spec 6.5). Two-phase commands wait for their completion event (`EVT_APS_DATA_CONFIRM`, `EVT_NETWORK_STATE`). Without a session the driver cycles 921 600 + RTS/CTS → 460 800 without flow control |
 | `lifecycle` (`Hub`) | Seamless resume on every session: UART flow-control mismatch (NCP without RTS/CTS ⇒ host flow off), store identity (`ncp_ieee`), NCP cookie, `table_epoch`, NCP flash size (`SYS_GET_INFO.flash_size`, decision N4: picks the H2 slot size, 1.875 MiB on 4 MB, 896 KiB on 2 MB, so oversized images are refused before `FW_BEGIN`); network ownership (adopt into an empty store, refuse to touch a different network, report a lost one); `NWK_INIT` with the checkpoint-log floors (`last + 9 × fc_stride`); replay of host endpoints and the permit-join remainder; `TBL_SYNC`; NCP firmware check. Operations: `form` (PAN ID, EPID and key chosen and persisted by the hub, then `NWK_FORM`), `permit_join`, `add_endpoint`, `send_aps`, `fw_update`, `fw_confirm`, `reset_ncp` (soft/EN), `enter_rom_loader` |
+| `inventory` | Devices the NCP already knows: `TBL_READ` of the `DEVICE` table, `DIAG_GET_CHILDREN` and `DIAG_GET_NEIGHBORS` (paged; previous children skipped; `UNSUPPORTED_COMMAND` tolerated and reported), merged by IEEE with the store's device records, the coordinator left out |
 | `fw` | `FW_BEGIN` → `FW_WRITE` (two in flight, resynchronised on `next_offset`) → `FW_FINISH` → `FW_ACTIVATE`, straight from the source (file, upload); the S3 keeps no NCP image. The next session confirms the hub's own trial image with `FW_CONFIRM` after the network resumed, or reports the H2 bootloader rollback. Trial images the hub did not activate are not confirmed (another host may own them) |
 | `store` | Host store journal (spec 3.4/8.8): 32 × 4 KiB ring, records `len, type, commit, payload, CRC-32C`, committed by clearing the commit byte after a read-back; two-generation snapshot + deltas, compaction above half the ring. Holds the store identity, the owned network (incl. key), the FC checkpoint log (every 4th checkpoint persisted), a device registry, the pending NCP update and the host endpoints. Backends: `hubdata` partition, a file, RAM |
 | `sim` | Simulated NCP (the real link on the NCP side, scripted command set incl. A/B slots, trial boot and rollback) for the tests and `hubctl --sim` |
@@ -478,7 +486,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` 0.2.3 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **bridge** (default; no NVS key) | `tbr-bridge` 0.2.4 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
 | **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
@@ -526,7 +534,7 @@ production, 2 944 KiB dev).
 
 | Image | App image |
 |---|---:|
-| `tbr-bridge` 0.2.3 | 455 760 B |
+| `tbr-bridge` 0.2.4 | 456 256 B |
 | `tbr-hub` 0.1.0, ZRHP host core only (`--no-default-features`) | 664 560 B |
 
 (Fat LTO at opt-level `z` since stage 2; 501 744 B and 738 416 B before. The
@@ -597,14 +605,14 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 | `convert` | ZRHP events → engine inputs (APS indications with source IEEE and group, admitted joins, `EVT_GP_*` incl. commissioned sink records and remote sink/translation tables); engine APS/GP requests → wire (`APS_DATA_REQUEST`, `GP_*` 0x0A01–0x0A0D) |
 | `transport` | The engine's `ZigbeeTransport` on `hub_ncp`: APS data non-blocking (`Client::start`, held across an NCP resume, outcomes counted), GP/group/remove/permit-join as calls only while the session is ready |
 | `registry` | Device registry in the host store journal (device-support 16.1): `dev/<id>` = deflated JSON `DeviceSnapshot` (identity, fingerprint, descriptors, attribute support and the values resolution reads, self-description fragment as zdef CBOR, user settings and entity overrides, configure hash/results, GP sink record), `udef/<id>` = user definitions. Written on device changes (2 s coalescing) and in a 30 s sweep; identical values are skipped and snapshots hold no measured values, so reports never write flash. The journal stores values > 2000 B as parts, applied only when complete |
-| `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist |
+| `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist; once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them |
 | `catalog` | Trusted keys of the definitions catalog: **slot 0** = `keys/zdef-catalog-ed25519.pub.pem` (`ff931767…63c6a2`, kid `66f64ac1cbfc9e27`), **slot 1** reserved for a rotation (add the successor in a firmware release, sign with it, retire slot 0 later); `verify_manifest` / `verify_bank` (COSE_Sign1 Ed25519, `zdef`) |
 
 `hub-devices` gained `persist` (`snapshot_device` / `restore_device`) and
 `ApiServer::pump_events`; `hub-ncp` gained key/value records, PTA
 `coex_enable` following the Wi-Fi state (decision N7, replayed on resume),
 `group_membership`, `remove_device`, `permit_join_on`. All zigbee-rs crates
-are pinned to one revision (master `7c4f96c`).
+are pinned to one revision (master `c18875b`).
 
 **Desktop.** `hubctl --serial … --store hubdata.bin serve [--listen
 127.0.0.1:8099] [--token T]` runs the application with its WebSocket JSON
@@ -618,6 +626,21 @@ pushes through detached senders) once Wi-Fi credentials are stored
 (console `wifi set <ssid> <password>`, `wifi`, `token`, `catalog`), and the
 same API as JSON lines on CDC 0 while a host holds the port (a test path
 without network).
+
+**RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
+application lives in ~295 KB of internal heap. On the first hardware run
+(2026-11-20, 4 MB dev table) it ran out of memory within a second: the
+registry's deflate compressor (~250 KB) and the decoded example catalog
+(~90 KB). Now the registry stores plain JSON (deflated values of earlier
+builds are still read), the example catalog loads only with PSRAM, the app
+thread has 40 KiB of stack and the hub-mode UART rings are 4/2 KiB. In hub
+mode, after the C6 sensor was imported and interviewed: ~106 KB internal
+heap free (minimum 103 KB), Wi-Fi not yet started. PSRAM support is on
+(`CONFIG_SPIRAM`, ignored when absent) for boards that have it. For the next
+crash, `info` shows the previous boot's start-up stage, free heap per stage,
+the last stack/heap watch, the last Rust panic message and the crash reset
+reason (RTC memory; hub-mode logs go to UART0, which the lab host cannot
+see); `hub stacks` shows the live picture.
 
 **Size.** The application is the default `tbr-hub` build; it targets the
 8 MB production layout (3 MiB slots) and the 4 MB dev layout (2 944 KiB).

@@ -58,6 +58,10 @@ pub struct AppConfig {
     /// Stack of the app thread (the engine's handlers are deep: an
     /// unoptimised build needs 64–96 KiB).
     pub stack_size: usize,
+    /// Import devices the NCP knows but the registry does not (joined
+    /// before the hub adopted the network) in every new NCP session, and
+    /// interview them.
+    pub import_ncp_devices: bool,
 }
 
 impl Default for AppConfig {
@@ -79,6 +83,7 @@ impl Default for AppConfig {
             },
             builtin_catalog: true,
             stack_size: 96 * 1024,
+            import_ncp_devices: true,
         }
     }
 }
@@ -131,6 +136,9 @@ pub struct AppStatus {
     pub aps: ApsCounters,
     /// The hub endpoint is registered with the NCP.
     pub endpoint_registered: bool,
+    /// Devices imported from the NCP's tables (see
+    /// [`AppConfig::import_ncp_devices`]).
+    pub imported: usize,
 }
 
 enum Input {
@@ -237,6 +245,10 @@ struct Runner {
     wall0: Millis,
     t0: Instant,
     registered: bool,
+    /// NCP cookie of the session the last import ran in.
+    imported_in: Option<u32>,
+    import_retry: Option<Instant>,
+    imported: usize,
 }
 
 impl Runner {
@@ -258,6 +270,9 @@ impl Runner {
             wall0: wall_ms(),
             t0: Instant::now(),
             registered: false,
+            imported_in: None,
+            import_retry: None,
+            imported: 0,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -348,6 +363,9 @@ impl Runner {
         if !self.registered && self.ncp.client().state() == SessionState::Ready {
             self.register();
         }
+        if self.registered && self.cfg.import_ncp_devices {
+            self.import_ncp_devices(now);
+        }
         self.engine.tick(now);
         self.engine.transport.poll();
     }
@@ -370,6 +388,46 @@ impl Runner {
         }
     }
 
+    /// Once per NCP session: devices the NCP knows and the engine does not
+    /// are added as if they had just joined (interview, then configure). A
+    /// sleepy device answers when it next polls.
+    fn import_ncp_devices(&mut self, now: Millis) {
+        let Some(cookie) = self.ncp.client().session().map(|s| s.link.peer_cookie) else { return };
+        if self.ncp.client().state() != SessionState::Ready
+            || self.imported_in == Some(cookie)
+            || self.import_retry.is_some_and(|t| Instant::now() < t)
+        {
+            return;
+        }
+        let inv = match self.ncp.ncp_devices() {
+            Ok(inv) => inv,
+            Err(e) => {
+                warn!("app: NCP device inventory: {e}");
+                self.import_retry = Some(Instant::now() + Duration::from_secs(30));
+                return;
+            }
+        };
+        self.imported_in = Some(cookie);
+        let mut added = 0;
+        for d in inv.devices.iter().filter(|d| d.nwk < 0xFFF8) {
+            let ieee = u64::from_le_bytes(d.ieee);
+            if self.engine.devices().any(|x| x.ieee() == Some(ieee)) {
+                continue;
+            }
+            self.engine.transport.nwk.insert(ieee, d.nwk);
+            self.engine.on_device_joined(ieee, d.nwk, now);
+            added += 1;
+        }
+        self.imported += added;
+        if added > 0 || !inv.unsupported.is_empty() {
+            info!(
+                "app: imported {added} of {} NCP devices (not answered by the NCP: {:04X?})",
+                inv.devices.len(),
+                inv.unsupported
+            );
+        }
+    }
+
     fn after_input(&mut self) {
         let now = self.now();
         let events = self.engine.drain_events();
@@ -386,5 +444,6 @@ impl Runner {
         st.registry_errors = self.registry.errors;
         st.aps = self.engine.transport.counters;
         st.endpoint_registered = self.registered;
+        st.imported = self.imported;
     }
 }

@@ -302,3 +302,38 @@ fn store_survives_a_hub_restart() {
     hub.shutdown();
     sim2.stop();
 }
+
+#[test]
+fn inventory_merges_ncp_table_children_and_neighbors() {
+    use crate::inventory::source;
+    let (hub, sim) = start(Store::volatile());
+    assert!(hub.wait_ready(T));
+    let (a, b, c, d, e) = ([0xA1; 8], [0xB2; 8], [0xC3; 8], [0xD4; 8], [0xE5; 8]);
+    sim.with(|s| s.table_devices = vec![(a, 0x1111, Some(0x80)), (b, 0x2222, None), (c, 0x3333, None)]);
+    // The master NCP image answers DIAG_GET_CHILDREN/NEIGHBORS UNSUPPORTED.
+    let inv = hub.ncp_devices().unwrap();
+    assert_eq!(inv.unsupported, vec![ids::DIAG_GET_CHILDREN, ids::DIAG_GET_NEIGHBORS]);
+    assert_eq!(inv.devices.iter().map(|x| (x.ieee, x.nwk)).collect::<Vec<_>>(), vec![(a, 0x1111), (b, 0x2222), (c, 0x3333)]);
+
+    let own = hub.client().session().unwrap().info.as_ref().unwrap().ieee_active;
+    sim.with(|s| {
+        s.children = Some(vec![(a, 0x1112, 0x8C), (d, 0x4444, 0x80)]);
+        s.neighbors = Some(vec![(own, 0x0000, 0, 3), (d, 0x4444, 2, 1), (e, 0x5555, 1, 4)]);
+    });
+    let inv = hub.ncp_devices().unwrap();
+    assert!(inv.unsupported.is_empty());
+    let got: Vec<_> = inv.devices.iter().map(|x| (x.ieee, x.nwk, x.capability, x.sources)).collect();
+    assert_eq!(
+        got,
+        vec![
+            // A child's live address and capability win over the table's.
+            (a, 0x1112, Some(0x8C), source::TABLE | source::CHILD),
+            (b, 0x2222, None, source::TABLE),
+            (c, 0x3333, None, source::TABLE),
+            (d, 0x4444, Some(0x80), source::CHILD | source::NEIGHBOR),
+        ],
+        "the coordinator and a previous child are left out"
+    );
+    hub.shutdown();
+    sim.stop();
+}

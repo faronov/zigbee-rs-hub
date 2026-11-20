@@ -4,6 +4,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub static UART_TO_USB: AtomicU32 = AtomicU32::new(0);
 pub static UART_TO_USB_DROPPED: AtomicU32 = AtomicU32::new(0);
+/// The host kept the bridge port open but took nothing for
+/// [`crate::STALL_LIMIT`]: CDC 0 TX FIFO flushed, data dropped.
+pub static UART_TO_USB_STALLS: AtomicU32 = AtomicU32::new(0);
+/// CDC 0 TX FIFO flushed on a DTR edge (port opened or closed).
+pub static DTR_FLUSHES: AtomicU32 = AtomicU32::new(0);
 pub static USB_TO_UART: AtomicU32 = AtomicU32::new(0);
 pub static LINE_STATE_EVENTS: AtomicU32 = AtomicU32::new(0);
 pub static LINE_CODING_EVENTS: AtomicU32 = AtomicU32::new(0);
@@ -14,9 +19,11 @@ pub static RX_BUFFER_FULL: AtomicU32 = AtomicU32::new(0);
 pub static FRAME_ERR: AtomicU32 = AtomicU32::new(0);
 pub static PARITY_ERR: AtomicU32 = AtomicU32::new(0);
 
-const ALL: [&AtomicU32; 9] = [
+const ALL: [&AtomicU32; 11] = [
     &UART_TO_USB,
     &UART_TO_USB_DROPPED,
+    &UART_TO_USB_STALLS,
+    &DTR_FLUSHES,
     &USB_TO_UART,
     &LINE_STATE_EVENTS,
     &LINE_CODING_EVENTS,
@@ -29,6 +36,8 @@ const ALL: [&AtomicU32; 9] = [
 pub struct Snapshot {
     pub uart_to_usb: u32,
     pub uart_to_usb_dropped: u32,
+    pub uart_to_usb_stalls: u32,
+    pub dtr_flushes: u32,
     pub usb_to_uart: u32,
     pub line_state_events: u32,
     pub line_coding_events: u32,
@@ -53,6 +62,8 @@ pub fn snapshot() -> Snapshot {
     Snapshot {
         uart_to_usb: g(&UART_TO_USB),
         uart_to_usb_dropped: g(&UART_TO_USB_DROPPED),
+        uart_to_usb_stalls: g(&UART_TO_USB_STALLS),
+        dtr_flushes: g(&DTR_FLUSHES),
         usb_to_uart: g(&USB_TO_UART),
         line_state_events: g(&LINE_STATE_EVENTS),
         line_coding_events: g(&LINE_CODING_EVENTS),
