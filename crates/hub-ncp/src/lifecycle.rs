@@ -60,13 +60,16 @@ pub struct ResumePolicy {
     pub replay: bool,
     /// Also confirm trial images the hub did not activate.
     pub confirm_foreign_trial: bool,
+    /// Never confirm a trial image, not even the hub's own (rollback tests:
+    /// a reset of the unconfirmed trial image returns to the previous slot).
+    pub hold_trial: bool,
     /// `LOG_CONFIG` level to request in every session (`None`: leave it).
     pub log_level: Option<u8>,
 }
 
 impl Default for ResumePolicy {
     fn default() -> Self {
-        Self { init_network: true, adopt: true, replay: true, confirm_foreign_trial: false, log_level: None }
+        Self { init_network: true, adopt: true, replay: true, confirm_foreign_trial: false, hold_trial: false, log_level: None }
     }
 }
 
@@ -74,7 +77,7 @@ impl ResumePolicy {
     /// Observe only: no `NWK_INIT`, no replay, nothing written to the NCP
     /// except the session handshake, `TBL_SYNC` and read-only queries.
     pub fn read_only() -> Self {
-        Self { init_network: false, adopt: false, replay: false, confirm_foreign_trial: false, log_level: None }
+        Self { init_network: false, adopt: false, replay: false, confirm_foreign_trial: false, hold_trial: false, log_level: None }
     }
 }
 
@@ -248,6 +251,8 @@ struct Inner {
     resumed_cookie: Mutex<Option<u32>>,
     pending_fc: Mutex<[u32; 2]>,
     coex: Mutex<Option<bool>>,
+    /// Set by [`Hub::shutdown`] under the store lock: no commits afterwards.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 /// The running hub core. Cheap to clone.
@@ -303,6 +308,7 @@ impl Hub {
             resumed_cookie: Mutex::new(None),
             pending_fc: Mutex::new([0; 2]),
             coex: Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
         });
         let hub = Hub { inner };
         let worker = hub.clone();
@@ -361,9 +367,12 @@ impl Hub {
         rx
     }
 
-    /// Stop the driver.
+    /// Stop the driver. Waits for a store commit in progress and refuses
+    /// later ones, so the process can exit without tearing a record.
     pub fn shutdown(&self) {
         self.inner.client.shutdown();
+        let _store = self.inner.store.lock().unwrap();
+        self.inner.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn update(&self, f: impl FnOnce(&mut HubStatus)) {
@@ -379,6 +388,9 @@ impl Hub {
 
     fn commit(&self, change: Change) {
         let mut store = self.inner.store.lock().unwrap();
+        if self.inner.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         if let Err(e) = store.commit_if_changed(change) {
             error!("hub: store commit failed: {e}");
         }
@@ -491,15 +503,28 @@ impl Hub {
         }
 
         // 3. Network.
-        let network_state = ready.as_ref().map_or(0, |r| r.network_state);
-        self.update(|s| s.network_state = network_state);
+        let mut network_state = ready.as_ref().map_or(0, |r| r.network_state);
         let stored = self.inner.store.lock().unwrap().state().network;
+        let stride = negotiated.capacity(capacity::FC_STRIDE);
+        let mut initialized = false;
+        if network_state == 1 && policy.init_network && (stored.is_some() || policy.adopt) {
+            // A formed-down NCP loads its NIB only in NWK_INIT: before that
+            // NWK_GET_INFO has no PAN, EPID or channel to compare. Start it,
+            // then compare; a mismatch below is reported as usual.
+            self.nwk_init(stride, network_state)?;
+            network_state = 2;
+            initialized = true;
+        }
+        self.update(|s| s.network_state = network_state);
         let mut ownership = Ownership::NoNetwork;
         if network_state == 0 {
             if stored.is_some() {
                 ownership = Ownership::Lost;
                 self.note_error("the NCP has no network but the store has one: restore needed".into());
             }
+        } else if network_state == 1 {
+            // Formed but down and not started here (read-only): nothing to compare.
+            ownership = Ownership::Observed;
         } else {
             let nwk = self.get_network_info(self.opts(Duration::from_secs(5)))?;
             match stored {
@@ -539,8 +564,8 @@ impl Hub {
                     ownership = Ownership::Owned;
                 }
             }
-            if ownership == Ownership::Owned && policy.init_network {
-                self.nwk_init(negotiated.capacity(capacity::FC_STRIDE), network_state)?;
+            if ownership == Ownership::Owned && policy.init_network && !initialized {
+                self.nwk_init(stride, network_state)?;
                 self.get_network_info(self.opts(Duration::from_secs(5)))?;
             }
         }
@@ -691,7 +716,10 @@ impl Hub {
         let pending = self.inner.store.lock().unwrap().state().fw_pending;
         match pending {
             Some(p) if p.activated => {
-                if run.version != p.version || run.sha256 != p.sha256 {
+                // By slot, not by SHA-256: the NCP reports the digest of the
+                // staged ESP image, which for a signed envelope is not the
+                // digest of the transferred file.
+                if run.version != p.version || run.slot != p.slot {
                     self.note_error(format!(
                         "NCP update 0x{:08X} rolled back: running 0x{:08X} in slot {}",
                         p.version, run.version, run.slot
@@ -699,6 +727,10 @@ impl Hub {
                     self.update(|s| s.fw = FwState::RolledBack { expected: p.version, running: run.version });
                     self.commit(Change::FwClear);
                 } else if run.state == slot_state::RUNNING_TRIAL {
+                    if self.inner.policy.hold_trial {
+                        info!("hub: trial image 0x{:08X} (slot {}) running, held unconfirmed", run.version, run.slot);
+                        return Ok(());
+                    }
                     if !may_confirm {
                         self.note_error("trial image running but the network did not resume; not confirming".into());
                         return Ok(());

@@ -392,11 +392,13 @@ impl SimNcp {
                     status(Status::Success)
                 }
             }
+            // Like the real NCP: the NIB is loaded by NWK_INIT, so a
+            // formed-down network reports no PAN, EPID or channel.
             ids::NWK_GET_INFO => ok(encode!(NwkGetInfoRsp {
                 state: s.network_state,
-                pan_id: s.pan_id,
-                ext_pan_id: s.ext_pan_id,
-                channel: s.channel,
+                pan_id: if s.network_state == 2 { s.pan_id } else { 0xFFFF },
+                ext_pan_id: if s.network_state == 2 { s.ext_pan_id } else { [0; 8] },
+                channel: if s.network_state == 2 { s.channel } else { 0 },
                 channel_mask: 1 << s.channel,
                 short: 0,
                 ieee: Ieee([0x5A, 0x51, 0, 0, 0, 0, 0x01, 0x02]),

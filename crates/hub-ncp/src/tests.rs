@@ -31,10 +31,13 @@ fn rng() -> Rng {
 }
 
 fn start(store: Store) -> (Hub, SimNcp) {
+    start_with(store, HubConfig::default())
+}
+
+fn start_with(store: Store, mut cfg: HubConfig) -> (Hub, SimNcp) {
     let (host, ncp) = pipe::pair();
     let sim = SimNcp::start(ncp);
     let (rx, tx) = host.split();
-    let mut cfg = HubConfig::default();
     cfg.driver.lines = vec![Line::BR_DEFAULT];
     (Hub::start(cfg, rx, tx, None, store, rng()), sim)
 }
@@ -218,6 +221,30 @@ fn rolled_back_update_is_reported() {
     let begins = sim.state().requests.iter().filter(|(id, _)| *id == ids::FW_BEGIN).count();
     assert_eq!(hub.fw_update(&big, &mut SliceSource(Vec::new())), Err(Error::Status(Status::TooLarge)));
     assert_eq!(sim.state().requests.iter().filter(|(id, _)| *id == ids::FW_BEGIN).count(), begins);
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
+fn held_trial_rolls_back_on_reset() {
+    let mut cfg = HubConfig::default();
+    cfg.resume.hold_trial = true;
+    let (hub, sim) = start_with(Store::volatile(), cfg);
+    assert!(hub.wait_ready(T));
+    hub.form(FormRequest::default()).unwrap();
+    // Same version as the running image: only the slot tells them apart.
+    let (img, data) = image(0x0001_0000, 1500);
+    assert_eq!(hub.fw_update(&img, &mut SliceSource(data)).unwrap(), 1);
+    assert!(hub.wait_status(T, |s| s.slots.iter().any(|x| x.slot == 1 && x.state == slot_state::RUNNING_TRIAL)));
+    assert!(sim.state().trial, "held, not confirmed");
+    reboot(&hub, &sim);
+    assert!(
+        hub.wait_status(T, |s| s.fw == FwState::RolledBack { expected: 0x0001_0000, running: 0x0001_0000 }),
+        "{:?}",
+        hub.status().fw
+    );
+    assert_eq!(sim.state().running, 0);
+    assert!(hub.store_state().fw_pending.is_none());
     hub.shutdown();
     sim.stop();
 }
