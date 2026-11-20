@@ -1,0 +1,22 @@
+[package]
+name = "hub-devices"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Device and entity engine of zigbee-rs-hub: interview, generic ZCL tier, definitions, Tuya EF00, Green Power, WebSocket API model"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+miniz_oxide = "0.8"
+# Green Power commissioning payload decoder and the GP default translation
+# (shared with the zigbee-rs NCP/sink), spec 13.2 and 13.8.
+zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "0580bc1a402d4028ee093a2baa28dee72960149c", features = ["sink"] }
+
+[dev-dependencies]
+serde_yaml = "0.9"
+proptest = "1"
