@@ -24,9 +24,10 @@ zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "7c4f96c2328
 zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "7c4f96c2328d778169344592f8f50b1ab24ea6b4", features = ["sink"] }
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 codegen-units = 1
 debug = true
+lto = "fat"
 
 [profile.dev]
 opt-level = "z"
