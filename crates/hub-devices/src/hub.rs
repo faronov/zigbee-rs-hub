@@ -1254,7 +1254,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if let Some(d) = self.devices.get_mut(id) {
                     for (st, a) in &recs {
                         if let (Some(a), true) = (a, *st != Status::SUCCESS) {
-                            d.configure.unreportable.push((ep, ind.cluster, *a));
+                            if !d.configure.unreportable.contains(&(ep, ind.cluster, *a)) {
+                                d.configure.unreportable.push((ep, ind.cluster, *a));
+                                d.configure.poll_at.insert((ep, ind.cluster, *a), now);
+                            }
                             d.diag.configure.insert(
                                 format!("report:{ep}:0x{:04x}:0x{a:04x}", ind.cluster),
                                 st.name().into(),
@@ -1976,6 +1979,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             self.redo_configure(id, now);
         }
+        // Unreportable primary measurements on mains devices are polled
+        // every `max` seconds (5.2); sleepy devices never are.
+        self.poll_unreportable(id, now);
         // Periodic Tuya query.
         let q = self
             .devices
@@ -1993,6 +1999,48 @@ impl<T: ZigbeeTransport> Hub<T> {
                     .unwrap_or(0);
                 d.tuya_query_at = (iv > 0).then(|| now + u64::from(iv) * 1000);
             }
+        }
+    }
+
+    fn poll_unreportable(&mut self, id: &str, now: Millis) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        if d.sleepy()
+            || d.power() != PowerKind::Mains
+            || d.gp.is_some()
+            || d.configure.unreportable.is_empty()
+        {
+            return;
+        }
+        let mut due = Vec::new();
+        for &(ep, c, a) in &d.configure.unreportable.clone() {
+            let primary = d
+                .entities
+                .iter()
+                .filter(|e| !e.orphaned && e.r.ep == ep && e.r.def.category.is_none())
+                .find_map(|e| {
+                    e.r.def
+                        .values()
+                        .find_map(|(_, v)| match (&v.binding, v.report) {
+                            (Binding::Zcl(z), Some(ReportSpec::Config { max, .. }))
+                                if z.cluster == c && z.attr == a =>
+                            {
+                                Some((u64::from(max.max(10)), z.mfr))
+                            }
+                            _ => None,
+                        })
+                });
+            let Some((max, mfr)) = primary else { continue };
+            // `poll_at` holds the time of the last poll (or of the failure).
+            let last = *d.configure.poll_at.entry((ep, c, a)).or_insert(now);
+            if now >= last + max * 1000 {
+                d.configure.poll_at.insert((ep, c, a), now);
+                due.push((ep, c, a, mfr));
+            }
+        }
+        for (ep, c, a, mfr) in due {
+            self.read_attrs(id, ep, c, mfr, &[a], Purpose::Refresh, now);
         }
     }
 

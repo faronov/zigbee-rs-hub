@@ -353,3 +353,181 @@ fn reinterview_keeps_uids_and_orphans_vanished_entities() {
     hub.delete_entity(&format!("{id}:1:humidity")).unwrap();
     assert!(hub.delete_entity(&format!("{id}:1:temperature")).is_err());
 }
+
+#[test]
+fn ias_contact_sensor_enrollment_and_notifications() {
+    let ieee = 0x00158d00aaaa0001;
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(ieee, 0x1301, LogicalType::EndDevice, false, 0x1234)
+            .endpoint(1, 0x0104, 0x0402, &[0x0000, 0x0001, 0x0500], &[])
+            .basic("ACME", "Door-1", 0x03)
+            .attr(1, 0x0500, 0x0000, TypedValue::uint(ZclType::ENUM8, 0))
+            .attr(1, 0x0500, 0x0001, TypedValue::uint(ZclType::ENUM16, 0x0015))
+            .attr(1, 0x0500, 0x0002, TypedValue::uint(ZclType::MAP16, 0)),
+    );
+    sim.join(&mut hub, ieee, T0);
+    let id = "zb:00158d00aaaa0001";
+    let s = sim.dev(ieee).clone();
+    // CIE address = coordinator IEEE.
+    let cie = s
+        .writes
+        .iter()
+        .find(|w| (w.1, w.2) == (0x0500, 0x0010))
+        .expect("IAS_CIE_Address write");
+    assert_eq!(
+        cie.4,
+        TypedValue::uint(
+            ZclType::IEEE,
+            crate::hub::HubConfig::default().coordinator_ieee
+        )
+    );
+    let k = keys(&hub, id);
+    assert!(
+        k.contains(&"1:contact".to_string())
+            && k.contains(&"1:tamper".to_string())
+            && k.contains(&"1:battery_low".to_string())
+    );
+    let (_, e) = hub.entity(&format!("{id}:1:contact")).unwrap();
+    assert_eq!(e.r.def.device_class.as_deref(), Some("door"));
+    assert_eq!(state(&hub, &format!("{id}:1:contact")), false);
+    // Zone Enroll Request → Zone Enroll Response (success).
+    hub.transport.take();
+    hub.on_aps_indication(
+        s.zcl(
+            1,
+            0x0500,
+            crate::zcl::FrameType::Cluster,
+            None,
+            0x30,
+            0x01,
+            vec![0x15, 0x00, 0x34, 0x12],
+        ),
+        T0 + 1000,
+    );
+    let a = hub
+        .transport
+        .aps()
+        .into_iter()
+        .find(|a| a.cluster == 0x0500)
+        .cloned()
+        .unwrap();
+    assert_eq!(&a.payload[2..4], &[0x00, 0x00]);
+    // Zone Status Change Notification: alarm1 + tamper.
+    hub.on_aps_indication(
+        s.zcl(
+            1,
+            0x0500,
+            crate::zcl::FrameType::Cluster,
+            None,
+            0x31,
+            0x00,
+            vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00],
+        ),
+        T0 + 2000,
+    );
+    assert_eq!(state(&hub, &format!("{id}:1:contact")), true);
+    assert_eq!(state(&hub, &format!("{id}:1:tamper")), true);
+    assert_eq!(state(&hub, &format!("{id}:1:battery_low")), false);
+}
+
+#[test]
+fn generic_cover_lock_thermostat_and_polling() {
+    let ieee = 0x00158d00bbbb0001;
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    let mut dev = SimDevice::new(ieee, 0x1401, LogicalType::Router, true, 0x1234)
+        .endpoint(1, 0x0104, 0x0202, &[0x0000, 0x0102], &[])
+        .endpoint(2, 0x0104, 0x000A, &[0x0101], &[])
+        .endpoint(3, 0x0104, 0x0301, &[0x0201, 0x0204], &[])
+        .endpoint(4, 0x0104, 0x0302, &[0x0402], &[])
+        .basic("ACME", "Multi", 0x01)
+        .attr(1, 0x0102, 0x0008, TypedValue::uint(ZclType::U8, 25))
+        .attr(2, 0x0101, 0x0000, TypedValue::uint(ZclType::ENUM8, 1))
+        .attr(3, 0x0201, 0x0000, TypedValue::int(ZclType::I16, 2050))
+        .attr(3, 0x0201, 0x0012, TypedValue::int(ZclType::I16, 2100))
+        .attr(3, 0x0201, 0x001C, TypedValue::uint(ZclType::ENUM8, 4))
+        .attr(3, 0x0201, 0x0029, TypedValue::uint(ZclType::MAP16, 1))
+        .attr(3, 0x0201, 0x001B, TypedValue::uint(ZclType::ENUM8, 2))
+        .attr(3, 0x0201, 0x0015, TypedValue::int(ZclType::I16, 500))
+        .attr(3, 0x0201, 0x0016, TypedValue::int(ZclType::I16, 3000))
+        .attr(3, 0x0204, 0x0001, TypedValue::uint(ZclType::ENUM8, 0))
+        .attr(4, 0x0402, 0x0000, TypedValue::int(ZclType::I16, 1900));
+    dev.unreportable.insert((0x0402, 0x0000));
+    sim.devices.push(dev);
+    sim.join(&mut hub, ieee, T0);
+    let id = "zb:00158d00bbbb0001";
+    // Cover: HA position = 100 − lift percentage.
+    let cover = format!("{id}:1:cover");
+    let st = hub.state_of(&cover).unwrap();
+    assert_eq!(
+        (
+            st["state"].clone(),
+            st["attributes"]["current_position"].clone()
+        ),
+        (json!("open"), json!(75))
+    );
+    sim.log.clear();
+    hub.entity_command(
+        &cover,
+        "set_cover_position",
+        &json!({"position": 30}),
+        T0 + 1000,
+    )
+    .unwrap();
+    hub.entity_command(&cover, "stop_cover", &json!({}), T0 + 1000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 1000);
+    let aps = sim.aps();
+    assert_eq!(&aps[0].payload[2..], &[0x05, 70]);
+    assert_eq!(aps[1].payload[2], 0x02);
+    // Lock.
+    let lock = format!("{id}:2:lock");
+    assert_eq!(state(&hub, &lock), "locked");
+    sim.log.clear();
+    hub.entity_command(&lock, "unlock", &json!({}), T0 + 2000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 2000);
+    assert_eq!(&sim.aps()[0].payload[2..], &[0x01, 0x00]);
+    assert!(keys(&hub, id).contains(&"2:lock_event".to_string()));
+    // Thermostat: hvac modes from ControlSequenceOfOperation, limits.
+    let th = format!("{id}:3:thermostat");
+    let st = hub.state_of(&th).unwrap();
+    assert_eq!(st["state"], "heat");
+    assert_eq!(st["attributes"]["hvac_action"], "heating");
+    assert_eq!(st["attributes"]["current_temperature"], json!(20.5));
+    let (_, e) = hub.entity(&th).unwrap();
+    let caps = e.record(id)["capabilities"].clone();
+    assert_eq!(caps["hvac_modes"], json!(["off", "heat"]));
+    assert_eq!(
+        (caps["min_temp"].clone(), caps["max_temp"].clone()),
+        (json!(5.0), json!(30.0))
+    );
+    sim.log.clear();
+    hub.entity_command(
+        &th,
+        "set_temperature",
+        &json!({"temperature": 22.5}),
+        T0 + 3000,
+    )
+    .unwrap();
+    sim.run(&mut hub, T0 + 3000);
+    let w = sim.dev(ieee).writes.last().unwrap().clone();
+    assert_eq!(
+        (w.1, w.2, w.4),
+        (0x0201, 0x0012, TypedValue::int(ZclType::I16, 2250))
+    );
+    assert_eq!(state(&hub, &format!("{id}:3:keypad_lockout")), "unlocked");
+    // UNREPORTABLE_ATTRIBUTE on a mains primary measurement → polled every max s.
+    sim.log.clear();
+    hub.tick(T0 + 3000 + 900_001);
+    sim.run(&mut hub, T0 + 3000 + 900_001);
+    assert!(
+        sim.aps()
+            .iter()
+            .any(|a| a.cluster == 0x0402 && a.payload[2] == 0x00),
+        "polled"
+    );
+    assert_eq!(state(&hub, &format!("{id}:4:temperature")), json!(19.0));
+}

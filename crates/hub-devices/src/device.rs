@@ -230,6 +230,8 @@ pub struct ConfigureState {
     pub in_flight: bool,
     /// Failed reporting configs (polled if primary on mains).
     pub unreportable: Vec<(u8, u16, u16)>,
+    /// Last poll (or failure) of an unreportable primary measurement.
+    pub poll_at: BTreeMap<(u8, u16, u16), Millis>,
 }
 
 /// Self-description progress (12.3).
