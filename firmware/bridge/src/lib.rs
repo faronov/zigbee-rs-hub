@@ -35,6 +35,10 @@ pub fn spawn(name: &'static core::ffi::CStr, prio: u8, stack: usize, f: impl FnO
     ThreadSpawnConfiguration::default().set().unwrap();
 }
 
+/// Longest time the UART reader waits for the host to take data from a
+/// full CDC 0 TX FIFO before it flushes the FIFO (Z14).
+pub const STALL_LIMIT: Duration = Duration::from_millis(200);
+
 fn uart_to_usb() {
     let mut buf = [0u8; 1024];
     loop {
@@ -46,11 +50,23 @@ fn uart_to_usb() {
         }
         // With flow control and the host port open, wait for the host instead
         // of dropping: the UART ring then fills, RTS deasserts and the H2
-        // pauses. With the port closed the data is dropped as before.
+        // pauses. With the port closed the data is dropped as before. A host
+        // that keeps the port open but takes nothing for STALL_LIMIT (or
+        // reopens it) must not hold the UART: flush and go on reading.
         let mut sent = 0;
+        let session = usb::bridge_session();
+        let mut progress = Instant::now();
         while sent < n && usb::mounted() {
-            sent += usb::write(usb::BRIDGE, &buf[sent..n], 50);
-            if !(uart::flow() && usb::bridge_open()) {
+            let w = usb::write(usb::BRIDGE, &buf[sent..n], 50);
+            sent += w;
+            if !(uart::flow() && usb::bridge_open()) || usb::bridge_session() != session {
+                break;
+            }
+            if w > 0 {
+                progress = Instant::now();
+            } else if progress.elapsed() >= STALL_LIMIT {
+                usb::clear_tx(usb::BRIDGE);
+                stats::add(&stats::UART_TO_USB_STALLS, 1);
                 break;
             }
         }

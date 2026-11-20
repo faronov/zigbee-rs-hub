@@ -173,7 +173,7 @@ pub fn info() -> String {
          uart: {} {} (S3 TX GPIO18 -> H2 GPIO23, RX GPIO17 <- H2 GPIO24)\r\n\
          flow: RTS/CTS {} (RTS GPIO{}={}, CTS GPIO{}={})\r\n\
          h2: EN={} BOOT={} auto-reset={}\r\n\
-         uart->usb: {} B, dropped {} B; usb->uart: {} B\r\n\
+         uart->usb: {} B, dropped {} B, stalls {}, DTR flushes {}; usb->uart: {} B\r\n\
          uart rx: fifo overflows {}, buffer full {}, frame errors {}, parity errors {}\r\n\
          line-state events: {}, line-coding events: {}\r\n",
         env!("CARGO_PKG_VERSION"),
@@ -189,6 +189,8 @@ pub fn info() -> String {
         if h2::AUTO_LINES.load(Ordering::Relaxed) { "on" } else { "off" },
         s.uart_to_usb,
         s.uart_to_usb_dropped,
+        s.uart_to_usb_stalls,
+        s.dtr_flushes,
         s.usb_to_uart,
         s.rx_fifo_ovf,
         s.rx_buffer_full,

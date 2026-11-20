@@ -2236,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "tbr-bridge"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embuild",
  "esp-idf-svc",

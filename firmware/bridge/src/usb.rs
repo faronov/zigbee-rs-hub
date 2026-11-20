@@ -6,7 +6,7 @@
 //! SET_LINE_CODING as callbacks and has no 64-byte FIFO limit.
 
 use std::ffi::{CString, c_char, c_int};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -24,8 +24,23 @@ static BRIDGE_DTR: AtomicBool = AtomicBool::new(false);
 /// clears it in hub mode, where the hub owns UART1.
 pub static BRIDGE_ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// Bumped on every DTR edge of the bridge port.
+static BRIDGE_SESSION: AtomicU32 = AtomicU32::new(0);
+
 pub fn bridge_open() -> bool {
     BRIDGE_DTR.load(Ordering::Relaxed)
+}
+
+/// Changes whenever the host opens or closes the bridge port.
+pub fn bridge_session() -> u32 {
+    BRIDGE_SESSION.load(Ordering::Relaxed)
+}
+
+/// Drop everything queued for the host on `itf`.
+pub fn clear_tx(itf: sys::tinyusb_cdcacm_itf_t) {
+    if !recovery::on_usj() {
+        unsafe { sys::tud_cdc_n_write_clear(itf as u8) };
+    }
 }
 
 pub const BRIDGE: sys::tinyusb_cdcacm_itf_t = sys::tinyusb_cdcacm_itf_t_TINYUSB_CDC_ACM_0;
@@ -99,7 +114,13 @@ unsafe extern "C" fn on_line_state(itf: c_int, ev: *mut sys::cdcacm_event_t) {
     }
     let d = unsafe { (*ev).__bindgen_anon_1.line_state_changed_data };
     diag::mark(Site::CbLineState, 1);
-    BRIDGE_DTR.store(d.dtr, Ordering::Relaxed);
+    if BRIDGE_DTR.swap(d.dtr, Ordering::Relaxed) != d.dtr {
+        // A new or closed session: whatever the old one left in the TX FIFO
+        // is stale, and a full FIFO would hold the UART reader back.
+        clear_tx(BRIDGE);
+        BRIDGE_SESSION.fetch_add(1, Ordering::Relaxed);
+        stats::add(&stats::DTR_FLUSHES, 1);
+    }
     stats::add(&stats::LINE_STATE_EVENTS, 1);
     if BRIDGE_ENABLED.load(Ordering::Relaxed) {
         h2::apply(esptool_lines(d.dtr, d.rts));
