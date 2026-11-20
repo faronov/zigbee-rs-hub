@@ -206,7 +206,7 @@ impl V<'_> {
         if full {
             match &e.key {
                 Some(k) if valid_key(k) => {}
-                Some(k) => self.err(path, format!("entity key {k:?} is not snake_case")),
+                Some(k) => self.err(path, format!("entity key \"{k}\" is not snake_case")),
                 None => self.err(path, "entity without key"),
             }
             if e.platform.is_none() {
@@ -251,7 +251,7 @@ impl V<'_> {
         }
         if let Some(s) = &e.struct_ {
             if !STRUCT_CODECS.contains(&s.codec.as_str()) {
-                self.err(path, format!("unknown struct codec {:?}", s.codec));
+                self.err(path, format!("unknown struct codec \"{}\"", s.codec));
             }
         }
         for (i, (a, _)) in e.map.iter().enumerate() {
@@ -261,7 +261,7 @@ impl V<'_> {
         }
         for (i, t) in e.event_types.iter().enumerate() {
             if e.event_types[..i].contains(t) {
-                self.err(path, format!("event_types: duplicate {t:?}"));
+                self.err(path, format!("event_types: duplicate \"{t}\""));
             }
         }
         let gp = self.gp;
@@ -383,7 +383,7 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
     } else {
         match &d.id {
             Some(id) if valid_id(id) => {}
-            Some(id) => v.err("id", format!("invalid id {id:?}")),
+            Some(id) => v.err("id", format!("invalid id \"{id}\"")),
             None => v.err("id", "missing"),
         }
         if d.revision.is_none() {
@@ -430,7 +430,7 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
         v.entity(&path, e, true, fragment);
         if let Some(k) = e.key.as_deref() {
             if seen.contains(&(e.ep, k)) {
-                v.err(&path, format!("duplicate entity key {k:?}"));
+                v.err(&path, format!("duplicate entity key \"{k}\""));
             }
             seen.push((e.ep, k));
         }

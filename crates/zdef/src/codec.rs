@@ -92,7 +92,7 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions<'_>) -> Result<Definition,
         };
         let mut found = Vec::new();
         d.map(
-            |d, k| {
+            &mut |d, k| {
                 if k == 17 {
                     found = d.consts()?;
                 } else {
@@ -114,7 +114,7 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions<'_>) -> Result<Definition,
     let mut def = Definition::new(Kind::Definition);
     let mut have_kind = false;
     d.map(
-        |d, k| {
+        &mut |d, k| {
             match k {
                 0 | 20 => {
                     let at = d.r.position();
@@ -218,7 +218,7 @@ impl<'a> D<'a, '_, '_> {
     }
 
     /// Integer-keyed map; `f` returns false for keys it does not know.
-    fn map(&mut self, mut f: impl FnMut(&mut Self, u64) -> DR<bool>, what: &'static str) -> DR<()> {
+    fn map(&mut self, f: &mut dyn FnMut(&mut Self, u64) -> DR<bool>, what: &'static str) -> DR<()> {
         let n = self.r.map()?;
         let mut prev: Option<u64> = None;
         for _ in 0..n {
@@ -396,7 +396,7 @@ impl<'a> D<'a, '_, '_> {
             Head::Map(_) => {
                 let mut p = None;
                 self.map(
-                    |d, k| {
+                    &mut |d, k| {
                         if k == 18 {
                             p = Some(d.text()?);
                             Ok(true)
@@ -415,7 +415,7 @@ impl<'a> D<'a, '_, '_> {
     fn range(&mut self) -> DR<VersionRange> {
         let mut r = VersionRange::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     60 => r.min = Some(d.r.int()?),
                     61 => r.max = Some(d.r.int()?),
@@ -436,7 +436,7 @@ impl<'a> D<'a, '_, '_> {
     fn clause(&mut self) -> DR<MatchClause> {
         let mut c = MatchClause::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     19 => c.manufacturer = Some(d.name_match(true)?),
                     20 => c.model = Some(d.name_match(false)?),
@@ -462,7 +462,7 @@ impl<'a> D<'a, '_, '_> {
                             prev = Some(ep);
                             let mut m = EpMatch::default();
                             d.map(
-                                |d, k| {
+                                &mut |d, k| {
                                     match k {
                                         21 => m.device_id = Some(d.uint_as("device_id")?),
                                         57 => m.profile = Some(d.uint_as("profile")?),
@@ -489,12 +489,12 @@ impl<'a> D<'a, '_, '_> {
     fn gp_match(&mut self) -> DR<GpMatch> {
         let mut g = GpMatch::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     7 => {
                         let mut c = GpClusters::default();
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     137 => c.server = d.u16s("server")?,
                                     138 => c.client = d.u16s("client")?,
@@ -512,7 +512,7 @@ impl<'a> D<'a, '_, '_> {
                         g.model_id = Some(if matches!(d.r.peek()?, Head::Map(_)) {
                             let (mut v, mut m) = (None, None);
                             d.map(
-                                |d, k| {
+                                &mut |d, k| {
                                     match k {
                                         8 => v = Some(d.uint_as("model_id")?),
                                         25 => m = Some(d.uint_as("mask")?),
@@ -553,7 +553,7 @@ impl<'a> D<'a, '_, '_> {
     fn white_label(&mut self) -> DR<WhiteLabel> {
         let mut w = WhiteLabel::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     19 => {
                         let idx: Vec<u64> = d.list(|d| Ok(d.r.uint()?))?;
@@ -580,7 +580,7 @@ impl<'a> D<'a, '_, '_> {
     fn device(&mut self) -> DR<Device> {
         let mut v = Device::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     29 => v.power = Some(d.power()?),
                     30 => v.sleepy = Some(d.bool()?),
@@ -588,7 +588,7 @@ impl<'a> D<'a, '_, '_> {
                         v.battery = Some(if matches!(d.r.peek()?, Head::Map(_)) {
                             let mut lin = None;
                             d.map(
-                                |d, k| {
+                                &mut |d, k| {
                                     if k != 32 {
                                         return Ok(false);
                                     }
@@ -612,7 +612,7 @@ impl<'a> D<'a, '_, '_> {
                     131 => {
                         let mut a = Availability::default();
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 if k != 132 {
                                     return Ok(false);
                                 }
@@ -636,7 +636,7 @@ impl<'a> D<'a, '_, '_> {
     fn generic(&mut self) -> DR<Generic> {
         let mut g = Generic::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     34 => g.exclude = d.list(|d| d.text())?,
                     35 => {
@@ -667,7 +667,7 @@ impl<'a> D<'a, '_, '_> {
     fn tuya(&mut self) -> DR<Tuya> {
         let mut t = Tuya::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     38 => {
                         t.time_sync = Some(match d.r.peek()? {
@@ -692,7 +692,7 @@ impl<'a> D<'a, '_, '_> {
                         t.query = Some(if matches!(d.r.peek()?, Head::Map(_)) {
                             let mut iv = None;
                             d.map(
-                                |d, k| {
+                                &mut |d, k| {
                                     if k != 146 {
                                         return Ok(false);
                                     }
@@ -758,7 +758,7 @@ impl<'a> D<'a, '_, '_> {
         let (mut ep, mut cluster, mut attr, mut ty, mut value, mut mfr) =
             (None, None, None, None, None, None);
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     0 => cluster = Some(d.uint_as("cluster")?),
                     1 => attr = Some(d.uint_as("attr")?),
@@ -785,7 +785,7 @@ impl<'a> D<'a, '_, '_> {
     fn cmd_ref(&mut self) -> DR<CmdRef> {
         let (mut cluster, mut id, mut mfr, mut ep) = (None, None, None, None);
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     0 => cluster = Some(d.uint_as("cluster")?),
                     3 => mfr = Some(d.uint_as("mfr")?),
@@ -808,7 +808,7 @@ impl<'a> D<'a, '_, '_> {
     fn configure_op(&mut self) -> DR<ConfigureOp> {
         let mut op = None;
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 if op.is_some() {
                     return Err(d.inv("configure op with several kinds"));
                 }
@@ -826,7 +826,7 @@ impl<'a> D<'a, '_, '_> {
                         let (mut ep, mut cluster, mut attr, mut ty, mut rep, mut mfr) =
                             (None, None, None, None, None, None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     0 => cluster = Some(d.uint_as("cluster")?),
                                     1 => attr = Some(d.uint_as("attr")?),
@@ -853,7 +853,7 @@ impl<'a> D<'a, '_, '_> {
                     27 => {
                         let (mut ep, mut clusters) = (None, Vec::new());
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     4 => ep = Some(d.uint_as("ep")?),
                                     7 => clusters = d.u16s("clusters")?,
@@ -869,7 +869,7 @@ impl<'a> D<'a, '_, '_> {
                         let (mut ep, mut cluster, mut attrs, mut mfr) =
                             (None, None, Vec::new(), None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     0 => cluster = Some(d.uint_as("cluster")?),
                                     3 => mfr = Some(d.uint_as("mfr")?),
@@ -891,7 +891,7 @@ impl<'a> D<'a, '_, '_> {
                     128 => {
                         let (mut ep, mut group) = (None, None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     4 => ep = Some(d.uint_as("ep")?),
                                     128 => group = Some(d.uint_as("group")?),
@@ -909,7 +909,7 @@ impl<'a> D<'a, '_, '_> {
                     129 => {
                         let mut iv = None;
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 if k != 130 {
                                     return Ok(false);
                                 }
@@ -934,7 +934,7 @@ impl<'a> D<'a, '_, '_> {
     fn gp_device(&mut self) -> DR<GpDevice> {
         let mut g = GpDevice::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     41 => g.security_min = Some(d.uint_as("security_min")?),
                     42 => g.report_interval_s = Some(d.uint_as("report_interval_s")?),
@@ -951,7 +951,7 @@ impl<'a> D<'a, '_, '_> {
     fn ignore_rule(&mut self) -> DR<IgnoreRule> {
         let (mut ep, mut cluster, mut cmd) = (None, None, None);
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     0 => cluster = Some(d.uint_as("cluster")?),
                     4 => ep = Some(d.uint_as("ep")?),
@@ -1016,7 +1016,7 @@ impl<'a> D<'a, '_, '_> {
         }
         let mut c = None;
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 if c.is_some() {
                     return Err(d.inv("codec with several names"));
                 }
@@ -1024,7 +1024,7 @@ impl<'a> D<'a, '_, '_> {
                     44 => {
                         let (mut day, mut tr) = (None, None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     45 => day = Some(d.uint_as("day")?),
                                     46 => tr = Some(d.uint_as("transitions")?),
@@ -1042,7 +1042,7 @@ impl<'a> D<'a, '_, '_> {
                     149 => {
                         let mut v = None;
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 if k != 150 {
                                     return Ok(false);
                                 }
@@ -1094,7 +1094,7 @@ impl<'a> D<'a, '_, '_> {
     fn entity(&mut self) -> DR<Entity> {
         let mut e = Entity::default();
         self.map(
-            |d, k| {
+            &mut |d, k| {
                 match k {
                     0 => e.key = Some(d.text()?),
                     1 => {
@@ -1121,7 +1121,7 @@ impl<'a> D<'a, '_, '_> {
                         let (mut cl, mut at, mut ty, mut mfr, mut ep) =
                             (None, None, None, None, None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     0 => cl = Some(d.uint_as("cluster")?),
                                     1 => at = Some(d.uint_as("attr")?),
@@ -1147,7 +1147,7 @@ impl<'a> D<'a, '_, '_> {
                         let (mut cl, mut at, mut mfr, mut ep, mut codec, mut tag) =
                             (None, None, None, None, None, None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     0 => cl = Some(d.uint_as("cluster")?),
                                     1 => at = Some(d.uint_as("attr")?),
@@ -1173,7 +1173,7 @@ impl<'a> D<'a, '_, '_> {
                     11 => {
                         let mut b = None;
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 if b.is_some() {
                                     return Err(d.inv("gp binding"));
                                 }
@@ -1183,7 +1183,7 @@ impl<'a> D<'a, '_, '_> {
                                         let (mut cl, mut at, mut ty, mut mfr) =
                                             (None, None, None, None);
                                         d.map(
-                                            |d, k| {
+                                            &mut |d, k| {
                                                 match k {
                                                     0 => cl = Some(d.uint_as("cluster")?),
                                                     1 => at = Some(d.uint_as("attr")?),
@@ -1273,7 +1273,7 @@ impl<'a> D<'a, '_, '_> {
                             };
                             let mut has_event = false;
                             d.map(
-                                |d, k| {
+                                &mut |d, k| {
                                     match k {
                                         6 => t.attrs = d.named_exprs()?,
                                         11 => t.cmd = Some(d.cmd_ref()?),
@@ -1300,7 +1300,7 @@ impl<'a> D<'a, '_, '_> {
                         let (mut cmd, mut payload, mut write, mut tuya, mut value) =
                             (None, None, None, None, None);
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 match k {
                                     8 => value = Some(d.scalar()?),
                                     11 => cmd = Some(d.cmd_ref()?),
@@ -1333,7 +1333,7 @@ impl<'a> D<'a, '_, '_> {
                     37 => {
                         let mut h = HubBinding { default: None };
                         d.map(
-                            |d, k| {
+                            &mut |d, k| {
                                 if k != 63 {
                                     return Ok(false);
                                 }

@@ -618,17 +618,24 @@ pub fn f16_from_f64(v: f64) -> Option<u16> {
 }
 
 pub fn f16_to_f64(h: u16) -> f64 {
-    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
-    let exp = ((h >> 10) & 0x1f) as i32;
-    let man = (h & 0x3ff) as f64;
-    let mag = if exp == 0 {
-        man * libm::pow(2.0, -24.0)
+    let sign = ((h as u64) & 0x8000) << 48;
+    let exp = ((h >> 10) & 0x1f) as u64;
+    let man = (h & 0x3ff) as u64;
+    let bits = if exp == 0 {
+        if man == 0 {
+            return f64::from_bits(sign);
+        }
+        // subnormal f16: man * 2^-24, normalise
+        let shift = man.leading_zeros() - 53; // bring the top bit to bit 10
+        let m = (man << shift) & 0x3ff;
+        let e = 1023 - 15 - shift as u64 + 1;
+        sign | (e << 52) | (m << 42)
     } else if exp == 31 {
-        if man == 0.0 { f64::INFINITY } else { f64::NAN }
+        sign | (0x7ff << 52) | (man << 42)
     } else {
-        (1.0 + man / 1024.0) * libm::pow(2.0, (exp - 15) as f64)
+        sign | ((exp + 1023 - 15) << 52) | (man << 42)
     };
-    sign * mag
+    f64::from_bits(bits)
 }
 
 #[cfg(test)]
@@ -682,6 +689,17 @@ mod tests {
             r.float_head(h, 0).unwrap_err().kind,
             CborErrorKind::NotShortest
         );
+    }
+
+    #[test]
+    fn f16_exhaustive() {
+        for h in 0u16..=0xffff {
+            let v = f16_to_f64(h);
+            if v.is_nan() {
+                continue;
+            }
+            assert_eq!(f16_from_f64(v), Some(h), "{h:#06x} {v}");
+        }
     }
 
     #[test]

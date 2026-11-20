@@ -231,8 +231,8 @@ pub fn build_bank(
 ) -> Result<BuiltBank, String> {
     let mut items: Vec<(String, Definition, Vec<u8>)> = Vec::new();
     for (name, cbor) in defs {
-        let d =
-            zdef::load(cbor, &zdef::HubFeatures(u128::MAX)).map_err(|e| format!("{name}: {e}"))?;
+        let d = zdef::load_canonical(cbor, &zdef::HubFeatures(u128::MAX))
+            .map_err(|e| format!("{name}: {e}"))?;
         if d.is_fragment() {
             return Err(format!("{name}: self-description fragments are not banked"));
         }

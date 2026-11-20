@@ -77,7 +77,11 @@ pub fn decimal_value(exp: i64, mant: i64) -> Option<f64> {
     if !(-18..=0).contains(&exp) {
         return None;
     }
-    let p = libm::pow(10.0, (-exp) as f64);
+    // 10^k is exact in f64 up to k = 22.
+    let mut p = 1.0f64;
+    for _ in 0..-exp {
+        p *= 10.0;
+    }
     Some(mant as f64 / p)
 }
 

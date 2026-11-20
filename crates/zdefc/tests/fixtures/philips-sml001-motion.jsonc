@@ -1,0 +1,23 @@
+// JSONC form of definitions/examples/philips-sml001-motion.yaml
+{
+  "zdef": 1,
+  "id": "philips/sml001",
+  "revision": 1,
+  "vendor": "Philips",
+  "model": "9290012607",
+  "description": "Hue motion sensor",
+  "match": [{"model": "SML001"}],
+  "device": {"power": "battery", "sleepy": true},
+  "generic": {"only_endpoints": [2], "patch": {"occupancy_timeout": {"max": 65535}}},
+  "configure": [
+    {"read": {"ep": 2, "cluster": 1030, "attrs": [48], "mfr": 4107}},
+    {"read": {"ep": 2, "cluster": 0, "attrs": [51], "mfr": 4107}},
+  ],
+  "entities": [
+    {"key": "motion_sensitivity", "platform": "select", "category": "config", "ep": 2,
+     "zcl": {"cluster": 1030, "attr": 48, "type": "u8", "mfr": 4107},
+     "map": {"0": "low", "1": "medium", "2": "high"}},
+    {"key": "led_indication", "platform": "switch", "category": "config", "ep": 2,
+     "zcl": {"cluster": 0, "attr": 51, "type": "bool", "mfr": 4107}},
+  ],
+}

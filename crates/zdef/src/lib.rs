@@ -98,10 +98,26 @@ impl Definition {
     }
 }
 
-/// Decodes, checks canonical form, validates and checks `requires` against
+/// Decodes (strict deterministic CBOR, spec 8.1), validates (every
+/// expression through the bytecode verifier) and checks `requires` against
 /// the hub: what the hub runs on every definition load (spec 12.3 step 5).
+///
+/// Does not re-encode, so the encoder is not linked into a hub that only
+/// loads; [`load_canonical`] additionally requires the canonical encoding.
 pub fn load(bytes: &[u8], hub: &HubFeatures) -> Result<Definition, LoadError> {
-    let d = codec::decode_canonical(bytes).map_err(LoadError::Decode)?;
+    check_loaded(codec::decode(bytes).map_err(LoadError::Decode)?, hub)
+}
+
+/// [`load`] plus the re-encode check (input is the canonical encoding of
+/// the result); used by `zdefc` and for user uploads where hash uniqueness matters.
+pub fn load_canonical(bytes: &[u8], hub: &HubFeatures) -> Result<Definition, LoadError> {
+    check_loaded(
+        codec::decode_canonical(bytes).map_err(LoadError::Decode)?,
+        hub,
+    )
+}
+
+fn check_loaded(d: Definition, hub: &HubFeatures) -> Result<Definition, LoadError> {
     d.validate().map_err(LoadError::Invalid)?;
     if let Some(f) = hub.missing(&d.requires) {
         return Err(LoadError::Requires(f));
