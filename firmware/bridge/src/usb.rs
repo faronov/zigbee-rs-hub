@@ -20,6 +20,10 @@ use crate::{h2, recovery, stats, uart};
 /// Host DTR on the bridge port: a terminal has the port open.
 static BRIDGE_DTR: AtomicBool = AtomicBool::new(false);
 
+/// CDC 0 controls the H2 UART and EN/BOOT (bridge mode). The hub firmware
+/// clears it in hub mode, where the hub owns UART1.
+pub static BRIDGE_ENABLED: AtomicBool = AtomicBool::new(true);
+
 pub fn bridge_open() -> bool {
     BRIDGE_DTR.load(Ordering::Relaxed)
 }
@@ -97,7 +101,9 @@ unsafe extern "C" fn on_line_state(itf: c_int, ev: *mut sys::cdcacm_event_t) {
     diag::mark(Site::CbLineState, 1);
     BRIDGE_DTR.store(d.dtr, Ordering::Relaxed);
     stats::add(&stats::LINE_STATE_EVENTS, 1);
-    h2::apply(esptool_lines(d.dtr, d.rts));
+    if BRIDGE_ENABLED.load(Ordering::Relaxed) {
+        h2::apply(esptool_lines(d.dtr, d.rts));
+    }
     diag::mark(Site::CbLineState, 0);
 }
 
@@ -112,7 +118,9 @@ unsafe extern "C" fn on_line_coding(itf: c_int, ev: *mut sys::cdcacm_event_t) {
     }
     diag::mark(Site::CbLineCoding, 1);
     stats::add(&stats::LINE_CODING_EVENTS, 1);
-    uart::set_line_coding(rate, stop, parity, bits);
+    if BRIDGE_ENABLED.load(Ordering::Relaxed) {
+        uart::set_line_coding(rate, stop, parity, bits);
+    }
     diag::mark(Site::CbLineCoding, 0);
 }
 

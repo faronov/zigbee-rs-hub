@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, phase1]
   pull_request:
   workflow_dispatch:
 
@@ -11,15 +11,15 @@ env:
 
 jobs:
   host:
-    name: hub-core (host tests)
+    name: hub-core, hub-ncp, hubctl (host tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p hub-core
+      - run: cargo test -p hub-core -p hub-ncp -p hubctl
 
-  bridge:
-    name: tbr-bridge firmware (ESP32-S3, esp-idf-svc)
+  firmware:
+    name: tbr-bridge + tbr-hub firmware (ESP32-S3, esp-idf-svc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,16 +39,22 @@ jobs:
             .embuild
           key: bridge-${{ runner.os }}-idf-v5.5.1-${{ hashFiles('Cargo.lock', 'components_esp32s3.lock') }}
           restore-keys: bridge-${{ runner.os }}-idf-v5.5.1-
-      - name: Build
+      - name: Build tbr-bridge
         working-directory: firmware/bridge
         run: cargo build --release
-      - name: App image (ota_0 of the stock Thread BR layout)
+      - name: Build tbr-hub
+        working-directory: firmware/hub
+        run: cargo build --release
+      - name: App images (ota_0; tbr-hub must fit the 1.5 MiB slot of the 4 MB layout)
         run: |
           pip install --quiet "esptool>=5,<6"
-          tools/make-app-image.sh release target/tbr-bridge-app.bin
+          tools/make-app-image.sh release target/tbr-bridge-app.bin tbr-bridge
+          MAX_APP_BYTES=1572864 tools/make-app-image.sh release target/tbr-hub-app.bin tbr-hub
       - uses: actions/upload-artifact@v4
         with:
-          name: tbr-bridge
+          name: firmware
           path: |
             target/tbr-bridge-app.bin
+            target/tbr-hub-app.bin
             target/xtensa-esp32s3-espidf/release/tbr-bridge
+            target/xtensa-esp32s3-espidf/release/tbr-hub

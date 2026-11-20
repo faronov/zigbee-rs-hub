@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core", "firmware/bridge"]
-# Host-side `cargo test` at the root only builds the portable crates; the
-# firmware is built from `firmware/bridge` (Xtensa toolchain, see README).
-default-members = ["crates/hub-core"]
+members = ["crates/hub-core", "crates/hub-ncp", "tools/hubctl", "firmware/bridge", "firmware/hub"]
+# Host-side `cargo test` at the root only builds the portable crates and the
+# desktop tool; the firmware is built from `firmware/bridge` and
+# `firmware/hub` (Xtensa toolchain, see README).
+default-members = ["crates/hub-core", "crates/hub-ncp", "tools/hubctl"]
 
 [workspace.package]
 edition = "2024"
@@ -13,8 +14,10 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 hub-core = { path = "crates/hub-core" }
-# ZRHP v1 protocol crate from zigbee-rs (ZRHP v1 spec + crate merge, master c0c7d97).
-zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "c0c7d97589d7ecace11039e6464aff243a68ffb5", default-features = false }
+hub-ncp = { path = "crates/hub-ncp" }
+# ZRHP v1 protocol crate from zigbee-rs (batch merge 2026-11-20: RTS/CTS NCP,
+# GP translation commands 0x0A08-0x0A0D; 2ab8ac0).
+zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "2ab8ac0400a437717e3ad3a99229b31ada8646e7", default-features = false }
 
 [profile.release]
 opt-level = "s"

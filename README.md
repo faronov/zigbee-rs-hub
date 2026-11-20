@@ -16,7 +16,7 @@ interface will be a WebSocket JSON API.
 | Phase | Content | Status |
 |---|---|---|
 | **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
-| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | planned |
+| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode) builds at 709 KiB (46 % of the 1.5 MiB slot); hardware runs pending (see "Phase 1") |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | planned |
 
 ## Device support
@@ -73,8 +73,11 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | Path | What |
 |---|---|
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
-| `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb) |
-| `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF) |
+| `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, host store journal, simulated NCP (`sim`) |
+| `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim` |
+| `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
+| `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
+| `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF), optional size limit |
 | `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`, `s3_reflash.sh`) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
 | `definitions/examples/` | Example device definitions (YAML source form) |
@@ -325,7 +328,7 @@ espup install --toolchain-version 1.90.0.0 --targets esp32s3 --std
 . ~/export-esp.sh
 cd firmware/bridge && cargo build --release      # downloads ESP-IDF v5.5.1 into .embuild
 cd ../.. && tools/make-app-image.sh              # -> target/tbr-bridge-app.bin
-cargo test -p hub-core                           # host tests (repo root, stable Rust)
+cargo test                                       # host tests: hub-core, hub-ncp, hubctl (stable Rust)
 ```
 
 ### Flashing the S3 (hwlab only, no buttons)
@@ -420,6 +423,107 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   caught it (`console loop stalled`, console blocked in a command); 0.2.2
   lets the reader thread do the flush on request. **0.2.2** (`7797265d…`) is
   on the board, flashed without buttons.
+- **0.2.3** (not flashed): the bridge became a library as well, so `tbr-hub`
+  runs it as its default mode; a console extension hook and a CDC 0
+  "bridge enabled" switch (always on in `tbr-bridge`). No functional change.
+
+## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
+
+One host core, two places: on macOS against the real NCP through the
+bridge (fast development loop) and on the S3 talking to UART1 directly.
+
+```text
+ hubctl (macOS)  ── serial ── tbr-bridge CDC 0 ── UART ──┐
+                                                         ├── H2: ZRHP NCP
+ tbr-hub (S3, hub mode) ── UART1 921 600 RTS/CTS ────────┘
+      both: hub-ncp = driver (zigbee-zrhp Link) + lifecycle (Hub) + store
+```
+
+### `crates/hub-ncp`
+
+| Piece | What it does |
+|---|---|
+| `transport` | `PortRx` (reader thread) / `PortTx` (driver: writes, line rate, RTS/CTS), `NcpControl` (EN/BOOT), in-memory pipe |
+| `driver` | One thread owns `zigbee_zrhp::link::Link<8, 8>` (embedded profile: RX window 8, LOG credit 0, BULK 2; credits returned on delivery). It answers `EVT_NCP_READY` with `SYS_NEGOTIATE` + `SYS_GET_INFO` itself, then reports the session. Requests are **gated** until the lifecycle has resumed the NCP, bounded by the 20 s resume budget. A dropped session makes transmitted requests "in doubt": same NCP cookie (`PEER_RESYNC`) ⇒ re-sent with the same TID and `RETRY` (the NCP's retry cache answers), new cookie ⇒ `LINK_RESET` (delivery unknown, spec 6.5). Two-phase commands wait for their completion event (`EVT_APS_DATA_CONFIRM`, `EVT_NETWORK_STATE`). Without a session the driver cycles 921 600 + RTS/CTS → 460 800 without flow control |
+| `lifecycle` (`Hub`) | Seamless resume on every session: UART flow-control mismatch (NCP without RTS/CTS ⇒ host flow off), store identity (`ncp_ieee`), NCP cookie, `table_epoch`, NCP flash size (`SYS_GET_INFO.flash_size`, decision N4: picks the H2 slot size, 1.875 MiB on 4 MB, 896 KiB on 2 MB, so oversized images are refused before `FW_BEGIN`); network ownership (adopt into an empty store, refuse to touch a different network, report a lost one); `NWK_INIT` with the checkpoint-log floors (`last + 9 × fc_stride`); replay of host endpoints and the permit-join remainder; `TBL_SYNC`; NCP firmware check. Operations: `form` (PAN ID, EPID and key chosen and persisted by the hub, then `NWK_FORM`), `permit_join`, `add_endpoint`, `send_aps`, `fw_update`, `fw_confirm`, `reset_ncp` (soft/EN), `enter_rom_loader` |
+| `fw` | `FW_BEGIN` → `FW_WRITE` (two in flight, resynchronised on `next_offset`) → `FW_FINISH` → `FW_ACTIVATE`, straight from the source (file, upload); the S3 keeps no NCP image. The next session confirms the hub's own trial image with `FW_CONFIRM` after the network resumed, or reports the H2 bootloader rollback. Trial images the hub did not activate are not confirmed (another host may own them) |
+| `store` | Host store journal (spec 3.4/8.8): 32 × 4 KiB ring, records `len, type, commit, payload, CRC-32C`, committed by clearing the commit byte after a read-back; two-generation snapshot + deltas, compaction above half the ring. Holds the store identity, the owned network (incl. key), the FC checkpoint log (every 4th checkpoint persisted), a device registry, the pending NCP update and the host endpoints. Backends: `hubdata` partition, a file, RAM |
+| `sim` | Simulated NCP (the real link on the NCP side, scripted command set incl. A/B slots, trial boot and rollback) for the tests and `hubctl --sim` |
+
+Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
+(host-backed tables and link keys are phase 2): `TBL_LOOKUP` is answered
+`NOT_FOUND`, `TBL_WRITEBACK` `STORAGE_ERROR`.
+
+### `tbr-hub` (S3)
+
+| Mode | What runs |
+|---|---|
+| **bridge** (default; no NVS key) | `tbr-bridge` 0.2.3 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
+
+Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
+reboot), `mode hub once` (one boot in hub mode, any later reset returns to
+the persisted mode), `hub [status]`, `hub echo [n]`, `hub form [channel]`,
+`hub permit <s>`, `hub fw slots`, `hub fw confirm`, `hub ncp reset [hard]`,
+`hub rom` (manual NCP recovery: reboot into the bridge with the H2 in its ROM
+loader, then esptool on CDC 0 with an operator-supplied image). USB recovery
+(`s3 usj`, 1200 bps touch, mount timeout, crash safe mode) is the bridge's,
+in both modes.
+
+The host store uses the `hubdata` partition when the table has one
+(`firmware/hub/partitions-4mb.csv`, `partitions-8mb.csv`; the 4 MB / 8 MB
+layouts above) and checks that the table fits the detected flash; with the
+stock table on the hwlab board it falls back to RAM. Flashing a new
+partition table is a separate, explicit step.
+
+### `hubctl` (desktop)
+
+```sh
+cargo run -p hubctl -- --sim status                     # simulated NCP
+cargo run -p hubctl -- --sim form --channel 17
+hubctl --serial /dev/cu.usbmodem7CDFA1FE67F01 --read-only status   # real NCP, observe only
+hubctl --serial … --store hubdata.bin form --channel 17            # store in a file
+hubctl --serial … fw-update ncp.bin --version 0x00010100           # stream, trial boot, confirm
+hubctl --serial … soak 60                                          # echoes across NCP resets
+```
+
+`--read-only` sends nothing that changes the NCP: handshake, negotiation
+and read-only queries only (no `NWK_INIT`, `TBL_SYNC` or replay). The bridge
+follows the host's rate and does RTS/CTS towards the H2 itself.
+
+### Building
+
+```sh
+cargo test                                        # host: hub-core, hub-ncp (11 tests), hubctl
+. ~/export-esp.sh && cd firmware/hub && cargo build --release
+cd ../.. && MAX_APP_BYTES=1572864 tools/make-app-image.sh release target/tbr-hub-app.bin tbr-hub
+```
+
+CI builds both firmwares and fails if `tbr-hub` exceeds the 1.5 MiB app
+slot of the 4 MB layout.
+
+### Sizes (release, Xtensa Rust 1.90.0.0, ESP-IDF v5.5.1)
+
+| Image | App image | Slot | Use |
+|---|---:|---:|---:|
+| `tbr-bridge` 0.2.3 | 501 744 B | 1 572 864 B | 32 % |
+| `tbr-hub` 0.1.0 | 725 888 B | 1 572 864 B | 46 % |
+
+The stock table's `ota_0` (1.6 MB) holds either.
+
+### Phase 1 status
+
+- Host tests (`hub-ncp`, against the simulated NCP over the shared link):
+  negotiation and `SYS_GET_INFO`; formation with host parameters, NCP
+  reboot with a request held across it, `NWK_INIT` with the floors of the
+  logged checkpoint, endpoint replay; `RETRY` after a resync; `LINK_RESET`
+  after a restart; APS data with its confirm; `FW_*` staged, trial boot,
+  `FW_CONFIRM`; a rolled-back update reported; the store surviving a hub
+  restart; journal compaction, power cuts at every 7th programmed byte and
+  a torn record.
+- Hardware: not run yet. The H2 NCP is shared (the bridge port was busy
+  with other work); `tbr-hub` has not been flashed: the bridge stays the
+  board's image until the user decides.
 
 ## License
 
