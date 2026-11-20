@@ -23,10 +23,10 @@ log = "0.4"
 tbr-bridge = { path = "../bridge" }
 
 [features]
-default = []
-# Stage 2: the application (device engine, registry) with its WebSocket JSON
-# API over Wi-Fi and JSON lines on CDC 0. ~2.3 MB: needs the 8 MB layout's
-# 3 MiB app slot; the default build fits the 1.5 MiB slot of 4 MB boards.
+default = ["app"]
+# The application (device engine, registry) with its WebSocket JSON API over
+# Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
+# phase-1 hub (ZRHP host core only).
 app = ["dep:hub-app", "dep:embedded-svc"]
 
 [build-dependencies]

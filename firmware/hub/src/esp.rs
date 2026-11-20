@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use esp_idf_svc::sys;
+use hub_core::layout::{self, Part, Verdict};
 use hub_ncp::Rng;
 use hub_ncp::store::{Flash, JOURNAL_BYTES, SECTOR};
 use hub_ncp::transport::{Line, NcpControl, PortRx, PortTx};
@@ -116,12 +117,13 @@ impl Flash for Partition {
     }
 }
 
-/// Detected S3 flash size, and whether the partition table fits it
-/// (spec 3.4, decision N9: a table that does not match is fatal).
-pub fn flash_layout() -> (u32, bool) {
+/// Detected S3 flash size and the boot check of the partition table
+/// (`hub_core::layout`: 8 MB production, 4 MB dev; spec 3.4, decision N9).
+pub fn flash_layout() -> (u32, Verdict) {
     let mut size = 0u32;
     unsafe { sys::esp_flash_get_size(core::ptr::null_mut(), &mut size) };
-    let mut end = 0u32;
+    let mut labels = Vec::new();
+    let mut parts = Vec::new();
     unsafe {
         let mut it = sys::esp_partition_find(
             sys::esp_partition_type_t_ESP_PARTITION_TYPE_ANY,
@@ -129,18 +131,24 @@ pub fn flash_layout() -> (u32, bool) {
             core::ptr::null(),
         );
         while !it.is_null() {
-            let p = sys::esp_partition_get(it);
-            let label = CStr::from_ptr((*p).label.as_ptr()).to_string_lossy();
-            info!("partition {label:<10} 0x{:06X} {:>8} B", (*p).address, (*p).size);
-            end = end.max((*p).address + (*p).size);
+            let p = &*sys::esp_partition_get(it);
+            let label = CStr::from_ptr(p.label.as_ptr()).to_string_lossy().into_owned();
+            info!("partition {label:<10} 0x{:06X} {:>8} B", p.address, p.size);
+            parts.push((p.type_ == sys::esp_partition_type_t_ESP_PARTITION_TYPE_APP, p.subtype as u8, p.address, p.size));
+            labels.push(label);
             it = sys::esp_partition_next(it);
         }
     }
-    let fits = end <= size;
-    if fits {
-        info!("S3 flash {} KiB, partition table ends at 0x{end:06X}", size / 1024);
-    } else {
-        error!("partition table ends at 0x{end:06X} beyond the {} KiB flash: wrong table for this board", size / 1024);
+    let parts: Vec<Part<'_>> = labels
+        .iter()
+        .zip(&parts)
+        .map(|(label, &(app, subtype, offset, size))| Part { label, app, subtype, offset, size })
+        .collect();
+    let verdict = layout::check(size, &parts);
+    match verdict {
+        Verdict::Ok(l) => info!("S3 flash {} KiB, {l:?} layout", size / 1024),
+        Verdict::Foreign => warn!("S3 flash {} KiB, not a hub layout (stock table?): host store in RAM", size / 1024),
+        Verdict::Fatal(m) => error!("S3 flash {} KiB: partition table does not belong to this flash ({m:?})", size / 1024),
     }
-    (size, fits)
+    (size, verdict)
 }

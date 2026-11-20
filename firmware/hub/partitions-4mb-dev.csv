@@ -1,0 +1,10 @@
+# zigbee-rs-hub DEV layout for 4 MB S3 samples (the hwlab board): one app slot
+# of 2 944 KiB, no OTA (flash and recover through hwlab / USB-Serial-JTAG),
+# hubdata 1 MiB (the 896 KiB areas of device-support 16.1 plus spare). The
+# phase-0 bridge stays a separate image for H2 work.
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x6000
+phy_init, data, phy,      0xF000,   0x1000
+factory,  app,  factory,  0x10000,  0x2E0000
+coredump, data, coredump, 0x2F0000, 0x10000
+hubdata,  data, 0x40,     0x300000, 0x100000

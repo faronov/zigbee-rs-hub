@@ -31,12 +31,14 @@ use hub_ncp::lifecycle::{FormRequest, Hub, HubConfig};
 use hub_ncp::store::Store;
 use hub_ncp::zrhp::codec::Rest;
 use hub_ncp::zrhp::msg::system::SysEcho;
-use log::{info, warn};
+use hub_core::layout::Verdict;
+use log::{error, info, warn};
 use tbr_bridge::{console, h2, uart, usb};
 
 use crate::mode::Mode;
 
 static HUB: OnceLock<Hub> = OnceLock::new();
+static LAYOUT_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 #[cfg(feature = "app")]
 static APP: OnceLock<hub_app::App> = OnceLock::new();
 static BOOT: OnceLock<mode::Boot> = OnceLock::new();
@@ -192,7 +194,10 @@ fn extension(words: &[&str]) -> Option<String> {
                 Err(e) => format!("error: {e}\r\n"),
             }
         }
-        ["hub", ..] if hub.is_none() => not_hub(),
+        ["hub", ..] if hub.is_none() => match LAYOUT_ERROR.lock().unwrap().as_ref() {
+            Some(e) => format!("hub not started: partition table does not belong to this flash ({e})\r\n"),
+            None => not_hub(),
+        },
         ["hub"] | ["hub", "status"] => status_text(hub?),
         ["hub", "echo", rest @ ..] => {
             let n: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 200);
@@ -278,22 +283,28 @@ fn console_reply(s: &str) {
 }
 
 fn start_hub() {
-    let (_, table_ok) = esp::flash_layout();
-    let store = match esp::Partition::find() {
-        Some(p) if table_ok => match Store::open(Box::new(p)) {
-            Ok(s) => {
+    let (_, verdict) = esp::flash_layout();
+    let store = match verdict {
+        Verdict::Fatal(m) => {
+            error!("hub not started: the partition table does not belong to this flash ({m:?}); flash the matching table");
+            *LAYOUT_ERROR.lock().unwrap() = Some(format!("{m:?}"));
+            return;
+        }
+        Verdict::Foreign => Store::volatile(),
+        Verdict::Ok(_) => match esp::Partition::find().map(|p| Store::open(Box::new(p))) {
+            Some(Ok(s)) => {
                 info!("host store: hubdata journal {:?}", s.stats());
                 s
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 warn!("host store: hubdata journal unusable ({e}); RAM only");
                 Store::volatile()
             }
+            None => {
+                warn!("host store: no usable hubdata partition; RAM only");
+                Store::volatile()
+            }
         },
-        _ => {
-            warn!("host store: no usable hubdata partition (stock table?); RAM only");
-            Store::volatile()
-        }
     };
     let mut cfg = HubConfig::default();
     cfg.driver.host_name = format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION"));
