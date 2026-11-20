@@ -28,8 +28,9 @@ GP bindings). `std`, sans-IO, host-tested without hardware.
 | `gp` | GP events, commissioning, generic GP tier, GP reports 0xA0–0xA3, GP definitions, GP bindings (on-device and hub-side) | 13 |
 | `api` | WebSocket JSON message model and a transport-free `ApiServer` (auth, subscriptions with snapshot + `seq`, handlers) | 14 |
 | `transport` | `ZigbeeTransport` trait (the boundary to the ZRHP host core) and `MockTransport` | 2 |
+| `persist` | `DeviceSnapshot`: what of a device survives a restart (no measured values), `Hub::snapshot_device` / `restore_device`; stored by `hub-app`'s registry | 3, 16.1 |
 
-## Boundary to the ZRHP host core (`hub-ncp`, branch `phase1`)
+## Boundary to the ZRHP host core (`hub-ncp`; adapter: `crates/hub-app`)
 
 The engine never blocks. Outgoing traffic goes through `ZigbeeTransport`;
 everything incoming is a method call with the current time.
