@@ -53,6 +53,9 @@ commands:
 also, without a hub:
   hubctl ws-call URL --token T [--listen SECS] JSON...
                             authenticate, send requests, print the frames
+  hubctl catalog-verify FILE...
+                            check catalog banks (.zdb) and manifest.cose with
+                            the firmware's trusted keys
 ";
 
 struct Logger(Instant, log::LevelFilter);
@@ -401,6 +404,37 @@ fn main() -> ExitCode {
     let _ = log::set_logger(Box::leak(Box::new(Logger(Instant::now(), level))));
     log::set_max_level(level);
 
+    if args.0.first().map(String::as_str) == Some("catalog-verify") {
+        let mut ok = true;
+        for (slot, kid) in hub_app::catalog::key_ids() {
+            println!("trusted key slot {slot}: kid {}", hex(&kid).to_lowercase());
+        }
+        for path in &args.0[1..] {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{path}: {e}");
+                    ok = false;
+                    continue;
+                }
+            };
+            let result = if bytes.starts_with(b"ZDB1") {
+                hub_app::catalog::verify_bank(&bytes).map(|_| "bank: body hash and signature ok".to_string()).map_err(|e| format!("{e:?}"))
+            } else {
+                hub_app::catalog::verify_manifest(&bytes)
+                    .map(|m| format!("manifest {}.{}: {} banks, signature ok", m.catalog_date, m.catalog_serial, m.banks.len()))
+                    .map_err(|e| format!("{e:?}"))
+            };
+            match result {
+                Ok(m) => println!("{path}: {m}"),
+                Err(e) => {
+                    println!("{path}: REJECTED: {e}");
+                    ok = false;
+                }
+            }
+        }
+        return if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
     if args.0.first().map(String::as_str) == Some("ws-call") {
         args.0.remove(0);
         let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_default();

@@ -7,12 +7,14 @@
 //! | [`transport`] | the engine's `ZigbeeTransport` on `hub_ncp::Client` |
 //! | [`registry`] | device registry and user definitions in the host store journal (`hubdata`) |
 //! | [`app`] | the app thread: engine, `ApiServer` sessions, registry, 1 s tick |
+//! | [`catalog`] | the definitions catalog's trusted keys (slot 0, slot 1 for rotation) and bank/manifest verification |
 //!
 //! The network side of the WebSocket JSON API (a desktop server in
 //! `hubctl serve`, `esp_http_server` on the S3) only moves text frames
 //! between sockets and [`App::connect`] / [`App::text`] / a [`SessionSink`].
 
 pub mod app;
+pub mod catalog;
 pub mod convert;
 pub mod registry;
 pub mod transport;

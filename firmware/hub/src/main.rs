@@ -59,6 +59,7 @@ hub firmware:\r
   wifi set <ssid> [pw] store Wi-Fi credentials (used from the next hub boot)\r
   wifi clear           forget them\r
   token                the API token (generated at the first hub boot)\r
+  catalog              trusted definitions-catalog keys (app build)\r
 ";
 
 fn hex(b: &[u8]) -> String {
@@ -247,6 +248,8 @@ fn extension(words: &[&str]) -> Option<String> {
         }
         #[cfg(feature = "app")]
         ["wifi"] => format!("wifi: {}\r\n", net::STATE.lock().unwrap()),
+        #[cfg(feature = "app")]
+        ["catalog"] => catalog_keys(),
         ["wifi", "set", ssid, rest @ ..] => {
             let pass = rest.join(" ");
             match mode::set_str("wifi_ssid", Some(ssid)).and_then(|_| mode::set_str("wifi_pass", Some(&pass))) {
@@ -300,8 +303,24 @@ fn start_hub() {
     start_app(hub);
 }
 
+/// The catalog verifier's key slots.
+#[cfg(feature = "app")]
+fn catalog_keys() -> String {
+    hub_app::catalog::KEY_SLOTS
+        .iter()
+        .enumerate()
+        .map(|(i, k)| match k {
+            Some(k) => format!("catalog key slot {i}: kid {} ed25519 {}\r\n", hex(&hub_app::catalog::key_ids()[i].1), hex(k)),
+            None => format!("catalog key slot {i}: reserved (rotation)\r\n"),
+        })
+        .collect()
+}
+
 #[cfg(feature = "app")]
 fn start_app(hub: Hub) {
+    for line in catalog_keys().lines() {
+        info!("{}", line.trim_end());
+    }
     let token = mode::get_str("api_token").unwrap_or_else(|| {
         let mut b = [0u8; 12];
         (esp::rng())(&mut b);
