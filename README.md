@@ -16,8 +16,8 @@ interface will be a WebSocket JSON API.
 | Phase | Content | Status |
 |---|---|---|
 | **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
-| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode) builds at 721 KiB (47 % of the 1.5 MiB slot); hardware runs pending (see "Phase 1") |
-| **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | **in progress** (branch `stage2`): engine on the host core, device registry in `hubdata`, WebSocket JSON API on a desktop (`hubctl serve`) and on the S3 over Wi-Fi, catalog verifier; the S3 application build is 2.2 MiB (fits the 8 MB layout, not 4 MB), see "Stage 2" |
+| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode); hardware runs pending (see "Phase 1") |
+| **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | **in progress** (branch `stage2`): engine on the host core, device registry in `hubdata`, WebSocket JSON API on a desktop (`hubctl serve`) and on the S3 over Wi-Fi, catalog verifier, 8 MB production / 4 MB dev layouts; the S3 application build is 2.1 MiB, see "Stage 2" |
 
 ## Device support
 
@@ -147,28 +147,36 @@ Measured on the hwlab board (early sample):
 
 The S3 stores **no NCP images**: NCP rollback lives on the H2 (A/B app
 slots, `FW_*` into the inactive slot, trial boot, `FW_CONFIRM`, H2 bootloader
-rollback; ZRHP decision N6 as amended 2026-11-18). The flash holds the hub app
-twice and one data partition. The hub detects 4 MB / 8 MB at boot and uses
-the matching table (ZRHP spec 3.4, decision N9; branch `zrhp-s3-4mb` of
-zigbee-rs):
+rollback; ZRHP decision N6 as amended 2026-11-18).
 
-| Partition | 4 MB | 8 MB |
+**8 MB boards are the product** (decision 2026-11-20): two 3 MiB app slots
+with A/B OTA and one data partition. **4 MB early samples** (the hwlab
+board) get a **development layout**: one app slot, no OTA (flashing and
+recovery through hwlab / USB-Serial-JTAG), the phase-0 bridge kept as a
+separate image for H2 work. The hub detects the flash size at boot and
+checks that the table belongs to it (`hub_core::layout`): a hub table for
+another size, or partitions beyond the flash, is fatal (the hub does not
+start); a foreign table (the stock one during bring-up) runs with the host
+store in RAM. Tables: `firmware/hub/partitions-8mb.csv`,
+`partitions-4mb-dev.csv`; binaries with `tools/make-partition-table.sh`.
+
+| Partition | 8 MB production | 4 MB dev |
 |---|---|---|
 | bootloader | 0x000000, 32 KiB | same |
 | partition table | 0x008000, 4 KiB | same |
 | `nvs` (Wi-Fi, PHY calibration, small settings) | 0x009000, 24 KiB | same |
-| `otadata` | 0x00F000, 8 KiB | same |
-| `phy_init` | 0x011000, 4 KiB | same |
-| reserved (optional core dump) | 0x012000, 56 KiB | same |
-| hub app `ota_0` | 0x020000, **1.5 MiB** | 0x020000, 3 MiB |
-| hub app `ota_1` | 0x1A0000, **1.5 MiB** | 0x320000, 3 MiB |
-| `hubdata` (LittleFS or log-structured store) | 0x320000, **896 KiB** | 0x620000, 1 920 KiB |
+| `otadata` | 0x00F000, 8 KiB | — |
+| `phy_init` | 0x011000, 4 KiB | 0x00F000, 4 KiB |
+| core dump | 0x012000, 56 KiB | 0x2F0000, 64 KiB |
+| hub app | `ota_0` 0x020000 and `ota_1` 0x320000, **3 MiB** each | `factory` 0x010000, **2 944 KiB** |
+| `hubdata` (log-structured store) | 0x620000, 1 920 KiB | 0x300000, 1 MiB |
 
-`hubdata` on 4 MB: ZRHP host store journal 128 KiB, configuration 32 KiB,
-converter database 2 × 256 KiB (active + staged, swapped atomically) and
-224 KiB (25 %) left free for copy-on-write and wear levelling. The hub app
-must stay within 1.5 MiB (to be enforced in CI); the stock `esp_ot_br` is
-1.6 MB *with* OpenThread, which the hub does not need.
+`hubdata` on the dev layout holds the 896 KiB areas of device-support 16.1
+(ZRHP host store journal 128 KiB, configuration 32 KiB, converter database
+2 × 256 KiB, local definitions 64 KiB) plus spare. CI checks the hub app
+against both slots (3 MiB and 2 944 KiB); the application build is
+2.1 MiB (see "Stage 2"). The stock `esp_ot_br` is 1.6 MB *with* OpenThread,
+which the hub does not need.
 
 **Converter database.** Device definitions are declarative data, updated
 without an app OTA: compact CBOR records (model/manufacturer ids, exposes,
@@ -508,20 +516,21 @@ follows the host's rate and does RTS/CTS towards the H2 itself.
 ```sh
 cargo test                                        # host: hub-core, hub-ncp (11 tests), hubctl
 . ~/export-esp.sh && cd firmware/hub && cargo build --release
-cd ../.. && MAX_APP_BYTES=1572864 tools/make-app-image.sh release target/tbr-hub-app.bin tbr-hub
+cd ../.. && MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-app.bin tbr-hub
 ```
 
-CI builds both firmwares and fails if `tbr-hub` exceeds the 1.5 MiB app
-slot of the 4 MB layout.
+CI builds both firmwares and checks `tbr-hub` against the app slots (3 MiB
+production, 2 944 KiB dev).
 
 ### Sizes (release, Xtensa Rust 1.90.0.0, ESP-IDF v5.5.1)
 
-| Image | App image | Slot | Use |
-|---|---:|---:|---:|
-| `tbr-bridge` 0.2.3 | 455 760 B | 1 572 864 B | 29 % |
-| `tbr-hub` 0.1.0 | 663 152 B | 1 572 864 B | 42 % |
+| Image | App image |
+|---|---:|
+| `tbr-bridge` 0.2.3 | 455 760 B |
+| `tbr-hub` 0.1.0, ZRHP host core only (`--no-default-features`) | 664 560 B |
 
-(Fat LTO at opt-level `z` since stage 2; 501 744 B and 738 416 B before.)
+(Fat LTO at opt-level `z` since stage 2; 501 744 B and 738 416 B before. The
+application build is in "Stage 2".)
 
 The stock table's `ota_0` (1.6 MB) holds either.
 
@@ -570,28 +579,27 @@ API (`ws://…/`); `hubctl ws-call URL --token T JSON…` is a minimal client;
 `hubctl catalog-verify FILE…` checks catalog banks and `manifest.cose` with
 the firmware's keys. `--sim` works for all of them.
 
-**S3.** `tbr-hub --features app` (hub mode) adds the application, the
+**S3.** `tbr-hub` (hub mode) runs the application, the
 WebSocket API on `ws://<ip>/api` (esp_http_server, one session per socket,
 pushes through detached senders) once Wi-Fi credentials are stored
 (console `wifi set <ssid> <password>`, `wifi`, `token`, `catalog`), and the
 same API as JSON lines on CDC 0 while a host holds the port (a test path
 without network).
 
-**Size: the application does not fit the 1.5 MiB slot of 4 MB boards.**
+**Size.** The application is the default `tbr-hub` build; it targets the
+8 MB production layout (3 MiB slots) and the 4 MB dev layout (2 944 KiB).
 
-| Build | App image | Slot |
-|---|---:|---|
-| `tbr-hub` (phase 1, default) | 663 152 B | 42 % of 1.5 MiB |
-| `tbr-hub --features app` | 2 329 344 B | 148 % of 1.5 MiB, 74 % of 3 MiB (8 MB layout) |
-| `tbr-hub --features app`, `panic_immediate_abort` (experiment) | 2 080 400 B | 132 % of 1.5 MiB |
+| Build | App image | 3 MiB slot | 2 944 KiB dev slot |
+|---|---:|---:|---:|
+| `tbr-hub` (application, default) | 2 208 864 B | 70 % | 73 % |
+| `tbr-hub --no-default-features` (ZRHP host core only) | 664 560 B | 21 % | 22 % |
 
-Rust is ~1.33 MB of the application build (engine 381 KB, `core`/`std`/
-`alloc` monomorphisations 495 KB, `zdef` 86 KB, `hub-ncp` 84 KB, serde
-~60 KB), C ~670 KB (ESP-IDF, Wi-Fi, lwIP, mbedTLS, httpd). The release
-profile is now fat LTO at opt-level `z` (both firmwares shrank: bridge
-455 760 B, hub 663 152 B). CI builds and size-checks both variants. How the
-4 MB board gets the application (a different 4 MB layout, Ethernet-only,
-or size work on the engine) is open.
+Rust is ~1.2 MB of the application build (engine, `zdef`, `hub-ncp`, serde
+and the `core`/`std`/`alloc` monomorphisations), C ~670 KB (ESP-IDF, Wi-Fi,
+lwIP, mbedTLS, httpd). Size work so far: fat LTO at opt-level `z` (both
+firmwares), std without backtrace symbolisation (−138 KB, panic messages
+kept), the smaller `zdef` (zdef-size). `panic_immediate_abort` would save
+another ~250 KB but loses panic messages; not used.
 
 **Toolchain workaround.** The Xtensa LLVM of Rust 1.90.0.0 fails
 instruction selection ("Cannot select: i32 = Constant<5376>") on the btree
