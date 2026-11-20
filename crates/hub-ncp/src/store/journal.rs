@@ -287,10 +287,19 @@ impl<F: Flash> Journal<F> {
 
     /// Durably append one change, then apply it.
     pub fn commit(&mut self, change: Change) -> io::Result<()> {
-        let (t, payload) = change.encode();
-        self.write_record(t, &payload)?;
-        self.state.apply(&change);
-        self.appended += 1;
+        self.commit_many(std::slice::from_ref(&change))
+    }
+
+    /// Durably append changes in order, applying each after its record is
+    /// committed; compaction only runs after the last one (a multi-part
+    /// key/value put is never split by a snapshot).
+    pub fn commit_many(&mut self, changes: &[Change]) -> io::Result<()> {
+        for change in changes {
+            let (t, payload) = change.encode();
+            self.write_record(t, &payload)?;
+            self.state.apply(change);
+            self.appended += 1;
+        }
         if self.head_seq + 1 - self.live_from > self.n / 2 {
             self.compact()?;
         }
@@ -407,6 +416,39 @@ mod tests {
                 break;
             }
         }
+    }
+
+    fn big(seed: u8, n: usize) -> Vec<u8> {
+        (0..n).map(|i| seed.wrapping_add((i * 7) as u8)).collect()
+    }
+
+    #[test]
+    fn multi_part_values_survive_compaction_and_torn_puts() {
+        let mut j = Journal::open(MemFlash::new(32, 4096)).unwrap();
+        for round in 0..12u8 {
+            for dev in 0..4u8 {
+                let v = big(round ^ dev, 5000 + usize::from(dev) * 900);
+                j.commit_many(&HostState::kv_changes(&format!("dev/{dev}"), &v)).unwrap();
+            }
+        }
+        assert!(j.stats().generation > 0, "{:?}", j.stats());
+        let want = j.state().kv.clone();
+        let mut flash = j.into_flash();
+        let j = Journal::open(flash.clone()).unwrap();
+        assert_eq!(j.state().kv, want);
+        // A put cut after its first part keeps the previous value.
+        flash.budget = Some(4000);
+        let mut j = Journal::open(flash).unwrap();
+        assert!(j.commit_many(&HostState::kv_changes("dev/1", &big(0xEE, 9000))).is_err());
+        let mut flash = j.into_flash();
+        flash.budget = None;
+        let mut j = Journal::open(flash).unwrap();
+        assert_eq!(j.state().kv, want);
+        assert!(j.state().kv_pending.is_none() || j.state().kv_pending.as_ref().unwrap().0 == "dev/1");
+        // And the next put of the same key works.
+        j.commit_many(&HostState::kv_changes("dev/1", &big(0x11, 9000))).unwrap();
+        let j = Journal::open(j.into_flash()).unwrap();
+        assert_eq!(j.state().kv["dev/1"], big(0x11, 9000));
     }
 
     #[test]

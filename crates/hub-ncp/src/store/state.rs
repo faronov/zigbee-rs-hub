@@ -119,7 +119,16 @@ pub struct HostState {
     pub fw_pending: Option<FwPending>,
     /// Host endpoints.
     pub endpoints: BTreeMap<u8, EndpointRecord>,
+    /// Application key/value records (device registry, user definitions).
+    pub kv: BTreeMap<String, Vec<u8>>,
+    /// A multi-part value being received: `(key, parts, data so far, next part)`.
+    pub kv_pending: Option<(String, u16, Vec<u8>, u16)>,
 }
+
+/// Largest data of one key/value record part (two parts fill a 4 KiB sector).
+pub const KV_PART: usize = 2000;
+/// Longest key.
+pub const KV_KEY_MAX: usize = 96;
 
 /// One state mutation = one journal record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +153,20 @@ pub enum Change {
     Endpoint(EndpointRecord),
     /// Remove a host endpoint.
     EndpointDel(u8),
+    /// One part of a key/value record; the value replaces the old one when
+    /// all `parts` parts arrived in order.
+    KvPut {
+        /// Key.
+        key: String,
+        /// Part index.
+        part: u16,
+        /// Number of parts.
+        parts: u16,
+        /// Data.
+        data: Vec<u8>,
+    },
+    /// Remove a key.
+    KvDel(String),
 }
 
 pub(crate) mod rec {
@@ -159,6 +182,8 @@ pub(crate) mod rec {
     pub const FW_CLEAR: u8 = 0x17;
     pub const ENDPOINT: u8 = 0x18;
     pub const ENDPOINT_DEL: u8 = 0x19;
+    pub const KV_PUT: u8 = 0x20;
+    pub const KV_DEL: u8 = 0x21;
 }
 
 struct W(Vec<u8>);
@@ -264,6 +289,14 @@ impl Change {
                 w.u8(*ep);
                 rec::ENDPOINT_DEL
             }
+            Self::KvPut { key, part, parts, data } => {
+                w.u8(key.len() as u8).bytes(key.as_bytes()).u16(*part).u16(*parts).bytes(data);
+                rec::KV_PUT
+            }
+            Self::KvDel(key) => {
+                w.u8(key.len() as u8).bytes(key.as_bytes());
+                rec::KV_DEL
+            }
         };
         (t, w.0)
     }
@@ -319,6 +352,17 @@ impl Change {
                 out_clusters: r.list()?,
             }),
             rec::ENDPOINT_DEL => Self::EndpointDel(r.u8()?),
+            rec::KV_PUT => {
+                let n = r.u8()?;
+                let key = String::from_utf8(r.take(n.into())?.to_vec()).ok()?;
+                let part = r.u16()?;
+                let parts = r.u16()?;
+                Self::KvPut { key, part, parts, data: r.0.to_vec() }
+            }
+            rec::KV_DEL => {
+                let n = r.u8()?;
+                Self::KvDel(String::from_utf8(r.take(n.into())?.to_vec()).ok()?)
+            }
             _ => return None,
         })
     }
@@ -350,7 +394,62 @@ impl HostState {
             Change::EndpointDel(ep) => {
                 self.endpoints.remove(ep);
             }
+            Change::KvPut { key, part, parts, data } => {
+                let pending = if *part == 0 {
+                    Some((key.clone(), *parts, data.clone(), 1))
+                } else {
+                    match self.kv_pending.take() {
+                        Some((k, n, mut acc, next)) if k == *key && n == *parts && next == *part => {
+                            acc.extend_from_slice(data);
+                            Some((k, n, acc, next + 1))
+                        }
+                        // Out of sequence (a torn put): drop it, keep the old value.
+                        _ => None,
+                    }
+                };
+                match pending {
+                    Some((k, n, acc, next)) if next >= n => {
+                        self.kv.insert(k, acc);
+                    }
+                    p => self.kv_pending = p,
+                }
+            }
+            Change::KvDel(key) => {
+                self.kv.remove(key);
+                if self.kv_pending.as_ref().is_some_and(|p| p.0 == *key) {
+                    self.kv_pending = None;
+                }
+            }
         }
+    }
+
+    /// Whether applying `c` would change the state (cheap; no clone).
+    pub fn would_change(&self, c: &Change) -> bool {
+        match c {
+            Change::Meta(m) => self.meta != *m,
+            Change::Network(n) => self.network != Some(*n),
+            Change::NetworkClear => self.network.is_some(),
+            Change::Fc(domain, f) => self.fc.get(usize::from(domain.wrapping_sub(1))).is_some_and(|x| *x != Some(*f)),
+            Change::Device(d) => self.devices.get(&d.ieee) != Some(d),
+            Change::DeviceDel(ieee) => self.devices.contains_key(ieee),
+            Change::FwPending(f) => self.fw_pending != Some(*f),
+            Change::FwClear => self.fw_pending.is_some(),
+            Change::Endpoint(e) => self.endpoints.get(&e.ep) != Some(e),
+            Change::EndpointDel(ep) => self.endpoints.contains_key(ep),
+            Change::KvPut { .. } => true,
+            Change::KvDel(key) => self.kv.contains_key(key),
+        }
+    }
+
+    /// The records that store `value` under `key`.
+    pub fn kv_changes(key: &str, value: &[u8]) -> Vec<Change> {
+        let chunks: Vec<&[u8]> = if value.is_empty() { vec![&[][..]] } else { value.chunks(KV_PART).collect() };
+        let parts = chunks.len() as u16;
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, data)| Change::KvPut { key: key.to_string(), part: i as u16, parts, data: data.to_vec() })
+            .collect()
     }
 
     /// The changes that rebuild this state from empty (a snapshot).
@@ -365,6 +464,9 @@ impl HostState {
         out.extend(self.devices.values().map(|d| Change::Device(*d)));
         out.extend(self.fw_pending.map(Change::FwPending));
         out.extend(self.endpoints.values().cloned().map(Change::Endpoint));
+        for (k, v) in &self.kv {
+            out.extend(Self::kv_changes(k, v));
+        }
         out
     }
 }

@@ -938,6 +938,47 @@ impl Hub {
         Ok(())
     }
 
+    /// Run `f` on the host store (also used for the application's
+    /// key/value records).
+    pub fn with_store<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
+        let mut store = self.inner.store.lock().unwrap();
+        let r = f(&mut store);
+        let (devices, journal) = (store.state().devices.len(), store.stats());
+        drop(store);
+        self.update(|s| {
+            s.devices = devices;
+            s.journal = journal;
+        });
+        r
+    }
+
+    /// `NWK_PERMIT_JOIN` on one router (`Some(nwk)`, not replayed) or the
+    /// whole network (`None`, as [`permit_join`](Self::permit_join)).
+    pub fn permit_join_on(&self, secs: u8, target: Option<u16>) -> Result<(), Error> {
+        match target {
+            None => self.permit_join(secs),
+            Some(t) => self
+                .inner
+                .client
+                .call(&NwkPermitJoin { duration_s: secs, target: t, flags: 1 }, CallOpts::default())
+                .map(|_| ()),
+        }
+    }
+
+    /// `NWK_GROUP_MEMBERSHIP` (`op` 1 add, 2 remove, 3 clear) of a host
+    /// endpoint.
+    pub fn group_membership(&self, op: u8, group: u16, ep: u8) -> Result<(), Error> {
+        let body = zigbee_zrhp::msg::network::NwkGroupMembership { op, group, ep };
+        self.inner.client.call(&body, CallOpts::default()).map(|_| ())
+    }
+
+    /// `NWK_REMOVE_DEVICE` (`flags` bit0 rejoin, bit1 remove children,
+    /// bit2 TC remove via parent).
+    pub fn remove_device(&self, nwk: u16, ieee: [u8; 8], flags: u8) -> Result<(), Error> {
+        let body = zigbee_zrhp::msg::network::NwkRemoveDevice { nwk, ieee: zigbee_zrhp::types::Ieee(ieee), flags };
+        self.inner.client.call(&body, CallOpts::default()).map(|_| ())
+    }
+
     /// Register a host endpoint now and on every resume.
     pub fn add_endpoint(&self, ep: EndpointRecord) -> Result<(), Error> {
         self.send_endpoint(&ep, false)?;
