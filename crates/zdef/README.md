@@ -18,9 +18,11 @@ deliberately and listed in this file's history.
 use zdef::{load, HubFeatures, Definition};
 
 let def: Definition = zdef::load(&cbor, &HubFeatures::v1())?; // what the hub runs per load
-// = codec::decode_canonical (strict deterministic CBOR, re-encode check)
+// = codec::decode (strict deterministic CBOR: shortest heads, definite
+//   lengths, sorted unique keys, known keys outside 64..127)
 //   + validate() (fields, bindings, fragment rules, every expression verified)
 //   + requires check against the hub's features
+let def = zdef::load_canonical(&cbor, &hub)?;                  // + re-encode equality (uploads, zdefc)
 let hash = zdef::ContentHash::of(&cbor);           // SHA-256, spec 8.6; `{:#}` = 8-byte short form
 let bytes = def.encode()?;                         // canonical standalone CBOR
 ```
@@ -118,4 +120,12 @@ let manifest = Manifest::verify(&manifest_cose, &keys)?;
 
 ## Sizes
 
-See `docs/zdef.md` (code size on xtensa-esp32s3 and RAM per loaded definition).
+See [`docs/zdef.md`](../../docs/zdef.md): code size per entry point on
+xtensa-esp32s3 (`tools/zdef-size/measure.sh`) and RAM per loaded definition.
+
+## API history
+
+- 2026-11-20: first version (`2344439`).
+- 2026-11-20: `load` no longer re-encodes (smaller hub image);
+  `load_canonical` added with the old behaviour. Decoder internals only
+  otherwise.
