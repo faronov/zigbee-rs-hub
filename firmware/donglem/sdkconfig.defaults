@@ -1,0 +1,20 @@
+# SONOFF Dongle-M: ESP32-D0WDR2-V3 (rev 3, 2 MB in-package PSRAM on
+# GPIO9/10), 16 MB flash. Applied after firmware/gateway/sdkconfig.defaults.
+# Flash DIO (GPIO9/10 belong to the PSRAM), 80 MHz like SONOFF's own ESPHome
+# configuration (PSRAM at 80 MHz needs the flash at 80 MHz on the ESP32);
+# if a unit does not boot, use 40 MHz for both.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM_SPEED_80M=y
+# V3 silicon: no PSRAM cache workaround, smaller and faster code.
+CONFIG_ESP32_REV_MIN_3=y
+
+# Console and logs on UART0 (CP2102N USB bridge).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# Internal EMAC + IP101 (RMII, clock in on GPIO0); configured at run time.
+CONFIG_ETH_USE_ESP32_EMAC=y
+
+CONFIG_APP_PROJECT_VER="zrh-donglem-0.1.0"

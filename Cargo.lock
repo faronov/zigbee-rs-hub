@@ -1096,6 +1096,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-compact",
+ "hub-core",
  "hub-devices",
  "hub-ncp",
  "log",
@@ -2963,3 +2964,36 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zrh-donglem"
+version = "0.1.0"
+dependencies = [
+ "embuild",
+ "esp-idf-svc",
+ "hub-core",
+ "zrh-gateway",
+]
+
+[[package]]
+name = "zrh-gateway"
+version = "0.1.0"
+dependencies = [
+ "embedded-svc",
+ "embuild",
+ "esp-idf-svc",
+ "hub-app",
+ "hub-core",
+ "hub-ncp",
+ "log",
+]
+
+[[package]]
+name = "zrh-s3-mg24"
+version = "0.1.0"
+dependencies = [
+ "embuild",
+ "esp-idf-svc",
+ "hub-core",
+ "zrh-gateway",
+]

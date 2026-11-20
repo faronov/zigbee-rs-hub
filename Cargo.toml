@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/hub"]
+members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/hub", "firmware/gateway", "firmware/donglem", "firmware/s3-mg24"]
 # Host-side `cargo test` at the root only builds the portable crates and the
-# desktop tool; the firmware is built from `firmware/bridge` and
-# `firmware/hub` (Xtensa toolchain, see README).
+# desktop tool; the firmware is built from `firmware/bridge`,
+# `firmware/hub`, `firmware/donglem` and `firmware/s3-mg24` (Xtensa
+# toolchain, see README).
 default-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-app", "crates/zdef", "crates/zdefc", "tools/hubctl"]
 
 [workspace.package]
