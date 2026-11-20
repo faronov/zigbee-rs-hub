@@ -30,6 +30,6 @@ debug = true
 inherits = "release"
 opt-level = "z"
 debug = false
-strip = true
+strip = false
 lto = true
 codegen-units = 1

@@ -166,7 +166,7 @@ fn main() -> ExitCode {
                 let f = f.to_string_lossy().to_string();
                 let r = if is_cbor(&f) {
                     read(&f).and_then(|b| {
-                        zdef::load(&b, &zdef::HubFeatures::v1())
+                        zdef::load_canonical(&b, &zdef::HubFeatures::v1())
                             .map(|d| (b, d))
                             .map_err(|e| format!("{f}: {e}"))
                     })
