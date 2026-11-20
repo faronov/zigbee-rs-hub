@@ -1,5 +1,5 @@
-# zigbee-rs-hub S3 layout for 8 MB flash (README "S3 flash layout", ZRHP spec 3.4).
-# Not used by the build: provisioning only.
+# zigbee-rs-hub production layout, 8 MB S3 (README "S3 flash layout", ZRHP spec
+# 3.4/12.4, device-support 16.2): two 3 MiB app slots (A/B OTA) and hubdata.
 # Name,   Type, SubType,  Offset,   Size
 nvs,      data, nvs,      0x9000,   0x6000
 otadata,  data, ota,      0xF000,   0x2000

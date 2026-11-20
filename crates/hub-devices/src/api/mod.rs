@@ -686,8 +686,19 @@ impl ApiServer {
     /// Drains the hub's events into frames: deltas for subscribers (with
     /// increasing `seq`) and deferred command results.
     pub fn pump<T: ZigbeeTransport>(&mut self, hub: &mut Hub<T>) -> Vec<(SessionId, String)> {
+        let events = hub.drain_events();
+        self.pump_events(hub, events)
+    }
+
+    /// [`pump`](Self::pump) for events the caller drained itself (so that
+    /// it can also act on them, e.g. persist changed devices).
+    pub fn pump_events<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        events: Vec<HubEvent>,
+    ) -> Vec<(SessionId, String)> {
         let mut out = Vec::new();
-        for ev in hub.drain_events() {
+        for ev in events {
             if let HubEvent::CommandResult { ticket, result } = &ev {
                 for (sid, sess) in &mut self.sessions {
                     if let Some(rid) = sess.tickets.remove(ticket) {

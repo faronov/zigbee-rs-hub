@@ -77,7 +77,15 @@ pub struct SimState {
     pub stall: Option<u16>,
     /// Retry-cache hits served.
     pub retries_served: u32,
+    /// Payloads of every `APS_DATA_REQUEST`.
+    pub aps: Vec<Vec<u8>>,
+    /// Other requests worth checking: `(msg_id, payload)`.
+    pub log: Vec<(u16, Vec<u8>)>,
+    /// Next ZCL TSN returned by remote GP requests.
+    pub gp_tsn: u8,
 }
+
+type Injected = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 
 /// Handle to a running simulated NCP.
 #[derive(Clone)]
@@ -85,6 +93,7 @@ pub struct SimNcp {
     state: Arc<Mutex<SimState>>,
     reboot: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    inject: Injected,
 }
 
 impl SimNcp {
@@ -113,8 +122,12 @@ impl SimNcp {
             crash_trial: false,
             stall: None,
             retries_served: 0,
+            aps: Vec::new(),
+            log: Vec::new(),
+            gp_tsn: 0x40,
         }));
-        let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)) };
+        let inject = Arc::new(Mutex::new(Vec::new()));
+        let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
         let worker = sim.clone();
         thread::Builder::new().name("sim-ncp".into()).spawn(move || worker.run(end)).expect("sim thread");
         sim
@@ -134,6 +147,12 @@ impl SimNcp {
     /// unconfirmed trial image rolls back).
     pub fn reboot(&self) {
         self.reboot.store(true, Ordering::SeqCst);
+    }
+
+    /// Send an event (ZIGBEE endpoint) with a raw payload, as if the
+    /// network produced it (indications, joins, GP frames).
+    pub fn inject_event(&self, msg_id: u16, payload: Vec<u8>) {
+        self.inject.lock().unwrap().push((msg_id, payload));
     }
 
     /// Stop the thread.
@@ -192,7 +211,9 @@ impl SimNcp {
                 after = rest;
                 ready.into_iter().map(|(_, a)| a).collect()
             };
-            for a in due {
+            let injected: Vec<Action> =
+                self.inject.lock().unwrap().drain(..).map(|(id, p)| Action::Event(id, p)).collect();
+            for a in due.into_iter().chain(injected) {
                 match a {
                     Action::Reboot => self.reboot(),
                     Action::Event(id, payload) => {
@@ -396,6 +417,7 @@ impl SimNcp {
                 status(Status::Success)
             }
             ids::APS_DATA_REQUEST => {
+                s.aps.push(m.payload.to_vec());
                 let req: ApsDataRequest = m.decode().unwrap();
                 let dst = match req.dst {
                     zigbee_zrhp::msg::data::ApsDst::Nwk(n) => n,
@@ -424,6 +446,15 @@ impl SimNcp {
                 paging_active: 0,
             })),
             ids::LOG_CONFIG => status(Status::Success),
+            ids::NWK_GROUP_MEMBERSHIP | ids::NWK_REMOVE_DEVICE | ids::GP_SINK_CONFIG | ids::GP_SINK_COMMISSIONING | ids::GP_SINK_REMOVE => {
+                s.log.push((m.header.msg_id, m.payload.to_vec()));
+                status(Status::Success)
+            }
+            ids::GP_PAIRING_CONFIGURATION..=ids::GP_REMOTE_PROXY_TABLE_REQUEST => {
+                s.log.push((m.header.msg_id, m.payload.to_vec()));
+                s.gp_tsn = s.gp_tsn.wrapping_add(1);
+                vec![0, s.gp_tsn]
+            }
             ids::FW_GET_SLOTS => {
                 let slots: [FwSlot; 2] = core::array::from_fn(|i| {
                     let (version, sha) = s.slots[i];

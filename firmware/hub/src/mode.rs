@@ -36,6 +36,30 @@ const ROM_ONCE: u32 = u32::from_le_bytes(*b"ROM1");
 static mut ONE_SHOT: u32 = 0;
 
 static NVS: Mutex<Option<EspNvs<NvsDefault>>> = Mutex::new(None);
+static PARTITION: std::sync::OnceLock<EspDefaultNvsPartition> = std::sync::OnceLock::new();
+
+/// The default NVS partition (shared with Wi-Fi), once [`boot`] opened it.
+#[cfg(feature = "app")]
+pub fn partition() -> Option<EspDefaultNvsPartition> {
+    PARTITION.get().cloned()
+}
+
+/// A string setting in NVS `hub/<key>`.
+pub fn get_str(key: &str) -> Option<String> {
+    let g = NVS.lock().unwrap();
+    let mut buf = [0u8; 128];
+    g.as_ref()?.get_str(key, &mut buf).ok().flatten().map(str::to_string)
+}
+
+/// Store (`Some`) or remove (`None`) a string setting.
+pub fn set_str(key: &str, value: Option<&str>) -> Result<(), String> {
+    let mut g = NVS.lock().unwrap();
+    let nvs = g.as_mut().ok_or("NVS unavailable")?;
+    match value {
+        Some(v) => nvs.set_str(key, v).map_err(|e| e.to_string()),
+        None => nvs.remove(key).map(|_| ()).map_err(|e| e.to_string()),
+    }
+}
 
 fn persisted() -> Option<Mode> {
     let g = NVS.lock().unwrap();
@@ -51,9 +75,15 @@ fn persisted() -> Option<Mode> {
 
 /// Open NVS and decide the mode of this boot.
 pub fn boot() -> Boot {
-    match EspDefaultNvsPartition::take().and_then(|p| EspNvs::new(p, "hub", true)) {
-        Ok(nvs) => *NVS.lock().unwrap() = Some(nvs),
-        Err(e) => warn!("NVS unavailable ({e}); the mode cannot be persisted"),
+    match EspDefaultNvsPartition::take() {
+        Ok(p) => {
+            let _ = PARTITION.set(p.clone());
+            match EspNvs::new(p, "hub", true) {
+                Ok(nvs) => *NVS.lock().unwrap() = Some(nvs),
+                Err(e) => warn!("NVS hub namespace unavailable ({e}); settings cannot be persisted"),
+            }
+        }
+        Err(e) => warn!("NVS unavailable ({e}); settings cannot be persisted"),
     }
     let shot = unsafe { core::ptr::addr_of_mut!(ONE_SHOT).replace(0) };
     match shot {

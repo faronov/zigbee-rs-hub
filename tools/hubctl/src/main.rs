@@ -14,6 +14,8 @@
 //! does RTS/CTS towards the H2 itself; opening the port asserts DTR and
 //! RTS, which leaves the H2 running (esptool auto-reset mapping).
 
+mod serve;
+
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,6 +46,16 @@ commands:
                             stream FILE into the inactive slot, trial boot, confirm
   fw-confirm                FW_CONFIRM
   reset [--hard]            SYS_RESET, or an EN pulse through the bridge's DTR/RTS
+  serve [--listen ADDR] [--token T] [--for SECS]
+                            the hub application (device engine, registry in the
+                            store) with its WebSocket JSON API (default
+                            127.0.0.1:8099, token from HUB_TOKEN or random)
+also, without a hub:
+  hubctl ws-call URL --token T [--listen SECS] JSON...
+                            authenticate, send requests, print the frames
+  hubctl catalog-verify FILE...
+                            check catalog banks (.zdb) and manifest.cose with
+                            the firmware's trusted keys
 ";
 
 struct Logger(Instant, log::LevelFilter);
@@ -351,6 +363,26 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             println!("NCP reset ({}); resumed: {resumed}", if hard { "EN" } else { "SYS_RESET" });
             let _ = hub.client().call_empty(ids::SYS_GET_STATUS, CallOpts::default());
         }
+        "serve" => {
+            let addr = args.value("--listen").unwrap_or_else(|| "127.0.0.1:8099".into());
+            let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_else(|| {
+                let mut b = [0u8; 12];
+                urandom()(&mut b);
+                hex(&b).to_lowercase()
+            });
+            let until = args.value("--for").and_then(|s| s.parse().ok()).map(|s: u64| Instant::now() + Duration::from_secs(s));
+            let cfg = hub_app::AppConfig { hub_name: "hubctl".into(), api_token: token.clone(), ..Default::default() };
+            let app = hub_app::App::start(hub.clone(), cfg);
+            println!("token: {token}");
+            let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
+            let st = app.status();
+            app.shutdown();
+            println!(
+                "app: {} devices ({} restored), registry writes {} errors {}, APS accepted {} busy {} failed {}",
+                st.devices, st.restored, st.registry_writes, st.registry_errors, st.aps.accepted, st.aps.busy, st.aps.failed
+            );
+            result?;
+        }
         other => return Err(format!("unknown command {other:?}\n{USAGE}")),
     }
     Ok(())
@@ -371,6 +403,54 @@ fn main() -> ExitCode {
     };
     let _ = log::set_logger(Box::leak(Box::new(Logger(Instant::now(), level))));
     log::set_max_level(level);
+
+    if args.0.first().map(String::as_str) == Some("catalog-verify") {
+        let mut ok = true;
+        for (slot, kid) in hub_app::catalog::key_ids() {
+            println!("trusted key slot {slot}: kid {}", hex(&kid).to_lowercase());
+        }
+        for path in &args.0[1..] {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{path}: {e}");
+                    ok = false;
+                    continue;
+                }
+            };
+            let result = if bytes.starts_with(b"ZDB1") {
+                hub_app::catalog::verify_bank(&bytes).map(|_| "bank: body hash and signature ok".to_string()).map_err(|e| format!("{e:?}"))
+            } else {
+                hub_app::catalog::verify_manifest(&bytes)
+                    .map(|m| format!("manifest {}.{}: {} banks, signature ok", m.catalog_date, m.catalog_serial, m.banks.len()))
+                    .map_err(|e| format!("{e:?}"))
+            };
+            match result {
+                Ok(m) => println!("{path}: {m}"),
+                Err(e) => {
+                    println!("{path}: REJECTED: {e}");
+                    ok = false;
+                }
+            }
+        }
+        return if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
+    if args.0.first().map(String::as_str) == Some("ws-call") {
+        args.0.remove(0);
+        let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_default();
+        let listen = Duration::from_secs(args.value("--listen").and_then(|s| s.parse().ok()).unwrap_or(0));
+        let Some(url) = (!args.0.is_empty()).then(|| args.0.remove(0)) else {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match serve::ws_call(&url, &token, &args.0, listen) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let mut cfg = HubConfig::default();
     cfg.driver.host_name = "hubctl".into();

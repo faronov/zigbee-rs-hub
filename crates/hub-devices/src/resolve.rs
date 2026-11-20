@@ -569,16 +569,19 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         score: None,
     });
     let disable = layers.iter().any(|(d, _)| d.generic.disable);
-    let mut merged: BTreeMap<(u8, String), ResolvedEntity> = BTreeMap::new();
+    // Boxed values: the Xtensa LLVM backend (Rust 1.90.0.0) fails
+    // instruction selection ("Cannot select: Constant<5376>") on the btree
+    // node code of this map with ~488-byte values inline.
+    let mut merged: BTreeMap<(u8, String), Box<ResolvedEntity>> = BTreeMap::new();
     let mut order: Vec<(u8, String)> = Vec::new();
-    let put = |merged: &mut BTreeMap<(u8, String), ResolvedEntity>,
+    let put = |merged: &mut BTreeMap<(u8, String), Box<ResolvedEntity>>,
                order: &mut Vec<(u8, String)>,
                r: ResolvedEntity| {
         let k = (r.ep, r.def.key.clone());
         if !merged.contains_key(&k) {
             order.push(k.clone());
         }
-        merged.insert(k, r);
+        merged.insert(k, Box::new(r));
     };
     for mut e in (input.generic)(power) {
         let device_level = matches!(e.value.binding, Binding::DeviceField(_));
@@ -681,7 +684,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         .collect();
     res.entities = order
         .into_iter()
-        .filter_map(|k| merged.remove(&k))
+        .filter_map(|k| merged.remove(&k).map(|b| *b))
         .map(|mut r| {
             r.ep_name = ep_names.get(&r.ep).cloned();
             r

@@ -7,14 +7,20 @@
 //!   flash and talk to the H2 NCP;
 //! - **hub**: the `hub-ncp` ZRHP host on UART1 (921 600 with RTS/CTS on the
 //!   reserved lines, 460 800 fallback), the host store in `hubdata` (RAM if
-//!   the partition is missing), console on CDC 1 with `hub …` commands. CDC 0
-//!   carries no data in this mode.
+//!   the partition is missing), the application (`hub-app`: device engine,
+//!   registry) with its WebSocket JSON API on `ws://<ip>/api` once Wi-Fi is
+//!   configured, the same API as JSON lines on CDC 0 (test path), console on
+//!   CDC 1 with `hub …`, `wifi …` and `token` commands.
 //!
 //! USB recovery (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode)
 //! works the same in both modes.
 
 mod esp;
 mod mode;
+#[cfg(feature = "app")]
+mod net;
+#[cfg(feature = "app")]
+mod usbapi;
 
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
@@ -25,12 +31,16 @@ use hub_ncp::lifecycle::{FormRequest, Hub, HubConfig};
 use hub_ncp::store::Store;
 use hub_ncp::zrhp::codec::Rest;
 use hub_ncp::zrhp::msg::system::SysEcho;
-use log::{info, warn};
+use hub_core::layout::Verdict;
+use log::{error, info, warn};
 use tbr_bridge::{console, h2, uart, usb};
 
 use crate::mode::Mode;
 
 static HUB: OnceLock<Hub> = OnceLock::new();
+static LAYOUT_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(feature = "app")]
+static APP: OnceLock<hub_app::App> = OnceLock::new();
 static BOOT: OnceLock<mode::Boot> = OnceLock::new();
 
 const HELP: &str = "\
@@ -47,6 +57,11 @@ hub firmware:\r
   hub ncp reset [hard] SYS_RESET, or an EN pulse\r
   hub rom              reboot into the bridge with the H2 in its ROM loader\r
                        (manual recovery: esptool on CDC 0)\r
+  wifi                 Wi-Fi state and the API address (hub mode, app build)\r
+  wifi set <ssid> [pw] store Wi-Fi credentials (used from the next hub boot)\r
+  wifi clear           forget them\r
+  token                the API token (generated at the first hub boot)\r
+  catalog              trusted definitions-catalog keys (app build)\r
 ";
 
 fn hex(b: &[u8]) -> String {
@@ -98,6 +113,26 @@ fn status_text(hub: &Hub) -> String {
     );
     if let Some(e) = &s.last_error {
         out += &format!("last error: {e}\r\n");
+    }
+    #[cfg(feature = "app")]
+    if let Some(app) = APP.get() {
+        let a = app.status();
+        out += &format!(
+            "app: {} devices ({} restored), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {}, endpoint {}\r\n",
+            a.devices,
+            a.restored,
+            a.sessions,
+            a.registry_writes,
+            a.registry_errors,
+            a.aps.accepted,
+            a.aps.busy,
+            a.aps.failed,
+            if a.endpoint_registered { "registered" } else { "pending" }
+        );
+    }
+    #[cfg(feature = "app")]
+    {
+        out += &format!("wifi: {}\r\n", net::STATE.lock().unwrap());
     }
     out
 }
@@ -159,7 +194,10 @@ fn extension(words: &[&str]) -> Option<String> {
                 Err(e) => format!("error: {e}\r\n"),
             }
         }
-        ["hub", ..] if hub.is_none() => not_hub(),
+        ["hub", ..] if hub.is_none() => match LAYOUT_ERROR.lock().unwrap().as_ref() {
+            Some(e) => format!("hub not started: partition table does not belong to this flash ({e})\r\n"),
+            None => not_hub(),
+        },
         ["hub"] | ["hub", "status"] => status_text(hub?),
         ["hub", "echo", rest @ ..] => {
             let n: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 200);
@@ -213,6 +251,25 @@ fn extension(words: &[&str]) -> Option<String> {
             hub?.shutdown();
             mode::restart_once(false)
         }
+        #[cfg(feature = "app")]
+        ["wifi"] => format!("wifi: {}\r\n", net::STATE.lock().unwrap()),
+        #[cfg(feature = "app")]
+        ["catalog"] => catalog_keys(),
+        ["wifi", "set", ssid, rest @ ..] => {
+            let pass = rest.join(" ");
+            match mode::set_str("wifi_ssid", Some(ssid)).and_then(|_| mode::set_str("wifi_pass", Some(&pass))) {
+                Ok(()) => "stored; used from the next hub boot\r\n".into(),
+                Err(e) => format!("error: {e}\r\n"),
+            }
+        }
+        ["wifi", "clear"] => match mode::set_str("wifi_ssid", None).and_then(|_| mode::set_str("wifi_pass", None)) {
+            Ok(()) => "Wi-Fi credentials removed\r\n".into(),
+            Err(e) => format!("error: {e}\r\n"),
+        },
+        ["token"] => match mode::get_str("api_token") {
+            Some(t) => format!("API token: {t}\r\n"),
+            None => "no token yet (generated at the first hub boot)\r\n".into(),
+        },
         // The hub owns UART1 and EN/BOOT in hub mode.
         ["baud", ..] | ["flow", ..] | ["lines", ..] | ["h2", ..] | ["gpio", ..] if hub_mode => {
             "error: the hub owns the H2 UART and EN/BOOT in hub mode (`hub rom`, `mode bridge`)\r\n".into()
@@ -226,28 +283,86 @@ fn console_reply(s: &str) {
 }
 
 fn start_hub() {
-    let (_, table_ok) = esp::flash_layout();
-    let store = match esp::Partition::find() {
-        Some(p) if table_ok => match Store::open(Box::new(p)) {
-            Ok(s) => {
+    let (_, verdict) = esp::flash_layout();
+    let store = match verdict {
+        Verdict::Fatal(m) => {
+            error!("hub not started: the partition table does not belong to this flash ({m:?}); flash the matching table");
+            *LAYOUT_ERROR.lock().unwrap() = Some(format!("{m:?}"));
+            return;
+        }
+        Verdict::Foreign => Store::volatile(),
+        Verdict::Ok(_) => match esp::Partition::find().map(|p| Store::open(Box::new(p))) {
+            Some(Ok(s)) => {
                 info!("host store: hubdata journal {:?}", s.stats());
                 s
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 warn!("host store: hubdata journal unusable ({e}); RAM only");
                 Store::volatile()
             }
+            None => {
+                warn!("host store: no usable hubdata partition; RAM only");
+                Store::volatile()
+            }
         },
-        _ => {
-            warn!("host store: no usable hubdata partition (stock table?); RAM only");
-            Store::volatile()
-        }
     };
     let mut cfg = HubConfig::default();
     cfg.driver.host_name = format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION"));
     let hub = Hub::start(cfg, esp::UartRx, esp::UartTx, Some(Box::new(esp::H2Lines)), store, esp::rng());
-    let _ = HUB.set(hub);
+    let _ = HUB.set(hub.clone());
+    #[cfg(feature = "app")]
+    start_app(hub);
 }
+
+/// The catalog verifier's key slots.
+#[cfg(feature = "app")]
+fn catalog_keys() -> String {
+    hub_app::catalog::KEY_SLOTS
+        .iter()
+        .enumerate()
+        .map(|(i, k)| match k {
+            Some(k) => format!("catalog key slot {i}: kid {} ed25519 {}\r\n", hex(&hub_app::catalog::key_ids()[i].1), hex(k)),
+            None => format!("catalog key slot {i}: reserved (rotation)\r\n"),
+        })
+        .collect()
+}
+
+#[cfg(feature = "app")]
+fn start_app(hub: Hub) {
+    for line in catalog_keys().lines() {
+        info!("{}", line.trim_end());
+    }
+    let token = mode::get_str("api_token").unwrap_or_else(|| {
+        let mut b = [0u8; 12];
+        (esp::rng())(&mut b);
+        let t = hex(&b).to_lowercase();
+        if let Err(e) = mode::set_str("api_token", Some(&t)) {
+            warn!("API token not stored: {e}");
+        }
+        t
+    });
+    let app_cfg = hub_app::AppConfig {
+        hub_name: format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION")),
+        api_token: token,
+        stack_size: APP_STACK,
+        ..Default::default()
+    };
+    let app = hub_app::App::start(hub.clone(), app_cfg);
+    let _ = APP.set(app.clone());
+    usbapi::start(app.clone());
+    match esp_idf_svc::hal::peripherals::Peripherals::take() {
+        Ok(p) => net::start(app, p.modem, move |up| {
+            if let Err(e) = hub.set_coex(up) {
+                warn!("coex_enable {up}: {e}");
+            }
+        }),
+        Err(e) => warn!("peripherals: {e}"),
+    }
+}
+
+/// Stack of the application thread (engine handlers, serde_json).
+#[cfg(feature = "app")]
+const APP_STACK: usize = 64 * 1024;
 
 fn main() {
     esp_idf_svc::sys::link_patches();

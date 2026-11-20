@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, phase1]
+    branches: [main, stage2]
   pull_request:
   workflow_dispatch:
 
@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p hub-core -p hub-ncp -p hubctl
+      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hubctl
 
   hub-devices:
     name: hub-devices (engine host tests, clippy, fmt)
@@ -131,19 +131,30 @@ jobs:
       - name: Build tbr-bridge
         working-directory: firmware/bridge
         run: cargo build --release
-      - name: Build tbr-hub
+      - name: Build tbr-hub without the application (ZRHP host core only)
+        working-directory: firmware/hub
+        run: cargo build --release --no-default-features
+      - name: Build tbr-hub (application)
         working-directory: firmware/hub
         run: cargo build --release
-      - name: App images (ota_0; tbr-hub must fit the 1.5 MiB slot of the 4 MB layout)
+      - name: App images (tbr-hub must fit the 3 MiB production slot and the 2 944 KiB dev slot)
         run: |
           pip install --quiet "esptool>=5,<6"
           tools/make-app-image.sh release target/tbr-bridge-app.bin tbr-bridge
-          MAX_APP_BYTES=1572864 tools/make-app-image.sh release target/tbr-hub-app.bin tbr-hub
+          FLASH_SIZE=8MB MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-8mb-app.bin tbr-hub
+          FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-app.bin tbr-hub
+      - name: Partition tables (8 MB production, 4 MB dev)
+        run: |
+          tools/make-partition-table.sh firmware/hub/partitions-8mb.csv target/partitions-8mb.bin 8MB
+          tools/make-partition-table.sh firmware/hub/partitions-4mb-dev.csv target/partitions-4mb-dev.bin 4MB
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
           path: |
             target/tbr-bridge-app.bin
-            target/tbr-hub-app.bin
+            target/tbr-hub-8mb-app.bin
+            target/tbr-hub-4mb-dev-app.bin
+            target/partitions-8mb.bin
+            target/partitions-4mb-dev.bin
             target/xtensa-esp32s3-espidf/release/tbr-bridge
             target/xtensa-esp32s3-espidf/release/tbr-hub

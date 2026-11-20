@@ -96,6 +96,7 @@ User decisions (2026-11-19, third batch), closing the remaining questions:
 | D21 | The other proposals of the drafts are accepted: on-demand fetch on by default (with a setting); availability defaults of 4.6; zhc expose property names as entity keys; the HA integration's domain and distribution are decided when it is built. | 4.6, 9.3, 15, 17.2 |
 | D23 | **GP bindings (2026-11-19):** a GPD button or command can be bound to a device endpoint or a group with a ZCL command and payload. Two executors, one per binding: **(a) on-device**, programmed into a target that is a GP sink with CT-based commissioning and a Translation Table (gpsFunctionality bits 11 and 18) through ZRHP remote GP provisioning (GP Pairing Configuration + GP Translation Table Update); **(b) hub-side virtual binding**, the hub turning the NCP's `EVT_GP_FRAME` into ZCL commands to any light or group, including proxy-only lamps. Automatic choice, user override, listing, removal, drift repair, persistence in `hubdata`; GP event entities always still fire. | 13.8, 14.5 |
 | D22 | **Source formats (2026-11-19):** the canonical form in the definitions repository is **strict YAML 1.2** (core schema); `zdefc` also accepts **JSON, JSONC and JSON5** (one data model, one JSON Schema, identical CBOR). JSON5 is the alternative for authors who prefer explicit typing: it has comments, hexadecimal numbers and no implicit booleans. Catalog CI normalises contributed JSON/JSON5 files to the canonical YAML. | 6.1, 14.4 |
+| D24 | **S3 layouts (2026-11-20):** 8 MB boards are the product (two 3 MiB app slots, A/B OTA, `hubdata` 1 920 KiB); 4 MB samples get a development layout (one 2 944 KiB app slot, no OTA, `hubdata` 1 MiB holding the 896 KiB areas of 16.1); no 1.5 MiB app target. | 16.1, 16.2, 16.5 |
 
 Design goals derived from these:
 
@@ -2112,7 +2113,7 @@ JSONC, JSON5 — D22) is compiled by `zdefc` on the client: the CLI, or its
 WebAssembly build inside the web UI.
 The UI decompiles CBOR back to YAML for editing (lossless except comments,
 which the UI keeps with the user's own copy). The hub never parses YAML,
-which keeps a YAML parser and the compiler out of the 1.5 MiB app.
+which keeps a YAML parser and the compiler out of the hub app.
 The WebAssembly build (`crates/zdefc-wasm`, 638 KB, 231 KB gzipped) exports
 `compile(source, format)` → CBOR bytes (throws the diagnostics as JSON),
 `check(source, format)` → `{ok, errors: [{path, line?, col?, message}],
@@ -2173,7 +2174,11 @@ API.
 
 ## 16. Storage and RAM budgets
 
-### 16.1 Flash: 4 MB S3 (`hubdata` 896 KiB, LittleFS)
+### 16.1 Flash: 4 MB S3 (development layout, D24)
+
+4 MB boards are development samples: one 2 944 KiB app slot, no OTA,
+`hubdata` 1 MiB. The areas below take 896 KiB of it; the remaining 128 KiB
+add to the free space.
 
 | Area | Size | Content |
 |---|---:|---|
@@ -2184,7 +2189,9 @@ API.
 | Local definitions (D10) | 64 KiB | user definitions, fetched definitions, self-description schemas (9.2) |
 | Free | 160 KiB (17.9 %) | LittleFS copy-on-write and wear levelling (224 KiB before the local area) |
 
-### 16.2 Flash: 8 MB S3 (`hubdata` 1 920 KiB), approved (D20)
+### 16.2 Flash: 8 MB S3, the product (`hubdata` 1 920 KiB), approved (D20, D24)
+
+Two 3 MiB app slots with A/B OTA.
 
 | Area | Size |
 |---|---:|
@@ -2235,7 +2242,12 @@ Definitions are loaded lazily: at boot only resolution records are read; a
 device's definition is inflated, verified and compiled into its tables on its
 first frame or API access, then the CBOR is freed.
 
-### 16.5 App code (estimate, 1.5 MiB app slot)
+### 16.5 App code (estimate)
+
+The app slot is 3 MiB on 8 MB boards and 2 944 KiB on the 4 MB dev layout
+(D24); the measured application build (engine, ZRHP host core, Wi-Fi,
+WebSocket API: 2.1 MiB) is in the README ("Stage 2"). The estimate below
+covers the definition engine only.
 
 CBOR decoder ~15 KB, expression VM + verifier ~12 KB, generic ZCL rules and
 codecs ~40–60 KB, Tuya ~8 KB, GP decoding (shared `zigbee-gp` codecs) ~10 KB,
@@ -2544,8 +2556,9 @@ For every generated definition the generator also emits test vectors:
 
 The bank builder fails if a bank exceeds its partition size, a definition
 exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
-size table (definitions, strings, index) per run. The hub CI keeps the app
-under 1.5 MiB (README).
+size table (definitions, strings, index) per run. The hub CI checks the app
+against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
+D24; README).
 
 ### 18.6 Hardware
 

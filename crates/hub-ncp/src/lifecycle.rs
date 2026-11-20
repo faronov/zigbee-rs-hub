@@ -247,6 +247,7 @@ struct Inner {
     subscribers: Mutex<Vec<Sender<Message>>>,
     resumed_cookie: Mutex<Option<u32>>,
     pending_fc: Mutex<[u32; 2]>,
+    coex: Mutex<Option<bool>>,
 }
 
 /// The running hub core. Cheap to clone.
@@ -301,6 +302,7 @@ impl Hub {
             subscribers: Mutex::new(Vec::new()),
             resumed_cookie: Mutex::new(None),
             pending_fc: Mutex::new([0; 2]),
+            coex: Mutex::new(None),
         });
         let hub = Hub { inner };
         let worker = hub.clone();
@@ -555,6 +557,12 @@ impl Hub {
             if let Some(left) = remaining {
                 let secs = left.as_secs().clamp(1, 254) as u8;
                 c.call(&NwkPermitJoin { duration_s: secs, target: 0xFFFC, flags: 1 }, self.opts(Duration::from_secs(5)))?;
+            }
+        }
+        if policy.replay {
+            let coex = *self.inner.coex.lock().unwrap();
+            if let Some(on) = coex {
+                self.apply_coex(on, true)?;
             }
         }
         if let Some(level) = policy.log_level {
@@ -936,6 +944,73 @@ impl Hub {
         *self.inner.permit_until.lock().unwrap() =
             (secs > 0).then(|| Instant::now() + Duration::from_secs(secs.into()));
         Ok(())
+    }
+
+    /// Run `f` on the host store (also used for the application's
+    /// key/value records).
+    pub fn with_store<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
+        let mut store = self.inner.store.lock().unwrap();
+        let r = f(&mut store);
+        let (devices, journal) = (store.state().devices.len(), store.stats());
+        drop(store);
+        self.update(|s| {
+            s.devices = devices;
+            s.journal = journal;
+        });
+        r
+    }
+
+    /// `NWK_PERMIT_JOIN` on one router (`Some(nwk)`, not replayed) or the
+    /// whole network (`None`, as [`permit_join`](Self::permit_join)).
+    pub fn permit_join_on(&self, secs: u8, target: Option<u16>) -> Result<(), Error> {
+        match target {
+            None => self.permit_join(secs),
+            Some(t) => self
+                .inner
+                .client
+                .call(&NwkPermitJoin { duration_s: secs, target: t, flags: 1 }, CallOpts::default())
+                .map(|_| ()),
+        }
+    }
+
+    /// `NWK_GROUP_MEMBERSHIP` (`op` 1 add, 2 remove, 3 clear) of a host
+    /// endpoint.
+    pub fn group_membership(&self, op: u8, group: u16, ep: u8) -> Result<(), Error> {
+        let body = zigbee_zrhp::msg::network::NwkGroupMembership { op, group, ep };
+        self.inner.client.call(&body, CallOpts::default()).map(|_| ())
+    }
+
+    /// `NWK_REMOVE_DEVICE` (`flags` bit0 rejoin, bit1 remove children,
+    /// bit2 TC remove via parent).
+    pub fn remove_device(&self, nwk: u16, ieee: [u8; 8], flags: u8) -> Result<(), Error> {
+        let body = zigbee_zrhp::msg::network::NwkRemoveDevice { nwk, ieee: zigbee_zrhp::types::Ieee(ieee), flags };
+        self.inner.client.call(&body, CallOpts::default()).map(|_| ())
+    }
+
+    /// PTA coexistence (`coex_enable`, spec 11.5 / decision N7): the hub
+    /// turns it on while its Wi-Fi is up. Volatile on the NCP, so it is
+    /// re-applied in every resume; a no-op without `PTA_COEX`.
+    pub fn set_coex(&self, on: bool) -> Result<(), Error> {
+        *self.inner.coex.lock().unwrap() = Some(on);
+        if self.inner.client.state() != SessionState::Ready {
+            return Ok(());
+        }
+        self.apply_coex(on, false)
+    }
+
+    fn apply_coex(&self, on: bool, during_resume: bool) -> Result<(), Error> {
+        let Some(session) = self.inner.client.session() else { return Ok(()) };
+        if !session.negotiated.has(caps::PTA_COEX) {
+            return Ok(());
+        }
+        let value = [u8::from(on)];
+        let item = [zigbee_zrhp::msg::system::ConfigValue {
+            id: zigbee_zrhp::msg::system::config::COEX_ENABLE,
+            value: zigbee_zrhp::codec::Bytes8(&value),
+        }];
+        let body = zigbee_zrhp::msg::system::SysSetConfig { values: List::new(&item) };
+        let opts = CallOpts { during_resume, ..CallOpts::timeout(Duration::from_secs(5)) };
+        self.inner.client.call(&body, opts).map(|_| ())
     }
 
     /// Register a host endpoint now and on every resume.

@@ -397,6 +397,15 @@ impl Ticket {
     pub fn wait(self) -> Result<Outcome, Error> {
         self.rx.recv().unwrap_or(Err(Error::Closed))
     }
+
+    /// The outcome if it is there already.
+    pub fn try_wait(&self) -> Option<Result<Outcome, Error>> {
+        match self.rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err(Error::Closed)),
+        }
+    }
 }
 
 impl Client {

@@ -718,6 +718,49 @@ fn self_describing_zigbee_rs_device() {
     );
     // Cached by hash.
     assert!(hub.schema_cache.contains_key(&hash));
+    // Registry persistence: a new hub restores the device from its
+    // snapshot (fragment included) without talking to it.
+    {
+        let d = hub.device_mut(id).unwrap();
+        let i = d.entity_index(&format!("{id}:1:temperature")).unwrap();
+        d.entities[i].user_name = Some("Desk".into());
+    }
+    let snap =
+        crate::persist::DeviceSnapshot::from_bytes(&hub.snapshot_device(id).unwrap().to_bytes())
+            .unwrap();
+    let mut restored = hub_with(&[]);
+    restored
+        .restore_device(
+            snap,
+            Some(&crate::zdef_adapter::ZdefSchemaDecoder),
+            T0 + 60_000,
+        )
+        .unwrap();
+    assert_eq!(keys(&restored, id), keys(&hub, id));
+    let d = restored.device(id).unwrap();
+    assert_eq!(d.interview, crate::device::InterviewStep::Done);
+    assert_eq!(d.configure.hash, hub.device(id).unwrap().configure.hash);
+    assert_eq!(
+        d.resolution.layers.last().unwrap().source,
+        crate::model::LayerSource::SelfDescription
+    );
+    let (_, e) = restored.entity(&format!("{id}:1:temperature")).unwrap();
+    assert_eq!(e.user_name.as_deref(), Some("Desk"));
+    assert!(restored.transport.sent.is_empty(), "restore sends nothing");
+    // Reports are dispatched to the restored entities.
+    restored.on_aps_indication(
+        sim.devices[0].report(
+            1,
+            0x0402,
+            None,
+            &[(0x0000, TypedValue::int(ZclType::I16, 2250))],
+        ),
+        T0 + 61_000,
+    );
+    assert_eq!(
+        state(&restored, &format!("{id}:1:temperature")),
+        json!(22.5)
+    );
     // A corrupted chunk fails verification: generic + catalog only.
     let mut hub2 = hub_with(&[]);
     hub2.set_schema_decoder(Box::new(crate::zdef_adapter::ZdefSchemaDecoder));
