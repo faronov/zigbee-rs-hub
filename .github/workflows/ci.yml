@@ -18,6 +18,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p hub-core
 
+  hub-devices:
+    name: hub-devices (engine host tests, clippy, fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt -p hub-devices -- --check
+      - run: cargo clippy -p hub-devices --all-targets -- -D warnings
+      - run: cargo test -p hub-devices
+
   zdef:
     name: zdef + zdefc (host tests, clippy, fmt)
     runs-on: ubuntu-latest

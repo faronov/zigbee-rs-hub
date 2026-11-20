@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "firmware/bridge"]
+members = ["crates/hub-core", "crates/hub-devices", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "firmware/bridge"]
 # Host-side `cargo test` at the root only builds the portable crates; the
 # firmware is built from `firmware/bridge` (Xtensa toolchain, see README).
-default-members = ["crates/hub-core", "crates/zdef", "crates/zdefc"]
+default-members = ["crates/hub-core", "crates/hub-devices", "crates/zdef", "crates/zdefc"]
 
 [workspace.package]
 edition = "2024"
