@@ -29,6 +29,51 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+/// SHA-256 and inflate: software (`soft`) or stand-ins for the ESP32-S3
+/// SHA accelerator / ROM `tinfl` (calls through fixed addresses, as ROM
+/// functions are linked, so they cost no flash here).
+#[cfg(feature = "soft")]
+type H = zdef::hash::SoftSha256;
+#[cfg(feature = "soft")]
+#[allow(dead_code)]
+fn inflater() -> zdef::bank::MinizInflate {
+    zdef::bank::MinizInflate::new()
+}
+
+#[cfg(not(feature = "soft"))]
+#[derive(Default)]
+struct H;
+#[cfg(not(feature = "soft"))]
+impl zdef::hash::Sha256 for H {
+    fn update(&mut self, d: &[u8]) {
+        let f: extern "C" fn(*const u8, usize) =
+            unsafe { core::mem::transmute(black_box(0x4000_1000usize)) };
+        f(d.as_ptr(), d.len());
+    }
+    fn finish(self) -> [u8; 32] {
+        let mut o = [0; 32];
+        let f: extern "C" fn(*mut u8) = unsafe { core::mem::transmute(black_box(0x4000_1004usize)) };
+        f(o.as_mut_ptr());
+        o
+    }
+}
+#[cfg(not(feature = "soft"))]
+struct RomInflate;
+#[cfg(not(feature = "soft"))]
+impl zdef::bank::Inflate for RomInflate {
+    fn inflate(&mut self, i: &[u8], o: &mut [u8]) -> Result<usize, zdef::bank::BankError> {
+        let f: extern "C" fn(*const u8, usize, *mut u8, usize) -> isize =
+            unsafe { core::mem::transmute(black_box(0x4000_1008usize)) };
+        let n = f(i.as_ptr(), i.len(), o.as_mut_ptr(), o.len());
+        usize::try_from(n).map_err(|_| zdef::bank::BankError::Inflate)
+    }
+}
+#[cfg(not(feature = "soft"))]
+#[allow(dead_code)]
+fn inflater() -> RomInflate {
+    RomInflate
+}
+
 #[allow(dead_code)]
 fn input() -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(black_box(0x1000 as *const u8), black_box(64)) }
@@ -52,7 +97,7 @@ pub extern "C" fn probe_main() -> usize {
         // decode_canonical (decode + encode) + validate (all expressions verified) + requires
         if let Ok(d) = zdef::load(input(), &zdef::HubFeatures::v1()) {
             n += d.entities.len();
-            n += zdef::ContentHash::of(input()).0[0] as usize;
+            n += zdef::ContentHash::of_with::<H>(input()).0[0] as usize;
         }
     }
     #[cfg(feature = "vm")]
@@ -100,9 +145,9 @@ pub extern "C" fn probe_main() -> usize {
     #[cfg(feature = "bank")]
     {
         if let Ok(b) = zdef::bank::Bank::parse(input()) {
-            let keys = [zdef::sign::TrustedKey::new([7; 32])];
-            if b.verify(&keys).is_ok() {
-                let mut inf = zdef::bank::MinizInflate::new();
+            let keys = [zdef::sign::TrustedKey::new_with::<H>([7; 32])];
+            if b.verify_with::<H>(&keys).is_ok() {
+                let mut inf = inflater();
                 if let Ok(st) = b.load_strings(&mut inf) {
                     let mut buf = [0u8; zdef::bank::BLOCK_MAX];
                     for e in b.lookup(black_box(5)) {

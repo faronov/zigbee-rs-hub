@@ -172,6 +172,12 @@ pub struct OpRun {
 /// Configure op kinds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpKind {
+    /// An op that cannot be sent (its payload expression failed): recorded
+    /// as failed with the reason, retried with the configure backoff.
+    Invalid {
+        /// Why.
+        reason: String,
+    },
     /// Bind_req to the hub.
     Bind {
         /// Endpoint.

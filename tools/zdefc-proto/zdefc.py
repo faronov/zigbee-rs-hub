@@ -55,6 +55,20 @@ ZCL_TYPES = {'bool': 0x10, 'map8': 0x18, 'map16': 0x19, 'u8': 0x20, 'u16': 0x21,
              'f32': 0x39, 'ostr': 0x41, 'str': 0x42}
 TUYA_TYPES = {'raw': 0, 'bool': 1, 'value': 2, 'string': 3, 'enum': 4, 'bitmap': 5}
 ACCESS = {'r': 1, 'w': 2, 'p': 4}
+# Closed string sets, encoded as their index (8.3).
+CLOSED = {
+    'power': ['mains', 'battery', 'energy_harvesting'],
+    'mode': ['auto', 'box', 'slider', 'text', 'password'],
+    'self_description': ['ignore', 'under', 'over'],
+    'send': ['dataRequest', 'sendData'],
+    'logical_type': ['coordinator', 'router', 'end_device'],
+    'battery': ['3V_2100', '3V_1500_2800', 'CR2032'],
+}
+TIME_SYNC = {'off': 0, 1970: 1, '1970': 1, 2000: 2, '2000': 2}
+CODECS = ['zcl_tagged', 'tuya_schedule_day', 'tuya_schedule_week', 'bcd_time', 'hhmm', 'ascii', 'utf16be_hex',
+          'bitmap_flags']
+SCHEDULE_VARIANTS = ['multi_dp', 'single_dp', 'trv602z', 'trv603wz']
+CODEC_PARAMS = {'day': 45, 'transitions': 46, 'min': 60, 'max': 61, 'variant': 150, 'scale': 159}
 
 # ---------------------------------------------------------------- key tables (8.2)
 TOP = ['zdef', 'id', 'revision', 'vendor', 'model', 'description', 'match', 'white_label', 'requires', 'device',
@@ -350,6 +364,18 @@ class Encoder:
             return {SUBK['prefix']: v['prefix']}
         return v
 
+    @staticmethod
+    def codec(v):
+        if isinstance(v, str):
+            return CODECS.index(v)
+        (name, params), = v.items()
+        if name == 'bitmap_flags':
+            return {CODECS.index(name): params}
+        out = {CODEC_PARAMS[k]: (SCHEDULE_VARIANTS.index(x) if k == 'variant' else x) for k, x in params.items()}
+        if name == 'tuya_schedule_day' and out.get(150) == 0:
+            del out[150]                                                # multi_dp is the default
+        return {CODECS.index(name): out}
+
     def sub(self, v):
         if isinstance(v, list):
             return [self.sub(x) for x in v]
@@ -357,7 +383,23 @@ class Encoder:
             return v
         out = {}
         for k, x in v.items():
-            if k in EXPR_FIELDS:
+            if k in CLOSED and isinstance(x, str):
+                out[SUBK.get(k, 156)] = CLOSED[k].index(x)
+            elif k == 'time_sync':
+                out[SUBK[k]] = TIME_SYNC[x]
+            elif k == 'send':
+                out[142] = CLOSED[k].index(x)
+            elif k == 'query':
+                items = x if isinstance(x, list) else [x]
+                mask = ('configure' in items) | ('announce' in items) << 1
+                if mask:
+                    out[SUBK[k]] = mask
+                for it in items:
+                    if isinstance(it, dict):
+                        out[146] = it['interval_s']
+            elif k == 'codec':
+                out[SUBK[k]] = self.codec(x)
+            elif k in EXPR_FIELDS:
                 out[SUBK.get(k, ENTK.get(k))] = self.comp.compile(x)
             elif k == 'attrs' and isinstance(x, dict):
                 out[SUBK[k]] = {self.comp.const(a): self.comp.compile(e) for a, e in x.items()}
@@ -392,6 +434,10 @@ class Encoder:
             return self.comp.compile(v)
         if k == 'map':
             return [x for pair in v.items() for x in pair]
+        if k == 'mode':
+            return CLOSED[k].index(v)
+        if k == 'codec':
+            return self.codec(v)
         if k == 'parts':
             return {SUBK[p]: self.entity(x) for p, x in v.items()}
         if k == 'attrs':
@@ -415,6 +461,8 @@ class Encoder:
                                 for gk, gv in v.items()}
             elif k == 'endpoints':
                 out[TOPK[k]] = v
+            elif k == 'self_description':
+                out[TOPK[k]] = CLOSED[k].index(v)
             elif isinstance(v, (dict, list)):
                 out[TOPK[k]] = self.sub(v)
             else:

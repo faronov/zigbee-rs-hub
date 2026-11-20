@@ -2,7 +2,7 @@
 
 use crate::cbor::{Head, Reader, Writer};
 use crate::codec::{DecodeError, DecodeErrorKind};
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// COSE algorithm EdDSA.
@@ -29,17 +29,30 @@ pub struct TrustedKey {
 }
 
 impl TrustedKey {
+    #[cfg(feature = "soft-sha256")]
     pub fn new(public: [u8; 32]) -> Self {
         TrustedKey {
             kid: key_id(&public),
             public,
         }
     }
+
+    pub fn new_with<H: crate::hash::Sha256>(public: [u8; 32]) -> Self {
+        TrustedKey {
+            kid: key_id_with::<H>(&public),
+            public,
+        }
+    }
 }
 
 /// Key ID: first 8 bytes of SHA-256 of the public key.
+#[cfg(feature = "soft-sha256")]
 pub fn key_id(public: &[u8; 32]) -> [u8; 8] {
-    let h = crate::hash::sha256(public);
+    key_id_with::<crate::hash::SoftSha256>(public)
+}
+
+pub fn key_id_with<H: crate::hash::Sha256>(public: &[u8; 32]) -> [u8; 8] {
+    let h = crate::hash::sha256_with::<H>(public);
     let mut k = [0; 8];
     k.copy_from_slice(&h[..8]);
     k
@@ -136,6 +149,7 @@ pub fn parse_cose_sign1(bytes: &[u8]) -> Result<Sign1<'_>, SignError> {
 
 /// Verifies a COSE_Sign1. `detached` supplies the payload when the structure
 /// carries nil. Returns the payload.
+#[cfg(feature = "sign")]
 pub fn verify_cose_sign1<'a>(
     bytes: &'a [u8],
     detached: Option<&'a [u8]>,
@@ -159,26 +173,35 @@ pub fn verify_cose_sign1<'a>(
     Ok(payload)
 }
 
-/// Bank asset entry of the manifest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Bank asset entry of the manifest: `{0: name, 1: SHA-256 of the file as
+/// published, 2: size, 3: definitions, 4: bank generation}`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ManifestAsset {
     pub name: String,
     pub sha256: [u8; 32],
     pub size: u64,
+    pub definitions: u32,
+    pub generation: u32,
 }
 
 /// Catalog manifest (payload of `manifest.cose`, spec 9.3).
 ///
 /// CBOR map: `0` format (1), `1` catalog date (YYYYMMDD), `2` serial, `3`
-/// minimum hub feature set, `4` banks `[{0: name, 1: sha256, 2: size}]`,
-/// `5` shards: 256 × (sha256 or null).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// minimum hub feature set, `4` banks (array of [`ManifestAsset`] maps), `5`
+/// shards: 256 × (SHA-256 or null for an empty shard), `6` content digest
+/// (SHA-256 of the ascending content hashes of every definition in the
+/// shards; equal digests = same catalog content), `7` source
+/// (text → text, informational, e.g. `{"commit": …, "zhc": …}`).
+/// Keys 64..127 are ignored (optional extensions).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Manifest {
     pub catalog_date: u32,
     pub catalog_serial: u16,
     pub requires: Vec<u16>,
     pub banks: Vec<ManifestAsset>,
     pub shards: Vec<Option<[u8; 32]>>,
+    pub content: Option<[u8; 32]>,
+    pub source: Vec<(String, String)>,
 }
 
 impl Manifest {
@@ -189,7 +212,7 @@ impl Manifest {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.map(6);
+        w.map(6 + self.content.is_some() as usize + !self.source.is_empty() as usize);
         w.uint(0);
         w.uint(1);
         w.uint(1);
@@ -204,13 +227,17 @@ impl Manifest {
         w.uint(4);
         w.array(self.banks.len());
         for b in &self.banks {
-            w.map(3);
+            w.map(5);
             w.uint(0);
             w.text(&b.name);
             w.uint(1);
             w.bytes(&b.sha256);
             w.uint(2);
             w.uint(b.size);
+            w.uint(3);
+            w.uint(b.definitions as u64);
+            w.uint(4);
+            w.uint(b.generation as u64);
         }
         w.uint(5);
         w.array(self.shards.len());
@@ -218,6 +245,21 @@ impl Manifest {
             match s {
                 Some(h) => w.bytes(h),
                 None => w.null(),
+            }
+        }
+        if let Some(c) = &self.content {
+            w.uint(6);
+            w.bytes(c);
+        }
+        if !self.source.is_empty() {
+            // canonical: keys by encoded length, then bytewise
+            let mut src: Vec<&(String, String)> = self.source.iter().collect();
+            src.sort_by(|a, b| (a.0.len(), a.0.as_bytes()).cmp(&(b.0.len(), b.0.as_bytes())));
+            w.uint(7);
+            w.map(src.len());
+            for (k, v) in src {
+                w.text(k);
+                w.text(v);
             }
         }
         w.into_vec()
@@ -228,15 +270,13 @@ impl Manifest {
             offset: r.position(),
             kind: DecodeErrorKind::Invalid(w),
         };
+        let hash = |r: &mut Reader<'_>, w: &'static str| -> Result<[u8; 32], DecodeError> {
+            let b = r.bytes()?;
+            <[u8; 32]>::try_from(b).map_err(|_| inv(r, w))
+        };
         let mut r = Reader::new(bytes);
         let n = r.map()?;
-        let mut m = Manifest {
-            catalog_date: 0,
-            catalog_serial: 0,
-            requires: Vec::new(),
-            banks: Vec::new(),
-            shards: Vec::new(),
-        };
+        let mut m = Manifest::default();
         let mut prev = None;
         for _ in 0..n {
             let k = r.uint()?;
@@ -259,23 +299,29 @@ impl Manifest {
                 }
                 4 => {
                     for _ in 0..r.array()? {
-                        if r.map()? != 3 || r.uint()? != 0 {
-                            return Err(inv(&r, "manifest bank"));
+                        let mut a = ManifestAsset::default();
+                        let mut prev = None;
+                        for _ in 0..r.map()? {
+                            let k = r.uint()?;
+                            if prev.is_some_and(|p| p >= k) {
+                                return Err(inv(&r, "manifest bank key order"));
+                            }
+                            prev = Some(k);
+                            match k {
+                                0 => a.name = r.text()?.into(),
+                                1 => a.sha256 = hash(&mut r, "manifest bank hash")?,
+                                2 => a.size = r.uint()?,
+                                3 => a.definitions = r.uint()? as u32,
+                                4 => a.generation = r.uint()? as u32,
+                                _ => {
+                                    r.skip()?;
+                                }
+                            }
                         }
-                        let name = r.text()?.to_string();
-                        if r.uint()? != 1 {
-                            return Err(inv(&r, "manifest bank"));
+                        if a.name.is_empty() {
+                            return Err(inv(&r, "manifest bank name"));
                         }
-                        let sha256 = <[u8; 32]>::try_from(r.bytes()?)
-                            .map_err(|_| inv(&r, "manifest bank hash"))?;
-                        if r.uint()? != 2 {
-                            return Err(inv(&r, "manifest bank"));
-                        }
-                        m.banks.push(ManifestAsset {
-                            name,
-                            sha256,
-                            size: r.uint()?,
-                        });
+                        m.banks.push(a);
                     }
                 }
                 5 => {
@@ -284,11 +330,15 @@ impl Manifest {
                             r.head()?;
                             m.shards.push(None);
                         } else {
-                            m.shards.push(Some(
-                                <[u8; 32]>::try_from(r.bytes()?)
-                                    .map_err(|_| inv(&r, "manifest shard hash"))?,
-                            ));
+                            m.shards.push(Some(hash(&mut r, "manifest shard hash")?));
                         }
+                    }
+                }
+                6 => m.content = Some(hash(&mut r, "manifest content digest")?),
+                7 => {
+                    for _ in 0..r.map()? {
+                        let k = r.text()?.into();
+                        m.source.push((k, r.text()?.into()));
                     }
                 }
                 _ => {
@@ -301,6 +351,7 @@ impl Manifest {
     }
 
     /// Verifies `manifest.cose` and decodes its payload.
+    #[cfg(feature = "sign")]
     pub fn verify(cose: &[u8], keys: &[TrustedKey]) -> Result<Manifest, ManifestError> {
         let payload = verify_cose_sign1(cose, None, keys).map_err(ManifestError::Signature)?;
         Manifest::decode(payload).map_err(ManifestError::Decode)

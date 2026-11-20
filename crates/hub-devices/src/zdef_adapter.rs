@@ -171,26 +171,48 @@ fn tuya_ty(t: zdef::enums::TuyaType) -> TuyaType {
 }
 
 fn codec(c: &z::Codec) -> Result<Codec, AdaptError> {
+    use zdef::enums::ScheduleVariant as V;
     Ok(match c {
         z::Codec::ZclTagged => Codec::ZclTagged,
-        z::Codec::TuyaScheduleDay { day, transitions } => Codec::TuyaScheduleDay {
-            day: *day,
-            transitions: *transitions,
+        z::Codec::TuyaScheduleDay {
+            day,
+            transitions,
+            variant,
+        } => {
+            if !matches!(variant, V::MultiDp | V::Trv602z) {
+                return Err(AdaptError(format!(
+                    "codec tuya_schedule_day/{} has no day-number layout",
+                    variant.as_str()
+                )));
+            }
+            Codec::TuyaScheduleDay {
+                day: *day,
+                transitions: *transitions,
+                variant: *variant,
+            }
+        }
+        z::Codec::TuyaScheduleWeek(w) => Codec::TuyaScheduleWeek {
+            variant: w.variant,
+            transitions: w.transitions.unwrap_or(match w.variant {
+                V::MultiDp => 4,
+                V::Trv602z => 6,
+                V::SingleDp => 10,
+                V::Trv603wz => 8,
+            }),
+            scale: w.scale.unwrap_or(10),
+            min: w.min.unwrap_or(5),
+            max: w.max.unwrap_or(35),
         },
         z::Codec::BcdTime => Codec::BcdTime,
         z::Codec::Hhmm => Codec::Hhmm,
         z::Codec::Ascii => Codec::Ascii,
         z::Codec::Utf16beHex => Codec::Utf16BeHex,
         z::Codec::BitmapFlags(v) => Codec::BitmapFlags(v.clone()),
-        z::Codec::TuyaScheduleWeek { variant } => {
-            return Err(AdaptError(format!(
-                "codec tuya_schedule_week/{variant} not implemented"
-            )));
-        }
     })
 }
 
 fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
+    let m = e.more();
     let binding = if let Some(b) = &e.zcl {
         Binding::Zcl(ZclBinding {
             cluster: b.cluster,
@@ -204,9 +226,9 @@ fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
             dp: t.dp,
             ty: tuya_ty(t.ty),
         }
-    } else if let Some(s) = &e.struct_ {
-        if s.codec != "zcl_tagged" {
-            return Err(AdaptError(format!("struct codec {}", s.codec)));
+    } else if let Some(s) = &e.more().struct_ {
+        if s.codec != zdef::enums::CodecName::ZclTagged {
+            return Err(AdaptError(format!("struct codec {}", s.codec.as_str())));
         }
         Binding::Struct {
             cluster: s.cluster,
@@ -230,7 +252,7 @@ fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
             },
             z::GpBinding::Cmd(c) => GpBinding::Cmd(*c),
         })
-    } else if let Some(h) = &e.hub {
+    } else if let Some(h) = &e.more().hub {
         Binding::Hub {
             default: h.default.as_ref().map_or(Value::Null, scalar),
         }
@@ -240,13 +262,13 @@ fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
     Ok(ValueDef {
         binding,
         transforms: Transforms {
-            codec: e.codec.as_ref().map(codec).transpose()?,
+            codec: m.codec.as_ref().map(codec).transpose()?,
             invalid: num(&e.invalid),
             map: e.map.clone(),
-            value_on: e.value_on.as_ref().map(scalar),
-            value_off: e.value_off.as_ref().map(scalar),
+            value_on: m.value_on.as_ref().map(scalar),
+            value_off: m.value_off.as_ref().map(scalar),
             from: cx.opt_expr(&e.from),
-            to: cx.opt_expr(&e.to),
+            to: cx.opt_expr(&m.to),
             mul: num(&e.mul),
             div: num(&e.div),
             offset: num(&e.offset),
@@ -257,7 +279,7 @@ fn value_def(cx: &Cx, e: &z::Entity) -> Result<ValueDef, AdaptError> {
             min: num(&e.min),
             max: num(&e.max),
             step: num(&e.step),
-            mode: e.mode.clone(),
+            mode: m.mode.map(|v| v.as_str().to_string()),
         },
         report: e.report.as_ref().map(report),
         access: access(e.access),
@@ -276,23 +298,24 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
     let p = e
         .platform
         .ok_or_else(|| AdaptError(format!("{key}: no platform")))?;
+    let m = e.more();
     let mut d = EntityDef::new(key, platform(p));
     d.device_class = table(e.device_class, zdef::enums::DEVICE_CLASSES);
     d.unit = table(e.unit, zdef::enums::UNITS);
     d.state_class = e.state_class.and_then(|s| StateClass::parse(s.as_str()));
     d.category = e.category.and_then(|c| Category::parse(c.as_str()));
-    d.name = e.name.clone();
+    d.name = m.name.clone();
     d.enabled = e.enabled.unwrap_or(true);
     d.ep =
         e.ep.or(e.zcl.and_then(|z| z.ep))
-            .or(e.struct_.as_ref().and_then(|s| s.ep));
+            .or(m.struct_.as_ref().and_then(|s| s.ep));
     d.value = value_def(cx, e)?;
-    for (k, pe) in &e.parts {
+    for (k, pe) in &m.parts {
         let name = zdef::keys::sub_name(u64::from(*k))
             .ok_or_else(|| AdaptError(format!("unknown part key {k}")))?;
         d.parts.push((name.to_string(), value_def(cx, pe)?));
     }
-    for t in &e.triggers {
+    for t in &m.triggers {
         let source = if let Some(c) = t.cmd {
             TriggerSource::Cmd {
                 ep: c.ep,
@@ -313,7 +336,7 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
             .iter()
             .map(|(k, x)| (k.clone(), cx.expr(x)))
             .collect();
-        attrs.extend(e.attrs.iter().map(|(k, x)| (k.clone(), cx.expr(x))));
+        attrs.extend(m.attrs.iter().map(|(k, x)| (k.clone(), cx.expr(x))));
         d.triggers.push(Trigger {
             source,
             when: cx.opt_expr(&t.when),
@@ -321,8 +344,8 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
             attrs,
         });
     }
-    d.event_types = e.event_types.clone();
-    d.press = match &e.press {
+    d.event_types = m.event_types.clone();
+    d.press = match &m.press {
         None => None,
         Some(z::Press::Cmd { cmd, payload }) => Some(Press::Cmd {
             cluster: cmd.cluster,
@@ -344,9 +367,9 @@ fn entity(cx: &Cx, e: &z::Entity) -> Result<EntityDef, AdaptError> {
             value: scalar(value),
         }),
     };
-    d.reset_after = cx.opt_expr(&e.reset_after);
-    d.present_if = cx.opt_expr(&e.present_if);
-    d.invert = e.invert.unwrap_or(false);
+    d.reset_after = cx.opt_expr(&m.reset_after);
+    d.present_if = cx.opt_expr(&m.present_if);
+    d.invert = m.invert.unwrap_or(false);
     Ok(d)
 }
 
@@ -361,12 +384,12 @@ fn patch(e: &z::Entity) -> EntityPatch {
         min: num(&e.min),
         max: num(&e.max),
         step: num(&e.step),
-        name: e.name.clone(),
+        name: e.more().name.clone(),
         enabled: e.enabled,
         category: e.category.and_then(|c| Category::parse(c.as_str())),
         device_class: table(e.device_class, zdef::enums::DEVICE_CLASSES),
         unit: table(e.unit, zdef::enums::UNITS),
-        invert: e.invert,
+        invert: e.more().invert,
     }
 }
 
@@ -434,7 +457,7 @@ fn clause(c: &z::MatchClause) -> MatchClause {
     }
 }
 
-fn configure(op: &z::ConfigureOp) -> ConfigureOp {
+fn configure(cx: &Cx, op: &z::ConfigureOp) -> ConfigureOp {
     match op {
         z::ConfigureOp::Bind { ep, clusters } => ConfigureOp::Bind {
             ep: *ep,
@@ -479,12 +502,17 @@ fn configure(op: &z::ConfigureOp) -> ConfigureOp {
             cluster,
             id,
             mfr,
+            payload,
         } => ConfigureOp::Cmd {
             ep: *ep,
             cluster: *cluster,
             id: *id,
             mfr: *mfr,
-            payload: Vec::new(),
+            payload: payload
+                .as_ref()
+                .map_or(PressPayload::Bytes(Vec::new()), |p| {
+                    PressPayload::Expr(cx.expr(p))
+                }),
         },
         z::ConfigureOp::Group { ep, group } => ConfigureOp::Group {
             ep: *ep,
@@ -547,7 +575,7 @@ pub fn adapt(
                 z::Battery::Linear { min_mv, max_mv } => {
                     BatteryCurve::Linear(f64::from(*min_mv), f64::from(*max_mv))
                 }
-                z::Battery::Curve(n) => BatteryCurve::Named(n.clone()),
+                z::Battery::Curve(n) => BatteryCurve::Named(n.as_str().to_string()),
             }),
             checkin_s: dev.checkin_s,
             availability_timeout_s: dev.availability.and_then(|a| a.timeout_s).map(u64::from),
@@ -568,7 +596,7 @@ pub fn adapt(
         Some(z::SelfDescription::Under) => SelfDescMode::Under,
         _ => SelfDescMode::Over,
     };
-    d.configure = zd.configure.iter().map(configure).collect();
+    d.configure = zd.configure.iter().map(|o| configure(&cx, o)).collect();
     d.ignore = zd
         .ignore
         .iter()
@@ -592,16 +620,10 @@ pub fn adapt(
         };
         f.force_time_sync_s = t.force_time_sync_s;
         f.magic_packet = t.magic_packet.unwrap_or(false);
-        match &t.query {
-            Some(z::TuyaQuery::On {
-                configure,
-                announce,
-            }) => {
-                f.query_on_configure = *configure;
-                f.query_on_announce = *announce;
-            }
-            Some(z::TuyaQuery::Interval(s)) => f.query_interval_s = Some(*s),
-            None => {}
+        if let Some(q) = &t.query {
+            f.query_on_configure = q.configure;
+            f.query_on_announce = q.announce;
+            f.query_interval_s = q.interval_s;
         }
         f.bind_basic = t.bind_basic.unwrap_or(false);
         f.gateway_status = t.gateway_status.unwrap_or(true);
@@ -626,10 +648,10 @@ pub fn adapt(
     Ok(d)
 }
 
-/// The `zdef` features this engine implements: all of v1 except
-/// `codec.tuya_schedule_week` (not implemented yet) and `wasm`.
+/// The `zdef` features this engine implements: all of v1 (not `wasm` and
+/// not the vendor templates, which v1 does not include either).
 pub fn hub_features() -> zdef::HubFeatures {
-    zdef::HubFeatures::v1().without(zdef::Feature::CodecTuyaScheduleWeek as u16)
+    zdef::HubFeatures::v1()
 }
 
 /// The hub's load path for CBOR (catalog, uploads, fetched definitions,
@@ -696,6 +718,14 @@ pub fn zdef_gp_fingerprint(g: &crate::fingerprint::GpFingerprint) -> zdef::GpFin
         commands: g.commands.clone(),
         server_clusters: g.server_clusters.clone(),
         client_clusters: g.client_clusters.clone(),
+        switch_info: g
+            .switch_info
+            .map(|(contacts, switch_type)| zdef::matching::GpSwitchInfo {
+                contacts,
+                switch_type,
+                contact_status: 0,
+            }),
+        security_level: Some(g.security_level),
     }
 }
 
@@ -719,5 +749,104 @@ impl crate::hub::SchemaDecoder for ZdefSchemaDecoder {
             return Err("not a definition fragment".into());
         }
         Ok(d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::{ExprCtx, ExprEnv, Value};
+
+    fn load(src: &str) -> Definition {
+        let c = zdefc::compile_str(src, zdefc::Format::Yaml, &zdefc::Options::default())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        load_cbor(&c.cbor, LayerSource::Catalog).unwrap()
+    }
+
+    struct Opts;
+    impl ExprEnv for Opts {
+        fn opt(&self, k: &str) -> Value {
+            if k == "sensitivity" {
+                Value::Int(2)
+            } else {
+                Value::Null
+            }
+        }
+    }
+
+    const TRV: &str = r#"
+zdef: 1
+id: test/trv
+revision: 1
+vendor: Test
+model: TRV
+match: [{manufacturer: _TZE200_test, model: TS0601, logical_type: end_device, x-priority: 1}]
+x-partial: true
+tuya: {time_sync: "1970", query: [configure, {interval_s: 30}]}
+configure:
+  - cmd: {cluster: 0xEF00, id: 0x10, payload: 'pack("u8 u16be", int(opt.sensitivity ?? 1), 0x0102)'}
+entities:
+  - {key: schedule, platform: text, tuya: [101, raw], codec: {tuya_schedule_week: {variant: trv602z}}}
+  - {key: schedule_mon, platform: text, tuya: [102, raw], codec: {tuya_schedule_day: {day: 1, transitions: 4}}}
+  - {key: mode, platform: select, tuya: [2, enum], map: {0: auto, 1: manual}}
+  - {key: child_lock, platform: switch, tuya: [7, bool], map: {"false": unlocked, "true": locked}}
+"#;
+
+    #[test]
+    fn configure_payload_schedule_week_and_flags() {
+        let d = load(TRV);
+        let ConfigureOp::Cmd {
+            payload: PressPayload::Expr(x),
+            ..
+        } = &d.configure[0]
+        else {
+            panic!("{:?}", d.configure)
+        };
+        let v = x.eval(&ExprCtx {
+            x: Value::Null,
+            payload: None,
+            last: None,
+            env: &Opts,
+        });
+        assert_eq!(v, Value::Bytes(vec![2, 1, 2]));
+        let week = d.entities[0].value.transforms.codec.clone().unwrap();
+        assert_eq!(
+            week,
+            Codec::TuyaScheduleWeek {
+                variant: zdef::enums::ScheduleVariant::Trv602z,
+                transitions: 6,
+                scale: 10,
+                min: 5,
+                max: 35
+            }
+        );
+        let t = d.tuya.unwrap();
+        assert!(t.query_on_configure && !t.query_on_announce);
+        assert_eq!(t.query_interval_s, Some(30));
+        assert_eq!(t.time_sync, TimeSync::Epoch1970);
+        assert_eq!(
+            d.entities[3].value.transforms.map,
+            vec![(0, "unlocked".into()), (1, "locked".into())]
+        );
+        let z = d.zdef.as_ref().unwrap();
+        assert_eq!(z.ext.len(), 1);
+        assert_eq!(
+            z.match_[0].logical_type,
+            Some(zdef::enums::LogicalType::EndDevice)
+        );
+    }
+
+    /// Vendor templates are C-tier features the hub does not implement:
+    /// such catalog definitions are skipped, not half-loaded.
+    #[test]
+    fn templates_are_required_features() {
+        let src = TRV.replace(
+            "x-partial: true\n",
+            "x-partial: true\ntemplates: [{name: tuya, params: {features: {tuya_light: {color: true}}}}]\n",
+        );
+        let c = zdefc::compile_str(&src, zdefc::Format::Yaml, &zdefc::Options::default()).unwrap();
+        assert_eq!(c.def.templates[0].name, zdef::enums::TemplateName::Tuya);
+        let e = load_cbor(&c.cbor, LayerSource::Catalog).unwrap_err();
+        assert!(e.0.contains("template.tuya"), "{}", e.0);
     }
 }

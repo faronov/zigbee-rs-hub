@@ -65,6 +65,8 @@ fn gp(device_id: u8, mfr: Option<u16>, model: Option<u16>, src: u32) -> GpFinger
         commands: vec![0xA2],
         server_clusters: vec![],
         client_clusters: vec![],
+        switch_info: None,
+        security_level: None,
     }
 }
 
@@ -204,8 +206,8 @@ fn gp_matching_with_masks_and_ranges() {
                 Some(0xF100 | bits),
                 7
             ))),
-            Some(610),
-            "bits {bits}"
+            Some(600),
+            "bits {bits} (spec 13.3: no extras for GP)"
         );
     }
     assert_eq!(
@@ -233,7 +235,7 @@ fn gp_matching_with_masks_and_ranges() {
     let sensor = def("gp-zigbee-rs-sensor");
     assert_eq!(
         sensor.match_score(Identity::Gp(&gp(0x33, Some(0x6D6B), Some(0xF300), 1))),
-        Some(610)
+        Some(600)
     );
     let h = lookup_hashes(Identity::Gp(&gp(0x33, Some(0x6D6B), Some(0xF300), 1)));
     let keys = zdef::matching::clause_keys(&sensor.match_[0]).unwrap();
@@ -484,7 +486,7 @@ fn expressions_of_examples_evaluate() {
         Value::Int(1000)
     );
     let rwl = def("philips-rwl022-dimmer");
-    let t = &rwl.entity("action").unwrap().triggers[0];
+    let t = &rwl.entity("action").unwrap().more().triggers[0];
     let p = [2u8, 0, 0, 0, 1, 0, 9, 0];
     assert_eq!(
         vm.eval(t.event.code(), &rwl.consts, &Inputs::payload(&p), &NoHost)
@@ -494,6 +496,7 @@ fn expressions_of_examples_evaluate() {
     assert!(
         rwl.entity("action")
             .unwrap()
+            .more()
             .event_types
             .iter()
             .any(|e| e == "up_hold")
@@ -511,7 +514,7 @@ fn expressions_of_examples_evaluate() {
         "short payload: error, i.e. null"
     );
     let ptm = def("gp-enocean-ptm216z");
-    let w = ptm.entity("rocker_a_top").unwrap().triggers[0]
+    let w = ptm.entity("rocker_a_top").unwrap().more().triggers[0]
         .when
         .clone()
         .unwrap();

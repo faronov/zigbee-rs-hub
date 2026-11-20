@@ -79,7 +79,7 @@ proptest! {
     #[test]
     fn schedule_codec_round_trips(day in 1u8..=7, items in prop::collection::vec((0u8..24, 0u8..60, 50u16..350), 6)) {
         let text = items.iter().map(|(h, m, t)| format!("{h:02}:{m:02}/{:.1}", f64::from(*t) / 10.0)).collect::<Vec<_>>().join(" ");
-        let c = crate::model::Codec::TuyaScheduleDay { day, transitions: 6 };
+        let c = crate::model::Codec::TuyaScheduleDay { day, transitions: 6, variant: crate::model::ScheduleVariant::MultiDp };
         let raw = crate::codec::encode(&c, &Value::Str(text.clone())).unwrap();
         prop_assert_eq!(crate::codec::decode(&c, &raw), Value::Str(text));
     }

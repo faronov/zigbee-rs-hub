@@ -22,6 +22,7 @@ zdef = { path = "../zdef", features = ["std"] }
 zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "0580bc1a402d4028ee093a2baa28dee72960149c", features = ["sink"] }
 
 [dev-dependencies]
+zdefc = { path = "../zdefc" }
 heapless = "0.9"
 serde_yaml = "0.9"
 proptest = "1"

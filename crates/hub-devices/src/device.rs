@@ -568,8 +568,11 @@ pub fn capabilities(e: &EntityDef) -> Map<String, J> {
                 "mode".into(),
                 json!(v.limits.mode.clone().unwrap_or_else(|| "text".into())),
             );
-            if let Some(crate::model::Codec::TuyaScheduleDay { transitions, .. }) =
-                &v.transforms.codec
+            if let Some(crate::model::Codec::TuyaScheduleDay {
+                transitions,
+                variant: crate::model::ScheduleVariant::MultiDp,
+                ..
+            }) = &v.transforms.codec
             {
                 let one = r"\d{2}:\d{2}/\d+(\.\d)?";
                 c.insert(

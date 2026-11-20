@@ -9,14 +9,22 @@ description = "zigbee-rs-hub device definitions: data model, canonical CBOR, exp
 publish = false
 
 [features]
-default = []
+default = ["bank", "sign", "miniz", "soft-sha256"]
 # Host conveniences (std::error::Error impls). The crate itself is `no_std` + `alloc`.
 std = []
+# Catalog bank reader and shards (spec 9.1, 9.3).
+bank = []
+# Ed25519 verification of banks and manifests (COSE_Sign1).
+sign = ["dep:ed25519-compact"]
+# `miniz_oxide` inflater for banks; the hub may wrap the ROM tinfl instead (`bank::Inflate`).
+miniz = ["dep:miniz_oxide"]
+# Software SHA-256; the hub may use the SHA accelerator instead (`hash::Sha256`).
+soft-sha256 = ["dep:sha2"]
 
 [dependencies]
 libm = "0.2"
-sha2 = { version = "0.10", default-features = false }
-miniz_oxide = { version = "0.8", default-features = false }
-ed25519-compact = { version = "2.1", default-features = false, features = ["opt_size"] }
+sha2 = { version = "0.10", default-features = false, optional = true }
+miniz_oxide = { version = "0.8", default-features = false, optional = true }
+ed25519-compact = { version = "2.1", default-features = false, features = ["opt_size"], optional = true }
 
 [dev-dependencies]

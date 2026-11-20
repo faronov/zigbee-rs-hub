@@ -58,34 +58,33 @@ the model, `expr::Vm` with a `Host`, `matching::score_clause` through
 the engine's fingerprint hash, property-tested), the zdefc golden CBOR of
 `definitions/examples` (the scenarios load exactly those bytes).
 
-Not used, and why — requested changes:
+Not used, and why:
 
-1. **`zdef::resolve` for the merge.** The generic tier needs behaviour that a
-   `zdef::Entity` cannot carry and the hub cannot compile at run time (zdef
-   has no compiler): attribute-derived scaling (Metering/Electrical
-   multiplier and divisor attributes, unless a layer fixes `mul`/`div`),
-   cluster-command write paths (On/Off, Move to Level with On/Off, Move to
-   Color Temperature, Go To Lift Percentage, Lock/Unlock), mireds ↔ kelvin,
-   IAS zone bits. The engine therefore merges its own model with the same
-   precedence and knobs. Request: let `resolve` take the generic layer as
-   an opaque, already-resolved list (or a trait), or add extension keys for
-   a write mode and an attribute scale plus precompiled generic bytecode.
+1. **`zdef::resolve` for the merge — decided: the engine keeps its own
+   merge.** The generic tier needs behaviour that a `zdef::Entity` cannot
+   carry and the hub cannot compile at run time (zdef has no compiler):
+   attribute-derived scaling (Metering/Electrical multiplier and divisor
+   attributes, unless a layer fixes `mul`/`div`), cluster-command write paths
+   (On/Off, Move to Level with On/Off, Move to Color Temperature, Go To Lift
+   Percentage, Lock/Unlock), mireds ↔ kelvin, IAS zone bits. Making
+   `Entity` expressive enough would put engine semantics into the v1 wire
+   format. Instead the definition layers are pinned to the reference: every
+   vendor scenario checks that the `(endpoint, key)` set a catalog definition
+   contributes equals what `zdef::resolve` yields for the same definition
+   and fingerprint (`scenarios::assert_zdef_resolve_agrees`).
 2. **`expr::Host` lifetimes.** `state()`/`opt()` return `Value<'a>` borrowed
    for the evaluation; a host with owned state needs an arena (the adapter
-   uses `typed-arena`). Request: an owned/`Cow` return or an arena hook.
-3. **`ConfigureOp::Cmd` has no payload.** The engine supports one (empty
-   when adapted). Request: optional `payload` (bytes or an expression).
-4. **Colour parts.** `keys::PART_NAMES` has `color_xy` / `color_hs`, each
-   two attributes; a part binds one attribute. Request: part keys
-   `color_x`, `color_y`, `hue`, `saturation` (what the generic light uses)
-   or a two-attribute part binding.
-5. **GP score.** `zdef::matching` adds +10 for the DeviceID next to
-   manufacturer + model ID (FlowerX GP scores 610, spec table: 600); the
-   engine follows zdef. Spec and zdef should agree.
-6. **`GpFingerprint`** lacks switch information and the security level; the
-   engine keeps its own and converts.
-7. `codec.tuya_schedule_week` is not implemented: the engine loads with
-   `HubFeatures::v1().without(6)` so such definitions are skipped.
+   uses `typed-arena`). Still open (an owned/`Cow` return or an arena hook).
+
+Closed in `zdef-size` (2026-11-20): `ConfigureOp::Cmd` has an optional
+`payload` expression (evaluated when the configure plan is built, with
+options and state); part keys `color_x`, `color_y`, `hue`, `saturation`,
+`command`; the GP score follows the spec (600, no extras); `GpFingerprint`
+carries `switch_info` and `security_level`; `codec.tuya_schedule_week` is
+implemented (variants `multi_dp`, `single_dp`, `trv602z`, `trv603wz`, byte
+vectors checked against zigbee-herdsman-converters) and the engine loads
+with all of `HubFeatures::v1()`; `fp.manufacturer`/`fp.model` in
+`present_if`.
 
 ## Decisions worth knowing
 

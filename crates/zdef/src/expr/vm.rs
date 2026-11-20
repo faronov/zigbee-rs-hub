@@ -8,8 +8,7 @@ use super::{
     FP_FIELDS, FUNCS, GPD_FIELDS, MAX_CODE, MAX_LOCALS, MAX_STACK, MAX_STR, PACK_ITEMS, func,
     insn_len, op, read_uleb, unzigzag,
 };
-use crate::model::{Const, Scalar};
-use core::fmt::Write;
+use crate::model::{Const, Num, Scalar};
 
 /// Bytes of string/byte-string scratch per evaluation.
 pub const ARENA_SIZE: usize = 512;
@@ -181,22 +180,6 @@ fn value_slot(v: Value<'_>) -> Slot<'_> {
     }
 }
 
-struct ArenaW<'v> {
-    vm: &'v mut Vm,
-    start: usize,
-}
-
-impl Write for ArenaW<'_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        if self.vm.used + s.len() > ARENA_SIZE || self.vm.used - self.start + s.len() > MAX_STR {
-            return Err(core::fmt::Error);
-        }
-        self.vm.arena[self.vm.used..self.vm.used + s.len()].copy_from_slice(s.as_bytes());
-        self.vm.used += s.len();
-        Ok(())
-    }
-}
-
 impl Vm {
     pub const fn new() -> Self {
         Vm {
@@ -233,17 +216,15 @@ impl Vm {
         Ok((o as u16, data.len() as u8))
     }
 
-    fn fmt_str(
-        &mut self,
-        f: impl FnOnce(&mut ArenaW<'_>) -> core::fmt::Result,
-    ) -> R<Slot<'static>> {
-        let start = self.used;
-        let mut w = ArenaW { vm: self, start };
-        if f(&mut w).is_err() {
-            self.used = start;
+    /// Copies `b` into the arena as a string slot.
+    fn arena_str(&mut self, b: &[u8]) -> R<Slot<'static>> {
+        if self.used + b.len() > ARENA_SIZE || b.len() > MAX_STR {
             return Err(EvalError::TooLong);
         }
-        Ok(Slot::AStr(start as u16, (self.used - start) as u8))
+        let start = self.used;
+        self.arena[start..start + b.len()].copy_from_slice(b);
+        self.used += b.len();
+        Ok(Slot::AStr(start as u16, b.len() as u8))
     }
 
     fn eq(&self, a: &Slot<'_>, b: &Slot<'_>) -> bool {
@@ -845,8 +826,14 @@ impl Vm {
             "str" => match a[0] {
                 Slot::Str(_) | Slot::AStr(..) => Ok(a[0]),
                 Slot::Bool(b) => Ok(Slot::Str(if b { "true" } else { "false" })),
-                Slot::Int(i) => self.fmt_str(|w| write!(w, "{i}")),
-                Slot::Float(x) => self.fmt_str(|w| write!(w, "{x}")),
+                Slot::Int(i) => {
+                    let mut b = [0u8; 32];
+                    self.arena_str(crate::num::format_number(Num::Int(i), &mut b).as_bytes())
+                }
+                Slot::Float(x) => {
+                    let mut b = [0u8; 32];
+                    self.arena_str(crate::num::format_number(Num::Float(x), &mut b).as_bytes())
+                }
                 _ => Err(EvalError::Type),
             },
             "pack" => {

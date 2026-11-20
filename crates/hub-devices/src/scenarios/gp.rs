@@ -205,8 +205,8 @@ fn flowerx_gp_model_bit_variants() {
             d.resolution.layers[1].id, "diyruz/flowerx-gp",
             "{model:04x}"
         );
-        // zdef::matching: manufacturer + model ID (600) + DeviceID (+10).
-        assert_eq!(d.resolution.layers[1].score, Some(610));
+        // Spec 13.3: manufacturer + model ID = 600 (GP rows have no extras).
+        assert_eq!(d.resolution.layers[1].score, Some(600));
         let mut want: Vec<String> = base
             .iter()
             .chain(extra.iter())

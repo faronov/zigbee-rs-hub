@@ -93,7 +93,7 @@ impl Fingerprint {
         opt!(11, self.sw_build_id, |w: &mut Writer, v: &String| w.text(v));
         if !self.endpoints.is_empty() {
             let mut eps: Vec<&Endpoint> = self.endpoints.iter().collect();
-            eps.sort_by_key(|e| e.ep);
+            crate::sort_small_by_key(&mut eps, |e| e.ep);
             body.uint(12);
             body.array(eps.len());
             for e in eps {
@@ -121,8 +121,14 @@ impl Fingerprint {
     }
 
     /// First 16 bytes of SHA-256 over [`Fingerprint::canonical_cbor`] (spec 3.2).
+    #[cfg(feature = "soft-sha256")]
     pub fn hash16(&self) -> [u8; 16] {
-        let h = crate::hash::sha256(&self.canonical_cbor());
+        self.hash16_with::<crate::hash::SoftSha256>()
+    }
+
+    /// [`Fingerprint::hash16`] with a SHA-256 implementation of the hub.
+    pub fn hash16_with<H: crate::hash::Sha256>(&self) -> [u8; 16] {
+        let h = crate::hash::sha256_with::<H>(&self.canonical_cbor());
         let mut o = [0; 16];
         o.copy_from_slice(&h[..16]);
         o
@@ -158,6 +164,38 @@ pub struct GpFingerprint {
     pub commands: Vec<u8>,
     pub server_clusters: Vec<u16>,
     pub client_clusters: Vec<u16>,
+    /// Switch information of the commissioning payload (spec 13.2).
+    pub switch_info: Option<GpSwitchInfo>,
+    /// Security level the sink accepted (0-3, `EVT_GP_COMMISSIONED`).
+    pub security_level: Option<u8>,
+}
+
+/// GPD switch information (Application information, spec 13.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct GpSwitchInfo {
+    /// Number of contacts.
+    pub contacts: u8,
+    /// Switch type (0 button, 1 rocker, 2 unknown).
+    pub switch_type: u8,
+    /// Current contact bit vector.
+    pub contact_status: u8,
+}
+
+impl GpFingerprint {
+    /// A GP identity without application information.
+    pub fn new(gpd_id: GpdId, device_id: u8) -> Self {
+        GpFingerprint {
+            gpd_id,
+            device_id,
+            manufacturer_id: None,
+            model_id: None,
+            commands: Vec::new(),
+            server_clusters: Vec::new(),
+            client_clusters: Vec::new(),
+            switch_info: None,
+            security_level: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -261,6 +299,12 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
                 }
                 extra += 1;
             }
+            if let Some(t) = c.logical_type {
+                if fp.logical_type != Some(t.code()) {
+                    return None;
+                }
+                extra += 1;
+            }
             if let Some(p) = c.power {
                 if fp.power() != Some(p) {
                     return None;
@@ -353,29 +397,24 @@ fn score_gp(m: &GpMatch, g: &GpFingerprint) -> Option<u16> {
             return None;
         }
     }
+    // Spec 13.3: the clause's strongest identity decides; GP clauses get no
+    // +10 extras (FlowerX GP, DeviceID + manufacturer + masked model: 600).
     let mfr_model = m.manufacturer_id.is_some() && m.model_id.is_some();
-    let mut fields = m.device_id.is_some() as u16
-        + m.manufacturer_id.is_some() as u16
-        + m.model_id.is_some() as u16
-        + src_or_ieee as u16
-        + !m.commands.is_empty() as u16
-        + m.clusters.is_some() as u16;
-    let base = if mfr_model || (src_or_ieee && m.device_id.is_some()) {
-        fields -= 2;
-        score::GP_STRONG
+    if mfr_model || (src_or_ieee && m.device_id.is_some()) {
+        Some(score::GP_STRONG)
     } else if m.device_id.is_some() && !m.commands.is_empty() {
-        fields -= 2;
-        score::GP_DEVICE_COMMANDS
+        Some(score::GP_DEVICE_COMMANDS)
     } else if m.device_id.is_some() || src_or_ieee {
-        fields -= 1;
-        score::GP_DEVICE
-    } else if fields > 0 {
-        fields -= 1;
-        score::GP_WEAK
+        Some(score::GP_DEVICE)
+    } else if m.manufacturer_id.is_some()
+        || m.model_id.is_some()
+        || !m.commands.is_empty()
+        || m.clusters.is_some()
+    {
+        Some(score::GP_WEAK)
     } else {
-        return None;
-    };
-    Some(base + (fields * score::EXTRA).min(score::EXTRA_MAX))
+        None
+    }
 }
 
 impl Definition {
@@ -478,6 +517,8 @@ pub enum IndexKey<'a> {
     GpDevice(u8),
     /// `[5, manufacturer_id]` (GP, masked model ID without DeviceID)
     GpManufacturer(u16),
+    /// `[6, manufacturer]` (manufacturer-only clauses, e.g. Tuya names; rechecked)
+    Manufacturer(&'a str),
 }
 
 impl IndexKey<'_> {
@@ -521,12 +562,17 @@ impl IndexKey<'_> {
                 w.uint(5);
                 w.uint(*m as u64);
             }
+            IndexKey::Manufacturer(m) => {
+                w.array(2);
+                w.uint(6);
+                w.text(m);
+            }
         }
         w.into_vec()
     }
 
     pub fn hash(&self) -> u64 {
-        crate::bank::siphash24(&crate::bank::INDEX_KEY, &self.canonical())
+        crate::siphash::siphash24(&crate::siphash::INDEX_KEY, &self.canonical())
     }
 }
 
@@ -565,7 +611,8 @@ pub fn clause_keys(c: &MatchClause) -> Result<Vec<(IndexKey<'_>, u8)>, NotIndexa
         }
         return Ok(out);
     }
-    let extra = c.mfr_code.is_some()
+    let extra = c.logical_type.is_some()
+        || c.mfr_code.is_some()
         || c.app_version.is_some()
         || c.stack_version.is_some()
         || c.hw_version.is_some()
@@ -608,9 +655,17 @@ pub fn clause_keys(c: &MatchClause) -> Result<Vec<(IndexKey<'_>, u8)>, NotIndexa
                 out.push((IndexKey::Model(n), key_flags::RECHECK));
             }
         }
-        (None, None) => {
+        (Some(NameMatch::Exact(m)), None) => {
+            out.push((IndexKey::Manufacturer(m), key_flags::RECHECK))
+        }
+        (Some(NameMatch::Any(ms)), None) => {
+            for m in ms {
+                out.push((IndexKey::Manufacturer(m), key_flags::RECHECK));
+            }
+        }
+        _ => {
             let mut eps: Vec<&(u8, EpMatch)> = c.endpoints.iter().collect();
-            eps.sort_by_key(|e| e.0);
+            crate::sort_small_by_key(&mut eps, |e| e.0);
             let e = eps
                 .iter()
                 .find(|e| e.1.profile.is_some() && e.1.device_id.is_some())
@@ -620,7 +675,6 @@ pub fn clause_keys(c: &MatchClause) -> Result<Vec<(IndexKey<'_>, u8)>, NotIndexa
                 key_flags::FINGERPRINT | key_flags::RECHECK,
             ));
         }
-        _ => return Err(NotIndexable),
     }
     Ok(out)
 }
@@ -637,6 +691,9 @@ pub fn lookup_hashes(id: Identity<'_>) -> Vec<u64> {
             }
             if let Some(n) = model {
                 out.push(IndexKey::Model(n).hash());
+            }
+            if let Some(m) = mfr {
+                out.push(IndexKey::Manufacturer(m).hash());
             }
             for e in &fp.endpoints {
                 out.push(IndexKey::Fingerprint(None, e.profile, e.device_id).hash());
@@ -655,7 +712,7 @@ pub fn lookup_hashes(id: Identity<'_>) -> Vec<u64> {
             }
         }
     }
-    out.sort_unstable();
+    crate::sort_small_by_key(&mut out, |h| *h);
     out.dedup();
     out
 }

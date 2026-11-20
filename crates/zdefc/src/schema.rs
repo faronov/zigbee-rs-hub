@@ -51,6 +51,12 @@ fn int_range(min: i64, max: i64) -> Node {
 fn enum_of(v: &[&str]) -> Node {
     o(vec![("enum", arr(v.iter().map(|x| s(x)).collect()))])
 }
+/// Enum of a closed `zdef` string set (encoded as its integer code).
+macro_rules! enum_all {
+    ($t:ty) => {
+        enum_of(&<$t>::ALL.iter().map(|x| x.as_str()).collect::<Vec<_>>())
+    };
+}
 fn list_of(item: Node) -> Node {
     o(vec![
         ("type", s("array")),
@@ -82,6 +88,8 @@ fn int_keyed(value: Node) -> Node {
 }
 
 const INT_KEY: &str = "^(0|-?[1-9][0-9]*|0x[0-9a-fA-F]+)$";
+/// `map` keys: integers or booleans (`true` = 1, `false` = 0).
+const MAP_KEY: &str = "^(0|-?[1-9][0-9]*|0x[0-9a-fA-F]+|true|false)$";
 
 fn entity_props(full: bool) -> Vec<(&'static str, Node)> {
     let platforms: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();
@@ -137,7 +145,15 @@ fn entity_props(full: bool) -> Vec<(&'static str, Node)> {
                     ("attr", r("u16")),
                     ("mfr", r("u16")),
                     ("ep", int_range(1, 254)),
-                    ("codec", enum_of(zdef::model::STRUCT_CODECS)),
+                    (
+                        "codec",
+                        enum_of(
+                            &zdef::model::STRUCT_CODECS
+                                .iter()
+                                .map(|c| c.as_str())
+                                .collect::<Vec<_>>(),
+                        ),
+                    ),
                     ("tag", ty("integer")),
                 ],
                 &["cluster", "attr", "codec"],
@@ -177,16 +193,21 @@ fn entity_props(full: bool) -> Vec<(&'static str, Node)> {
         ("offset", ty("number")),
         ("precision", int_range(0, 15)),
         ("invalid", ty("number")),
-        ("map", int_keyed(ty("string"))),
+        (
+            "map",
+            o(vec![
+                ("type", s("object")),
+                ("minProperties", i(1)),
+                ("propertyNames", o(vec![("pattern", s(MAP_KEY))])),
+                ("additionalProperties", ty("string")),
+            ]),
+        ),
         ("value_on", r("scalar")),
         ("value_off", r("scalar")),
         ("min", ty("number")),
         ("max", ty("number")),
         ("step", ty("number")),
-        (
-            "mode",
-            enum_of(&["auto", "box", "slider", "text", "password"]),
-        ),
+        ("mode", enum_all!(zdef::enums::Mode)),
         (
             "access",
             o(vec![("type", s("string")), ("pattern", s("^[rwp]{1,3}$"))]),
@@ -276,6 +297,8 @@ pub fn schema() -> Node {
                 ]),
             ),
             ("power", enum_of(&["mains", "battery"])),
+            ("logical_type", enum_all!(zdef::enums::LogicalType)),
+            ("x-priority", ty("integer")),
             (
                 "endpoints",
                 int_keyed(obj(
@@ -379,7 +402,22 @@ pub fn schema() -> Node {
             )],
             &["report"],
         ),
-        obj(vec![("cmd", cmd_ref.clone())], &["cmd"]),
+        obj(
+            vec![(
+                "cmd",
+                obj(
+                    vec![
+                        ("cluster", r("u16")),
+                        ("id", r("u8")),
+                        ("mfr", r("u16")),
+                        ("ep", int_range(1, 254)),
+                        ("payload", r("expr")),
+                    ],
+                    &["cluster", "id"],
+                ),
+            )],
+            &["cmd"],
+        ),
         obj(
             vec![(
                 "group",
@@ -439,7 +477,11 @@ pub fn schema() -> Node {
             vec![(
                 "tuya_schedule_day",
                 obj(
-                    vec![("day", int_range(1, 7)), ("transitions", int_range(1, 10))],
+                    vec![
+                        ("day", int_range(1, 7)),
+                        ("transitions", int_range(1, 10)),
+                        ("variant", enum_all!(zdef::enums::ScheduleVariant)),
+                    ],
                     &["day", "transitions"],
                 ),
             )],
@@ -448,7 +490,16 @@ pub fn schema() -> Node {
         obj(
             vec![(
                 "tuya_schedule_week",
-                obj(vec![("variant", ty("string"))], &["variant"]),
+                obj(
+                    vec![
+                        ("variant", enum_all!(zdef::enums::ScheduleVariant)),
+                        ("transitions", int_range(1, 10)),
+                        ("scale", int_range(1, 1000)),
+                        ("min", int_range(-1000, 1000)),
+                        ("max", int_range(-1000, 1000)),
+                    ],
+                    &["variant"],
+                ),
             )],
             &["tuya_schedule_week"],
         ),
@@ -461,12 +512,12 @@ pub fn schema() -> Node {
     let part = obj(entity_props(false), &[]);
     let device = obj(
         vec![
-            ("power", enum_of(&["mains", "battery", "energy_harvesting"])),
+            ("power", enum_all!(zdef::enums::Power)),
             ("sleepy", ty("boolean")),
             (
                 "battery",
                 one_of(vec![
-                    enum_of(zdef::model::BATTERY_CURVES),
+                    enum_all!(zdef::enums::BatteryCurve),
                     obj(
                         vec![(
                             "voltage_to_percent",
@@ -508,7 +559,7 @@ pub fn schema() -> Node {
             (
                 "time_sync",
                 one_of(vec![
-                    o(vec![("const", s("off"))]),
+                    enum_all!(zdef::enums::TimeSync),
                     o(vec![("const", i(1970))]),
                     o(vec![("const", i(2000))]),
                 ]),
@@ -518,13 +569,16 @@ pub fn schema() -> Node {
             (
                 "query",
                 one_of(vec![
-                    list_of(enum_of(&["configure", "announce"])),
+                    list_of(one_of(vec![
+                        enum_of(&["configure", "announce"]),
+                        obj(vec![("interval_s", r("u32"))], &["interval_s"]),
+                    ])),
                     obj(vec![("interval_s", r("u32"))], &["interval_s"]),
                 ]),
             ),
             ("bind_basic", ty("boolean")),
             ("gateway_status", ty("boolean")),
-            ("send", enum_of(&["dataRequest", "sendData"])),
+            ("send", enum_all!(zdef::enums::TuyaSend)),
             ("mcu_version", ty("boolean")),
             ("optimistic", ty("boolean")),
             ("dedup", ty("boolean")),
@@ -561,7 +615,7 @@ pub fn schema() -> Node {
         ),
         ("requires", list_of(enum_of(&feature_names))),
         ("priority", int_range(-1000, 1000)),
-        ("self_description", enum_of(&["ignore", "under", "over"])),
+        ("self_description", enum_all!(zdef::enums::SelfDescription)),
         ("device", device),
         ("generic", generic),
         ("endpoints", int_keyed(ty("string"))),
@@ -590,7 +644,18 @@ pub fn schema() -> Node {
                 &["cluster"],
             )),
         ),
+        (
+            "templates",
+            list_of(obj(
+                vec![
+                    ("name", enum_all!(zdef::enums::TemplateName)),
+                    ("params", ty("object")),
+                ],
+                &["name"],
+            )),
+        ),
         ("x-wasm", ty("object")),
+        ("x-partial", ty("boolean")),
     ];
     let defs = o(vec![
         ("u8", int_range(0, 0xff)),

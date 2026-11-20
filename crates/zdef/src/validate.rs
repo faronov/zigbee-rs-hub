@@ -1,17 +1,90 @@
 //! Semantic validation (spec 6, 7.5, 8.5, 12.1) and `requires` computation.
+//!
+//! Errors carry a structured path and a static message, so validation links
+//! no formatting code; `Display` renders them on demand.
 
 use crate::enums::{Feature, Platform, zcl_type_name};
-use crate::expr::{self, Context, Site, Ty};
+use crate::expr::{self, Context, Site, Ty, VerifyError};
 use crate::model::*;
-use alloc::format;
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+
+/// Where an error is: `entities[3].parts.hvac_mode.triggers[0].event`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ErrPath {
+    /// Top-level section (`entities`, `match`, `configure`, `generic.patch`,
+    /// `requires`, `id`, ...); empty for the whole definition.
+    pub section: &'static str,
+    /// Index in the section (entity, clause, op, patch entry).
+    pub index: Option<u16>,
+    /// Part key (a `keys::SUB` part name key).
+    pub part: Option<u16>,
+    pub trigger: Option<u16>,
+    /// Field inside the item (`from`, `event`, `press.payload`, ...).
+    pub field: &'static str,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationError {
-    /// Field path, e.g. `entities[3].from`.
-    pub path: String,
-    pub message: String,
+    pub path: ErrPath,
+    pub message: &'static str,
+    /// The verifier's error for bytecode.
+    pub verify: Option<VerifyError>,
+    /// The feature ID a `requires` error is about.
+    pub feature: Option<u16>,
+}
+
+impl core::fmt::Display for ErrPath {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.section)?;
+        if let Some(i) = self.index {
+            write!(f, "[{i}]")?;
+        }
+        if let Some(p) = self.part {
+            write!(
+                f,
+                ".parts.{}",
+                crate::keys::sub_name(p as u64).unwrap_or("?")
+            )?;
+        }
+        if let Some(t) = self.trigger {
+            write!(f, ".triggers[{t}]")?;
+        }
+        if !self.field.is_empty() {
+            if !self.section.is_empty() {
+                f.write_str(".")?;
+            }
+            f.write_str(self.field)?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)?;
+        if let Some(v) = &self.verify {
+            write!(f, " (offset {}: {:?})", v.offset, v.kind)?;
+        }
+        if let Some(x) = self.feature {
+            write!(
+                f,
+                " ({})",
+                Feature::from_code(x as u64)
+                    .map(|x| x.as_str())
+                    .unwrap_or("?")
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Context of a `configure` `cmd` payload: evaluated when the configure plan
+/// is built, with `opt.*` and `state.*` but no `x`, `payload` or time
+/// functions, so the plan (and its idempotence keys) is stable.
+pub fn configure_payload_context(gp_def: bool) -> Context {
+    Context::new(Site::Attr)
+        .with_payload(false)
+        .with_gpd(gp_def)
 }
 
 /// Static type of a ZCL type's decoded value.
@@ -35,13 +108,14 @@ fn tuya_ty(t: TuyaType) -> Ty {
 
 /// Type of `x` in `from` for an entity (after codec, map, value_on/off).
 pub fn from_x_ty(e: &Entity) -> Ty {
+    let m = e.more();
     if !e.map.is_empty() {
         return Ty::STR;
     }
-    if e.value_on.is_some() || e.value_off.is_some() {
+    if m.value_on.is_some() || m.value_off.is_some() {
         return Ty::BOOL;
     }
-    if let Some(c) = &e.codec {
+    if let Some(c) = &m.codec {
         return match c {
             Codec::BcdTime => Ty::INT,
             _ => Ty::STR,
@@ -90,66 +164,77 @@ pub fn is_gp(d: &Definition) -> bool {
         || d.gp.is_some()
         || d.entities
             .iter()
-            .any(|e| e.gp.is_some() || e.triggers.iter().any(|t| t.gp_cmd.is_some()))
+            .any(|e| e.gp.is_some() || e.more().triggers.iter().any(|t| t.gp_cmd.is_some()))
+}
+
+fn add(f: &mut Vec<u16>, x: u16) {
+    if !f.contains(&x) {
+        f.push(x);
+    }
+}
+
+fn walk_features(e: &Entity, f: &mut Vec<u16>, any_expr: &mut bool) {
+    e.for_each_expr(&mut |_, _| *any_expr = true);
+    let m = e.more();
+    if e.tuya.is_some()
+        || m.triggers.iter().any(|t| t.tuya.is_some())
+        || matches!(m.press, Some(Press::Tuya { .. }))
+    {
+        add(f, Feature::Tuya as u16);
+    }
+    if e.gp.is_some() || m.triggers.iter().any(|t| t.gp_cmd.is_some()) {
+        add(f, Feature::Gp as u16);
+    }
+    if let Some(s) = &m.struct_ {
+        add(f, codec_feature(s.codec) as u16);
+    }
+    if let Some(c) = &m.codec {
+        add(f, c.feature() as u16);
+    }
+    for (_, p) in &m.parts {
+        walk_features(p, f, any_expr);
+    }
 }
 
 /// Features the definition uses (spec 8.5), ascending.
 pub fn compute_requires(d: &Definition) -> Vec<u16> {
     let mut f: Vec<u16> = Vec::new();
-    let mut add = |x: Feature| {
-        let c = x.code() as u16;
-        if !f.contains(&c) {
-            f.push(c);
-        }
-    };
     let mut any_expr = false;
-    let mut visit = |e: &Entity, add: &mut dyn FnMut(Feature)| {
-        e.for_each_expr(&mut |_, _| any_expr = true);
-        fn walk(e: &Entity, add: &mut dyn FnMut(Feature)) {
-            if e.tuya.is_some()
-                || e.triggers.iter().any(|t| t.tuya.is_some())
-                || matches!(e.press, Some(Press::Tuya { .. }))
-            {
-                add(Feature::Tuya);
-            }
-            if e.gp.is_some() || e.triggers.iter().any(|t| t.gp_cmd.is_some()) {
-                add(Feature::Gp);
-            }
-            if let Some(s) = &e.struct_ {
-                if s.codec == "zcl_tagged" {
-                    add(Feature::StructZclTagged);
-                }
-            }
-            if let Some(c) = &e.codec {
-                add(c.feature());
-            }
-            for (_, p) in &e.parts {
-                walk(p, add);
-            }
-        }
-        walk(e, add);
-    };
     for e in &d.entities {
-        visit(e, &mut add);
+        walk_features(e, &mut f, &mut any_expr);
     }
     if let Some(g) = &d.generic {
         for (_, e) in &g.patch {
-            visit(e, &mut add);
+            walk_features(e, &mut f, &mut any_expr);
         }
     }
+    if d.configure.iter().any(|op| {
+        matches!(
+            op,
+            ConfigureOp::Cmd {
+                payload: Some(_),
+                ..
+            }
+        )
+    }) {
+        any_expr = true;
+    }
     if any_expr {
-        add(Feature::ExprV1);
+        add(&mut f, Feature::ExprV1 as u16);
     }
     if d.tuya.is_some() {
-        add(Feature::Tuya);
+        add(&mut f, Feature::Tuya as u16);
     }
     if d.gp.is_some() || d.match_.iter().any(|c| c.gp.is_some()) {
-        add(Feature::Gp);
+        add(&mut f, Feature::Gp as u16);
+    }
+    for t in &d.templates {
+        add(&mut f, t.name.feature());
     }
     if d.x_wasm.is_some() {
-        add(Feature::Wasm);
+        add(&mut f, Feature::Wasm as u16);
     }
-    f.sort_unstable();
+    crate::sort_small_by_key(&mut f, |x| *x);
     f
 }
 
@@ -175,179 +260,190 @@ struct V<'d> {
 }
 
 impl V<'_> {
-    fn err(&mut self, path: &str, msg: impl Into<String>) {
+    fn err(&mut self, path: ErrPath, message: &'static str) {
         self.errs.push(ValidationError {
-            path: path.to_string(),
-            message: msg.into(),
+            path,
+            message,
+            verify: None,
+            feature: None,
         });
     }
 
-    fn expr(&mut self, path: &str, x: &Expr, ctx: Context, want: Ty) {
+    fn expr(&mut self, path: ErrPath, x: &Expr, ctx: Context, want: Ty) {
         match expr::verify(x.code(), &self.d.consts, &ctx) {
             Ok(t) => {
                 if !t.compatible(want) {
-                    self.err(
-                        path,
-                        format!(
-                            "expression has the wrong result type for {}",
-                            ctx.site.name()
-                        ),
-                    );
+                    self.err(path, "expression has the wrong result type for its field");
                 }
             }
-            Err(e) => self.err(
+            Err(e) => self.errs.push(ValidationError {
                 path,
-                format!("bytecode rejected at offset {}: {:?}", e.offset, e.kind),
-            ),
+                message: "bytecode rejected",
+                verify: Some(e),
+                feature: None,
+            }),
         }
     }
 
-    fn entity(&mut self, path: &str, e: &Entity, full: bool, fragment: bool) {
+    fn entity(&mut self, p: ErrPath, e: &Entity, full: bool, fragment: bool) {
+        let m = e.more();
+        let at = |field| ErrPath { field, ..p };
         if full {
             match &e.key {
                 Some(k) if valid_key(k) => {}
-                Some(k) => self.err(path, format!("entity key \"{k}\" is not snake_case")),
-                None => self.err(path, "entity without key"),
+                Some(_) => self.err(at("key"), "entity key is not snake_case"),
+                None => self.err(p, "entity without key"),
             }
             if e.platform.is_none() {
-                self.err(path, "entity without platform");
+                self.err(p, "entity without platform");
             }
         }
         let bindings = e.zcl.is_some() as u8
             + e.tuya.is_some() as u8
-            + e.struct_.is_some() as u8
+            + m.struct_.is_some() as u8
             + e.gp.is_some() as u8
-            + e.hub.is_some() as u8
-            + (!e.parts.is_empty()) as u8
-            + (!e.triggers.is_empty()) as u8
-            + e.press.is_some() as u8;
+            + m.hub.is_some() as u8
+            + (!m.parts.is_empty()) as u8
+            + (!m.triggers.is_empty()) as u8
+            + m.press.is_some() as u8;
         if bindings > 1 {
             self.err(
-                path,
+                p,
                 "more than one binding (zcl, tuya, struct, gp, hub, parts, triggers, press)",
             );
         }
         if full && bindings == 0 {
-            self.err(path, "entity without binding");
+            self.err(p, "entity without binding");
         }
-        if let Some(p) = e.platform {
-            if p == Platform::Event && (e.triggers.is_empty() || e.event_types.is_empty()) {
-                self.err(path, "event entity needs triggers and event_types");
+        if let Some(pl) = e.platform {
+            if pl == Platform::Event && (m.triggers.is_empty() || m.event_types.is_empty()) {
+                self.err(p, "event entity needs triggers and event_types");
             }
-            if p == Platform::Button && e.press.is_none() && full {
-                self.err(path, "button entity needs press");
+            if pl == Platform::Button && m.press.is_none() && full {
+                self.err(p, "button entity needs press");
             }
-            if !e.parts.is_empty() && !p.is_composite() {
-                self.err(path, "parts on a non-composite platform");
+            if !m.parts.is_empty() && !pl.is_composite() {
+                self.err(at("parts"), "parts on a non-composite platform");
             }
         }
-        if fragment && (e.tuya.is_some() || e.struct_.is_some() || e.gp.is_some()) {
-            self.err(path, "self-description fragments allow only zcl bindings");
+        if fragment && (e.tuya.is_some() || m.struct_.is_some() || e.gp.is_some()) {
+            self.err(p, "self-description fragments allow only zcl bindings");
         }
         if let Some(z) = &e.zcl {
             if zcl_type_name(z.zcl_type).is_none() {
-                self.err(path, "unknown ZCL type");
+                self.err(at("zcl.type"), "unknown ZCL type");
             }
         }
-        if let Some(s) = &e.struct_ {
-            if !STRUCT_CODECS.contains(&s.codec.as_str()) {
-                self.err(path, format!("unknown struct codec \"{}\"", s.codec));
+        if let Some(s) = &m.struct_ {
+            if !STRUCT_CODECS.contains(&s.codec) {
+                self.err(at("struct.codec"), "not a struct codec");
             }
         }
         for (i, (a, _)) in e.map.iter().enumerate() {
             if e.map[..i].iter().any(|(b, _)| a == b) {
-                self.err(path, format!("map: duplicate raw value {a}"));
+                self.err(at("map"), "duplicate raw value");
             }
         }
-        for (i, t) in e.event_types.iter().enumerate() {
-            if e.event_types[..i].contains(t) {
-                self.err(path, format!("event_types: duplicate \"{t}\""));
+        for (i, t) in m.event_types.iter().enumerate() {
+            if m.event_types[..i].contains(t) {
+                self.err(at("event_types"), "duplicate event type");
             }
         }
         let gp = self.gp;
-        let p = |s: &str| format!("{path}.{s}");
         if let Some(x) = &e.from {
-            self.expr(&p("from"), x, context_for(e, Site::From, gp), Ty::ANY);
+            self.expr(at("from"), x, context_for(e, Site::From, gp), Ty::ANY);
         }
-        if let Some(x) = &e.to {
-            self.expr(&p("to"), x, context_for(e, Site::To, gp), Ty::ANY);
+        if let Some(x) = &m.to {
+            self.expr(at("to"), x, context_for(e, Site::To, gp), Ty::ANY);
         }
-        if let Some(x) = &e.reset_after {
+        if let Some(x) = &m.reset_after {
             self.expr(
-                &p("reset_after"),
+                at("reset_after"),
                 x,
                 context_for(e, Site::ResetAfter, gp),
                 Ty::NUM,
             );
         }
-        if let Some(x) = &e.present_if {
+        if let Some(x) = &m.present_if {
             self.expr(
-                &p("present_if"),
+                at("present_if"),
                 x,
                 context_for(e, Site::PresentIf, gp),
                 Ty::BOOL,
             );
         }
-        for (n, x) in &e.attrs {
-            self.expr(
-                &p(&format!("attrs.{n}")),
-                x,
-                context_for(e, Site::Attr, gp),
-                Ty::ANY,
-            );
+        for (_, x) in &m.attrs {
+            self.expr(at("attrs"), x, context_for(e, Site::Attr, gp), Ty::ANY);
         }
-        for (i, t) in e.triggers.iter().enumerate() {
-            let tp = format!("{path}.triggers[{i}]");
+        for (i, t) in m.triggers.iter().enumerate() {
+            let tp = ErrPath {
+                trigger: Some(i as u16),
+                ..p
+            };
             let kinds = t.cmd.is_some() as u8 + t.gp_cmd.is_some() as u8 + t.tuya.is_some() as u8;
             if kinds != 1 {
-                self.err(&tp, "a trigger needs exactly one of cmd, gp_cmd, tuya");
+                self.err(tp, "a trigger needs exactly one of cmd, gp_cmd, tuya");
             }
             if fragment && t.cmd.is_none() {
-                self.err(&tp, "self-description fragments allow only cmd triggers");
+                self.err(tp, "self-description fragments allow only cmd triggers");
             }
             if let Some(x) = &t.when {
                 self.expr(
-                    &format!("{tp}.when"),
+                    ErrPath {
+                        field: "when",
+                        ..tp
+                    },
                     x,
                     context_for(e, Site::When, gp),
                     Ty::BOOL,
                 );
             }
             self.expr(
-                &format!("{tp}.event"),
+                ErrPath {
+                    field: "event",
+                    ..tp
+                },
                 &t.event,
                 context_for(e, Site::Event, gp),
                 Ty::STR,
             );
-            for (n, x) in &t.attrs {
+            for (_, x) in &t.attrs {
                 self.expr(
-                    &format!("{tp}.attrs.{n}"),
+                    ErrPath {
+                        field: "attrs",
+                        ..tp
+                    },
                     x,
                     context_for(e, Site::Attr, gp),
                     Ty::ANY,
                 );
             }
         }
-        if let Some(pr) = &e.press {
-            match pr {
-                Press::Cmd {
-                    payload: Some(x), ..
-                } => self.expr(
-                    &p("press.payload"),
-                    x,
-                    context_for(e, Site::PressPayload, gp),
-                    Ty::BYTES,
-                ),
-                Press::Tuya { .. } if fragment => self.err(
-                    &p("press"),
-                    "self-description fragments allow only cmd/write presses",
-                ),
-                _ => {}
-            }
+        match &m.press {
+            Some(Press::Cmd {
+                payload: Some(x), ..
+            }) => self.expr(
+                at("press.payload"),
+                x,
+                context_for(e, Site::PressPayload, gp),
+                Ty::BYTES,
+            ),
+            Some(Press::Tuya { .. }) if fragment => self.err(
+                at("press"),
+                "self-description fragments allow only cmd/write presses",
+            ),
+            _ => {}
         }
-        for (k, part) in &e.parts {
-            let name = crate::keys::sub_name(*k as u64).unwrap_or("?");
-            self.entity(&format!("{path}.parts.{name}"), part, false, fragment);
+        for (k, part) in &m.parts {
+            self.entity(
+                ErrPath {
+                    part: Some(*k),
+                    ..p
+                },
+                part,
+                false,
+                fragment,
+            );
         }
     }
 }
@@ -361,13 +457,17 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
         gp: is_gp(d),
         errs: Vec::new(),
     };
+    let top = |section| ErrPath {
+        section,
+        ..ErrPath::default()
+    };
     let fragment = d.is_fragment();
     if fragment {
         if d.id.is_some() || !d.match_.is_empty() || !d.white_label.is_empty() {
-            v.err("", "a fragment has no id, match or white_label");
+            v.err(top(""), "a fragment has no id, match or white_label");
         }
-        if d.tuya.is_some() || d.gp.is_some() {
-            v.err("", "a fragment has no tuya or gp block");
+        if d.tuya.is_some() || d.gp.is_some() || !d.templates.is_empty() {
+            v.err(top(""), "a fragment has no tuya, gp or templates block");
         }
         for (i, op) in d.configure.iter().enumerate() {
             if !matches!(
@@ -375,7 +475,11 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
                 ConfigureOp::Report { .. } | ConfigureOp::Read { .. } | ConfigureOp::Checkin { .. }
             ) {
                 v.err(
-                    &format!("configure[{i}]"),
+                    ErrPath {
+                        section: "configure",
+                        index: Some(i as u16),
+                        ..ErrPath::default()
+                    },
                     "fragments allow only report, read and checkin ops",
                 );
             }
@@ -383,22 +487,27 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
     } else {
         match &d.id {
             Some(id) if valid_id(id) => {}
-            Some(id) => v.err("id", format!("invalid id \"{id}\"")),
-            None => v.err("id", "missing"),
+            Some(_) => v.err(top("id"), "invalid id"),
+            None => v.err(top("id"), "missing"),
         }
         if d.revision.is_none() {
-            v.err("revision", "missing");
+            v.err(top("revision"), "missing");
         }
         if d.vendor.is_none() {
-            v.err("vendor", "missing");
+            v.err(top("vendor"), "missing");
         }
         if d.model.is_none() {
-            v.err("model", "missing");
+            v.err(top("model"), "missing");
         }
         if d.match_.is_empty() {
-            v.err("match", "at least one clause is required");
+            v.err(top("match"), "at least one clause is required");
         }
         for (i, c) in d.match_.iter().enumerate() {
+            let p = ErrPath {
+                section: "match",
+                index: Some(i as u16),
+                ..ErrPath::default()
+            };
             let zig = c.manufacturer.is_some()
                 || c.model.is_some()
                 || c.mfr_code.is_some()
@@ -407,12 +516,10 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
                 || c.app_version.is_some()
                 || c.hw_version.is_some()
                 || c.stack_version.is_some()
-                || c.power.is_some();
+                || c.power.is_some()
+                || c.logical_type.is_some();
             if c.gp.is_some() && zig {
-                v.err(
-                    &format!("match[{i}]"),
-                    "a GP clause cannot have Zigbee fields",
-                );
+                v.err(p, "a GP clause cannot have Zigbee fields");
             }
             if c.gp.is_none()
                 && c.manufacturer.is_none()
@@ -420,39 +527,69 @@ pub fn validate(d: &Definition) -> Result<(), Vec<ValidationError>> {
                 && c.endpoints.is_empty()
                 && c.mfr_code.is_none()
             {
-                v.err(&format!("match[{i}]"), "empty clause");
+                v.err(p, "empty clause");
             }
         }
     }
     let mut seen: Vec<(Option<u8>, &str)> = Vec::new();
     for (i, e) in d.entities.iter().enumerate() {
-        let path = format!("entities[{i}]");
-        v.entity(&path, e, true, fragment);
+        let p = ErrPath {
+            section: "entities",
+            index: Some(i as u16),
+            ..ErrPath::default()
+        };
+        v.entity(p, e, true, fragment);
         if let Some(k) = e.key.as_deref() {
             if seen.contains(&(e.ep, k)) {
-                v.err(&path, format!("duplicate entity key \"{k}\""));
+                v.err(p, "duplicate entity key");
             }
             seen.push((e.ep, k));
         }
     }
     if let Some(g) = &d.generic {
-        for (k, e) in &g.patch {
-            v.entity(&format!("generic.patch.{k}"), e, false, fragment);
+        for (i, (_, e)) in g.patch.iter().enumerate() {
+            v.entity(
+                ErrPath {
+                    section: "generic.patch",
+                    index: Some(i as u16),
+                    ..ErrPath::default()
+                },
+                e,
+                false,
+                fragment,
+            );
+        }
+    }
+    for (i, op) in d.configure.iter().enumerate() {
+        if let ConfigureOp::Cmd {
+            payload: Some(x), ..
+        } = op
+        {
+            v.expr(
+                ErrPath {
+                    section: "configure",
+                    index: Some(i as u16),
+                    field: "payload",
+                    ..ErrPath::default()
+                },
+                x,
+                configure_payload_context(v.gp),
+                Ty::BYTES,
+            );
         }
     }
     for f in compute_requires(d) {
         if !d.requires.contains(&f) {
-            let name = Feature::from_code(f as u64)
-                .map(|x| x.as_str())
-                .unwrap_or("?");
-            v.err("requires", format!("feature {name} is used but not listed"));
+            v.errs.push(ValidationError {
+                path: top("requires"),
+                message: "a used feature is not listed",
+                verify: None,
+                feature: Some(f),
+            });
         }
     }
-    let mut sorted = d.requires.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    if sorted != d.requires {
-        v.err("requires", "must be ascending and unique");
+    if d.requires.windows(2).any(|w| w[0] >= w[1]) {
+        v.err(top("requires"), "must be ascending and unique");
     }
     if v.errs.is_empty() {
         Ok(())

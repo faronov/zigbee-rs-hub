@@ -56,6 +56,12 @@ jobs:
           targets: thumbv7em-none-eabihf
           components: llvm-tools
       - run: cargo build -p zdef --release --target thumbv7em-none-eabihf
+      - name: Feature subsets (hub configuration without software SHA-256 / miniz)
+        run: |
+          for f in "" bank sign "bank,sign" "bank,sign,miniz" "soft-sha256"; do
+            echo "features: [$f]"
+            cargo build -q -p zdef --release --target thumbv7em-none-eabihf --no-default-features --features "$f"
+          done
       - uses: esp-rs/xtensa-toolchain@v1.7.0
         env:
           # espup queries the GitHub API; unauthenticated calls hit the rate limit

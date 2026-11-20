@@ -31,6 +31,7 @@ python3 tools/zdefc-proto/zdefc.py expr 'x > 130536 ? 0 : x - 65536'
 | 8.2 key tables | prototype tables (top level, entity, sub-maps) |
 | 8.3 enumerations | platform, device class, unit, state class, category, access, ZCL type, Tuya DP type (subsets of the HA tables) |
 | 8.4 strings | packed Tuya manufacturer names, white-label name indices |
+| 8.3 closed sets | `power`, `mode`, `self_description`, `time_sync`, `send`, `query` (bitmask + `interval_s`), `logical_type`, battery curves, codecs and schedule variants as integers (v1 freeze) |
 
 ## What it leaves out
 

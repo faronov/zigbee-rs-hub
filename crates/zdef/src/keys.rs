@@ -76,6 +76,10 @@ table!(SUB, sub_key, sub_name, {
     144 => "optimistic", 145 => "dedup", 146 => "interval_s", 147 => "tuya",
     148 => "zcl_tagged", 149 => "tuya_schedule_week", 150 => "variant", 151 => "bcd_time",
     152 => "hhmm", 153 => "ascii", 154 => "utf16be_hex", 155 => "bitmap_flags",
+    156 => "logical_type",
+    157 => "name",
+    158 => "params",
+    159 => "scale",
     // composite part names (HA property names), continued
     160 => "on_off", 161 => "brightness", 162 => "color_temp", 163 => "color_xy",
     164 => "color_hs", 165 => "color_mode", 166 => "effect", 167 => "position", 168 => "tilt",
@@ -83,7 +87,17 @@ table!(SUB, sub_key, sub_name, {
     174 => "oscillating", 175 => "target_temperature_low", 176 => "target_temperature_high",
     177 => "current_humidity", 178 => "target_humidity", 179 => "swing_mode", 180 => "tone",
     181 => "volume", 182 => "duration", 183 => "valve_position", 184 => "running_state",
+    185 => "color_x",
+    186 => "color_y",
+    187 => "hue",
+    188 => "saturation",
+    189 => "command",
 });
+
+/// Named optional extensions of the top-level map (source key `x-<name>`).
+pub const TOP_EXT: &[(u16, &str)] = &[(64, "x-partial")];
+/// Named optional extensions of a match clause.
+pub const CLAUSE_EXT: &[(u16, &str)] = &[(64, "x-priority")];
 
 /// Part names usable as keys of `parts` (a subset of [`SUB`]).
 pub const PART_NAMES: &[&str] = &[
@@ -116,6 +130,11 @@ pub const PART_NAMES: &[&str] = &[
     "duration",
     "valve_position",
     "running_state",
+    "color_x",
+    "color_y",
+    "hue",
+    "saturation",
+    "command",
 ];
 
 #[cfg(test)]

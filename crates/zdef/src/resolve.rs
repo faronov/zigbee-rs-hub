@@ -160,6 +160,16 @@ impl<'a> Host<'a> for IdHost<'a> {
                 .as_deref()
                 .map(Value::Str)
                 .unwrap_or(Value::Null),
+            7 | 8 => {
+                let n = if f == 7 {
+                    &fp.manufacturer_name
+                } else {
+                    &fp.model_id
+                };
+                n.as_deref()
+                    .map(|n| Value::Str(crate::matching::trim_name(n)))
+                    .unwrap_or(Value::Null)
+            }
             _ => Value::Null,
         }
     }
@@ -180,20 +190,21 @@ pub fn default_ep(e: &Entity, t: Target<'_>) -> u8 {
     if let Some(z) = &e.zcl {
         return z.ep.unwrap_or_else(|| by(z.cluster, false));
     }
-    if let Some(s) = &e.struct_ {
+    let m = e.more();
+    if let Some(s) = &m.struct_ {
         return s.ep.unwrap_or_else(|| by(s.cluster, false));
     }
     if e.tuya.is_some() {
         return by(0xEF00, false);
     }
-    if let Some(p) = &e.press {
+    if let Some(p) = &m.press {
         return match p {
             Press::Cmd { cmd, .. } => cmd.ep.unwrap_or_else(|| by(cmd.cluster, true)),
             Press::Write(w) => w.ep.unwrap_or_else(|| by(w.cluster, false)),
             Press::Tuya { .. } => by(0xEF00, false),
         };
     }
-    if let Some(t) = e.triggers.first() {
+    if let Some(t) = m.triggers.first() {
         if let Some(c) = &t.cmd {
             return c.ep.unwrap_or_else(|| by(c.cluster, true));
         }
@@ -201,7 +212,7 @@ pub fn default_ep(e: &Entity, t: Target<'_>) -> u8 {
             return by(0xEF00, false);
         }
     }
-    if let Some((_, p)) = e.parts.first() {
+    if let Some((_, p)) = m.parts.first() {
         return default_ep(p, Target::Zigbee(fp));
     }
     lowest
@@ -215,16 +226,20 @@ fn has_exprs(e: &Entity) -> bool {
 
 fn clear_exprs(e: &mut Entity) {
     e.from = None;
-    e.to = None;
-    e.reset_after = None;
-    e.present_if = None;
-    e.attrs.clear();
-    e.triggers.clear();
-    if let Some(Press::Cmd { payload, .. }) = &mut e.press {
-        *payload = None;
-    }
-    for (_, p) in &mut e.parts {
-        clear_exprs(p);
+    if e.more.is_some() {
+        let m = e.more_mut();
+        m.to = None;
+        m.reset_after = None;
+        m.present_if = None;
+        m.attrs.clear();
+        m.triggers.clear();
+        if let Some(Press::Cmd { payload, .. }) = &mut m.press {
+            *payload = None;
+        }
+        for (_, p) in &mut m.parts {
+            clear_exprs(p);
+        }
+        e.compact();
     }
 }
 
@@ -233,9 +248,6 @@ pub fn apply_patch(base: &mut Entity, patch: &Entity) {
     macro_rules! opt {
         ($($f:ident),*) => { $( if patch.$f.is_some() { base.$f = patch.$f.clone(); } )* };
     }
-    macro_rules! list {
-        ($($f:ident),*) => { $( if !patch.$f.is_empty() { base.$f = patch.$f.clone(); } )* };
-    }
     opt!(
         key,
         platform,
@@ -243,28 +255,43 @@ pub fn apply_patch(base: &mut Entity, patch: &Entity) {
         unit,
         state_class,
         category,
-        name,
         ep,
         zcl,
         tuya,
-        struct_,
         gp,
         from,
-        to,
         mul,
         div,
         offset,
         precision,
         invalid,
-        value_on,
-        value_off,
         min,
         max,
         step,
-        mode,
         access,
         report,
-        enabled,
+        enabled
+    );
+    if !patch.map.is_empty() {
+        base.map = patch.map.clone();
+    }
+    let Some(pm) = patch.more.as_deref() else {
+        return;
+    };
+    let bm = base.more_mut();
+    macro_rules! more_opt {
+        ($($f:ident),*) => { $( if pm.$f.is_some() { bm.$f = pm.$f.clone(); } )* };
+    }
+    macro_rules! more_list {
+        ($($f:ident),*) => { $( if !pm.$f.is_empty() { bm.$f = pm.$f.clone(); } )* };
+    }
+    more_opt!(
+        name,
+        struct_,
+        to,
+        value_on,
+        value_off,
+        mode,
         reset_after,
         press,
         codec,
@@ -272,7 +299,8 @@ pub fn apply_patch(base: &mut Entity, patch: &Entity) {
         hub,
         invert
     );
-    list!(map, parts, event_types, triggers, attrs);
+    more_list!(parts, event_types, triggers, attrs);
+    base.compact();
 }
 
 fn merge_device(into: &mut Device, d: &Device) {
@@ -438,7 +466,7 @@ pub fn resolve<'a>(layers: &Layers<'a>, target: Target<'a>) -> Resolution<'a> {
             res.gp = d.gp.as_ref();
         }
         for e in &d.entities {
-            if let Some(p) = &e.present_if {
+            if let Some(p) = &e.more().present_if {
                 match vm.eval(p.code(), &d.consts, &Inputs::NONE, &host) {
                     Ok(Value::Bool(true)) => {}
                     Ok(_) => continue,
@@ -489,7 +517,7 @@ pub fn resolve<'a>(layers: &Layers<'a>, target: Target<'a>) -> Resolution<'a> {
                 .iter()
                 .find(|(ep, k, _)| *ep == e.ep && k == e.key())
             {
-                e.entity.name = Some(n.clone());
+                e.entity.more_mut().name = Some(n.clone());
             }
         }
     }
