@@ -11,7 +11,7 @@ env:
 
 jobs:
   host:
-    name: hub-core, hub-ncp, hubctl (host tests)
+    name: hub-core, hub-ncp (incl. Gecko bootloader client), hub-app, hubctl (host tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -158,3 +158,64 @@ jobs:
             target/partitions-4mb-dev.bin
             target/xtensa-esp32s3-espidf/release/tbr-bridge
             target/xtensa-esp32s3-espidf/release/tbr-hub
+
+  gateway:
+    name: gateway firmware (Dongle-M ESP32, S3 SuperMini + MG24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        env:
+          # espup queries the GitHub API; unauthenticated runners hit its rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          default: true
+          buildtargets: esp32,esp32s3
+          ldproxy: true
+          version: "1.90.0.0"
+      - name: Cache ESP-IDF and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .embuild
+          key: gateway-${{ runner.os }}-idf-v5.5.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: gateway-${{ runner.os }}-idf-v5.5.1-
+      - name: Build zrh-donglem (classic ESP32)
+        working-directory: firmware/donglem
+        run: cargo build --release
+      - name: Build zrh-s3-mg24 (ESP32-S3)
+        working-directory: firmware/s3-mg24
+        run: cargo build --release
+      - name: App images (Dongle-M in the 4 MiB slot of the 16 MB layout, SuperMini in the 2 944 KiB dev slot)
+        run: |
+          pip install --quiet "esptool>=5,<6"
+          CHIP=esp32 FLASH_SIZE=16MB MIN_REV_FULL=300 MAX_APP_BYTES=4194304 tools/make-app-image.sh release target/zrh-donglem-app.bin zrh-donglem
+          CHIP=esp32s3 FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/zrh-s3-mg24-app.bin zrh-s3-mg24
+      - name: Partition tables and bootloaders
+        run: |
+          tools/make-partition-table.sh firmware/gateway/partitions-16mb.csv target/partitions-16mb.bin 16MB
+          tools/make-partition-table.sh firmware/hub/partitions-4mb-dev.csv target/partitions-4mb-dev.bin 4MB
+          cp "$(ls target/xtensa-esp32-espidf/release/build/esp-idf-sys-*/out/build/bootloader/bootloader.bin | head -1)" target/bootloader-donglem.bin
+          cp "$(ls target/xtensa-esp32s3-espidf/release/build/esp-idf-sys-*/out/build/bootloader/bootloader.bin | head -1)" target/bootloader-s3-mg24.bin
+      - name: Static RAM (internal DRAM/IRAM)
+        run: |
+          for t in esp32:zrh-donglem esp32s3:zrh-s3-mg24; do
+            chip=${t%%:*}; app=${t#*:}
+            size="$(find .embuild/espressif/tools -name "xtensa-$chip-elf-size" -type f | head -1)"
+            echo "== $app"
+            "$size" -A "target/xtensa-$chip-espidf/release/$app" | grep -E "^\.(iram0\.text|dram0\.(data|bss)|flash\.(text|rodata)) "
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-firmware
+          path: |
+            target/zrh-donglem-app.bin
+            target/zrh-s3-mg24-app.bin
+            target/partitions-16mb.bin
+            target/partitions-4mb-dev.bin
+            target/bootloader-donglem.bin
+            target/bootloader-s3-mg24.bin
+            target/xtensa-esp32-espidf/release/zrh-donglem
+            target/xtensa-esp32s3-espidf/release/zrh-s3-mg24
