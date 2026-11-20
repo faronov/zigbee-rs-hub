@@ -252,10 +252,11 @@ Precedence rules:
   any other names-only combination (model prefix, manufacturer only) = 250;
   a GP clause without DeviceID and without manufacturer + model ID = 100. Extra
   constraints (+10 each, at most +50): `mfr_code` (part of the base for
-  fingerprint-only clauses), each version range, `sw_build`, `power`, and
-  `endpoints` when names are present; for GP every field beyond the base
-  pair (so the FlowerX clause, DeviceID + manufacturer + masked model, scores
-  610). A clause without any field never matches.
+  fingerprint-only clauses), each version range, `sw_build`, `power`,
+  `logical_type`, and `endpoints` when names are present. GP clauses take
+  the table of 13.3 without extras (the FlowerX clause, DeviceID +
+  manufacturer + masked model, scores 600). A clause without any field never
+  matches.
 
   Ties: the higher explicit `priority` field, then the user source over the
   catalog, then the newer `revision`. A definition may be **pinned** per device
@@ -661,14 +662,16 @@ any clause matches (OR).
 | `app_version`, `stack_version`, `hw_version` | `{min, max}` | Basic 0x0001 / 0x0002 / 0x0003 |
 | `sw_build` | string or `{prefix}` | Basic 0x4000 |
 | `power` | mains / battery | Basic 0x0007 / Node descriptor |
+| `logical_type` | coordinator / router / end_device | Node descriptor logical type |
 | `endpoints` | `{<ep>: {profile, device_id, in: [...], out: [...]}}`; `in`/`out` must be subsets | Simple descriptors |
 | `gp` | 13.3 | GP commissioning data |
 
-Indexing (9.2): each clause yields one or more **index keys**: `(manufacturer,
+Indexing (9.1): each clause yields one or more **index keys**: `(manufacturer,
 model)` pairs for exact names (one key per name of an `any` list), `(*,
-model)` for model-only and prefix clauses, and `(fp, hash of the endpoint
-structure)` for fingerprint-only clauses. Prefix and range constraints are
-re-checked after the index lookup.
+model)` for model-only and prefix clauses, `(manufacturer, *)` for
+manufacturer-only clauses, and `(mfr code, profile, device ID)` of the
+lowest fully specified endpoint for fingerprint-only clauses. Prefix and
+range constraints are re-checked after the index lookup.
 
 ### 6.3 Entities
 
@@ -753,8 +756,8 @@ that use it declare it in `requires` (8.5). v1 set:
 | Name | Parameters | What it does | Users |
 |---|---|---|---|
 | `zcl_tagged` | — | sequence of `(tag u8, ZCL type u8, value)` → map tag → value | Lumi 0xFCC0/0x00F7, genBasic 0xFF01 (`aqara-rtcgq14lm-motion-p1.yaml`) |
-| `tuya_schedule_day` | `day`, `transitions` | Tuya per-day schedule DP ↔ text `HH:MM/T …` (herdsman `thermostatScheduleDayMultiDPWithDayNumber`) | Tuya TRVs |
-| `tuya_schedule_week` | variant | the other Tuya schedule layouts (`thermostatScheduleDayMultiDP`, …) | Tuya TRVs |
+| `tuya_schedule_day` | `day`, `transitions`, `variant` (`multi_dp` default, `trv602z`) | Tuya per-day schedule DP with the day number in byte 0 ↔ text `HH:MM/T …` (`trv602z`: `HH:MM/T/P …`, P = 2 eco, 3 comfort) (herdsman `thermostatScheduleDayMultiDPWithDayNumber`, `…_TRV602Z_WithDayNumber`) | Tuya TRVs |
+| `tuya_schedule_week` | `variant` (required), `transitions`, `scale`, `min`, `max` | schedule DPs without a day number: `multi_dp` = `thermostatScheduleDayMultiDPWithTransitionCount` (byte 0 = 0, then `hour, minute, temp×scale u16 BE` per transition; defaults 4 transitions, scale 10, 5–35 °C); `single_dp` = `thermostatScheduleDaySingleDP` (day bitmask byte, up to 10 × `10-min segment, temp×10 u16 BE`, padded with `144,0,180`; the text starts with the day selector `monday`…`sunday`, `mon_sun`, `mon_fri`); `trv602z` (6 × `0xC0|min>>8, min, preset<<4, temp×10`); `trv603wz` (`7, count, (hour×10 + min/10, temp×2)*`) | Tuya TRVs |
 | `bcd_time`, `hhmm` | — | packed times | timers |
 | `ascii`, `utf16be_hex` | — | strings in raw DPs (herdsman `utf8String`, `utf16BEHexString`) | Tuya |
 | `bitmap_flags` | `{bit: label}` | bitmap → list of labels (text sensor) | fault codes |
@@ -806,9 +809,18 @@ configure:
   - read: {ep: 2, cluster: 0x0406, attrs: [0x0030], mfr: 0x100B}
   - report: {ep: 1, cluster: 0x0402, attr: 0x0000, type: i16, report: [10, 600, 10]}
   - cmd: {ep: 1, cluster: 0xEF00, id: 0x03}     # e.g. Tuya dataQuery (prefer tuya.query)
+  - cmd: {cluster: 0xFC11, id: 0x01, payload: 'pack("u8", opt.sensitivity ?? 2)'}
   - group: {ep: 1, group: 0x0100}               # hub joins a group the remote sends to
   - checkin: {interval_qs: 14400}               # Poll Control 0x0020/0x0000, quarter-seconds
 ```
+
+A `cmd` op's optional `payload` (sub-map key 62) is an expression yielding
+bytes. It is evaluated when the configure plan is built, with `opt.*` and
+`state.*` but without `x`, `payload` or time functions, so the op's
+idempotence key (which includes the payload bytes) is stable; a payload that
+fails to evaluate records the op as failed. In the canonical expression
+order (constant pool) configure payloads come after `generic.patch` and
+before `entities` (key order 10, 13, 14).
 
 Ops run in order after the generic configure (5.3). Each op is idempotent;
 failures are recorded, never fatal. The set is closed (no loops, no
@@ -865,8 +877,11 @@ programs are verified before use and their cost is bounded by their length.
   (only the shift count is checked); `?:` takes the else branch on `false`
   or `null`; a non-finite float result is a run-time error; `round(x)`,
   `floor`, `ceil` and `int` return `int` (rounding half away from zero),
-  `round(x, d)` returns `float`; `str(float)` is the shortest round-trip
-  decimal; `min`/`max` take 2–8 arguments; built-ins return `null` when an
+  `round(x, d)` returns `float`; `str(float)` prints at most 15
+  significant digits, rounded, trailing zeros dropped, as a plain decimal
+  for 1e-6 ≤ |x| < 1e21 and as `d.ddde±N` otherwise (JavaScript layout;
+  `str(0.1 + 0.2)` = `"0.3"`, `str(21.0)` = `"21"`), so the VM links no
+  float formatter; `min`/`max` take 2–8 arguments; built-ins return `null` when an
   argument is `null` (except `isnull`).
 
 ### 7.2 Grammar
@@ -912,7 +927,7 @@ reuse a context variable name (7.3).
 | `opt.<key>` | value of a `hub` binding entity | everything except `present_if` |
 | `last` | `str`/`null`: the entity's previous event type | event `when`/`event` |
 | `gpd.device_id`, `gpd.manufacturer_id`, `gpd.model_id`, `gpd.src_id` | `int` | GP definitions, `present_if` |
-| `fp.app_version`, `fp.hw_version`, `fp.mfr_code`, `fp.sw_build` | `int`/`str` | `present_if` |
+| `fp.app_version`, `fp.hw_version`, `fp.mfr_code`, `fp.sw_build`, `fp.stack_version`, `fp.zcl_version`, `fp.date_code`, `fp.manufacturer`, `fp.model` | `int`/`str` (names trimmed of trailing spaces and NULs) | `present_if` |
 
 ### 7.4 Built-in functions
 
@@ -1048,9 +1063,9 @@ Top level:
 | 7 | white_label | 18 | source |
 | 8 | requires | 19 | mfr |
 | 9 | device | 20 | zdef_fragment |
-| 10 | generic | 21 | templates (reserved) |
+| 10 | generic | 21 | templates |
 | 22 | priority | 23 | self_description |
-| 31 | x-wasm (reserved) | 64–127 | optional extensions |
+| 31 | x-wasm (reserved) | 64–127 | optional extensions (64 `x-partial`) |
 
 Entity:
 
@@ -1090,14 +1105,28 @@ ignore_commands 134, ieee 135, commands 136, server 137, client 138,
 force_time_sync_s 139, bind_basic 140, gateway_status 141, send 142,
 mcu_version 143, optimistic 144, dedup 145, interval_s 146, tuya 147,
 zcl_tagged 148, tuya_schedule_week 149, variant 150, bcd_time 151,
-hhmm 152, ascii 153, utf16be_hex 154, bitmap_flags 155`, and the part names
+hhmm 152, ascii 153, utf16be_hex 154, bitmap_flags 155, logical_type 156,
+name 157, params 158, scale 159`, and the part names
 `on_off 160, brightness 161, color_temp 162, color_xy 163, color_hs 164,
 color_mode 165, effect 166, position 167, tilt 168, state 169, preset 170,
 fan_mode 171, percentage 172, direction 173, oscillating 174,
 target_temperature_low 175, target_temperature_high 176,
 current_humidity 177, target_humidity 178, swing_mode 179, tone 180,
-volume 181, duration 182, valve_position 183, running_state 184`. Keys
+volume 181, duration 182, valve_position 183, running_state 184,
+color_x 185, color_y 186, hue 187, saturation 188, command 189`. Keys
 24–255 all take two bytes, so the gap costs nothing.
+
+Named optional extensions (source key `x-<name>`, value any JSON, stored as
+canonical CBOR with text keys): top level `64 x-partial` (the generator's
+"partially translated" marker), match clause `64 x-priority` (zhc's
+definition priority). Other keys 64–127 have no source form; the decoder
+keeps them (top level, match clause, entity) so a decode/encode round trip
+is lossless, and ignores them otherwise.
+
+A decoder reads every sub-map with the one shared table, so a known key that
+does not apply to that sub-map (e.g. `group` in a `zcl` binding) is ignored
+by `decode` and rejected by the canonical check (`load_canonical`: the
+re-encoded bytes differ).
 
 A name matcher (`manufacturer`, `model`, `sw_build`) is a text string
 (exact), an array (`any`; key 17 is not used in v1) or `{18: prefix}`.
@@ -1119,7 +1148,21 @@ them.
 | access | bitmask 1 read, 2 write, 4 report |
 | ZCL type | the ZCL data type code (0x10 bool, 0x18 map8, 0x20 u8, … 0x29 i16, 0x30 enum8, 0x39 single, 0x41 octet string, 0x42 char string) |
 | Tuya DP type | the Tuya code (0 raw, 1 bool, 2 value, 3 string, 4 enum, 5 bitmap) |
-| other closed sets | text strings in v1: `power`, number/text `mode`, `self_description`, `tuya.time_sync` (`"off"`, or the integers 1970/2000), `tuya.send`, `tuya.query` items, `source`, battery curve names, codec names without parameters |
+| power | 0 mains, 1 battery, 2 energy_harvesting (match clauses: 0, 1) |
+| logical_type (match) | 0 coordinator, 1 router, 2 end_device |
+| mode (number/text) | 0 auto, 1 box, 2 slider, 3 text, 4 password |
+| self_description | 0 ignore, 1 under, 2 over |
+| tuya.time_sync | 0 off, 1 1970, 2 2000 (source: `off`, `1970`/`2000` as integers or strings) |
+| tuya.send | 0 dataRequest, 1 sendData |
+| tuya.query | key 40: bitmask 1 configure, 2 announce; key 146 `interval_s` (source: a list of `configure`, `announce`, `{interval_s: N}`) |
+| battery curve | 0 3V_2100, 1 3V_1500_2800, 2 CR2032 (or `{32: [min_mV, max_mV]}`) |
+| codec | 0 zcl_tagged, 1 tuya_schedule_day, 2 tuya_schedule_week, 3 bcd_time, 4 hhmm, 5 ascii, 6 utf16be_hex, 7 bitmap_flags; a codec with parameters is `{code: {params}}` (6.6); `struct.codec` is the code |
+| schedule variant | 0 multi_dp, 1 single_dp, 2 trv602z, 3 trv603wz |
+| template name | 0 hue_light, 1 lumi, 2 tuya, 3 tuya_metering_zero_debounce (feature 20 + code) |
+| `map` keys | integers; the source may also write `"true"`/`"false"` (1/0) |
+
+Only `source` (free text) and names stay strings. Closed sets were text in
+the draft of v1 and became integers before the v1 freeze.
 
 Tables are append-only within a `zdef` major version; an index unknown to a
 hub (newer table) makes the field "unknown" (the entity is still created,
@@ -1160,7 +1203,10 @@ without that device class or unit) and is reported in diagnostics.
   `4 struct.zcl_tagged`, `5 codec.tuya_schedule_day`,
   `6 codec.tuya_schedule_week`, `7 codec.bcd_time`, `8 codec.hhmm`,
   `9 codec.ascii`, `10 codec.utf16be_hex`, `11 codec.bitmap_flags`,
-  `60 wasm` (reserved). The compiler computes it from what the definition
+  `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
+  `23 template.tuya_metering_zero_debounce` (vendor templates, C tier 17.4:
+  `templates: [{name, params}]`, `params` free-form, key 21 at the top
+  level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
   that uses a feature it does not list. A hub lacking any listed feature
   treats the definition as non-matching (3.3).
@@ -1218,8 +1264,10 @@ draft said, cannot be computed from a device whose Simple descriptors are a
 superset), `[3, manufacturer_id, model_id]` for GP clauses with an unmasked
 model ID, `[4, device_id]` for other GP clauses with a DeviceID (masked model
 IDs, SrcID ranges), `[5, manufacturer_id]` for masked GP model IDs without a
-DeviceID. A clause that yields no key is rejected by the bank builder. The
-hub computes the same keys from the fingerprint (trimmed names; every
+DeviceID, `[6, manufacturer]` for manufacturer-only clauses (zhc fingerprints
+with a `manufacturerName` and no model, common for Tuya; rechecked). A clause
+that yields no key is rejected by the bank builder. The hub computes the same
+keys from the fingerprint (trimmed names; the manufacturer alone; every
 endpoint with and without its manufacturer code). The catalog form drops
 `description` and replaces text items that are not map keys with shared
 references where that is shorter; strings shared by at least two
@@ -1274,22 +1322,32 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   to `objects.githubusercontent.com`).
 - **Shards hold the definitions themselves**, not pointers: a release may
   carry at most 1 000 assets, so one asset per definition is impossible.
-  `shard-{hh}.cbor` is a CBOR array of `[index key hash (uint), requires
-  (array), standalone definition (byte string)]` for all definitions whose
-  index keys fall into prefix `hh` (the top byte of the 64-bit key hash)
-  (≈ 20–30 definitions, a few KiB deflated). 256 shards + 2 banks + manifest
-  = 259 assets.
+  `shard-{hh}.cbor` is a CBOR array of `[index key hashes, requires
+  (array), standalone definition (byte string)]`, one record per definition
+  that has index keys in prefix `hh` (the top byte of the 64-bit key hash),
+  ordered by definition ID; the key hashes are a uint for one key and an
+  ascending array for several (≈ 20–30 definitions, a few KiB deflated).
+  Shards hold every definition, partial ones included. 256 shards + 2 banks
+  + manifest + 2 reports = 261 assets.
 - `manifest.cose`: COSE_Sign1, Ed25519 (alg −8), embedded payload: a CBOR
   map `{0: format 1, 1: catalog date, 2: serial, 3: minimum hub feature set,
-  4: [{0: bank asset name, 1: SHA-256, 2: size}], 5: 256 × (shard SHA-256 or
-  null)}`. Shards and banks
+  4: [{0: bank asset name, 1: SHA-256 of the published (signed) file,
+  2: size, 3: definitions, 4: bank generation}], 5: 256 × (shard SHA-256 or
+  null), 6: content digest, 7: source {text: text}}`. The content digest is
+  the SHA-256 of the ascending content hashes of all shard definitions (equal
+  digests = same definitions); `source` is informational (`zhc` version,
+  repository commit). Keys 64–127 are ignored. Shards and banks
   are verified by these hashes and each definition by its content hash, so
   only the manifest is signed. The manifest's version must not go backwards
   (anti-rollback, stored in config).
 - **Keys** (D9): the signing key is an Ed25519 private key in the GitHub
   Actions secrets of `faronov/zigbee-rs-definitions` (`ZDEF_SIGNING_KEY`,
-  owned by the user); the release workflow signs the manifest and the bank
-  headers. The hub firmware carries the public key and one spare slot for a
+  owned by the user; an unencrypted PKCS#8 PEM as `openssl genpkey -algorithm
+  ed25519` writes it, `zdefc` also accepts the hex seed); the release
+  workflow signs the bank headers and the manifest with `zdefc catalog sign`
+  and checks the result with `zdefc catalog verify` against
+  `keys/zdef-catalog-ed25519.pub.pem` (key ID `66f64ac1cbfc9e27`). The hub
+  firmware carries that public key in slot 0 and one spare slot for a
   rotation key; a rotation ships the new public key in a hub release first,
   then switches the secret. Users can add their own keys (14.4) for private
   catalogs.
@@ -1698,10 +1756,12 @@ match:
 Fields (all optional, AND-ed): `device_id`, `manufacturer_id`, `model_id`
 (int or `{value, mask}`), `src_id` (`[lo, hi]` inclusive), `ieee` (prefix),
 `commands` (must all be in the GPD command list), `clusters` (`{server: [...],
-client: [...]}` subsets). Scoring: manufacturer + model = 600, SrcID range +
-DeviceID = 600, DeviceID + command subset = 300, DeviceID only = 200. Index
-keys: `(gp, mfr, model)` and `(gp, device_id)`; SrcID ranges are few and kept
-as a small separate list (the PTM and Hue Tap ranges above).
+client: [...]}` subsets). Scoring: manufacturer + model (masked or not) = 600,
+SrcID range or IEEE prefix + DeviceID = 600, DeviceID + command subset = 300,
+DeviceID or SrcID/IEEE alone = 200, anything else = 100; GP clauses get no
++10 extras. Index keys: `[3, manufacturer_id, model_id]` (unmasked model),
+`[4, device_id]` and `[5, manufacturer_id]` (masked model without DeviceID),
+rechecked after the lookup (9.1).
 
 Known identities:
 
@@ -2182,10 +2242,11 @@ codecs ~40–60 KB, Tuya ~8 KB, GP decoding (shared `zigbee-gp` codecs) ~10 KB,
 named codecs ~10 KB, Ed25519 verify ~15 KB; SHA-256 and inflate come from
 mbedTLS/ROM. Roughly 110–130 KB in total, before vendor templates (17.4).
 Measured for the implemented part (2026-11-20, `tools/zdef-size`,
-xtensa-esp32s3, `opt-level = "s"`, LTO): decoder + validator + verifier
-98 KB, VM 37 KB, matching 19 KB, resolution 54 KB, bank reader with
-SHA-256, Ed25519 and inflate 114 KB; all together 200 KB, well above the
-estimate; reductions are listed in `zdef.md`.
+xtensa-esp32s3, `opt-level = "s"`, LTO, hub configuration with the SHA
+accelerator and ROM `tinfl` behind `zdef`'s traits): decoder + validator +
+verifier 84 KB (was 98), VM 26 KB (37), matching 10 KB (19), resolution
+43 KB (54), bank reader with Ed25519 101 KB (114); all together 158 KB (200),
+still above the estimate; details and next steps in `zdef.md`.
 
 ## 17. herdsman generator and measured coverage
 

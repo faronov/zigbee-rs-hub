@@ -53,46 +53,89 @@ claimed).
   (body, header, wrong key), manifest and shard verification, size limit.
 - **WASM**: built in CI, wasm-bindgen package, Node smoke test against the
   golden CBOR.
+- **Catalog** (`zdefc catalog build|sign|verify`): plan → banks (largest
+  priority prefix that fits), shards, manifest; sign; verify everything a
+  hub checks plus every shard definition (canonical load, own keys, content
+  digest); tampered shards and wrong keys are rejected. The full catalog of
+  faronov/zigbee-rs-definitions (4 669 definitions, zhc 26.130.0) builds in
+  ~6 s: banks of 2 289 definitions (198 KiB), 256 shards (2.9 MiB).
+- **Keys**: Ed25519 PKCS#8 PEM (`openssl genpkey -algorithm ed25519`, RFC
+  8410 v1 and v2 test vectors) and 64-hex seeds are auto-detected; public
+  keys as SPKI PEM or hex; `zdefc bank pubkey` prints the raw public key and
+  the COSE kid (`keys/zdef-catalog-ed25519.pub.pem`: kid
+  `66f64ac1cbfc9e27`, a test pins it).
+- **Engine** (`crates/hub-devices`): Tuya schedule byte vectors equal those
+  of zigbee-herdsman-converters for all four layouts; the definition-layer
+  merge equals `zdef::resolve` on seven vendor scenarios.
 
 ## Sizes
 
 ### Code (hub entry points, `tools/zdef-size`)
 
-Linked images with `--gc-sections`, `opt-level = "s"`, LTO, measured on
-2026-11-20 (`.text` + `.rodata`, bytes). Each row links only that entry
-point (with what it pulls in); "all" links everything a hub would use.
+Linked images with `--gc-sections`, `opt-level = "s"`, LTO (`.text` +
+`.rodata`, bytes). Each row links only that entry point (with what it pulls
+in); "all" links everything a hub would use. "Hub" is the configuration the
+firmware uses: `default-features = false, features = ["bank", "sign"]`, with
+SHA-256 and inflate supplied through `hash::Sha256` / `bank::Inflate` (the S3
+SHA accelerator and ROM `tinfl`, modelled as calls to fixed ROM addresses, so
+they cost no flash); "soft" adds the software `sha2` and `miniz_oxide`.
 
-| Entry point | xtensa-esp32s3 | thumbv7em (proxy) |
-|---|---:|---:|
-| `zdef::load` (decode + validate + bytecode verifier + `requires`) | 97 959 | 81 216 |
-| `Vm::eval` (interpreter, built-ins, float formatting) | 37 007 | 34 492 |
-| `select_best` + `lookup_hashes` (matching) | 19 157 | 13 464 |
-| `resolve` (layers, merge, `present_if`) | 54 135 | 49 388 |
-| `Bank::parse/verify/load_strings/load` (incl. decoder, SHA-256, Ed25519, inflate) | 113 635 | 85 425 |
-| **all of the above** | **200 371** | **156 470** |
+| Entry point | xtensa before | xtensa hub | xtensa soft | thumbv7em hub |
+|---|---:|---:|---:|---:|
+| `zdef::load` (decode + validate + bytecode verifier + `requires`) | 97 959 | 83 568 | 89 596 | 66 449 |
+| `Vm::eval` (interpreter, built-ins, `str()`) | 37 007 | 25 751 | 25 751 | 23 129 |
+| `select_best` + `lookup_hashes` (matching) | 19 149 | 9 585 | 9 585 | 8 116 |
+| `resolve` (layers, merge, `present_if`) | 54 135 | 42 847 | 42 847 | 38 185 |
+| `Bank::parse/verify_with/load_strings/load` (incl. decoder, Ed25519) | 113 635 | 100 679 | 114 615 | 73 598 |
+| **all of the above** | **200 363** | **158 307** | **172 179** | **121 019** |
 
-Biggest contributors in "all" (xtensa): definition decoder 43 KB, core
-formatting/sorting 30 KB, Ed25519 16 KB (`opt_size`), VM 12 KB, validation
-messages 10 KB, inflate 7 KB, SHA-256 5 KB. This is above the spec 16.5
-estimate (CBOR decoder ~15 KB, VM + verifier ~12 KB, Ed25519 ~15 KB);
-see "Open points".
+"Before" is `main` at `ecb4193` (software SHA-256 and miniz always linked).
+What changed (measured per row above; the decoder items together give the
+−14 KB of `load`):
+
+- the VM formats `str()` itself (`num::format_number`, 15 significant
+  digits) instead of `core::fmt`'s float printer: VM −11 KB;
+- `core`'s sorts (`sort_unstable`/`sort_by_key`, ~9 KB per element type) are
+  replaced by an insertion sort for the few-element lists sorted on the hub:
+  matching −9.6 KB;
+- validation errors are `ErrPath` + `&'static str` with a `Display` impl, so
+  the crate has no `format!`;
+- `DecodeError` is smaller (u32 key and string-reference payloads, −4.4 KB),
+  fields are set without drop glue (map keys are strictly ascending, so each
+  slot is written once, −2.9 KB), integer range errors carry no field name
+  (the offset locates them, −0.6 KB);
+- SHA-256 and inflate behind traits and the features `soft-sha256` and
+  `miniz`: the hub's bank path is 14 KB smaller than with the software ones;
+- the encoder is not linked by `load` (since phase 1).
+
+Still above the spec 16.5 estimate (decoder ~15 KB, VM + verifier ~12 KB,
+Ed25519 ~15 KB). Biggest remaining contributors in "all" (hub, xtensa): the
+definition decoder ~45 KB, `resolve` without the VM ~17 KB, Ed25519 17 KB
+(`ed25519-compact`, `opt_size`), the validator + verifier ~13 KB, VM 13 KB
+plus `libm`/soft-float helpers ~7 KB (shared with the firmware). A
+table-driven decoder was evaluated: the simple-field arms it would replace are
+~25 % of the decoder (each costs 30–50 B; a table entry plus accessor is
+~20 B), so it saves an estimated 5–8 KB, not the 30 KB to the estimate; the
+rest is the number of distinct structures (sub-maps, codecs, configure ops,
+triggers, GP bindings). See "Open points".
 
 ### RAM
 
-| Item | 32-bit (xtensa) | 64-bit host |
-|---|---:|---:|
-| `size_of::<Definition>()` | 336 B | 584 B |
-| `size_of::<Entity>()` | 472 B | 704 B |
-| `size_of::<Vm>()` (512 B string arena) | 516 B | 520 B |
-| `size_of::<Value>()` | 16 B | 24 B |
-| VM value stack (16 slots, on the Rust stack) | ~384 B | ~512 B |
+| Item | 32-bit (xtensa) before | 32-bit now | 64-bit host now |
+|---|---:|---:|---:|
+| `size_of::<Definition>()` | 336 B | 352 B | 600 B |
+| `size_of::<Entity>()` | 472 B | 224 B | 264 B |
+| `size_of::<Vm>()` (512 B string arena) | 516 B | 516 B | 520 B |
+| `size_of::<Value>()` | 16 B | 16 B | 24 B |
 
-Live heap of one decoded definition (`cargo test -p zdef --test ram --
---nocapture`, 64-bit host; 32-bit is roughly 60 % of it): 2.2 KB
-(`gp-zigbee-rs-switch`, 181 B CBOR) to 17.4 KB (`tuya-ts0601-trv-me167`,
-1 054 B, 18 entities); average 6.7 KB, peak during load +5 %. The decoded
-model is meant to be transient (spec 16.4: compiled into per-device tables,
-then dropped); `Entity` dominates.
+`Entity` keeps the fields of the common case inline and boxes the rest
+(`EntityMore`, used by 694 of the 10 067 entities of the generated catalog,
+~7 %). Live heap of one decoded definition (`cargo test -p zdef --test ram
+-- --nocapture`, 64-bit host; 32-bit is roughly 60 % of it): average over
+the examples 6.2 KB (was 6.7 KB); the TRV ME167 13.7 KB (was 17.4 KB);
+definitions whose entities mostly use out-of-line fields (Aqara P1: struct
+bindings, `reset_after`) grow (9.7 KB, was 7.9 KB) — the catalog average
+favours the split. The decoded model is transient (spec 16.4).
 
 ### WebAssembly
 
@@ -140,16 +183,24 @@ examples is 3 898 B: 17 shared strings, 54 index keys, 2 blocks.
    differently, not only `on/off/yes/no` (spec 6.1).
 10. **Scoring** of clause shapes the table did not list (spec 3.3).
 
+11. **v1 freeze (`zdef-size`)**: closed string sets are integers (spec
+    8.3); `Entity` rare fields are out of line; configure `cmd` payloads are
+    expressions evaluated when the configure plan is built (no time
+    functions); GP scores have no extras (600 for FlowerX); `str(float)`
+    prints 15 significant digits; manufacturer-only clauses get the index key
+    `[6, manufacturer]`; shard records group a definition's keys per shard;
+    the manifest carries a content digest and the source. The catalog of
+    faronov/zigbee-rs-definitions is built by `zdefc catalog build` (its
+    provisional formats are gone).
+
 ## Open points
 
-- **Code size** is about 200 KB on the S3 for everything, versus ~42 KB
-  estimated for decoder + VM + Ed25519. Candidates: a table-driven decoder,
-  the ROM `tinfl` through the existing `bank::Inflate` trait, mbedTLS
-  SHA-256 behind a trait, static validation messages instead of `format!`.
-- **`Entity` is 472 B on 32-bit**; boxing rarely used fields would cut the
-  transient RAM of large definitions roughly in half, at the cost of an API
-  change for the engine.
-- Named codecs (6.6) are parsed, encoded and feature-gated, but their
-  byte-level implementations belong to the hub runtime.
+- **Code size**: 158 KB on the S3 for everything in the hub configuration
+  (was 200 KB), versus ~42 KB estimated for decoder + VM + Ed25519. The
+  next steps by expected gain: a borrowed (zero-copy) decoder for the
+  catalog path that does not build the owned model; a table-driven decoder
+  for simple fields (~5–8 KB); merging `resolve`'s generic-tier logic with
+  the engine's (the engine does not use `zdef::resolve`, so a hub image need
+  not link it: −17 KB today).
 - `cargo fuzz` targets are not set up; the fuzz-style tests are
   deterministic and run in CI.
