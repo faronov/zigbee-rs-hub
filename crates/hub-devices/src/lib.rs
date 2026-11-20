@@ -6,6 +6,9 @@
 //! [`transport::ZigbeeTransport`].
 
 #![warn(missing_docs)]
+// Nested `if let` reads better than let-chains in the decoders (as in zdef);
+// the handlers take the full request context.
+#![allow(clippy::collapsible_if, clippy::too_many_arguments, clippy::type_complexity, clippy::if_same_then_else)]
 
 pub mod api;
 pub mod codec;

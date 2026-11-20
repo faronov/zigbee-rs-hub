@@ -113,6 +113,9 @@ pub trait ZigbeeTransport {
 
     /// Removes a device from the network (`NWK_REMOVE_DEVICE`).
     fn remove_device(&mut self, ieee: u64) -> Result<(), TransportError>;
+
+    /// `NWK_PERMIT_JOIN` for `duration_s` (0 closes), on one router or all.
+    fn permit_join(&mut self, duration_s: u8, target: Option<u16>) -> Result<(), TransportError>;
 }
 
 /// Something the mock recorded.
@@ -126,6 +129,8 @@ pub enum Sent {
     Group(u8, u16),
     /// Device removal.
     Remove(u64),
+    /// Permit join.
+    PermitJoin(u8, Option<u16>),
 }
 
 /// Recording transport for host tests.
@@ -185,6 +190,11 @@ impl ZigbeeTransport for MockTransport {
 
     fn remove_device(&mut self, ieee: u64) -> Result<(), TransportError> {
         self.sent.push(Sent::Remove(ieee));
+        Ok(())
+    }
+
+    fn permit_join(&mut self, duration_s: u8, target: Option<u16>) -> Result<(), TransportError> {
+        self.sent.push(Sent::PermitJoin(duration_s, target));
         Ok(())
     }
 }

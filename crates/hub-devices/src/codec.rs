@@ -137,7 +137,7 @@ pub fn encode(codec: &Codec, v: &Value) -> Result<Value, CodecFailure> {
                 return Err(bad());
             }
             Ok(Value::Bytes(if matches!(codec, Codec::BcdTime) {
-                vec![(h / 10) << 4 | h % 10, (m / 10) << 4 | m % 10]
+                vec![((h / 10) << 4) | (h % 10), ((m / 10) << 4) | (m % 10)]
             } else {
                 vec![h, m]
             }))

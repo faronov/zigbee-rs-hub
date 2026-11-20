@@ -328,6 +328,23 @@ pub mod translation_action {
 /// GP requests the engine issues through the transport (ZRHP 0x0A0x).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GpRequest {
+    /// `GP_SINK_CONFIG` (0x0A01).
+    SinkConfig {
+        /// 1 NCP sink.
+        mode: u8,
+        /// Communication mode.
+        communication_mode: u8,
+        /// Group for mode 2.
+        group: u16,
+        /// Exit mode bits.
+        exit_mode: u8,
+        /// Window.
+        window_s: u16,
+        /// `gpsSecurityLevel` (0x00, D14).
+        security_level: u8,
+        /// Groupcast radius.
+        groupcast_radius: u8,
+    },
     /// `GP_SINK_COMMISSIONING` (0x0A03).
     SinkCommissioning {
         /// 1 enter, 0 exit.
@@ -388,6 +405,7 @@ impl GpRequest {
     /// ZRHP message ID.
     pub fn zrhp_id(&self) -> u16 {
         match self {
+            Self::SinkConfig { .. } => ids::GP_SINK_CONFIG,
             Self::SinkCommissioning { .. } => ids::GP_SINK_COMMISSIONING,
             Self::SinkRemove { .. } => ids::GP_SINK_REMOVE,
             Self::PairingConfiguration(_) => ids::GP_PAIRING_CONFIGURATION,
