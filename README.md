@@ -521,9 +521,16 @@ The stock table's `ota_0` (1.6 MB) holds either.
   `FW_CONFIRM`; a rolled-back update reported; the store surviving a hub
   restart; journal compaction, power cuts at every 7th programmed byte and
   a torn record.
-- Hardware: not run yet. The H2 NCP is shared (the bridge port was busy
-  with other work); `tbr-hub` has not been flashed: the bridge stays the
-  board's image until the user decides.
+- Hardware, 2026-11-20, `hubctl --read-only` on macOS through bridge 0.2.2
+  to the shared H2 NCP (quick checks only): session at 921 600 in ~15 ms,
+  `SYS_NEGOTIATE`/`SYS_GET_INFO` (fw 0.1.0, 4 MB flash, RTS/CTS), PAN 0x1C06
+  on channel 17 up, slots (0: 0x00010000 running, 1: 0x00010001 inactive),
+  frame counters; 200 `SYS_ECHO`s, mean 11.4 ms, worst 15 ms, no
+  retransmissions (the NCP's ACK arrives ~7 ms after a request over the USB
+  bridge; the host core adds < 1 ms, 0.7 ms against the simulated NCP).
+- Not run on hardware yet: NCP resets/resume, formation, joins, `FW_*`
+  (the NCP is shared), and `tbr-hub` on the S3 (not flashed: the bridge
+  stays the board's image until the user decides).
 
 ## License
 
