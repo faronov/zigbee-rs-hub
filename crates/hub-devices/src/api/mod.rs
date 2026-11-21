@@ -254,7 +254,7 @@ impl ApiServer {
         }]
     }
 
-    fn snapshot<T: ZigbeeTransport>(&self, hub: &Hub<T>, topics: &[String]) -> J {
+    fn snapshot<T: ZigbeeTransport>(&self, hub: &mut Hub<T>, topics: &[String]) -> J {
         let mut snap = json!({"topic": "snapshot"});
         if topics.iter().any(|t| t == "devices") {
             snap["devices"] = hub.devices().map(|d| d.record()).collect();
@@ -271,6 +271,9 @@ impl ApiServer {
         }
         if topics.iter().any(|t| t == "gp") {
             snap["bindings"] = J::Array(hub.list_bindings(None, None));
+        }
+        if topics.iter().any(|t| t == "network") {
+            snap["network"] = hub.transport.network_info().unwrap_or(J::Null);
         }
         snap
     }
@@ -298,6 +301,10 @@ impl ApiServer {
                 }
                 r
             }
+            R::NetworkInfo => hub
+                .transport
+                .network_info()
+                .ok_or_else(|| ApiError::new("unsupported", "no network information"))?,
             R::PermitJoin {
                 duration_s,
                 target,
@@ -785,6 +792,15 @@ impl ApiServer {
                     "events",
                     json!({"topic": "entity_event", "uid": uid, "event_type": event_type, "attributes": attributes, "time": time}),
                 ),
+                HubEvent::Network(mut body) => {
+                    if !body.is_object() {
+                        body = json!({"body": body});
+                    }
+                    if body.get("topic").is_none() {
+                        body["topic"] = "network".into();
+                    }
+                    ("network", body)
+                }
                 HubEvent::Gp { kind, mut body } => {
                     if let Some(o) = body.as_object_mut() {
                         o.insert("topic".into(), kind.into());

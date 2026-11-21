@@ -119,4 +119,61 @@ impl ZigbeeTransport for NcpTransport {
         self.ready()?;
         self.ncp.permit_join_on(duration_s, target).map_err(transport_error)
     }
+
+    fn network_info(&mut self) -> Option<serde_json::Value> {
+        Some(network_info(&self.ncp))
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `network/info`: the host core's view of the network and the NCP. EUI-64
+/// values are big-endian hex, as in device records.
+pub fn network_info(ncp: &Ncp) -> serde_json::Value {
+    use serde_json::json;
+    let st = ncp.status();
+    let be = |b: &[u8; 8]| {
+        let mut r = *b;
+        r.reverse();
+        hex(&r)
+    };
+    let mut o = json!({
+        "state": match st.network_state { 2 => "up", 1 => "formed_down", _ => "none" },
+        "session": format!("{:?}", st.session).to_lowercase(),
+        "ownership": match &st.ownership {
+            hub_ncp::Ownership::Unknown => "unknown",
+            hub_ncp::Ownership::NoNetwork => "no_network",
+            hub_ncp::Ownership::Owned => "owned",
+            hub_ncp::Ownership::Lost => "lost",
+            hub_ncp::Ownership::Mismatch(_) => "mismatch",
+            hub_ncp::Ownership::Observed => "observed",
+        },
+        "permit_join_s": ncp.permit_join_remaining(),
+    });
+    if let Some(n) = &st.network {
+        o["pan_id"] = n.pan_id.into();
+        o["ext_pan_id"] = be(&n.ext_pan_id).into();
+        o["channel"] = n.channel.into();
+        o["nwk_update_id"] = n.nwk_update_id.into();
+        o["tx_power"] = n.tx_power.into();
+    }
+    if let Some(s) = &st.ncp {
+        let mut ncp_o = json!({
+            "fw": s.negotiated.fw,
+            "protocol": format!("{}.{}", s.negotiated.major, s.negotiated.minor),
+            "chip": s.negotiated.chip,
+            "baud": s.line.baud,
+            "flow_control": s.line.flow,
+        });
+        if let Some(i) = &s.info {
+            ncp_o["ieee"] = be(&i.ieee_active).into();
+            ncp_o["flash_kib"] = (i.flash_size / 1024).into();
+            ncp_o["board"] = i.board.clone().into();
+            ncp_o["product"] = i.product.clone().into();
+        }
+        o["ncp"] = ncp_o;
+    }
+    o
 }

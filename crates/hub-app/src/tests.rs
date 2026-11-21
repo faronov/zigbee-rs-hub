@@ -222,3 +222,39 @@ fn connect_returns_before_the_hello_is_sent() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+#[test]
+fn network_info_and_permit_join_events() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let info = call(&app, sid, &rx, 1, json!({"type": "network/info"}));
+    assert_eq!(info["success"], true, "{info}");
+    let n = &info["result"];
+    assert_eq!(n["state"], "up");
+    assert_eq!(n["ownership"], "owned");
+    assert_eq!(n["pan_id"], r.sim.state().pan_id);
+    assert_eq!(n["channel"], r.sim.state().channel);
+    assert!(n["ncp"]["fw"].is_string() && n["ncp"]["ieee"].as_str().map(str::len) == Some(16), "{n}");
+    assert_eq!(n["permit_join_s"], 0);
+
+    let sub = call(&app, sid, &rx, 2, json!({"type": "subscribe", "topics": ["network"]}));
+    assert_eq!(sub["success"], true);
+    let pj = call(&app, sid, &rx, 3, json!({"type": "network/permit_join", "duration_s": 60}));
+    assert_eq!(pj["success"], true, "{pj}");
+    let ev = loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "event" && f["event"]["topic"] == "permit_join" {
+            break f;
+        }
+    };
+    assert_eq!(ev["event"]["remaining_s"], 60);
+    let info = call(&app, sid, &rx, 4, json!({"type": "network/info"}));
+    let left = info["result"]["permit_join_s"].as_u64().unwrap();
+    assert!((58..=60).contains(&left), "{left}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}

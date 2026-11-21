@@ -969,6 +969,15 @@ impl Hub {
         Ok(record)
     }
 
+    /// Seconds of open joining left: from this hub's own `permit_join`,
+    /// else the NCP's last `EVT_PERMIT_JOIN_STATE`.
+    pub fn permit_join_remaining(&self) -> u32 {
+        match *self.inner.permit_until.lock().unwrap() {
+            Some(t) => t.saturating_duration_since(Instant::now()).as_secs() as u32,
+            None => u32::from(self.status().permit_join_s),
+        }
+    }
+
     /// Open joining on the whole network (TC significance) for `secs`; the
     /// remainder is replayed after an NCP restart.
     pub fn permit_join(&self, secs: u8) -> Result<(), Error> {

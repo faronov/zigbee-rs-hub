@@ -116,6 +116,12 @@ pub trait ZigbeeTransport {
 
     /// `NWK_PERMIT_JOIN` for `duration_s` (0 closes), on one router or all.
     fn permit_join(&mut self, duration_s: u8, target: Option<u16>) -> Result<(), TransportError>;
+
+    /// Network and NCP facts for `network/info` (a JSON object; `None`:
+    /// the host core does not know them).
+    fn network_info(&mut self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Something the mock recorded.
@@ -142,6 +148,8 @@ pub struct MockTransport {
     pub next_gp_tsn: u8,
     /// Fail every send with this error.
     pub fail: Option<TransportError>,
+    /// What `network_info` returns.
+    pub network: Option<serde_json::Value>,
 }
 
 impl MockTransport {
@@ -196,5 +204,9 @@ impl ZigbeeTransport for MockTransport {
     fn permit_join(&mut self, duration_s: u8, target: Option<u16>) -> Result<(), TransportError> {
         self.sent.push(Sent::PermitJoin(duration_s, target));
         Ok(())
+    }
+
+    fn network_info(&mut self) -> Option<serde_json::Value> {
+        self.network.clone()
     }
 }

@@ -9,10 +9,10 @@ use crate::gp::bindings::{BindAction, BindTrigger, CreateBinding, ExecutorChoice
 use crate::hub::ApiError;
 
 /// API version (`major.minor`; minors only add fields and types).
-pub const API_VERSION: &str = "1.0";
+pub const API_VERSION: &str = "1.1";
 
 /// Topics of `subscribe`.
-pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp"];
+pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp", "network"];
 
 /// The first frame from the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +54,8 @@ pub enum Request {
     #[serde(rename = "hub/info")]
     HubInfo,
 
+    #[serde(rename = "network/info")]
+    NetworkInfo,
     #[serde(rename = "network/permit_join")]
     PermitJoin {
         duration_s: u8,

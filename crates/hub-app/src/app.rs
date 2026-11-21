@@ -325,6 +325,7 @@ impl Runner {
                     self.engine.on_device_joined(ieee, nwk, now);
                 }
                 Some(EngineInput::Gp(e)) => self.engine.on_gp_event(e, now),
+                Some(EngineInput::Network(body)) => self.engine.network_event(body),
                 None => {}
             },
             Input::Connect(mut sink, reply) => {

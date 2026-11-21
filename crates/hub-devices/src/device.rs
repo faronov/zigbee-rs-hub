@@ -459,6 +459,7 @@ impl Device {
         json!({
             "id": self.id,
             "ieee": ieee,
+            "nwk": self.nwk(),
             "src_id": src_id,
             "manufacturer": self.manufacturer(),
             "model": self.model(),
