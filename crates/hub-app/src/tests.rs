@@ -711,3 +711,37 @@ fn cached_network_map_is_null_before_the_first_scan() {
     assert!(r.sim.state().aps.iter().all(|p| p.get(5..7) != Some(&[0x31, 0x00])), "no scan started");
     app.shutdown();
 }
+
+#[test]
+fn large_network_map_and_full_diagnostics_are_valid_frames() {
+    use hub_ncp::sim::SimRemote;
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 15);
+    // 8 routers in a chain, each with 6 end devices.
+    let ieee = |n: u16| { let mut b = [0x77; 8]; b[..2].copy_from_slice(&n.to_le_bytes()); b };
+    r.sim.with(|s| {
+        s.neighbors = Some(vec![(ieee(0x100), 0x100, 1, 2)]);
+        s.remotes = (0..8u16)
+            .map(|i| {
+                let nwk = 0x100 + i;
+                let mut nb: Vec<_> = (0..6u16).map(|e| (ieee(0x1000 + i * 16 + e), 0x1000 + i * 16 + e, 2, 1, 100)).collect();
+                if i < 7 {
+                    nb.push((ieee(nwk + 1), nwk + 1, 1, 2, 150));
+                }
+                SimRemote { nwk, ieee: ieee(nwk), neighbors: nb, routes: vec![(0, 0, 0)] }
+            })
+            .collect();
+        s.counters = (0x0101u16..0x0119).chain(0x0201..0x0209).chain(0x0301..0x0307).map(|i| (i, 7)).collect();
+    });
+    let map = call(&app, sid, &rx, 1, json!({"type": "network/topology"}));
+    let map = ok(&map);
+    assert_eq!(map["nodes"].as_array().unwrap().len(), 1 + 8 + 48);
+    assert!(map["nodes"].as_array().unwrap().iter().filter(|n| n["type"] == "router").all(|n| n["scanned"] == true));
+    let d = call(&app, sid, &rx, 2, json!({"type": "network/diagnostics"}));
+    let d = ok(&d);
+    assert_eq!(d["counters"].as_array().unwrap().len(), 38);
+    assert!(d["counters"].as_array().unwrap().iter().any(|c| c["name"] == "mac_tx_no_ack" && c["group"] == "mac"));
+    app.shutdown();
+}

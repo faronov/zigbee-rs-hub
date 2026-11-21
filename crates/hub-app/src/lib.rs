@@ -20,6 +20,7 @@
 pub mod admin;
 pub mod app;
 pub mod catalog;
+pub mod jw;
 pub mod convert;
 pub mod ocb;
 pub mod platform;

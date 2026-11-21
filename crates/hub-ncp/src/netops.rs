@@ -126,7 +126,9 @@ impl Hub {
         let per_channel_ms = 15.36 * f64::from((1u32 << duration_exp.min(14)) + 1);
         let scan = Duration::from_millis((per_channel_ms * f64::from(channels) * f64::from(count.max(1))) as u64);
         let body = NwkEnergyScan { channel_mask, duration_exp, count: count.max(1) };
-        let confirm = Confirm { event_id: ids::EVT_ENERGY_SCAN_RESULT, tid_offset: 0, timeout: scan + Duration::from_secs(10) };
+        // The NCP measures one channel per pass between stack steps
+        // (zigbee-rs 3ad4a999), so allow twice the radio time.
+        let confirm = Confirm { event_id: ids::EVT_ENERGY_SCAN_RESULT, tid_offset: 0, timeout: scan * 2 + Duration::from_secs(15) };
         let opts = CallOpts { confirm: Some(confirm), ..CallOpts::default() };
         let outcome = self.inner.client.call_raw(NwkEnergyScan::ID, &driver::encode_body(&body)?, opts)?;
         let ev: EvtEnergyScanResult = outcome.confirm.as_ref().ok_or(Error::Codec)?.decode()?;

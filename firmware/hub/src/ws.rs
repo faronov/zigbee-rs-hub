@@ -303,6 +303,9 @@ impl SessionSink for WsSink {
     fn send(&mut self, text: &str) -> bool {
         self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_TEXT, text.as_bytes().to_vec())
     }
+    fn send_owned(&mut self, text: String) -> bool {
+        self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_TEXT, text.into_bytes())
+    }
     fn alive(&self) -> bool {
         !self.state.dead.load(Ordering::Relaxed)
             && is_current(self.hd as httpd_handle_t, self.fd, self.generation)

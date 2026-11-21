@@ -346,8 +346,30 @@ pub struct ExportSummary {
     pub complete: bool,
 }
 
-/// Write the backup file for a record stream from `BKP_EXPORT_*`.
-pub fn from_records(stream: &[u8], info: &ExportInfo) -> Result<(String, ExportSummary), String> {
+/// Why [`from_records`] failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportError {
+    /// The output buffer could not be reserved.
+    NoMemory,
+    /// The record stream is not a usable export.
+    Invalid(String),
+}
+
+impl From<String> for ExportError {
+    fn from(e: String) -> Self {
+        Self::Invalid(e)
+    }
+}
+
+impl From<&str> for ExportError {
+    fn from(e: &str) -> Self {
+        Self::Invalid(e.into())
+    }
+}
+
+/// Append the backup file for a record stream from `BKP_EXPORT_*` to
+/// `out` (its room is reserved fallibly first).
+pub fn from_records(stream: &[u8], info: &ExportInfo, out: &mut String) -> Result<ExportSummary, ExportError> {
     let mut node = None;
     let mut network = None;
     let mut nkey = None;
@@ -369,7 +391,7 @@ pub fn from_records(stream: &[u8], info: &ExportInfo) -> Result<(String, ExportS
             Ok(Record::EzspHashedTclk(s)) => seed = Some(s),
             Ok(Record::Device(d)) => devices.push(d),
             Ok(_) => {}
-            Err(e) => return Err(format!("record: {e:?}")),
+            Err(e) => return Err(format!("record: {e:?}").into()),
         }
     }
     let node = node.ok_or("no NODE record")?;
@@ -385,13 +407,13 @@ pub fn from_records(stream: &[u8], info: &ExportInfo) -> Result<(String, ExportS
             });
         }
     }
-    let mut out = String::with_capacity(1024 + 220 * devices.len());
+    out.try_reserve(1200 + 230 * devices.len()).map_err(|_| ExportError::NoMemory)?;
     let coord = be_hex(&node.ieee.0);
-    out += "{\"metadata\":{\"format\":";
-    out += &js(FORMAT);
-    out += ",\"version\":1,\"source\":";
-    out += &js(&info.source);
-    out += ",\"internal\":{";
+    *out += "{\"metadata\":{\"format\":";
+    *out += &js(FORMAT);
+    *out += ",\"version\":1,\"source\":";
+    *out += &js(&info.source);
+    *out += ",\"internal\":{";
     if let Some(t) = &info.creation_time {
         let _ = write!(out, "\"creation_time\":{},", js(t));
     }
@@ -415,9 +437,9 @@ pub fn from_records(stream: &[u8], info: &ExportInfo) -> Result<(String, ExportS
         let _ = write!(out, ",\"tx_power\":{}", network.tx_power);
     }
     if nkey.is_none() {
-        out += ",\"incomplete\":true";
+        *out += ",\"incomplete\":true";
     }
-    out += "}},\"stack_specific\":{";
+    *out += "}},\"stack_specific\":{";
     let mut first = true;
     if let Some(p) = &rs {
         let _ = write!(
@@ -455,9 +477,9 @@ pub fn from_records(stream: &[u8], info: &ExportInfo) -> Result<(String, ExportS
                 k.tx_counter
             );
         }
-        None => out += "null",
+        None => *out += "null",
     }
-    out += ",\"devices\":[";
+    *out += ",\"devices\":[";
     let mut summary = ExportSummary { devices: devices.len(), link_keys: 0, complete: nkey.is_some() };
     for (i, d) in devices.iter().enumerate() {
         if i > 0 {
@@ -482,8 +504,8 @@ pub fn from_records(stream: &[u8], info: &ExportInfo) -> Result<(String, ExportS
         }
         out.push('}');
     }
-    out += "]}";
-    Ok((out, summary))
+    *out += "]}";
+    Ok(summary)
 }
 
 /// RFC 3339 UTC time of a Unix timestamp (s); `None` before 2020 (the
@@ -606,7 +628,8 @@ mod tests {
             ncp_build_id: "5151515151515151".into(),
             host_devices: vec![([9; 8], Some(0x1234)), (r.devices[0].0, Some(0x4D32))],
         };
-        let (text, summary) = from_records(&r.stream, &info).unwrap();
+        let mut text = String::new();
+        let summary = from_records(&r.stream, &info, &mut text).unwrap();
         assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true });
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["metadata"]["internal"]["creation_time"], "2023-11-14T22:13:20+00:00");
@@ -633,7 +656,8 @@ mod tests {
             .filter(|(t, _)| *t != record_type::NETWORK_KEY && *t != record_type::TC_LINK_KEY)
             .flat_map(|(_, tlv)| tlv.to_vec())
             .collect();
-        let (text, summary) = from_records(&stream, &ExportInfo::default()).unwrap();
+        let mut text = String::new();
+        let summary = from_records(&stream, &ExportInfo::default(), &mut text).unwrap();
         assert!(!summary.complete);
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["network_key"], J::Null);

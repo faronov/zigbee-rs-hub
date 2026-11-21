@@ -22,6 +22,7 @@ use serde_json::{Value as J, json};
 use zigbee_zrhp::msg::system::caps;
 use zigbee_zrhp::types::Status;
 
+use crate::jw::{Jw, oom};
 use crate::ocb;
 use crate::platform::Platform;
 use crate::topology::{self, Known, ScanOpts};
@@ -47,8 +48,11 @@ pub const TYPES: &[&str] = &[
 
 /// Host store key of the last complete backup (OCB text).
 pub const LAST_BACKUP_KEY: &str = "bkp/last";
-/// Largest backup accepted by `network/restore` (chunked).
-pub const MAX_RESTORE_BYTES: usize = 256 * 1024;
+/// Largest backup accepted by `network/restore` (chunked; the buffer is
+/// reserved fallibly, a hub without PSRAM may refuse less).
+pub const MAX_RESTORE_BYTES: usize = 128 * 1024;
+/// Network maps up to this size are kept for `refresh: false`.
+const MAX_CACHED_MAP: usize = 8 * 1024;
 
 /// `id` and `type` of a request this module handles.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -147,19 +151,26 @@ fn frame(id: u64, r: Result<J, ApiError>) -> String {
     .to_text()
 }
 
-/// A result frame around JSON text the caller already produced.
-fn raw_frame(id: u64, json_text: &str) -> String {
-    format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{json_text}}}")
+/// A result frame around JSON text the caller already produced (one copy).
+fn raw_frame(id: u64, json_text: &str) -> Result<String, ApiError> {
+    let mut w = Jw::result(id, json_text.len() + 64)?;
+    w.raw(json_text);
+    w.finish()
+}
+
+/// The result value inside a frame written by [`Jw::result`].
+fn result_part(frame: &str) -> &str {
+    frame.find("\"result\":").map_or("null", |i| &frame[i + 9..frame.len() - 1])
 }
 
 type Job = Box<dyn FnOnce(&Out) -> Result<Reply, ApiError> + Send>;
 
 /// Result of a job.
 pub enum Reply {
-    /// A JSON value.
+    /// A small JSON value.
     Json(J),
-    /// JSON text (large results: backups, maps).
-    Raw(String),
+    /// A complete result frame written with [`Jw`] (large results).
+    Frame(String),
 }
 
 /// Centre frequency (MHz) of a 2.4 GHz Wi-Fi channel.
@@ -207,23 +218,63 @@ pub fn recommend(scan: &[EnergyChannel], wifi: Option<u8>) -> (Option<u8>, Vec<(
     (best, scored)
 }
 
-fn counter_name(id: u16) -> String {
-    const LINK: [&str; 28] = [
-        "", "tx_frames", "tx_bytes", "tx_retransmissions", "tx_rto_expiries", "tx_rejected", "tx_blocked_credit_ms",
-        "tx_blocked_window_ms", "tx_discarded_no_host", "naks_sent", "naks_received", "sessions_established",
-        "link_down_events", "", "", "", "", "rx_frames", "rx_bytes", "rx_bad_frame", "rx_duplicate", "rx_out_of_order",
-        "rx_epoch_mismatch", "rx_not_in_session", "rx_rejected_sent", "rx_overflow", "rx_stale_reset", "peer_restarted",
-    ];
-    let name = match id >> 8 {
-        0x01 if id == 0x011C => "peer_resync",
-        0x01 => LINK.get(usize::from(id & 0xFF)).copied().unwrap_or(""),
-        0x07 => ["", "aps_queue_high_water", "busy_responses", "indications_dropped", "log_dropped", "bad_batches"]
-            .get(usize::from(id & 0xFF))
-            .copied()
-            .unwrap_or(""),
-        _ => "",
-    };
-    if name.is_empty() { format!("0x{id:04X}") } else { name.to_string() }
+/// Counter names (ZRHP 5.12 link counters, 7.8 registry).
+const COUNTER_NAMES: &[(u16, &str)] = &[
+    (0x0101, "tx_frames"),
+    (0x0102, "tx_bytes"),
+    (0x0103, "tx_retransmissions"),
+    (0x0104, "tx_rto_expiries"),
+    (0x0105, "tx_rejected"),
+    (0x0106, "tx_blocked_credit_ms"),
+    (0x0107, "tx_blocked_window_ms"),
+    (0x0108, "tx_discarded_no_host"),
+    (0x0109, "naks_sent"),
+    (0x010A, "naks_received"),
+    (0x010B, "sessions_established"),
+    (0x010C, "link_down_events"),
+    (0x0111, "rx_frames"),
+    (0x0112, "rx_bytes"),
+    (0x0113, "rx_bad_frame"),
+    (0x0114, "rx_duplicate"),
+    (0x0115, "rx_out_of_order"),
+    (0x0116, "rx_epoch_mismatch"),
+    (0x0117, "rx_not_in_session"),
+    (0x0118, "rx_rejected_sent"),
+    (0x0119, "rx_overflow"),
+    (0x011A, "rx_stale_reset"),
+    (0x011B, "peer_restarted"),
+    (0x011C, "peer_resync"),
+    (0x0201, "mac_tx"),
+    (0x0202, "mac_tx_ack_requested"),
+    (0x0203, "mac_tx_no_ack"),
+    (0x0204, "mac_tx_errors"),
+    (0x0205, "mac_tx_deferred"),
+    (0x0206, "mac_data_requests"),
+    (0x0207, "frame_pending_acks"),
+    (0x0208, "mac_ack_stall_recoveries"),
+    (0x0301, "nwk_secured_rx"),
+    (0x0302, "nwk_decrypt_failures"),
+    (0x0303, "nwk_missing_key"),
+    (0x0304, "nwk_replay_rejects"),
+    (0x0305, "replay_table_full"),
+    (0x0306, "nwk_security_header_errors"),
+    (0x0401, "aps_tx"),
+    (0x0402, "aps_tx_failed"),
+    (0x0403, "aps_rx"),
+    (0x0501, "joins_admitted"),
+    (0x0502, "joins_denied"),
+    (0x0503, "devices_authorized"),
+    (0x0504, "authorization_failures"),
+    (0x0505, "devices_left"),
+    (0x0701, "aps_queue_high_water"),
+    (0x0702, "busy_responses"),
+    (0x0703, "indications_dropped"),
+    (0x0704, "log_dropped"),
+    (0x0705, "bad_batches"),
+];
+
+fn counter_name(id: u16) -> Option<&'static str> {
+    COUNTER_NAMES.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
 }
 
 fn group_name(id: u16) -> &'static str {
@@ -423,9 +474,23 @@ fn mask_of(channels: &[u8]) -> Result<u32, ApiError> {
     })
 }
 
-/// Export (keys optional) and render the OCB file; complete backups are
-/// also kept in the host store.
-fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64) -> Result<(String, ocb::ExportSummary), ApiError> {
+/// A backup: the result frame of request `id` holding the OCB file, and
+/// where the file is inside it.
+struct Backup {
+    frame: String,
+    file: std::ops::Range<usize>,
+}
+
+impl Backup {
+    fn file(&self) -> &str {
+        &self.frame[self.file.clone()]
+    }
+}
+
+/// Export (keys optional) and write the OCB file straight into a result
+/// frame (one buffer, reserved fallibly); complete backups are also kept in
+/// the host store.
+fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
     let stream = ncp.backup_export(keys).map_err(|e| ncp_error("backup export", e))?;
     let session = ncp.client().session();
     let info = ocb::ExportInfo {
@@ -436,13 +501,24 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64)
         ncp_build_id: session.as_ref().map(|s| hex(&s.negotiated.build_id)).unwrap_or_default(),
         host_devices: known.iter().map(|k| (k.ieee.to_le_bytes(), k.nwk)).collect(),
     };
-    let (text, summary) = ocb::from_records(&stream, &info).map_err(|e| ApiError::new("failed", e))?;
+    let mut frame = Jw::result(id, 0)?.finish()?;
+    frame.pop();
+    let start = frame.len();
+    let summary = ocb::from_records(&stream, &info, &mut frame).map_err(|e| match e {
+        ocb::ExportError::NoMemory => oom(),
+        ocb::ExportError::Invalid(e) => ApiError::new("failed", e),
+    })?;
+    drop(stream);
+    let end = frame.len();
+    frame.try_reserve(1).map_err(|_| oom())?;
+    frame.push('}');
+    let b = Backup { frame, file: start..end };
     if summary.complete {
-        ncp.with_store(|s| s.kv_put(LAST_BACKUP_KEY, text.as_bytes()))
+        ncp.with_store(|s| s.kv_put(LAST_BACKUP_KEY, b.file().as_bytes()))
             .map_err(|e| ApiError::new("failed", format!("backup not stored: {e}")))?;
     }
     info!("admin: backup taken ({} devices, {} link keys, complete {})", summary.devices, summary.link_keys, summary.complete);
-    Ok((text, summary))
+    Ok(b)
 }
 
 impl Admin {
@@ -487,12 +563,18 @@ impl Admin {
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
             "hub/mode/set" => self.mode(&v),
             "network/backup/last" => {
-                let last = ctx.ncp.with_store(|s| s.kv_get(LAST_BACKUP_KEY).map(|b| String::from_utf8_lossy(b).into_owned()));
-                return vec![raw_frame(id, &format!("{{\"backup\":{}}}", last.as_deref().unwrap_or("null")))];
+                let r = ctx.ncp.with_store(|s| {
+                    let last = s.kv_get(LAST_BACKUP_KEY).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
+                    let mut w = Jw::result(id, last.len() + 80)?;
+                    w.obj().key("backup").raw(last).end_obj();
+                    w.finish()
+                });
+                return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
             }
             "network/topology" => match TopologyReq::from(&v) {
                 Ok(q) if !q.refresh => {
-                    return vec![raw_frame(id, self.topology.as_deref().unwrap_or("null"))];
+                    let r = raw_frame(id, self.topology.as_deref().map_or("null", result_part));
+                    return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
                 }
                 Ok(q) => return self.job_topology(ctx, sid, id, q),
                 Err(e) => Err(e),
@@ -609,7 +691,7 @@ impl Admin {
             drop(done);
             let text = match r {
                 Ok(Reply::Json(v)) => frame(id, Ok(v)),
-                Ok(Reply::Raw(t)) => raw_frame(id, &t),
+                Ok(Reply::Frame(t)) => t,
                 Err(e) => {
                     warn!("admin: {name}: {}", e.message);
                     frame(id, Err(e))
@@ -652,20 +734,25 @@ impl Admin {
                     let scan = ncp.energy_scan(mask, duration, count).map_err(|e| ncp_error("energy scan", e))?;
                     let (best, scored) = recommend(&scan, wifi);
                     let current = ncp.status().network.map(|n| n.channel);
-                    let channels: Vec<J> = scan
-                        .iter()
-                        .zip(&scored)
-                        .map(|(c, (_, overlap, score))| {
-                            json!({"channel": c.channel, "energy": c.energy, "max_rssi_dbm": c.max_rssi_dbm, "wifi_overlap": overlap, "score": score})
-                        })
-                        .collect();
-                    Ok(Reply::Json(json!({
-                        "channels": channels,
-                        "current": current,
-                        "wifi_channel": wifi,
-                        "recommended": best,
-                        "duration_ms": t.elapsed().as_millis() as u64,
-                    })))
+                    let mut w = Jw::result(id, 160 + 90 * scan.len())?;
+                    w.obj().key("channels").arr();
+                    for (c, (_, overlap, score)) in scan.iter().zip(&scored) {
+                        w.obj().key("channel").num(c.channel).key("energy").num(c.energy).key("max_rssi_dbm").num(c.max_rssi_dbm);
+                        w.key("wifi_overlap").num(overlap).key("score").num(score).end_obj();
+                    }
+                    w.end_arr();
+                    let opt = |w: &mut Jw, k: &str, v: Option<u8>| {
+                        w.key(k);
+                        match v {
+                            Some(v) => w.num(v),
+                            None => w.null(),
+                        };
+                    };
+                    opt(&mut w, "current", current);
+                    opt(&mut w, "wifi_channel", wifi);
+                    opt(&mut w, "recommended", best);
+                    w.key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
+                    Ok(Reply::Frame(w.finish()?))
                 })
             }
             "network/change_channel" => {
@@ -699,7 +786,7 @@ impl Admin {
                     Err(e) => return fail(e),
                 };
                 let groups = q.groups.unwrap_or(0xFF);
-                self.spawn("diagnostics", out, sid, id, move |_| Ok(Reply::Json(diagnostics(&ncp, groups, q.reset))))
+                self.spawn("diagnostics", out, sid, id, move |_| diagnostics(&ncp, groups, q.reset, id).map(Reply::Frame))
             }
             "network/backup" => {
                 let q = match BackupReq::from(v) {
@@ -716,7 +803,7 @@ impl Admin {
                 let source = self.source.clone();
                 let now_s = ctx.now_s;
                 self.spawn("backup", out, sid, id, move |_| {
-                    take_backup(&ncp, q.keys, &known, &source, now_s).map(|(text, _)| Reply::Raw(text))
+                    take_backup(&ncp, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame))
                 })
             }
             "network/reset" => self.reset(ctx, sid, id, v),
@@ -733,9 +820,14 @@ impl Admin {
             let mut progress = |scanned: usize, queued: usize| {
                 out(JobOut::Event(json!({"topic": "topology_progress", "scanned": scanned, "queued": queued})));
             };
-            let map = topology::scan(&ncp, &known, opts, now_s, &mut progress).to_string();
-            out(JobOut::Topology(map.clone()));
-            Ok(Reply::Raw(map))
+            let map = topology::scan(&ncp, &known, opts, now_s, id, &mut progress)?;
+            // Kept for `refresh: false` unless it is large (RAM).
+            if map.len() <= MAX_CACHED_MAP
+                && let Ok(copy) = raw_frame(0, result_part(&map))
+            {
+                out(JobOut::Topology(copy));
+            }
+            Ok(Reply::Frame(map))
         })
     }
 
@@ -754,7 +846,12 @@ impl Admin {
                     return fail(bad(format!("total: 1–{MAX_RESTORE_BYTES} bytes")));
                 }
                 if offset == 0 {
-                    self.restore_buf = Some((total, String::with_capacity(total)));
+                    self.restore_buf = None;
+                    let mut b = String::new();
+                    if b.try_reserve_exact(total).is_err() {
+                        return fail(oom());
+                    }
+                    self.restore_buf = Some((total, b));
                 }
                 let Some((want, buf)) = self.restore_buf.as_mut().filter(|(t, b)| *t == total && b.len() == offset) else {
                     self.restore_buf = None;
@@ -804,28 +901,26 @@ impl Admin {
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
             let mut previous = false;
             if ncp.status().network_state == 2 && !skip_backup {
-                take_backup(&ncp, true, &known, &source, now_s).map_err(|e| {
+                drop(take_backup(&ncp, true, &known, &source, now_s, id).map_err(|e| {
                     ApiError::new(&e.code, format!("automatic backup before the restore failed ({}); set skip_backup to restore anyway", e.message))
-                })?;
+                })?);
                 previous = true;
             }
             let report = ncp.backup_restore(&restore.stream, opts).map_err(|e| ncp_error("restore", e))?;
             out(JobOut::Reimport);
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "restored"})));
             let note = |n: u8| ["", "host_backed", "child_demoted", "ignored", "floor_raised"].get(usize::from(n)).copied().unwrap_or("unknown");
-            Ok(Reply::Json(json!({
-                "pan_id": restore.pan_id,
-                "channel": restore.channel,
-                "coordinator_ieee": be_hex(&restore.coordinator_ieee),
-                "devices": restore.devices.len(),
-                "nwk_fc_start": report.nwk_fc_start,
-                "aps_fc_start": report.aps_fc_start,
-                "link_keys_on_ncp": report.link_keys_on_ncp,
-                "link_keys_host_backed": report.link_keys_host_backed,
-                "children": report.children,
-                "notes": report.notes.iter().map(|(i, n)| json!({"index": i, "note": note(*n)})).collect::<Vec<_>>(),
-                "previous_network_backed_up": previous,
-            })))
+            let mut w = Jw::result(id, 400 + 40 * report.notes.len())?;
+            w.obj().key("pan_id").num(restore.pan_id).key("channel").num(restore.channel);
+            w.key("coordinator_ieee").str(&be_hex(&restore.coordinator_ieee)).key("devices").num(restore.devices.len());
+            w.key("nwk_fc_start").num(report.nwk_fc_start).key("aps_fc_start").num(report.aps_fc_start);
+            w.key("link_keys_on_ncp").num(report.link_keys_on_ncp).key("link_keys_host_backed").num(report.link_keys_host_backed);
+            w.key("children").num(report.children).key("notes").arr();
+            for (i, n) in &report.notes {
+                w.obj().key("index").num(i).key("note").str(note(*n)).end_obj();
+            }
+            w.end_arr().key("previous_network_backed_up").num(previous).end_obj();
+            Ok(Reply::Frame(w.finish()?))
         })
     }
 
@@ -877,10 +972,10 @@ impl Admin {
             let st = ncp.status();
             if st.network_state != 0 {
                 if st.network_state == 2 && !skip_backup {
-                    let (text, _) = take_backup(&ncp, true, &known, &source, now_s).map_err(|e| {
+                    let b = take_backup(&ncp, true, &known, &source, now_s, id).map_err(|e| {
                         ApiError::new(&e.code, format!("automatic backup failed ({}); nothing was changed; set skip_backup to reset anyway", e.message))
                     })?;
-                    backup = Some(text);
+                    backup = Some(b);
                 }
                 ncp.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
             }
@@ -899,13 +994,12 @@ impl Admin {
             }
             out(JobOut::Reimport);
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "formed"})));
-            let network = format!(
-                "{{\"pan_id\":{},\"ext_pan_id\":\"{}\",\"channel\":{}}}",
-                net.pan_id,
-                be_hex(&net.ext_pan_id),
-                net.channel
-            );
-            Ok(Reply::Raw(format!("{{\"network\":{network},\"backup\":{}}}", backup.as_deref().unwrap_or("null"))))
+            let file = backup.as_ref().map_or("null", |b| b.file());
+            let mut w = Jw::result(id, file.len() + 160)?;
+            w.obj().key("network").obj().key("pan_id").num(net.pan_id).key("ext_pan_id").str(&be_hex(&net.ext_pan_id));
+            w.key("channel").num(net.channel).end_obj().key("backup").raw(file).end_obj();
+            drop(backup);
+            Ok(Reply::Frame(w.finish()?))
         })
     }
 
@@ -915,72 +1009,77 @@ impl Admin {
     }
 }
 
-fn diagnostics(ncp: &Ncp, groups: u8, reset: bool) -> J {
-    let mut unsupported = Vec::new();
+fn diagnostics(ncp: &Ncp, groups: u8, reset: bool, id: u64) -> Result<String, ApiError> {
+    let mut unsupported: Vec<&str> = Vec::new();
     let mut errors = Vec::new();
-    let mut note = |what: &str, e: Error| match e {
-        Error::Status(Status::UnsupportedCommand) => unsupported.push(what.to_string()),
+    let mut note = |what: &'static str, e: Error| match e {
+        Error::Status(Status::UnsupportedCommand) => unsupported.push(what),
         e => errors.push(format!("{what}: {e}")),
     };
     if reset && let Err(e) = ncp.diag_reset_counters(groups) {
         note("DIAG_RESET_COUNTERS", e);
     }
-    let counters: Vec<J> = match ncp.diag_counters(groups) {
-        Ok(list) => list
-            .iter()
-            .map(|(id, v)| json!({"id": format!("0x{id:04X}"), "group": group_name(*id), "name": counter_name(*id), "value": v}))
-            .collect(),
-        Err(e) => {
-            note("DIAG_GET_COUNTERS", e);
-            Vec::new()
+    let counters = ncp.diag_counters(groups).unwrap_or_else(|e| {
+        note("DIAG_GET_COUNTERS", e);
+        Vec::new()
+    });
+    let status = ncp.ncp_status().map_err(|e| note("SYS_GET_STATUS", e)).ok();
+    let fc = ncp.frame_counters().map_err(|e| note("SEC_GET_FRAME_COUNTERS", e)).ok();
+    let host = ncp.client().counters().entries();
+    let mut w = Jw::result(id, 700 + 75 * counters.len() + 50 * host.len())?;
+    w.obj().key("ncp");
+    match &status {
+        Some(s) => {
+            w.obj().key("network_state").num(s.network_state).key("uptime_s").num(s.uptime_s);
+            w.key("free_aps_slots").num(s.free_aps_slots).key("host_absent_queue").num(s.host_absent_queue);
+            w.key("dirty_writebacks").num(s.dirty_writebacks).key("restore_in_progress").num(s.restore_in_progress != 0);
+            for (bit, k) in [(0x01, "key_export_locked"), (0x02, "paging_active"), (0x04, "pta_coex"), (0x08, "gp_commissioning"), (0x10, "permit_join")] {
+                w.key(k).num(s.flags & bit != 0);
+            }
+            w.end_obj()
         }
+        None => w.null(),
     };
-    let status = match ncp.ncp_status() {
-        Ok(s) => json!({
-            "network_state": s.network_state,
-            "uptime_s": s.uptime_s,
-            "free_aps_slots": s.free_aps_slots,
-            "host_absent_queue": s.host_absent_queue,
-            "dirty_writebacks": s.dirty_writebacks,
-            "restore_in_progress": s.restore_in_progress != 0,
-            "key_export_locked": s.flags & 0x01 != 0,
-            "paging_active": s.flags & 0x02 != 0,
-            "pta_coex": s.flags & 0x04 != 0,
-            "gp_commissioning": s.flags & 0x08 != 0,
-            "permit_join": s.flags & 0x10 != 0,
-        }),
-        Err(e) => {
-            note("SYS_GET_STATUS", e);
-            J::Null
+    let mut hexid = String::new();
+    w.key("counters").arr();
+    for (cid, v) in &counters {
+        hexid.clear();
+        let _ = std::fmt::Write::write_fmt(&mut hexid, format_args!("0x{cid:04X}"));
+        w.obj().key("id").str(&hexid).key("group").str(group_name(*cid));
+        w.key("name").str(counter_name(*cid).unwrap_or(&hexid)).key("value").num(v).end_obj();
+    }
+    w.end_arr().key("frame_counters");
+    match &fc {
+        Some(f) => {
+            w.obj().key("nwk").num(f.nwk_current).key("nwk_limit").num(f.nwk_limit).key("aps").num(f.aps_current);
+            w.key("aps_limit").num(f.aps_limit).key("stride").num(f.stride).end_obj()
         }
+        None => w.null(),
     };
-    let fc = match ncp.frame_counters() {
-        Ok(f) => json!({"nwk": f.nwk_current, "nwk_limit": f.nwk_limit, "aps": f.aps_current, "aps_limit": f.aps_limit, "stride": f.stride}),
-        Err(e) => {
-            note("SEC_GET_FRAME_COUNTERS", e);
-            J::Null
-        }
+    w.key("host_link").arr();
+    for (cid, v) in host.iter().filter(|(_, v)| *v != 0) {
+        w.obj().key("name").str(counter_name(*cid).unwrap_or("?")).key("value").num(v).end_obj();
+    }
+    w.end_arr().key("pta").obj().key("capable").num(ncp.ncp_has(caps::PTA_COEX)).key("enabled");
+    match &status {
+        Some(s) => w.num(s.flags & 0x04 != 0),
+        None => w.null(),
     };
-    let host: Vec<J> = ncp
-        .client()
-        .counters()
-        .entries()
-        .iter()
-        .filter(|(_, v)| *v != 0)
-        .map(|(id, v)| json!({"name": counter_name(*id), "value": v}))
-        .collect();
-    let pta_capable = ncp.ncp_has(caps::PTA_COEX);
-    let pta_enabled = status.get("pta_coex").and_then(J::as_bool);
-    json!({
-        "ncp": status,
-        "counters": counters,
-        "frame_counters": fc,
-        "host_link": host,
-        "pta": {"capable": pta_capable, "enabled": pta_enabled},
-        "tx_power_set": ncp.stored_tx_power(),
-        "unsupported": unsupported,
-        "errors": errors,
-    })
+    w.end_obj().key("tx_power_set");
+    match ncp.stored_tx_power() {
+        Some(p) => w.num(p),
+        None => w.null(),
+    };
+    w.key("unsupported").arr();
+    for u in &unsupported {
+        w.str(u);
+    }
+    w.end_arr().key("errors").arr();
+    for e in &errors {
+        w.str(e);
+    }
+    w.end_arr().end_obj();
+    w.finish()
 }
 
 #[cfg(test)]
@@ -1012,11 +1111,13 @@ mod tests {
 
     #[test]
     fn counter_names() {
-        assert_eq!(counter_name(0x0101), "tx_frames");
-        assert_eq!(counter_name(0x0113), "rx_bad_frame");
-        assert_eq!(counter_name(0x011C), "peer_resync");
-        assert_eq!(counter_name(0x0702), "busy_responses");
-        assert_eq!(counter_name(0x0805), "0x0805");
+        assert_eq!(counter_name(0x0101), Some("tx_frames"));
+        assert_eq!(counter_name(0x0113), Some("rx_bad_frame"));
+        assert_eq!(counter_name(0x011C), Some("peer_resync"));
+        assert_eq!(counter_name(0x0702), Some("busy_responses"));
+        assert_eq!(counter_name(0x0203), Some("mac_tx_no_ack"));
+        assert_eq!(counter_name(0x0505), Some("devices_left"));
+        assert_eq!(counter_name(0x0805), None);
         assert_eq!(group_name(0x0805), "gp");
     }
 

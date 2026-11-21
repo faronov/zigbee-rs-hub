@@ -36,6 +36,12 @@ pub trait SessionSink: Send {
     /// Send one text frame.
     fn send(&mut self, text: &str) -> bool;
 
+    /// Send one frame the caller no longer needs (large results): a sink
+    /// that queues frames takes the buffer instead of copying it.
+    fn send_owned(&mut self, text: String) -> bool {
+        self.send(&text)
+    }
+
     /// Whether the connection still exists. Checked every second, so a
     /// connection that went away silently (no close notification, no frame
     /// to fail on) does not keep its session.
@@ -414,7 +420,14 @@ impl Runner {
                 self.api.disconnect(sid);
             }
             Input::Admin(out) => match out {
-                JobOut::Reply(sid, frame) => self.send(sid, &frame),
+                JobOut::Reply(sid, frame) => {
+                    if let Some(sink) = self.sinks.get_mut(&sid)
+                        && !sink.send_owned(frame)
+                    {
+                        self.sinks.remove(&sid);
+                        self.api.disconnect(sid);
+                    }
+                }
                 JobOut::Event(body) => self.engine.network_event(body),
                 JobOut::Topology(map) => self.admin.topology = Some(map),
                 JobOut::Reimport => {

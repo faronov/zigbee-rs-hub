@@ -12,7 +12,9 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use hub_ncp::{Hub as Ncp, Message};
-use serde_json::{Value as J, json};
+use hub_devices::hub::ApiError;
+
+use crate::jw::Jw;
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication};
 use zigbee_zrhp::msg::ids;
 
@@ -222,14 +224,25 @@ impl Zdo<'_> {
     }
 }
 
-fn add_link(links: &mut Vec<J>, from: u16, e: &NeighborEntry) {
-    links.push(json!({
-        "source": from,
-        "target": e.nwk,
-        "lqi": e.lqi,
-        "relationship": RELATIONS[usize::from(e.relationship & 7)],
-        "depth": e.depth,
-    }));
+/// A link as `source` reports it.
+struct Link {
+    source: u16,
+    target: u16,
+    lqi: Option<u8>,
+    relationship: u8,
+    depth: Option<u8>,
+}
+
+/// A routing-table entry of `source`.
+struct RouteRow {
+    source: u16,
+    dst: u16,
+    next_hop: u16,
+    status: u8,
+}
+
+fn add_link(links: &mut Vec<Link>, from: u16, e: &NeighborEntry) {
+    links.push(Link { source: from, target: e.nwk, lqi: Some(e.lqi), relationship: e.relationship, depth: e.depth });
 }
 
 /// Record what a neighbour entry says about a node; queue unscanned routers.
@@ -255,11 +268,20 @@ struct Node {
 }
 
 /// Scan the network. `progress(scanned, queued)` after every router.
-pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> J {
+/// The map is written straight into the result frame of request `id`
+/// (structs while scanning, no JSON tree: RAM).
+pub fn scan(
+    ncp: &Ncp,
+    known: &[Known],
+    opts: ScanOpts,
+    now_s: f64,
+    id: u64,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<String, ApiError> {
     let started = Instant::now();
     let mut nodes: BTreeMap<u16, Node> = BTreeMap::new();
-    let mut links: Vec<J> = Vec::new();
-    let mut routes: Vec<J> = Vec::new();
+    let mut links: Vec<Link> = Vec::new();
+    let mut routes: Vec<RouteRow> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let coord_ieee = ncp.client().session().and_then(|s| s.info.as_ref().map(|i| i.ieee_active));
     nodes.insert(0, Node { ieee: coord_ieee, device_type: Some(0), scanned: true, error: None });
@@ -288,8 +310,8 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
                 let n = nodes.entry(c.nwk).or_default();
                 n.ieee.get_or_insert(c.ieee.0);
                 n.device_type.get_or_insert(if c.capability & 0x02 != 0 { 1 } else { 2 });
-                if !links.iter().any(|l| l["source"] == 0 && l["target"] == c.nwk) {
-                    links.push(json!({"source": 0, "target": c.nwk, "lqi": null, "relationship": "child", "depth": null}));
+                if !links.iter().any(|l| l.source == 0 && l.target == c.nwk) {
+                    links.push(Link { source: 0, target: c.nwk, lqi: None, relationship: 1, depth: None });
                 }
             }
         }
@@ -297,9 +319,7 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
     }
     if opts.routes {
         match ncp.coordinator_routes() {
-            Ok(list) => routes.extend(list.iter().map(|r| {
-                json!({"source": 0, "dst": r.dst, "next_hop": r.next_hop, "status": ROUTE_STATUS[usize::from(r.status & 7)]})
-            })),
+            Ok(list) => routes.extend(list.iter().map(|r| RouteRow { source: 0, dst: r.dst, next_hop: r.next_hop, status: r.status })),
             Err(e) => notes.push(format!("coordinator routes: {e}")),
         }
     }
@@ -335,9 +355,7 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
         }
         if opts.routes && nodes.get(&nwk).is_some_and(|n| n.scanned) {
             match zdo.routes(nwk) {
-                Ok(list) => routes.extend(list.iter().map(|r| {
-                    json!({"source": nwk, "dst": r.dst, "next_hop": r.next_hop, "status": ROUTE_STATUS[usize::from(r.status & 7)]})
-                })),
+                Ok(list) => routes.extend(list.iter().map(|r| RouteRow { source: nwk, dst: r.dst, next_hop: r.next_hop, status: r.status })),
                 Err(e) => notes.push(format!("routes of 0x{nwk:04X}: {e}")),
             }
         }
@@ -346,29 +364,45 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
 
     let by_ieee: BTreeMap<[u8; 8], &Known> = known.iter().map(|k| (k.ieee.to_le_bytes(), k)).collect();
     let by_nwk: BTreeMap<u16, &Known> = known.iter().filter_map(|k| Some((k.nwk?, k))).collect();
-    let nodes: Vec<J> = nodes
-        .iter()
-        .map(|(nwk, n)| {
-            let k = n.ieee.and_then(|i| by_ieee.get(&i)).or_else(|| by_nwk.get(nwk)).copied();
-            json!({
-                "nwk": nwk,
-                "ieee": n.ieee.as_ref().map(be),
-                "type": TYPES[usize::from(n.device_type.unwrap_or(3).min(3))],
-                "device": k.map(|k| k.id.clone()),
-                "name": k.and_then(|k| k.name.clone()),
-                "scanned": n.scanned,
-                "error": n.error,
-            })
-        })
-        .collect();
-    json!({
-        "time": now_s,
-        "duration_ms": started.elapsed().as_millis() as u64,
-        "nodes": nodes,
-        "links": links,
-        "routes": routes,
-        "notes": notes,
-    })
+    let mut w = Jw::result(id, 256 + 150 * nodes.len() + 90 * links.len() + 70 * routes.len())?;
+    w.obj().key("time").num(now_s).key("duration_ms").num(started.elapsed().as_millis() as u64);
+    w.key("nodes").arr();
+    for (nwk, n) in &nodes {
+        let k = n.ieee.and_then(|i| by_ieee.get(&i)).or_else(|| by_nwk.get(nwk)).copied();
+        w.obj().key("nwk").num(nwk);
+        w.opt_str("ieee", n.ieee.as_ref().map(be).as_deref());
+        w.key("type").str(TYPES[usize::from(n.device_type.unwrap_or(3).min(3))]);
+        w.opt_str("device", k.map(|k| k.id.as_str()));
+        w.opt_str("name", k.and_then(|k| k.name.as_deref()));
+        w.key("scanned").num(n.scanned);
+        w.opt_str("error", n.error.as_deref());
+        w.end_obj();
+    }
+    w.end_arr().key("links").arr();
+    for l in &links {
+        w.obj().key("source").num(l.source).key("target").num(l.target).key("lqi");
+        match l.lqi {
+            Some(q) => w.num(q),
+            None => w.null(),
+        };
+        w.key("relationship").str(RELATIONS[usize::from(l.relationship & 7)]).key("depth");
+        match l.depth {
+            Some(d) => w.num(d),
+            None => w.null(),
+        };
+        w.end_obj();
+    }
+    w.end_arr().key("routes").arr();
+    for r in &routes {
+        w.obj().key("source").num(r.source).key("dst").num(r.dst).key("next_hop").num(r.next_hop);
+        w.key("status").str(ROUTE_STATUS[usize::from(r.status & 7)]).end_obj();
+    }
+    w.end_arr().key("notes").arr();
+    for n in &notes {
+        w.str(n);
+    }
+    w.end_arr().end_obj();
+    w.finish()
 }
 
 #[cfg(test)]
