@@ -1905,20 +1905,24 @@ Manufacturer-specific frames (no example device uses them yet; illustrative):
 |---|---|---|
 | `gp/commissioning/open {duration_s ≤ 600, involve_proxies: true, exit_on_first_pairing: false}` | `GP_SINK_COMMISSIONING{action 1, flags, window_s}` | also offered from the "permit join" dialog, as zigpy does (`NWK_PERMIT_JOIN` + GP window) |
 | `gp/commissioning/close` | `GP_SINK_COMMISSIONING{action 0}` | |
-| event `gp/commissioning` | `EVT_GP_COMMISSIONING` | state, remaining time, exit reason |
-| event `gp/pending` | `EVT_GP_FRAME` with `command_id` 0xE0/0xE3 (`result` 3 or 5) | a GPD is commissioning (bidirectional steps in progress) |
+| `gp/commissioning/status` (API 1.2) | hub state | `{open, state, remaining_s, involve_proxies, exit_on_first_pairing, exit_reason, pending: [{gpd, command_id, result, since, time}], failed: [{gpd, reason, reason_code, time}]}`; `remaining_s` is `null` for a window without a deadline, 0 when closed; `pending` holds at most 8 GPDs (dropped 60 s after their last commissioning frame, on `gp/commissioned` or `gp/failed`), `failed` the last 8 failures, newest first; times in s like `last_seen`; not persisted |
+| event `gp/commissioning` | `EVT_GP_COMMISSIONING`, and the hub's own open/close/expiry | `state` (`open`/`closed`), `remaining_s`, `exit_reason` (`none`, `explicit`, `first_pairing`, `timeout`); API 1.2 adds `open`, `involve_proxies`, `exit_on_first_pairing` (the body of `gp/commissioning/status` without the lists). The hub keeps its own deadline, as for permit join (14.2): an NCP image need not report the window, so the hub reports opening and closing through the API, its expiry and the exit after the first pairing itself |
+| event `gp/pending` | `EVT_GP_FRAME` with `command_id` 0xE0/0xE3 (`result` 3 or 5) | a GPD is commissioning (bidirectional steps in progress): `{gpd, command_id, result, time}` (`time` since 1.2) |
 | event `gp/commissioned` | `EVT_GP_COMMISSIONED` + the stored payload + the resolution | device appears with its entities |
-| event `gp/failed` | `EVT_GP_COMMISSIONING_FAILED{reason}` | reason text from `SinkDrop` (SecurityPolicy, TableFull, NoTempMaster, …) |
-| `gp/devices/list` | hub registry + `GP_SINK_TABLE_READ` | includes "on NCP but unknown to the hub" |
-| `gp/devices/remove {id, send_remove: true}` | `GP_SINK_REMOVE{gpd_id, flags bit0}` | `send_remove` sends GP Pairing RemoveGPD to proxies |
-| `gp/config {security_level, communication_mode}` | `GP_SINK_CONFIG` | admin only; stays 0x00 (D14); a level > 0 would reject unsecured GPDs such as FlowerX GP |
+| event `gp/failed` | `EVT_GP_COMMISSIONING_FAILED{reason}` | `{gpd, reason, reason_code, time}`: reason text from `SinkDrop` (SecurityPolicy, TableFull, NoTempMaster, …); `reason_code` and `time` since 1.2 |
+| `gp/devices/list` | hub registry + `GP_SINK_TABLE_READ` | device records plus `security_level`, `frame_counter`, `sink` (the `R_GP_SINK` record) and, since 1.2, `device_id` (GPD DeviceID) and `commands` (GPD commands from the commissioning payload and seen since, sorted); "on NCP but unknown to the hub" is not listed yet (14.5) |
+| `gp/devices/remove {device, send_remove: true}` | `GP_SINK_REMOVE{gpd_id, flags bit0}` | `send_remove` sends GP Pairing RemoveGPD to proxies |
+| `gp/config {security_level?, communication_mode?}` | `GP_SINK_CONFIG` | admin only; stays 0x00 (D14); a level > 0 would reject unsecured GPDs such as FlowerX GP. Since 1.2 an absent field keeps its current value (before: 0 and 2), values above 3 are `invalid_value`, and the result is the `gp/config/get` record |
+| `gp/config/get` (API 1.2) | hub state | `{security_level, communication_mode, group, source: "default"\|"api", warning}`: the configuration last written through the API since the hub started, else the defaults (0x00, mode 2, group 0x0B84); `warning` is set for a level > 0 |
+| event `gp/config` (API 1.2) | `GP_SINK_CONFIG` written | the `gp/config/get` record |
 | `gp/bindings/list {gpd?, target?}` | hub registry | binding records with executor, state and per-target verification (13.8) |
 | `gp/bindings/create {gpd, trigger, target, action, executor: auto\|device\|hub}` | on-device: `GP_PAIRING_CONFIGURATION`, `GP_TRANSLATION_UPDATE`, `GP_TRANSLATION_REQUEST` (7.11); hub-side: none | admin only; returns the binding with state `pending`, then `active` or `failed{zcl_status}`; `unsupported` when `device` is forced on a target without gpsFunctionality bits 11 and 18 |
-| `gp/bindings/update {id, …}` | as create | changing the executor removes the old one first (13.8) |
-| `gp/bindings/delete {id}` | on-device: `GP_TRANSLATION_UPDATE{remove}`, last one: `GP_PAIRING_CONFIGURATION{remove pairing}` | state `removing` until the target confirmed |
-| `gp/bindings/verify {id?}` | `GP_TRANSLATION_REQUEST`, `GP_REMOTE_SINK_TABLE_REQUEST` | re-reads on-device targets, repairs drift |
-| `gp/targets/probe {device}` | ZCL Read Attributes of 0x0021 attrs 0x0000/0x0006 on EP 242, `GP_REMOTE_SINK_TABLE_REQUEST` | `{sink: bool, translation_table: bool, security_levels, max_sink_entries}` |
-| event `gp/binding` | the steps above | `{id, state, target, zcl_status?}` |
+| `gp/bindings/update {binding, executor?, action?, trigger?}` | as create | changing the executor removes the old one first (13.8) |
+| `gp/bindings/delete {binding}` | on-device: `GP_TRANSLATION_UPDATE{remove}`, last one: `GP_PAIRING_CONFIGURATION{remove pairing}` | state `removing` until the target confirmed |
+| `gp/bindings/verify {binding?}` | `GP_TRANSLATION_REQUEST`, `GP_REMOTE_SINK_TABLE_REQUEST` | re-reads on-device targets, repairs drift |
+| `gp/targets/probe {device}` | ZCL Read Attributes of 0x0021 attrs 0x0000/0x0006 on EP 242, `GP_REMOTE_SINK_TABLE_REQUEST` | `{sink: bool, translation_table: bool, security_levels, max_sink_entries, functionality, probed}` when known, else `{probing: true}` and the event `gp/target` follows |
+| event `gp/target` | the probe above | `{device, capabilities}` (the probe result) |
+| event `gp/binding` | the steps above | the binding record (`{id, gpd, trigger, target, action, choice, executor, state, targets, …}`, `zcl_status?`); `state: "removed"` once deleted. `targets[].last_verified` is in ms, unlike the other times |
 | device field `warnings: ["gp_unsecured"]` | `EVT_GP_COMMISSIONED` record security level | shown as a badge; set for level 0 or below `security_min` (13.1) |
 
 ### 13.8 GP bindings (D23)
@@ -2083,8 +2087,9 @@ code feels familiar:
 - `api_version` is `major.minor`; minor versions only add fields and message
   types. Clients ignore unknown fields. 1.1 added `network/info`, the
   `network` topic and the device record's `nwk`; 1.2 added the maintenance
-  requests of 14.6, `maintenance` in `hub/info` and the `network_updated`
-  and `topology_progress` events.
+  requests of 14.6, `maintenance` in `hub/info`, the `network_updated`
+  and `topology_progress` events, `gp/commissioning/status`,
+  `gp/config/get` and the GP fields of 14.5.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2171,6 +2176,47 @@ See 13.7 (`gp/commissioning/open|close`, `gp/devices/list|remove`,
 `gp/commissioned`, `gp/failed`, `gp/binding`) and 13.8 for bindings. GP
 devices also appear in `devices/*` and `entities/*` like Zigbee devices;
 binding management is admin only.
+
+API 1.2 added, for the web UI's Green Power tab (all additive):
+
+- `gp/commissioning/status`: the window, the pending GPDs and the recent
+  failures, which were only events before, so a page reload loses nothing;
+  the `gp` snapshot carries the same object as `gp_commissioning` (next to
+  `bindings`);
+- `gp/config/get` and the event `gp/config`: the sink configuration was
+  write-only; `gp/config` keeps absent fields and validates its values;
+- the hub's own commissioning deadline: `gp/commissioning` is reported for
+  API open/close, expiry and the exit after the first pairing even when the
+  NCP image does not send `EVT_GP_COMMISSIONING`;
+- fields: `time`/`reason_code` on `gp/pending` and `gp/failed`,
+  `open`/`involve_proxies`/`exit_on_first_pairing` on `gp/commissioning`,
+  `device_id`/`commands` in `gp/devices/list` (the binding trigger picker);
+- documented what existed but was missing here: the event `gp/target`, the
+  probe's `{probing: true}`, the `gp/binding` body and `state: "removed"`,
+  and the parameter names `device`/`binding`.
+
+Known gaps, left open:
+
+- `gp/devices/list` does not read the NCP's Sink Table
+  (`GP_SINK_TABLE_READ`): a GPD the NCP knows but the hub does not appears
+  only with its first frame (13.2);
+- the sink configuration, the pending GPDs and the failures are not
+  persisted: after a hub restart `gp/config/get` reports the defaults
+  (`source: "default"`) even if the NCP kept another configuration, which
+  the hub cannot read back (ZRHP has no `GP_SINK_CONFIG` read);
+- `EVT_GP_COMMISSIONING.involve_proxies` is not passed to the engine, so a
+  window opened elsewhere (console, NCP) reports the flags of the last API
+  request;
+- bindings: the target of a binding cannot be changed with
+  `gp/bindings/update` (delete and create), group members are not looked
+  up by the hub (an on-device group binding needs `members` from the
+  client; the UI creates group bindings without them, i.e. hub-side), and
+  the per-button command names of GP definitions (13.5) are not exposed, so
+  the UI offers GPD command IDs;
+- `targets[].last_verified` of a binding is in ms while every other API
+  time is in s (kept for compatibility);
+- no admin role exists yet: "admin only" operations are open to every
+  token.
 
 ### 14.6 Network and hub maintenance (API 1.2)
 

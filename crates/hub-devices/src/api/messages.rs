@@ -189,6 +189,8 @@ pub enum Request {
     },
     #[serde(rename = "gp/commissioning/close")]
     GpCommissioningClose,
+    #[serde(rename = "gp/commissioning/status")]
+    GpCommissioningStatus,
     #[serde(rename = "gp/devices/list")]
     GpDevicesList,
     #[serde(rename = "gp/devices/remove")]
@@ -200,11 +202,13 @@ pub enum Request {
     },
     #[serde(rename = "gp/config")]
     GpConfig {
-        #[serde(default)]
-        security_level: u8,
-        #[serde(default = "two")]
-        communication_mode: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        security_level: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        communication_mode: Option<u8>,
     },
+    #[serde(rename = "gp/config/get")]
+    GpConfigGet,
     #[serde(rename = "gp/bindings/list")]
     GpBindingsList {
         #[serde(default)]
@@ -237,10 +241,6 @@ pub enum Request {
     },
     #[serde(rename = "gp/targets/probe")]
     GpTargetsProbe { device: String },
-}
-
-fn two() -> u8 {
-    2
 }
 
 mod double_option {
