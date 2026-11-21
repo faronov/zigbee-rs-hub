@@ -101,7 +101,9 @@ impl PortRx for SerialRx {
         }
     }
     fn clear_input(&mut self) -> io::Result<()> {
-        self.0.clear(serialport::ClearBuffer::Input).map_err(io::Error::other)
+        self.0
+            .clear(serialport::ClearBuffer::Input)
+            .map_err(io::Error::other)
     }
 }
 
@@ -120,7 +122,9 @@ impl PortTx for SerialTx {
 
 impl BridgeLines {
     fn set(&mut self, dtr: bool, rts: bool) -> io::Result<()> {
-        self.0.write_data_terminal_ready(dtr).map_err(io::Error::other)?;
+        self.0
+            .write_data_terminal_ready(dtr)
+            .map_err(io::Error::other)?;
         self.0.write_request_to_send(rts).map_err(io::Error::other)
     }
 }
@@ -238,7 +242,10 @@ fn print_status(s: &HubStatus) {
         );
     }
     if let Some(c) = &s.counters {
-        println!("frame counters: nwk {}/{} aps {}/{} stride {}", c.nwk_current, c.nwk_limit, c.aps_current, c.aps_limit, c.stride);
+        println!(
+            "frame counters: nwk {}/{} aps {}/{} stride {}",
+            c.nwk_current, c.nwk_limit, c.aps_current, c.aps_limit, c.stride
+        );
     }
     println!(
         "resumes {} (last {:?}), NCP restarts {}, fw {:?}, devices {}, store {} ({:?})",
@@ -247,7 +254,11 @@ fn print_status(s: &HubStatus) {
         s.ncp_restarts,
         s.fw,
         s.devices,
-        if s.store_volatile { "volatile" } else { "persistent" },
+        if s.store_volatile {
+            "volatile"
+        } else {
+            "persistent"
+        },
         s.journal
     );
     if let Some(e) = &s.last_error {
@@ -262,7 +273,9 @@ fn print_event(m: &Message) {
 fn echo_round(hub: &Hub, i: u32) -> Result<Duration, hub_ncp::driver::Error> {
     let data = [(i & 0xFF) as u8; 32];
     let t = Instant::now();
-    let rsp = hub.client().call(&SysEcho { data: Rest(&data) }, CallOpts::default())?;
+    let rsp = hub
+        .client()
+        .call(&SysEcho { data: Rest(&data) }, CallOpts::default())?;
     if rsp.payload.get(1..) != Some(&data[..]) {
         return Err(hub_ncp::driver::Error::Other("echo mismatch".into()));
     }
@@ -272,7 +285,11 @@ fn echo_round(hub: &Hub, i: u32) -> Result<Duration, hub_ncp::driver::Error> {
 static HOLD_TRIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
-    let cmd = if args.0.is_empty() { "status".to_string() } else { args.0.remove(0) };
+    let cmd = if args.0.is_empty() {
+        "status".to_string()
+    } else {
+        args.0.remove(0)
+    };
     let ready = hub.wait_ready(Duration::from_secs(20));
     if !ready && cmd != "status" {
         return Err(format!("no session: {:?}", hub.status().session));
@@ -291,17 +308,23 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             let n = args.0.first().and_then(|s| s.parse().ok()).unwrap_or(10u32);
             let mut worst = Duration::ZERO;
             let mut total = Duration::ZERO;
+            hub.client().take_latency();
             for i in 0..n {
                 let d = echo_round(hub, i).map_err(|e| e.to_string())?;
                 worst = worst.max(d);
                 total += d;
             }
-            println!("echo x{n}: mean {:?} worst {worst:?}", total / n.max(1));
+            println!(
+                "echo x{n}: mean {:?} worst {worst:?}; {}",
+                total / n.max(1),
+                hub.client().take_latency()
+            );
         }
         "soak" => {
             let secs: u64 = args.0.first().and_then(|s| s.parse().ok()).unwrap_or(30);
             let until = Instant::now() + Duration::from_secs(secs);
-            let (mut ok, mut failed, mut interrupted, mut worst) = (0u64, 0u64, 0u64, Duration::ZERO);
+            let (mut ok, mut failed, mut interrupted, mut worst) =
+                (0u64, 0u64, 0u64, Duration::ZERO);
             let mut i = 0;
             while Instant::now() < until {
                 match echo_round(hub, i) {
@@ -334,7 +357,12 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                 req.channel_mask = 1 << ch;
             }
             let n = hub.form(req).map_err(|e| e.to_string())?;
-            println!("formed PAN 0x{:04X} EPID {} channel {}", n.pan_id, hex(&n.ext_pan_id), n.channel);
+            println!(
+                "formed PAN 0x{:04X} EPID {} channel {}",
+                n.pan_id,
+                hex(&n.ext_pan_id),
+                n.channel
+            );
         }
         "permit" => {
             let secs = args.0.first().and_then(|s| s.parse().ok()).unwrap_or(60u8);
@@ -353,32 +381,62 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
         }
         "fw-slots" => {
             for s in hub.fw_slots().map_err(|e| e.to_string())? {
-                println!("slot {}: state {} version 0x{:08X} sha256 {}", s.slot, s.state, s.version, hex(&s.sha256));
+                println!(
+                    "slot {}: state {} version 0x{:08X} sha256 {}",
+                    s.slot,
+                    s.state,
+                    s.version,
+                    hex(&s.sha256)
+                );
             }
         }
         "fw-update" => {
             let path = PathBuf::from(args.0.first().ok_or("fw-update FILE")?);
-            let version = args.value("--version").and_then(|v| parse_u32(&v)).ok_or("--version 0xMMmmrrrr")?;
+            let version = args
+                .value("--version")
+                .and_then(|v| parse_u32(&v))
+                .ok_or("--version 0xMMmmrrrr")?;
             let mut src = FileSource::open(&path).map_err(|e| e.to_string())?;
             let (size, sha256) = src.measure().map_err(|e| e.to_string())?;
-            let image = FwImage { size, sha256, version, format: 1, flags: 0 };
+            let image = FwImage {
+                size,
+                sha256,
+                version,
+                format: 1,
+                flags: 0,
+            };
             let t = Instant::now();
             let slot = hub.fw_update(&image, &mut src).map_err(|e| e.to_string())?;
-            println!("staged {size} B in slot {slot} in {:?}; trial boot", t.elapsed());
+            println!(
+                "staged {size} B in slot {slot} in {:?}; trial boot",
+                t.elapsed()
+            );
             if HOLD_TRIAL.load(std::sync::atomic::Ordering::Relaxed) {
                 let trial = hub.wait_status(Duration::from_secs(120), |s| {
-                    s.slots.iter().any(|x| x.slot == slot && x.state == hub_ncp::fw::slot_state::RUNNING_TRIAL)
+                    s.slots.iter().any(|x| {
+                        x.slot == slot && x.state == hub_ncp::fw::slot_state::RUNNING_TRIAL
+                    })
                 });
                 println!("trial image running in slot {slot}, not confirmed: {trial}");
                 for x in hub.status().slots {
-                    println!("slot {}: state {} version 0x{:08X}", x.slot, x.state, x.version);
+                    println!(
+                        "slot {}: state {} version 0x{:08X}",
+                        x.slot, x.state, x.version
+                    );
                 }
                 return Ok(());
             }
             let done = hub.wait_status(Duration::from_secs(120), |s| {
-                !matches!(s.fw, hub_ncp::FwState::Activated { .. } | hub_ncp::FwState::Staging { .. })
+                !matches!(
+                    s.fw,
+                    hub_ncp::FwState::Activated { .. } | hub_ncp::FwState::Staging { .. }
+                )
             });
-            println!("result: {:?}{}", hub.status().fw, if done { "" } else { " (timeout)" });
+            println!(
+                "result: {:?}{}",
+                hub.status().fw,
+                if done { "" } else { " (timeout)" }
+            );
         }
         "fw-confirm" => {
             hub.fw_confirm().map_err(|e| e.to_string())?;
@@ -389,19 +447,37 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             let before = hub.status().resumes;
             hub.reset_ncp(hard).map_err(|e| e.to_string())?;
             let resumed = hub.wait_status(Duration::from_secs(20), |s| s.resumes > before);
-            println!("NCP reset ({}); resumed: {resumed}", if hard { "EN" } else { "SYS_RESET" });
-            let _ = hub.client().call_empty(ids::SYS_GET_STATUS, CallOpts::default());
+            println!(
+                "NCP reset ({}); resumed: {resumed}",
+                if hard { "EN" } else { "SYS_RESET" }
+            );
+            let _ = hub
+                .client()
+                .call_empty(ids::SYS_GET_STATUS, CallOpts::default());
         }
         "serve" => {
-            let addr = args.value("--listen").unwrap_or_else(|| "127.0.0.1:8099".into());
-            let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_else(|| {
-                let mut b = [0u8; 12];
-                urandom()(&mut b);
-                hex(&b).to_lowercase()
-            });
-            let until = args.value("--for").and_then(|s| s.parse().ok()).map(|s: u64| Instant::now() + Duration::from_secs(s));
+            let addr = args
+                .value("--listen")
+                .unwrap_or_else(|| "127.0.0.1:8099".into());
+            let token = args
+                .value("--token")
+                .or_else(|| std::env::var("HUB_TOKEN").ok())
+                .unwrap_or_else(|| {
+                    let mut b = [0u8; 12];
+                    urandom()(&mut b);
+                    hex(&b).to_lowercase()
+                });
+            let until = args
+                .value("--for")
+                .and_then(|s| s.parse().ok())
+                .map(|s: u64| Instant::now() + Duration::from_secs(s));
             let wifi_channel = args.value("--wifi-channel").and_then(|c| c.parse().ok());
-            let desktop = platform::Desktop { started: Instant::now(), rng: urandom(), wifi_channel, wifi: Default::default() };
+            let desktop = platform::Desktop {
+                started: Instant::now(),
+                rng: urandom(),
+                wifi_channel,
+                wifi: Default::default(),
+            };
             let cfg = hub_app::AppConfig {
                 hub_name: "hubctl".into(),
                 api_token: token.clone(),
@@ -415,7 +491,14 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             app.shutdown();
             println!(
                 "app: {} devices ({} restored, {} imported from the NCP), registry writes {} errors {}, APS accepted {} busy {} failed {}",
-                st.devices, st.restored, st.imported, st.registry_writes, st.registry_errors, st.aps.accepted, st.aps.busy, st.aps.failed
+                st.devices,
+                st.restored,
+                st.imported,
+                st.registry_writes,
+                st.registry_errors,
+                st.aps.accepted,
+                st.aps.busy,
+                st.aps.failed
             );
             result?;
         }
@@ -455,10 +538,19 @@ fn main() -> ExitCode {
                 }
             };
             let result = if bytes.starts_with(b"ZDB1") {
-                hub_app::catalog::verify_bank(&bytes).map(|_| "bank: body hash and signature ok".to_string()).map_err(|e| format!("{e:?}"))
+                hub_app::catalog::verify_bank(&bytes)
+                    .map(|_| "bank: body hash and signature ok".to_string())
+                    .map_err(|e| format!("{e:?}"))
             } else {
                 hub_app::catalog::verify_manifest(&bytes)
-                    .map(|m| format!("manifest {}.{}: {} banks, signature ok", m.catalog_date, m.catalog_serial, m.banks.len()))
+                    .map(|m| {
+                        format!(
+                            "manifest {}.{}: {} banks, signature ok",
+                            m.catalog_date,
+                            m.catalog_serial,
+                            m.banks.len()
+                        )
+                    })
                     .map_err(|e| format!("{e:?}"))
             };
             match result {
@@ -469,12 +561,23 @@ fn main() -> ExitCode {
                 }
             }
         }
-        return if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        return if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
     if args.0.first().map(String::as_str) == Some("ws-call") {
         args.0.remove(0);
-        let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_default();
-        let listen = Duration::from_secs(args.value("--listen").and_then(|s| s.parse().ok()).unwrap_or(0));
+        let token = args
+            .value("--token")
+            .or_else(|| std::env::var("HUB_TOKEN").ok())
+            .unwrap_or_default();
+        let listen = Duration::from_secs(
+            args.value("--listen")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+        );
         let Some(url) = (!args.0.is_empty()).then(|| args.0.remove(0)) else {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -496,7 +599,9 @@ fn main() -> ExitCode {
     cfg.resume.hold_trial = args.flag("--hold-trial");
     HOLD_TRIAL.store(cfg.resume.hold_trial, std::sync::atomic::Ordering::Relaxed);
     let store = match args.value("--store") {
-        Some(p) => match FileFlash::open(p.as_ref(), JOURNAL_BYTES / SECTOR, SECTOR).and_then(|f| Store::open(Box::new(f))) {
+        Some(p) => match FileFlash::open(p.as_ref(), JOURNAL_BYTES / SECTOR, SECTOR)
+            .and_then(|f| Store::open(Box::new(f)))
+        {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("{p}: {e}");
@@ -508,13 +613,20 @@ fn main() -> ExitCode {
     let sim = args.flag("--sim");
     let demo = args.flag("--sim-demo");
     let serial = args.value("--serial");
-    let baud = args.value("--baud").and_then(|b| b.parse().ok()).unwrap_or(921_600u32);
+    let baud = args
+        .value("--baud")
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(921_600u32);
     let mut sim_ncp = None;
     let hub = if sim {
         let (host, ncp) = pipe::pair();
         let s = SimNcp::start(ncp);
         if let Some(list) = args.value("--sim-unsupported") {
-            let ids: Vec<u16> = list.split(',').filter_map(|x| parse_u32(x.trim())).map(|x| x as u16).collect();
+            let ids: Vec<u16> = list
+                .split(',')
+                .filter_map(|x| parse_u32(x.trim()))
+                .map(|x| x as u16)
+                .collect();
             s.with(|st| st.unsupported = ids);
         }
         sim_ncp = Some(s);
@@ -522,7 +634,10 @@ fn main() -> ExitCode {
         cfg.driver.lines = vec![Line::BR_DEFAULT];
         Hub::start(cfg, rx, tx, None, store, urandom())
     } else if let Some(path) = serial {
-        let port = match serialport::new(&path, baud).timeout(Duration::from_millis(50)).open() {
+        let port = match serialport::new(&path, baud)
+            .timeout(Duration::from_millis(50))
+            .open()
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{path}: {e}");
@@ -537,9 +652,22 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         // The desktop side sets the rate only; the bridge owns RTS/CTS.
-        cfg.driver.lines = vec![Line { baud, flow: false }, Line { baud: 460_800, flow: false }];
+        cfg.driver.lines = vec![
+            Line { baud, flow: false },
+            Line {
+                baud: 460_800,
+                flow: false,
+            },
+        ];
         cfg.driver.lines.dedup();
-        Hub::start(cfg, SerialRx(rx), SerialTx(port), Some(Box::new(BridgeLines(lines))), store, urandom())
+        Hub::start(
+            cfg,
+            SerialRx(rx),
+            SerialTx(port),
+            Some(Box::new(BridgeLines(lines))),
+            store,
+            urandom(),
+        )
     } else {
         eprint!("{USAGE}");
         return ExitCode::from(2);
@@ -559,7 +687,9 @@ fn main() -> ExitCode {
         c.tx_rto_expiries
     );
     hub.shutdown();
-    let _ = hub.client().wait_state(Duration::from_secs(1), |s| s == SessionState::Stopped);
+    let _ = hub
+        .client()
+        .wait_state(Duration::from_secs(1), |s| s == SessionState::Stopped);
     if let Some(s) = sim_ncp {
         s.stop();
     }
