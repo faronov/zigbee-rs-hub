@@ -722,7 +722,16 @@ form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
 the scan advice); `hubctl --sim --sim-demo serve` forms a network on the
 simulated NCP with three routers that answer Mgmt_Lqi/Mgmt_Rtg, and
 `--sim-unsupported 0x0106,0x0108` mimics an NCP image without energy scan
-and TX power.
+and TX power. The web UI has a **Map** tab (an SVG drawn by the page: the
+coordinator in the middle, rings by hop count, end devices next to their
+parent, links coloured by LQI, a table with the best LQI per node) and a
+**Settings** tab (network facts, channel change, TX power, an energy-scan
+chart with the hub's Wi-Fi overlap and the recommendation, backup download,
+the last automatic backup, restore from a file in chunks, a new-network form
+that needs `RESET` typed, hub facts, Wi-Fi, token rotation, reboot, bridge
+mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
+are hidden (`maintenance` in `hub/info`). The page is 11.8 KB gzipped (6.1 KB
+before).
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
 application lives in ~295 KB of internal heap. On the first hardware run

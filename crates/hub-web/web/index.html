@@ -46,6 +46,11 @@ input.num{width:6em}
 #login{max-width:420px;margin:3em auto}
 #login input{width:100%;margin:.5em 0}
 #toast{position:fixed;bottom:1em;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5em 1em;border-radius:8px;display:none;max-width:90vw}
+.row label{display:inline-flex;align-items:center;gap:.3em}
+table{border-collapse:collapse;font-size:.9em}td,th{padding:.15em .6em .15em 0;text-align:left;font-variant-numeric:tabular-nums}
+pre{white-space:pre-wrap;font-size:.8em;max-height:24em;overflow:auto;background:var(--bg);padding:.5em;border-radius:7px}
+svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}
+.warn{color:var(--warn)}
 .hide{display:none!important}
 nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
 .tab{display:grid;gap:1em;min-width:0}
@@ -73,6 +78,29 @@ nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
 <section class="devs" id="devs"></section>
 </div>
+<div data-tab="map" data-title="Map" class="tab">
+<section class="card"><div class="row"><h2 style="flex:1;margin:0">Network map</h2><span id="mpt" class="mut"></span><button class="p" id="mpb">Scan</button></div>
+<p class="mut">The coordinator's tables, then every router asked for its neighbours (Mgmt_Lqi) and routes. Line colour: link quality (LQI) as the routers report it.</p>
+<div id="mp"></div><div id="mpl"></div></section>
+</div>
+<div data-tab="settings" data-title="Settings" class="tab">
+<section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
+<div class="row acts"><label>Channel <select id="ch"></select></label><button id="chb">Change channel</button></div>
+<div class="row acts f-tx_power"><label>TX power <input id="txp" type="number" class="num" min="-24" max="20"> dBm</label><button id="txb">Apply</button></div>
+<div class="row acts f-energy_scan"><button id="esb">Energy scan</button><span id="est" class="mut"></span></div><div id="es"></div></section>
+<section class="card"><h2>Backup and restore</h2>
+<p class="mut">Open ZigBee Coordinator Backup (zigpy/ZHA, Zigbee2MQTT). The file holds the network key: keep it private.</p>
+<div class="row acts f-backup"><button class="p" id="bkb">Download backup</button><button id="bkl">Last automatic backup</button></div>
+<div class="row acts f-restore"><label>Restore from a file <input id="rsf" type="file" accept=".json,application/json"></label></div><div id="bks" class="mut"></div></section>
+<section class="card"><h2>New network</h2>
+<p class="mut">Leaves the current network and forms a new one; every device must then be paired again. The current network is backed up and the file offered first.</p>
+<div class="row"><label>Channel <select id="nch"><option value="">quietest</option></select></label><label>PAN ID <input id="npan" placeholder="random" size="6"></label><label>Ext. PAN ID <input id="nepid" placeholder="random" size="17"></label><label>TX power <input id="ntx" type="number" class="num" placeholder="keep"></label></div>
+<div class="row acts"><input id="nconf" placeholder="type RESET" size="11"><button class="d" id="nrb">Back up and reset</button></div></section>
+<section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
+<div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
+<div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
+<section class="card"><h2>Diagnostics</h2><div class="row acts"><button id="dgb">Refresh</button><button id="dgr">Reset counters</button><button id="lgb" class="f-logs">Logs</button></div><div id="dg"></div><pre id="lg" class="hide"></pre></section>
+</div>
 </main>
 <div id="toast"></div>
 <script>
@@ -97,7 +125,7 @@ function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";cl
 function status(s,c){$("#conn").textContent=s;$("#dot").className="dot "+c}
 function call(type,p={}){return new Promise((ok,no)=>{if(!ws||ws.readyState!=1)return no(new Error("not connected"));const id=++rid;pend[id]={ok,no};ws.send(JSON.stringify(Object.assign({id,type},p)))})}
 function act(type,p){return call(type,p).catch(e=>{toast(type+": "+e.message);throw e})}
-{const m=/[#&]token=([^&]+)/.exec(location.hash);if(m){localStorage.setItem("zrhToken",decodeURIComponent(m[1]));history.replaceState(null,"",location.pathname)}}
+{const m=/[#&]token=([^&]+)/.exec(location.hash);if(m){localStorage.setItem("zrhToken",decodeURIComponent(m[1]));const v=location.hash.slice(1).split("&").filter(x=>!x.startsWith("token=")).join("&");history.replaceState(null,"",location.pathname+(v?"#"+v:""))}}
 function connect(){
  const tok=localStorage.getItem("zrhToken");
  if(!tok){showLogin();return}
@@ -112,7 +140,7 @@ function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
-  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet()}).catch(()=>{});
+  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate()}).catch(()=>{});
   call("subscribe",{topics:["devices","entities","network"]}).catch(e=>toast(e.message));return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="event")onEvent(m.event);
@@ -132,10 +160,11 @@ function onEvent(e){
  case"entity_removed":{const x=ents[e.uid];delete ents[e.uid];if(x)renderDev(x.device)}break;
  case"entity_state":states[e.uid]=e;{const x=ents[e.uid];if(x)renderEnt(x)}break;
  case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
- case"network_state":call("network/info").then(setNet).catch(()=>{});break;
+ case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
+ case"topology_progress":$("#mpt").textContent="scanning: "+e.scanned+" routers asked, "+e.queued+" queued";break;
  }
 }
-function setNet(n){net=n||{};if(net.time)skew=net.time-Date.now()/1000;if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();pjTick()}
+function setNet(n){net=n||{};if(net.time)skew=net.time-Date.now()/1000;if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();renderSNet();pjTick()}
 function renderNet(){
  const n=net,c=n.ncp||{},kv=$("#net");kv.textContent="";
  const add=(k,v)=>{if(v!=null&&v!==""){kv.append(el("dt",{},k),el("dd",{},String(v)))}};
@@ -206,6 +235,112 @@ function entRow(e){
 }
 function renderEnt(e){const o=document.getElementById("e-"+e.uid);if(o)o.replaceWith(entRow(e));else renderDev(e.device)}
 setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById("d-"+id);if(c&&!c.contains(document.activeElement))renderDev(id)}},30000);
+// ── Views: map and settings (API 1.2, device-support 14.6) ──
+const has=f=>(hub.maintenance||[]).includes(f);
+onTab.map=()=>{if(authed&&!mapData)call("network/topology",{refresh:false}).then(drawMap).catch(()=>{})};
+onTab.settings=()=>{if(authed){renderSNet();loadSys()}};
+function gate(){for(const e of document.querySelectorAll("[class*=f-]")){const f=[...e.classList].find(c=>c.startsWith("f-"));if(f)e.classList.toggle("hide",!has(f.slice(2)))}}
+const kv=(box,rows)=>{box.textContent="";for(const[k,v]of rows)if(v!=null&&v!==""&&v!==false)box.append(el("dt",{},k),el("dd",{},String(v)))};
+const dur=s=>s<3600?Math.round(s/60)+" min":s<86400?(s/3600).toFixed(1)+" h":(s/86400).toFixed(1)+" d";
+const busy=(b,p)=>{b.disabled=true;return p.finally(()=>b.disabled=false)};
+const mkSvg=(w,h)=>{const d=el("div");d.innerHTML='<svg viewBox="0 0 '+w+" "+h+'"></svg>';return d.firstChild};
+function save(name,text){const a=el("a",{href:URL.createObjectURL(new Blob([text],{type:"application/json"})),download:name});document.body.append(a);a.click();a.remove()}
+function saveBackup(b){save("zigbee-rs-hub-backup-"+b.pan_id+"-"+new Date().toISOString().slice(0,10)+".json",JSON.stringify(b,null,1))}
+for(let c=11;c<=26;c++){$("#ch").append(el("option",{value:c},c));$("#nch").append(el("option",{value:c},c))}
+function renderSNet(){
+ const n=net,c=n.ncp||{};
+ kv($("#snet"),[["State",n.state&&n.state+(n.ownership&&n.ownership!="owned"?" ("+n.ownership+")":"")],["Channel",n.channel],["PAN ID",n.pan_id!=null&&hex(n.pan_id,4)],["Extended PAN ID",n.ext_pan_id],["NWK update ID",n.nwk_update_id],["TX power",n.tx_power!=null&&n.tx_power+" dBm"],["NCP firmware",c.fw],["NCP",[c.board,c.product,c.flash_kib&&c.flash_kib+" KiB flash"].filter(Boolean).join(" · ")]]);
+ if(n.channel&&document.activeElement!=$("#ch"))$("#ch").value=n.channel;
+ if(n.tx_power!=null&&document.activeElement!=$("#txp"))$("#txp").value=n.tx_power;
+}
+$("#chb").onclick=e=>{const c=+$("#ch").value;if(c==net.channel)return toast("Already on channel "+c);
+ if(!confirm("Move the network to channel "+c+"? Routers follow within about 10 s; sleepy devices find it when they next wake up (some only after a rejoin)."))return;
+ busy(e.target,act("network/change_channel",{channel:c}).then(r=>toast("Network on channel "+r.channel))).catch(()=>{})};
+$("#txb").onclick=e=>busy(e.target,act("network/set_tx_power",{dbm:+$("#txp").value}).then(r=>toast("TX power "+r.applied_dbm+" dBm"))).catch(()=>{});
+$("#esb").onclick=e=>{$("#est").textContent="scanning…";busy(e.target,act("network/energy_scan",{}).then(drawScan)).catch(()=>$("#est").textContent="")};
+function drawScan(r){
+ const W=640,H=170,bw=W/16,svg=mkSvg(W,H),ns=svg.namespaceURI;
+ const add=(t,a,txt)=>{const x=document.createElementNS(ns,t);for(const k in a)x.setAttribute(k,a[k]);if(txt!=null)x.textContent=txt;svg.append(x);return x};
+ r.channels.forEach((c,i)=>{const h=Math.max(2,c.energy/255*120),x=i*bw+4;
+  const b=add("rect",{x,y:140-h,width:bw-8,height:h,rx:3,fill:c.wifi_overlap?"var(--warn)":c.channel==r.recommended?"var(--ok)":"var(--acc)",opacity:c.channel==r.current?1:.75});
+  b.append(Object.assign(document.createElementNS(ns,"title"),{textContent:"channel "+c.channel+": energy "+c.energy+", max "+c.max_rssi_dbm+" dBm"+(c.wifi_overlap?", under the hub's Wi-Fi":"")}));
+  b.style.cursor="pointer";b.onclick=()=>{$("#ch").value=c.channel};
+  add("text",{x:x+(bw-8)/2,y:156,"text-anchor":"middle","font-weight":c.channel==r.current?"bold":""},c.channel);
+  if(c.channel==r.recommended)add("text",{x:x+(bw-8)/2,y:134-h,"text-anchor":"middle"},"★")});
+ const box=$("#es");box.textContent="";box.append(svg,el("p",{class:"mut"},"Bars: energy per channel (lower is better); orange: under the hub's Wi-Fi channel"+(r.wifi_channel?" ("+r.wifi_channel+")":"")+"; bold: current; ★ recommended."),
+  r.recommended&&r.recommended!=r.current?el("button",{onclick:()=>{$("#ch").value=r.recommended;$("#chb").click()}},"Move to channel "+r.recommended):null);
+ $("#est").textContent="took "+(r.duration_ms/1000).toFixed(1)+" s";
+}
+$("#bkb").onclick=e=>busy(e.target,act("network/backup",{}).then(b=>{saveBackup(b);$("#bks").textContent="Backup of PAN "+b.pan_id+": "+b.devices.length+" devices"+(b.network_key?"":" — incomplete (no keys), cannot be restored")})).catch(()=>{});
+$("#bkl").onclick=()=>act("network/backup/last").then(r=>r.backup?saveBackup(r.backup):toast("No backup yet")).catch(()=>{});
+async function upload(t,force){t=t.replace(/[^\x00-\x7f]/g,c=>"\\u"+c.charCodeAt(0).toString(16).padStart(4,"0"));let r;for(let o=0;o<t.length;o+=6000)r=await call("network/restore",{chunk:t.slice(o,o+6000),offset:o,total:t.length,force});return r}
+$("#rsf").onchange=async e=>{
+ const f=e.target.files[0];e.target.value="";if(!f)return;const t=await f.text();let b;try{b=JSON.parse(t)}catch{return toast("Not a JSON file")}
+ if(!confirm("Restore network PAN "+b.pan_id+", channel "+b.channel+" with "+(b.devices||[]).length+" devices onto this hub's radio? Never run the old coordinator at the same time."))return;
+ $("#bks").textContent="restoring…";
+ try{let r=await upload(t,false).catch(err=>{if(/force/.test(err.message)&&confirm("The radio runs a network now. Replace it? It is backed up first."))return upload(t,true);throw err});
+  if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
+ catch(err){$("#bks").textContent="";toast("restore: "+err.message)}};
+$("#nrb").onclick=e=>{
+ if($("#nconf").value!="RESET")return toast("Type RESET to confirm");
+ const p={confirm:"RESET"},c=$("#nch").value,pan=$("#npan").value.trim(),ep=$("#nepid").value.trim(),tx=$("#ntx").value;
+ if(c)p.channel=+c;if(pan)p.pan_id=parseInt(pan,16);if(ep)p.ext_pan_id=ep;if(tx!=="")p.tx_power=+tx;
+ if(!confirm("Leave the current network and form a new one? All devices must be paired again."))return;
+ busy(e.target,act("network/reset",p).then(r=>{if(r.backup)saveBackup(r.backup);$("#nconf").value="";toast("New network: PAN "+hex(r.network.pan_id,4)+", channel "+r.network.channel)})).catch(()=>{})};
+function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a=s.app||{},n=s.ncp||{};
+ kv($("#ssys"),[["Version",s.version],["API",hub.api_version],["Mode",s.mode],["Uptime",s.uptime_s!=null&&dur(s.uptime_s)],["Free heap",h.free!=null&&Math.round(h.free/1024)+" KiB (min "+Math.round(h.min_free/1024)+" KiB"+(h.largest_block?", largest "+Math.round(h.largest_block/1024)+" KiB":"")+")"],
+  ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
+  ["Store",s.store&&(s.store.volatile?"RAM only":"hubdata, generation "+s.store.journal_generation)],["App",a.devices+" devices, "+a.sessions+" sessions, APS "+(a.aps?a.aps.accepted+" ok / "+a.aps.failed+" failed":"")]]);
+ if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}
+$("#wb").onclick=()=>{const ssid=$("#wss").value.trim();if(!ssid)return;if(!confirm("Save Wi-Fi \""+ssid+"\" and reconnect? This page loses the hub until it is on that network."))return;act("hub/wifi/set",{ssid,password:$("#wpw").value}).then(()=>toast("Wi-Fi saved, reconnecting")).catch(()=>{})};
+$("#tkb").onclick=()=>{if(!confirm("Create a new API token? Other clients (Home Assistant) need it then; this page switches to it."))return;act("hub/token/rotate").then(r=>{localStorage.setItem("zrhToken",r.token);prompt("New API token (copy it for other clients):",r.token)}).catch(()=>{})};
+$("#rbb").onclick=()=>{if(confirm("Reboot the hub?"))act("hub/reboot").then(()=>toast("Rebooting…")).catch(()=>{})};
+$("#mdb").onclick=()=>{if(confirm("Reboot into bridge mode (USB bridge to the radio, no hub)? Back with the console command `mode hub`."))act("hub/mode/set",{mode:"bridge"}).then(()=>toast("Rebooting into bridge mode")).catch(()=>{})};
+function diag(reset,b){busy(b,act("network/diagnostics",reset?{reset:true}:{}).then(d=>{const box=$("#dg"),n=d.ncp||{},f=d.frame_counters||{};box.textContent="";
+ const t=el("table");const row=(k,v)=>t.append(el("tr",{},el("th",{},k),el("td",{},String(v))));
+ if(n.uptime_s!=null){row("NCP uptime",dur(n.uptime_s));row("Free APS slots",n.free_aps_slots)}
+ row("PTA (Wi-Fi coexistence)",d.pta.capable?(n.pta_coex?"on":"off"):"not wired / not supported");
+ if(f.nwk!=null)row("Frame counters","NWK "+f.nwk+" / APS "+f.aps);
+ if(d.tx_power_set!=null)row("TX power set",d.tx_power_set+" dBm");
+ for(const c of d.counters)row(c.group+" · "+c.name,c.value);
+ for(const c of d.host_link)row("host link · "+c.name,c.value);
+ box.append(t);if(d.unsupported.length)box.append(el("p",{class:"mut"},"Not in this NCP firmware: "+d.unsupported.join(", ")));
+ if(d.errors.length)box.append(el("p",{class:"warn"},d.errors.join("; ")))})).catch(()=>{})}
+$("#dgb").onclick=e=>diag(false,e.target);$("#dgr").onclick=e=>{if(confirm("Reset the NCP's counters?"))diag(true,e.target)};
+$("#lgb").onclick=()=>act("hub/logs",{lines:200}).then(r=>{const p=$("#lg");p.textContent=r.lines.join("\n");p.classList.remove("hide");p.scrollTop=p.scrollHeight}).catch(()=>{});
+let mapData=null;
+$("#mpb").onclick=e=>{$("#mpt").textContent="scanning…";busy(e.target,act("network/topology",{}).then(drawMap)).catch(()=>$("#mpt").textContent="")};
+function drawMap(m){
+ if(!m||!m.nodes)return;mapData=m;
+ const N={},adj={},pairs={};for(const n of m.nodes){N[n.nwk]=n;adj[n.nwk]=[]}
+ for(const l of m.links){if(!N[l.target]||!N[l.source])continue;const k=Math.min(l.source,l.target)+"-"+Math.max(l.source,l.target);
+  const p=pairs[k]||(pairs[k]={a:l.source,b:l.target,q:[]});if(l.lqi!=null)p.q.push(l.lqi);if(!adj[l.source].includes(l.target)){adj[l.source].push(l.target);adj[l.target].push(l.source)}}
+ // Breadth first from the coordinator: rings by hop count, children next to their parent.
+ const lvl={0:0},par={},order=[0];for(let i=0;i<order.length;i++){const u=order[i];for(const v of adj[u].sort((x,y)=>(N[x].type=="router"?0:1)-(N[y].type=="router"?0:1)))if(lvl[v]==null&&(N[u].type!="end_device")){lvl[v]=lvl[u]+1;par[v]=u;order.push(v)}}
+ const loose=m.nodes.filter(n=>lvl[n.nwk]==null);const maxl=Math.max(1,...Object.values(lvl))+(loose.length?1:0);
+ const W=640,C=W/2,R=(C-50)/maxl,pos={0:[C,C]},ang={0:0};
+ const kids=u=>order.filter(v=>par[v]==u);
+ const place=(u,a0,a1)=>{const k=kids(u);k.forEach((v,i)=>{const a=k.length==1&&u?a0+(a1-a0)/2:a0+(a1-a0)*(i+.5)/k.length;ang[v]=a;pos[v]=[C+R*lvl[v]*Math.cos(a),C+R*lvl[v]*Math.sin(a)];const w=(a1-a0)/k.length;place(v,a-w/2,a+w/2)})};
+ place(0,-Math.PI/2,1.5*Math.PI);
+ loose.forEach((n,i)=>{const a=2*Math.PI*i/loose.length;pos[n.nwk]=[C+R*maxl*Math.cos(a),C+R*maxl*Math.sin(a)]});
+ const svg=mkSvg(W,W),ns=svg.namespaceURI;
+ const add=(t,a,txt)=>{const x=document.createElementNS(ns,t);for(const k in a)x.setAttribute(k,a[k]);if(txt!=null)x.textContent=txt;svg.append(x);return x};
+ const col=q=>q==null?"var(--mut)":q>=150?"var(--ok)":q>=80?"var(--warn)":"var(--bad)";
+ const label=n=>n.name||(n.type=="coordinator"?"coordinator":hex(n.nwk,4));
+ for(const k in pairs){const p=pairs[k],q=p.q.length?Math.max(...p.q):null,[x1,y1]=pos[p.a],[x2,y2]=pos[p.b];
+  const l=add("line",{x1,y1,x2,y2,stroke:col(q),"stroke-width":par[p.b]==p.a||par[p.a]==p.b?2.5:1,opacity:.8});
+  l.append(Object.assign(document.createElementNS(ns,"title"),{textContent:label(N[p.a])+" ↔ "+label(N[p.b])+": LQI "+(p.q.join(" / ")||"?")}))}
+ for(const n of m.nodes){const[x,y]=pos[n.nwk],r=n.type=="coordinator"?11:n.type=="router"?8:5;
+  const c=add("circle",{cx:x,cy:y,r,fill:n.type=="end_device"?"var(--card)":"var(--acc)",stroke:n.error?"var(--bad)":"var(--acc)","stroke-width":2});
+  c.append(Object.assign(document.createElementNS(ns,"title"),{textContent:label(n)+"\n"+n.type+" · NWK "+hex(n.nwk,4)+(n.ieee?" · "+n.ieee:"")+(n.error?"\n"+n.error:"")}));
+  add("text",{x,y:y+r+12,"text-anchor":"middle"},label(n))}
+ $("#mp").textContent="";$("#mp").append(svg);
+ const t=el("table",{},el("tr",{},el("th",{},"Device"),el("th",{},"Type"),el("th",{},"NWK"),el("th",{},"Best LQI"),el("th",{},"Note")));
+ for(const n of m.nodes.slice().sort((a,b)=>(lvl[a.nwk]??99)-(lvl[b.nwk]??99))){const q=Object.values(pairs).filter(p=>p.a==n.nwk||p.b==n.nwk).flatMap(p=>p.q);
+  t.append(el("tr",{},el("td",{},label(n)),el("td",{},n.type),el("td",{},hex(n.nwk,4)),el("td",{},q.length?Math.max(...q):"–"),el("td",{class:n.error?"warn":"mut"},n.error||(n.type=="router"&&!n.scanned?"not asked":""))))}
+ $("#mpl").textContent="";$("#mpl").append(t);if(m.notes.length)$("#mpl").append(el("p",{class:"mut"},m.notes.join("; ")));
+ $("#mpt").textContent=m.nodes.length+" nodes, "+Object.keys(pairs).length+" links · "+ago(m.time)+" · "+(m.duration_ms/1000).toFixed(1)+" s";
+}
 connect();
 </script>
 </body>
