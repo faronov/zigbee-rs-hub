@@ -152,6 +152,8 @@ fn raw_frame(id: u64, json_text: &str) -> String {
     format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{json_text}}}")
 }
 
+type Job = Box<dyn FnOnce(&Out) -> Result<Reply, ApiError> + Send>;
+
 /// Result of a job.
 pub enum Reply {
     /// A JSON value.
@@ -236,45 +238,31 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-#[derive(Deserialize)]
 struct ScanReq {
-    #[serde(default)]
     channels: Option<Vec<u8>>,
-    #[serde(default)]
     duration_exp: Option<u8>,
-    #[serde(default)]
     count: Option<u8>,
 }
 
-#[derive(Deserialize)]
 struct ChannelReq {
     channel: u8,
 }
 
-#[derive(Deserialize)]
 struct TxPowerReq {
     dbm: i8,
 }
 
-#[derive(Deserialize)]
 struct DiagReq {
-    #[serde(default)]
     reset: bool,
-    #[serde(default)]
     groups: Option<u8>,
 }
 
-#[derive(Deserialize)]
 struct TopologyReq {
-    #[serde(default = "yes")]
     refresh: bool,
-    #[serde(default = "yes")]
     routes: bool,
 }
 
-#[derive(Deserialize)]
 struct BackupReq {
-    #[serde(default = "yes")]
     keys: bool,
 }
 
@@ -296,39 +284,133 @@ struct RestoreReq {
     skip_backup: bool,
 }
 
-#[derive(Deserialize)]
 struct ResetReq {
     confirm: String,
-    #[serde(default)]
     channel: Option<u8>,
-    #[serde(default)]
     channels: Option<Vec<u8>>,
-    #[serde(default)]
     pan_id: Option<u16>,
-    #[serde(default)]
     ext_pan_id: Option<String>,
-    #[serde(default)]
     tx_power: Option<i8>,
-    #[serde(default)]
     skip_backup: bool,
 }
 
-#[derive(Deserialize)]
 struct WifiReq {
     ssid: String,
-    #[serde(default)]
     password: String,
 }
 
-#[derive(Deserialize)]
 struct ModeReq {
     mode: String,
 }
 
-#[derive(Deserialize)]
 struct LogsReq {
-    #[serde(default)]
     lines: Option<usize>,
+}
+
+
+/// Request parameters from the frame's JSON (no serde derives: each derive
+/// costs kilobytes of firmware).
+fn field<'a>(v: &'a J, k: &str) -> Option<&'a J> {
+    v.get(k).filter(|x| !x.is_null())
+}
+
+fn num<T: TryFrom<i64>>(v: &J, k: &str) -> Result<Option<T>, ApiError> {
+    field(v, k)
+        .map(|x| x.as_i64().and_then(|n| T::try_from(n).ok()).ok_or_else(|| bad(format!("{k}: an integer in range"))))
+        .transpose()
+}
+
+fn flag(v: &J, k: &str, default: bool) -> Result<bool, ApiError> {
+    field(v, k).map_or(Ok(default), |x| x.as_bool().ok_or_else(|| bad(format!("{k}: true or false"))))
+}
+
+fn text<'a>(v: &'a J, k: &str) -> Result<Option<&'a str>, ApiError> {
+    field(v, k).map(|x| x.as_str().ok_or_else(|| bad(format!("{k}: a string")))).transpose()
+}
+
+fn need<T>(x: Option<T>, k: &str) -> Result<T, ApiError> {
+    x.ok_or_else(|| ApiError::new("invalid_format", format!("missing {k}")))
+}
+
+fn channels(v: &J, k: &str) -> Result<Option<Vec<u8>>, ApiError> {
+    field(v, k)
+        .map(|x| {
+            x.as_array()
+                .and_then(|a| a.iter().map(|c| c.as_u64().and_then(|c| u8::try_from(c).ok())).collect::<Option<Vec<u8>>>())
+                .ok_or_else(|| bad(format!("{k}: a list of channel numbers")))
+        })
+        .transpose()
+}
+
+impl ScanReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { channels: channels(v, "channels")?, duration_exp: num(v, "duration_exp")?, count: num(v, "count")? })
+    }
+}
+
+impl ChannelReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { channel: need(num(v, "channel")?, "channel")? })
+    }
+}
+
+impl TxPowerReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { dbm: need(num(v, "dbm")?, "dbm")? })
+    }
+}
+
+impl DiagReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { reset: flag(v, "reset", false)?, groups: num(v, "groups")? })
+    }
+}
+
+impl TopologyReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { refresh: flag(v, "refresh", true)?, routes: flag(v, "routes", true)? })
+    }
+}
+
+impl BackupReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { keys: flag(v, "keys", true)? })
+    }
+}
+
+impl ResetReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self {
+            confirm: text(v, "confirm")?.unwrap_or_default().to_string(),
+            channel: num(v, "channel")?,
+            channels: channels(v, "channels")?,
+            pan_id: num(v, "pan_id")?,
+            ext_pan_id: text(v, "ext_pan_id")?.map(str::to_string),
+            tx_power: num(v, "tx_power")?,
+            skip_backup: flag(v, "skip_backup", false)?,
+        })
+    }
+}
+
+impl WifiReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self {
+            ssid: need(text(v, "ssid")?, "ssid")?.to_string(),
+            password: text(v, "password")?.unwrap_or_default().to_string(),
+        })
+    }
+}
+
+impl ModeReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { mode: need(text(v, "mode")?, "mode")?.to_string() })
+    }
+}
+
+impl LogsReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        Ok(Self { lines: num(v, "lines")? })
+    }
 }
 
 fn yes() -> bool {
@@ -390,26 +472,32 @@ impl Admin {
     /// follows through [`Ctx::out`]).
     pub fn handle(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, text: &str) -> Vec<String> {
         let id = head.id;
+        if head.ty == "network/restore" {
+            return self.restore(ctx, sid, id, text);
+        }
+        let v: J = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(e) => return vec![frame(id, Err(ApiError::new("invalid_format", e.to_string())))],
+        };
         let r = match head.ty.as_str() {
             "hub/system" => Ok(self.system(&ctx)),
-            "hub/logs" => self.logs(text),
-            "hub/wifi/set" => self.wifi(text),
+            "hub/logs" => self.logs(&v),
+            "hub/wifi/set" => self.wifi(&v),
             "hub/token/rotate" => self.rotate_token(ctx.api),
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
-            "hub/mode/set" => self.mode(text),
+            "hub/mode/set" => self.mode(&v),
             "network/backup/last" => {
                 let last = ctx.ncp.with_store(|s| s.kv_get(LAST_BACKUP_KEY).map(|b| String::from_utf8_lossy(b).into_owned()));
                 return vec![raw_frame(id, &format!("{{\"backup\":{}}}", last.as_deref().unwrap_or("null")))];
             }
-            "network/topology" => match params::<TopologyReq>(text) {
+            "network/topology" => match TopologyReq::from(&v) {
                 Ok(q) if !q.refresh => {
                     return vec![raw_frame(id, self.topology.as_deref().unwrap_or("null"))];
                 }
                 Ok(q) => return self.job_topology(ctx, sid, id, q),
                 Err(e) => Err(e),
             },
-            "network/restore" => return self.restore(ctx, sid, id, text),
-            _ => return self.ncp_job(ctx, sid, head, text),
+            _ => return self.ncp_job(ctx, sid, head, &v),
         };
         vec![frame(id, r)]
     }
@@ -447,14 +535,14 @@ impl Admin {
         v
     }
 
-    fn logs(&self, text: &str) -> Result<J, ApiError> {
-        let q: LogsReq = params(text)?;
+    fn logs(&self, v: &J) -> Result<J, ApiError> {
+        let q = LogsReq::from(v)?;
         let p = self.platform()?;
         Ok(json!({"lines": p.logs(q.lines.unwrap_or(100).min(500))}))
     }
 
-    fn wifi(&self, text: &str) -> Result<J, ApiError> {
-        let q: WifiReq = params(text)?;
+    fn wifi(&self, v: &J) -> Result<J, ApiError> {
+        let q = WifiReq::from(v)?;
         if q.ssid.is_empty() || q.ssid.len() > 32 {
             return Err(bad("ssid: 1–32 bytes"));
         }
@@ -477,8 +565,8 @@ impl Admin {
         Ok(json!({"token": token}))
     }
 
-    fn mode(&self, text: &str) -> Result<J, ApiError> {
-        let q: ModeReq = params(text)?;
+    fn mode(&self, v: &J) -> Result<J, ApiError> {
+        let q = ModeReq::from(v)?;
         if q.mode != "hub" && q.mode != "bridge" {
             return Err(bad("mode: hub or bridge"));
         }
@@ -495,6 +583,11 @@ impl Admin {
         id: u64,
         f: impl FnOnce(&Out) -> Result<Reply, ApiError> + Send + 'static,
     ) -> Vec<String> {
+        // One thread entry for every job (no per-closure copy of it).
+        self.spawn_job(name, out, sid, id, Box::new(f))
+    }
+
+    fn spawn_job(&mut self, name: &'static str, out: Out, sid: SessionId, id: u64, f: Job) -> Vec<String> {
         {
             let mut busy = self.busy.lock().unwrap();
             if let Some(running) = *busy {
@@ -533,14 +626,14 @@ impl Admin {
         }
     }
 
-    fn ncp_job(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, text: &str) -> Vec<String> {
+    fn ncp_job(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, v: &J) -> Vec<String> {
         let id = head.id;
         let ncp = ctx.ncp.clone();
         let out = ctx.out.clone();
         let fail = |e: ApiError| vec![frame(id, Err(e))];
         match head.ty.as_str() {
             "network/energy_scan" => {
-                let q: ScanReq = match params(text) {
+                let q = match ScanReq::from(v) {
                     Ok(q) => q,
                     Err(e) => return fail(e),
                 };
@@ -576,7 +669,7 @@ impl Admin {
                 })
             }
             "network/change_channel" => {
-                let q: ChannelReq = match params(text) {
+                let q = match ChannelReq::from(v) {
                     Ok(q) => q,
                     Err(e) => return fail(e),
                 };
@@ -590,7 +683,7 @@ impl Admin {
                 })
             }
             "network/set_tx_power" => {
-                let q: TxPowerReq = match params(text) {
+                let q = match TxPowerReq::from(v) {
                     Ok(q) => q,
                     Err(e) => return fail(e),
                 };
@@ -601,7 +694,7 @@ impl Admin {
                 })
             }
             "network/diagnostics" => {
-                let q: DiagReq = match params(text) {
+                let q = match DiagReq::from(v) {
                     Ok(q) => q,
                     Err(e) => return fail(e),
                 };
@@ -609,7 +702,7 @@ impl Admin {
                 self.spawn("diagnostics", out, sid, id, move |_| Ok(Reply::Json(diagnostics(&ncp, groups, q.reset))))
             }
             "network/backup" => {
-                let q: BackupReq = match params(text) {
+                let q = match BackupReq::from(v) {
                     Ok(q) => q,
                     Err(e) => return fail(e),
                 };
@@ -626,7 +719,7 @@ impl Admin {
                     take_backup(&ncp, q.keys, &known, &source, now_s).map(|(text, _)| Reply::Raw(text))
                 })
             }
-            "network/reset" => self.reset(ctx, sid, id, text),
+            "network/reset" => self.reset(ctx, sid, id, v),
             other => fail(ApiError::new("unsupported", other.to_string())),
         }
     }
@@ -736,9 +829,9 @@ impl Admin {
         })
     }
 
-    fn reset(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, text: &str) -> Vec<String> {
+    fn reset(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, v: &J) -> Vec<String> {
         let fail = |e: ApiError| vec![frame(id, Err(e))];
-        let q: ResetReq = match params(text) {
+        let q = match ResetReq::from(v) {
             Ok(q) => q,
             Err(e) => return fail(e),
         };
