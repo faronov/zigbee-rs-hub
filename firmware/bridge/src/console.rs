@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::diag::{self, Site};
-use crate::{h2, recovery, reserved, stats, uart, usb};
+use crate::{h2, pta_lines, recovery, reserved, stats, uart, usb};
 
 const HELP: &str = "\
 commands:\r
@@ -26,6 +26,9 @@ commands:\r
   diag                 thread breadcrumbs now and the last supervisor restart\r
   gpio                 levels of the reserved lines S3 GPIO4/5/6\r
   gpio <4|5|6> high|low|in|pu|pd  drive or sense a reserved line (flow off)\r
+  pta                  levels of the PTA lines (request, priority, grant, tx_line)\r
+  pta sample <ms>      request/priority duty cycle over <ms> (max 5000)\r
+  pta grant|tx_line high|low|in|pd  drive or release an S3 PTA output (bridge mode)\r
   s3 usj | s3 download hand the USB PHY back to USB-Serial-JTAG (app keeps\r
                        running, bridge off; hwlab can flash, an RTS reset reboots)\r
   s3 reset             reboot the S3 (bridge restarts)\r
@@ -142,6 +145,17 @@ fn execute(cmd: &str) {
             reply("ok: counters cleared\r\n");
         }
         ["gpio"] => reply(&format!("{}\r\n", reserved::levels())),
+        // PTA links (H9 wiring check; the hub's coexistence leader owns them
+        // in hub mode).
+        ["pta"] => reply(&format!("{}\r\n", pta_lines::levels())),
+        ["pta", "sample", ms] => match ms.parse::<u32>() {
+            Ok(ms) => reply(&format!("{}\r\n", pta_lines::sample(ms))),
+            Err(_) => reply("error: pta sample MS\r\n"),
+        },
+        ["pta", line, mode] => match pta_lines::set(line, mode) {
+            Ok(()) => reply(&format!("ok: {}\r\n", pta_lines::levels())),
+            Err(e) => reply(&format!("error: {}\r\n", e)),
+        },
         ["gpio", pin, mode] => match pin.parse::<i32>().map_err(|_| "pin").and_then(|p| reserved::set(p, mode)) {
             Ok(()) => reply(&format!("ok: {}\r\n", reserved::levels())),
             Err(e) => reply(&format!("error: {}\r\n", e)),
