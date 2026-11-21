@@ -237,6 +237,7 @@ fn bank_build_lookup_tamper() {
         catalog_date: 20261120,
         catalog_serial: 1,
         max_size: 256 * 1024,
+        ..Default::default()
     };
     let unsigned = zdefc::bank::build_bank(&defs, &params).unwrap();
     assert_eq!(Bank::parse(&unsigned.bytes).unwrap().header.sig_len, 0);
@@ -249,7 +250,7 @@ fn bank_build_lookup_tamper() {
     bank.verify(&keys).unwrap();
     assert_eq!(bank.header.definitions as usize, defs.len());
     let mut inf = MinizInflate::new();
-    let strings = bank.load_strings(&mut inf).unwrap();
+    let strings = bank.strings(&mut inf).unwrap();
     let mut buf = [0u8; BLOCK_MAX];
     // Zigbee lookup by names
     let fp = zdef::Fingerprint {

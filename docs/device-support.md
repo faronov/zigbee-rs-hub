@@ -1237,7 +1237,7 @@ LittleFS), at most 256 KiB on 4 MB boards (16).
 
 ```text
 Header (64 B, little-endian):
-   0 magic "ZDB1"            4 format u16 (1)          6 signature length u16
+   0 magic "ZDB1"            4 format u16 (1 or 2)     6 signature length u16
    8 bank generation u32    12 catalog date u32 (YYYYMMDD)
   16 catalog serial u16     18 blocks u16             20 definitions u16
   22 shared strings u16     24 index keys u32         28 string section length u32
@@ -1245,8 +1245,12 @@ Header (64 B, little-endian):
 Signature:     COSE_Sign1 (RFC 9052), EdDSA/Ed25519 (alg -8), protected {1: -8},
                unprotected {4: kid}, detached payload (nil) = the 64-byte header;
                kid = first 8 bytes of SHA-256 of the public key
-String table:  u32 inflated length + raw deflate of a CBOR array of text strings
-               (catalog form, 8.4)
+String table:  format 2 (written since 2026-11-21): u32 count, (count + 1) × u32
+               offsets into the text area (the last = its length), the text
+               area (UTF-8, concatenated); read in place from memory-mapped
+               flash, no RAM. Format 1: u32 inflated length + raw deflate of a
+               CBOR array of text strings, inflated into RAM (~32 KiB for the
+               2 289-definition release bank). Catalog form, 8.4
 Index:         n × 12 B, sorted by (key hash, block, slot):
                  u64 key hash (SipHash-2-4, key "zdef-index-v1" padded with NULs
                  to 16 bytes, over the canonical CBOR of the index key, below)
@@ -1281,8 +1285,20 @@ definitions enter the table, the largest saving first.
   `TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF`, so no 32 KiB window is
   needed. One definition load = one block inflate (≤ 4 KiB, ~0.5 ms).
 - **Lookup**: hash the device's `(manufacturer, model)` (and `(*, model)`,
-  and the fingerprint key), binary-search the index (in PSRAM), inflate the
-  block, decode the definition, re-check the full clause (6.2), score (3.3).
+  and the fingerprint key), binary-search the index (read in place from the
+  memory-mapped bank), inflate the block, decode the definition, re-check
+  the full clause (6.2), score (3.3).
+- **RAM without PSRAM** (format 2, measured on the host with a counting
+  allocator, `cargo test -p zdefc --test bank_heap -- --nocapture`,
+  `ZDEF_BANK=bank-4m.zdb` for the release bank): the bank (index, string
+  table, blocks) stays in flash; a lookup allocates the inflater state
+  (10.5 KB with `miniz_oxide`; the ROM `tinfl` state is about the same),
+  the 4 KiB block buffer and the decoded definition: 7.3 KB median, 33.7 KB
+  for the largest of the 2 289 definitions (inflater excluded), all freed
+  unless the definition is used. The same bank in format 1 holds 31.9 KB of
+  inflated string table for as long as the catalog is open. Format 2 costs
+  15 KiB of flash for that release (213.1 KiB instead of 197.8 KiB per bank,
+  43 KiB below the 256 KiB 4 MB bank).
 - **Atomic switch**: the active bank is chosen by a 32-byte record in the
   config area (`active: a|b`, generation, bank SHA-256), written with the
   same two-slot, CRC, commit-marker scheme as the zigbee-rs settings
@@ -2241,8 +2257,8 @@ definitions, 4 KiB deflate blocks) and the examples (appendix 20):
 
 | Item | Size |
 |---|---:|
-| Bank index (2 000 defs, ~3 200 keys × 12 B) | ~37 KiB |
-| String table, inflated | ~70 KiB (could be paged per block; not needed) |
+| Bank index (2 000 defs, ~3 200 keys × 12 B) | ~37 KiB in flash (memory-mapped, no RAM) |
+| String table | format 2: in flash, no RAM; format 1: 31.9 KB inflated (release bank, 1 524 strings) |
 | Inflate buffer for one block + one standalone definition | 8 KiB |
 | Per device: entity table (~48 B/entity: binding, transform refs, flags, last state), bytecode and constants (~100–300 B), dispatch entries (16 B/binding) | ~0.5–1.5 KiB |
 | 200 devices | ~100–300 KiB |
