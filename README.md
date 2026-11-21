@@ -642,6 +642,21 @@ the last stack/heap watch, the last Rust panic message and the crash reset
 reason (RTC memory; hub-mode logs go to UART0, which the lab host cannot
 see); `hub stacks` shows the live picture.
 
+With Wi-Fi (2026-11-21): the default Wi-Fi configuration left 14–22 KB of
+internal heap, so the hub build uses fewer Wi-Fi buffers (4 static RX,
+8 dynamic RX/TX, no A-MPDU) and keeps Wi-Fi, FreeRTOS and heap code in
+flash (`firmware/hub/sdkconfig.defaults`): with Wi-Fi, the HTTP server and
+a WebSocket session up, **~65 KB free (minimum 57 KB)**. `ws://<ip>/api` from
+the Mac: `devices/list` (the C6), `entities/states` with live temperature
+and humidity, `network/permit_join` — all answered. Found on the way: the
+first WebSocket connection deadlocked the app, because the app sent the
+`auth_required` frame through esp_http_server's detached sender (which
+needs the server thread) while that thread waited in the handler for the
+app's reply; the app now replies first. On macOS, Local Network privacy
+may block an unsigned `hubctl` from reaching LAN addresses ("No route to
+host" while `curl` works): allow it in System Settings, or relay through
+`nc` on localhost.
+
 **Size.** The application is the default `tbr-hub` build; it targets the
 8 MB production layout (3 MiB slots) and the 4 MB dev layout (2 944 KiB).
 

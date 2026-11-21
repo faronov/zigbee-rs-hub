@@ -329,12 +329,15 @@ impl Runner {
             },
             Input::Connect(mut sink, reply) => {
                 let (sid, hello) = self.api.connect();
+                // Reply first: the caller may be the transport's own thread
+                // (esp_http_server's WebSocket handler), which a blocking
+                // sink needs free to deliver the frame.
+                let _ = reply.send(sid);
                 if sink.send(&hello) {
                     self.sinks.insert(sid, sink);
                 } else {
                     self.api.disconnect(sid);
                 }
-                let _ = reply.send(sid);
             }
             Input::Text(sid, text) => {
                 for frame in self.api.handle_text(&mut self.engine, sid, &text, now) {
