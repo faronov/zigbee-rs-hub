@@ -14,14 +14,20 @@ use zigbee_zrhp::frame::{ResetReason, TX_BUFFER_LEN};
 use zigbee_zrhp::link::{Link, LinkConfig, LinkEvent};
 use zigbee_zrhp::msg::data::{ApsDataRequest, EvtApsDataConfirm};
 use zigbee_zrhp::msg::firmware::{FwBegin, FwBeginRsp, FwFinishRsp, FwGetSlotsRsp, FwSlot, FwWrite, FwWriteRsp};
+use zigbee_zrhp::msg::backup::{BkpExportBegin, BkpExportBeginRsp, BkpExportRead, BkpRestoreBegin, BkpRestoreBeginRsp, BkpRestoreCommitRsp, BkpRestorePutRsp, RestoreNote};
 use zigbee_zrhp::msg::network::{
-    EvtNetworkState, EvtPermitJoinState, NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin,
+    EnergyResult, EvtChannelChanged, EvtEnergyScanResult, EvtNetworkState, EvtPermitJoinState, NwkChangeChannel, NwkEnergyScan,
+    NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin, NwkSetTxPower, NwkSetTxPowerRsp,
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKeyRsp};
-use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysNegotiateRsp, caps};
-use zigbee_zrhp::msg::diag::{Child, DiagGetChildren, DiagGetChildrenRsp, DiagGetNeighbors, DiagGetNeighborsRsp, Neighbor};
+use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysGetStatusRsp, SysNegotiateRsp, caps};
+use zigbee_zrhp::msg::diag::{
+    Child, Counter, DiagGetChildren, DiagGetChildrenRsp, DiagGetCounters, DiagGetCountersRsp, DiagGetNeighbors,
+    DiagGetNeighborsRsp, DiagGetRoutes, DiagGetRoutesRsp, DiagResetCounters, Neighbor, Route,
+};
+use zigbee_zrhp::records::{NetworkKeyRecord, NetworkRecord, NodeRecord, RawRecords, RsParamsRecord, StreamCrc, TcLinkKeyRecord, verify_stream};
 use zigbee_zrhp::msg::tables::{TblRead, TblReadEntry, TblReadRsp, TblSyncRsp};
-use zigbee_zrhp::records::{ChildInfo, DeviceRecord, Record, device_flags};
+use zigbee_zrhp::records::{ChildInfo, DeviceRecord, LinkBlock, Record, device_flags};
 use zigbee_zrhp::msg::{Batch, Kind, RawMessage, ids};
 use zigbee_zrhp::queue::EndpointQueues;
 use zigbee_zrhp::types::{Endpoint, Ieee, Status};
@@ -94,6 +100,46 @@ pub struct SimState {
     pub neighbors: Option<Vec<SimNeighbor>>,
     /// No `EVT_PERMIT_JOIN_STATE` (as the zigbee-rs NCP image).
     pub silent_permit_join: bool,
+    /// Requests answered `UNSUPPORTED_COMMAND` (to mimic an NCP image that
+    /// lacks them, e.g. `NWK_ENERGY_SCAN`).
+    pub unsupported: Vec<u16>,
+    /// NWK update ID.
+    pub nwk_update_id: u8,
+    /// TX power (dBm).
+    pub tx_power: i8,
+    /// Energy per channel 11–26 for `NWK_ENERGY_SCAN`.
+    pub energy: [u8; 16],
+    /// Delay of `EVT_CHANNEL_CHANGED` after `NWK_CHANGE_CHANNEL`.
+    pub channel_delay: Duration,
+    /// `DIAG_GET_ROUTES`: `(dst, next_hop, status)`.
+    pub routes: Vec<(u16, u16, u8)>,
+    /// `DIAG_GET_COUNTERS`: `(id, value)`; the group is the ID's high byte.
+    pub counters: Vec<(u16, u32)>,
+    /// Remote nodes answering ZDO Mgmt_Lqi_req / Mgmt_Rtg_req sent as APS
+    /// data (the over-the-air topology scan).
+    pub remotes: Vec<SimRemote>,
+    /// Device link keys exported with `DEVICE` records: `(ieee, key)`.
+    pub link_keys: Vec<([u8; 8], [u8; 16])>,
+    /// Running export `(txn, stream, offset)`.
+    pub export: Option<(u16, Vec<u8>, usize)>,
+    /// Running restore `(txn, nwk_margin, aps_margin, stream)`.
+    pub restore: Option<(u16, u32, u32, Vec<u8>)>,
+    /// The last committed restore stream.
+    pub restored: Option<Vec<u8>>,
+}
+
+/// A router (or any node) of the simulated network answering Mgmt_Lqi_req
+/// and Mgmt_Rtg_req over the air.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimRemote {
+    /// Its short address.
+    pub nwk: u16,
+    /// Its IEEE.
+    pub ieee: [u8; 8],
+    /// Neighbor table: `(ieee, nwk, device type, relationship, lqi)`.
+    pub neighbors: Vec<([u8; 8], u16, u8, u8, u8)>,
+    /// Routing table: `(dst, next_hop, status)`.
+    pub routes: Vec<(u16, u16, u8)>,
 }
 
 /// `(ieee, nwk, device type, relationship)` of a simulated neighbor.
@@ -143,6 +189,18 @@ impl SimNcp {
             children: None,
             neighbors: None,
             silent_permit_join: false,
+            unsupported: Vec::new(),
+            nwk_update_id: 0,
+            tx_power: 8,
+            energy: [30, 25, 60, 120, 180, 200, 170, 90, 35, 20, 28, 40, 30, 22, 18, 26],
+            channel_delay: Duration::from_millis(50),
+            routes: Vec::new(),
+            counters: vec![(0x0101, 120), (0x0103, 2), (0x0111, 118), (0x0113, 1), (0x0701, 3), (0x0702, 0), (0x0703, 0)],
+            remotes: Vec::new(),
+            link_keys: Vec::new(),
+            export: None,
+            restore: None,
+            restored: None,
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
@@ -346,13 +404,21 @@ impl SimNcp {
         let status = |s: Status| vec![s.to_u8()];
         let mut actions = Vec::new();
         let mut s = self.state.lock().unwrap();
+        if s.unsupported.contains(&m.header.msg_id) {
+            return (status(Status::UnsupportedCommand), actions);
+        }
         let rsp = match m.header.msg_id {
             ids::SYS_NEGOTIATE => {
                 let capacities = [Capacity { id: 1, value: 4 }, Capacity { id: 7, value: STRIDE }];
                 ok(encode!(SysNegotiateRsp {
                     major: 1,
                     minor: 0,
-                    ncp_caps: caps::NCP_FW_UPDATE | caps::KEY_EXPORT | caps::UART_FLOW_CONTROL,
+                    ncp_caps: caps::NCP_FW_UPDATE
+                        | caps::KEY_EXPORT
+                        | caps::UART_FLOW_CONTROL
+                        | caps::BACKUP_RESTORE
+                        | if s.unsupported.contains(&ids::NWK_ENERGY_SCAN) { 0 } else { caps::ENERGY_SCAN }
+                        | if s.unsupported.contains(&ids::NWK_SET_TX_POWER) { 0 } else { caps::TX_POWER },
                     capacities: List::new(&capacities),
                     fw: Bytes8(b"sim-ncp 0.1.0"),
                     build_id: [0x51; 8],
@@ -420,13 +486,217 @@ impl SimNcp {
                 channel_mask: 1 << s.channel,
                 short: 0,
                 ieee: Ieee([0x5A, 0x51, 0, 0, 0, 0, 0x01, 0x02]),
-                nwk_update_id: 0,
+                nwk_update_id: s.nwk_update_id,
                 nwk_manager: 0,
                 key_seq: 0,
                 security_level: 5,
-                tx_power: 0,
+                tx_power: s.tx_power,
                 stack_profile: 2,
             })),
+            ids::NWK_ENERGY_SCAN => {
+                let r: NwkEnergyScan = m.decode().unwrap();
+                let results: Vec<EnergyResult> = (11u8..=26)
+                    .filter(|c| r.channel_mask & (1 << c) != 0)
+                    .map(|c| {
+                        let energy = s.energy[usize::from(c - 11)];
+                        EnergyResult { channel: c, max_rssi_dbm: (-100 + i16::from(energy) * 60 / 255) as i8, energy }
+                    })
+                    .collect();
+                actions.push((
+                    Duration::from_millis(20),
+                    event(&EvtEnergyScanResult { req_tid: tid, status: 0, results: List::new(&results) }),
+                ));
+                status(Status::Success)
+            }
+            ids::NWK_CHANGE_CHANNEL => {
+                let r: NwkChangeChannel = m.decode().unwrap();
+                if s.network_state != 2 {
+                    status(Status::InvalidState)
+                } else if !(11..=26).contains(&r.channel) {
+                    status(Status::InvalidParameter)
+                } else {
+                    if r.channel != s.channel {
+                        s.nwk_update_id = if r.nwk_update_id == 0 { s.nwk_update_id.wrapping_add(1) } else { r.nwk_update_id };
+                        s.channel = r.channel;
+                    }
+                    s.log.push((m.header.msg_id, m.payload.to_vec()));
+                    let ev = EvtChannelChanged { channel: s.channel, nwk_update_id: s.nwk_update_id, req_tid: tid };
+                    actions.push((s.channel_delay, event(&ev)));
+                    status(Status::Success)
+                }
+            }
+            ids::NWK_SET_TX_POWER => {
+                let r: NwkSetTxPower = m.decode().unwrap();
+                s.tx_power = r.dbm.clamp(-24, 20);
+                s.log.push((m.header.msg_id, m.payload.to_vec()));
+                ok(encode!(NwkSetTxPowerRsp { applied_dbm: s.tx_power }))
+            }
+            ids::NWK_LEAVE_RESET => {
+                s.network_state = 0;
+                s.pan_id = 0;
+                s.ext_pan_id = [0; 8];
+                s.key = [0; 16];
+                s.channel = 0;
+                s.log.push((m.header.msg_id, m.payload.to_vec()));
+                status(Status::Success)
+            }
+            ids::SYS_GET_STATUS => ok(encode!(SysGetStatusRsp {
+                network_state: s.network_state,
+                uptime_s: 3600,
+                free_aps_slots: 4,
+                host_absent_queue: 0,
+                dirty_writebacks: 0,
+                restore_in_progress: u8::from(s.restore.is_some()),
+                flags: 0,
+            })),
+            ids::DIAG_GET_COUNTERS => {
+                let r: DiagGetCounters = m.decode().unwrap();
+                let list: Vec<Counter> = s
+                    .counters
+                    .iter()
+                    .filter(|(id, _)| (id >> 8) >= 1 && (id >> 8) <= 8 && r.group_mask & (1 << ((id >> 8) - 1)) != 0)
+                    .map(|&(id, value)| Counter { id, value })
+                    .collect();
+                ok(encode!(DiagGetCountersRsp { counters: List::new(&list) }))
+            }
+            ids::DIAG_RESET_COUNTERS => {
+                let r: DiagResetCounters = m.decode().unwrap();
+                for (id, v) in s.counters.iter_mut() {
+                    if (*id >> 8) >= 1 && (*id >> 8) <= 8 && r.group_mask & (1 << ((*id >> 8) - 1)) != 0 {
+                        *v = 0;
+                    }
+                }
+                status(Status::Success)
+            }
+            ids::DIAG_GET_ROUTES => {
+                let r: DiagGetRoutes = m.decode().unwrap();
+                let entries: Vec<Route> = s
+                    .routes
+                    .iter()
+                    .skip(r.start as usize)
+                    .take(2)
+                    .map(|&(dst, next_hop, status)| Route { dst, next_hop, status, flags: 0 })
+                    .collect();
+                ok(encode!(DiagGetRoutesRsp { total: s.routes.len() as u8, entries: List::new(&entries) }))
+            }
+            ids::BKP_EXPORT_BEGIN => {
+                let r: BkpExportBegin = m.decode().unwrap();
+                if s.network_state != 2 {
+                    status(Status::InvalidState)
+                } else {
+                    let stream = export_stream(&s, r.flags & 1 != 0);
+                    let count = RawRecords::new(&stream).count() as u32;
+                    s.export = Some((tid, stream, 0));
+                    ok(encode!(BkpExportBeginRsp { txn: tid, record_count: count }))
+                }
+            }
+            ids::BKP_EXPORT_READ => {
+                let r: BkpExportRead = m.decode().unwrap();
+                match s.export.as_mut().filter(|e| e.0 == r.txn) {
+                    None => status(Status::NotFound),
+                    Some((_, stream, off)) => {
+                        let mut end = *off;
+                        for (_, tlv) in RawRecords::new(&stream[*off..]).flatten() {
+                            if end - *off + tlv.len() > usize::from(r.max_bytes) {
+                                break;
+                            }
+                            end += tlv.len();
+                        }
+                        let mut v = vec![0, u8::from(end < stream.len())];
+                        v.extend_from_slice(&stream[*off..end]);
+                        *off = end;
+                        v
+                    }
+                }
+            }
+            ids::BKP_EXPORT_END => {
+                s.export = None;
+                status(Status::Success)
+            }
+            ids::BKP_RESTORE_BEGIN => {
+                let r: BkpRestoreBegin = m.decode().unwrap();
+                if s.restore.is_some() {
+                    status(Status::InProgress)
+                } else {
+                    s.restore = Some((tid, r.nwk_margin, r.aps_margin, Vec::new()));
+                    ok(encode!(BkpRestoreBeginRsp { txn: tid, max_records_per_put: 12 }))
+                }
+            }
+            ids::BKP_RESTORE_PUT => {
+                let txn = u16::from_le_bytes([m.payload[0], m.payload[1]]);
+                match s.restore.as_mut().filter(|r| r.0 == txn) {
+                    None => status(Status::NotFound),
+                    Some(r) => {
+                        let before = RawRecords::new(&r.3).count();
+                        r.3.extend_from_slice(&m.payload[2..]);
+                        let notes: Vec<RestoreNote> = RawRecords::new(&r.3)
+                            .flatten()
+                            .enumerate()
+                            .skip(before)
+                            .filter(|(_, (t, _))| *t == zigbee_zrhp::records::record_type::GP_PROXY)
+                            .map(|(i, _)| RestoreNote { index: i as u16, note: 3 })
+                            .collect();
+                        let accepted = RawRecords::new(&r.3).count() as u16;
+                        ok(encode!(BkpRestorePutRsp { accepted, notes: List::new(&notes) }))
+                    }
+                }
+            }
+            ids::BKP_RESTORE_COMMIT => match s.restore.take() {
+                None => status(Status::NotFound),
+                Some((_, nwk_margin, aps_margin, stream)) => match verify_stream(&stream) {
+                    Err(_) => status(Status::InvalidParameter),
+                    Ok(_) => {
+                        let mut nwk_fc = 0u32;
+                        let mut aps_fc = 0u32;
+                        let mut children = 0u16;
+                        let mut keys = 0u16;
+                        s.table_devices.clear();
+                        for (_, tlv) in RawRecords::new(&stream).flatten() {
+                            match zigbee_zrhp::codec::Reader::new(tlv).read::<Record>() {
+                                Ok(Record::Network(n)) => {
+                                    s.pan_id = n.pan_id;
+                                    s.ext_pan_id = n.ext_pan_id;
+                                    s.channel = n.channel;
+                                    s.nwk_update_id = n.nwk_update_id;
+                                }
+                                Ok(Record::NetworkKey(k)) => {
+                                    s.key = k.key;
+                                    nwk_fc = nwk_fc.max(k.tx_counter);
+                                }
+                                Ok(Record::TcLinkKey(k)) => aps_fc = aps_fc.max(k.tx_counter),
+                                Ok(Record::RsParams(p)) => {
+                                    nwk_fc = nwk_fc.max(p.nwk_fc_limit);
+                                    aps_fc = aps_fc.max(p.aps_fc_limit);
+                                }
+                                Ok(Record::Device(d)) => {
+                                    children += u16::from(d.child.is_some());
+                                    if let Some(l) = d.link {
+                                        keys += 1;
+                                        aps_fc = aps_fc.max(l.tx_counter);
+                                    }
+                                    s.table_devices.push((d.ieee.0, d.nwk, d.child.map(|c| c.capability)));
+                                }
+                                _ => {}
+                            }
+                        }
+                        s.nwk_limit = s.nwk_limit.max(nwk_fc.saturating_add(nwk_margin));
+                        s.aps_limit = s.aps_limit.max(aps_fc.saturating_add(aps_margin));
+                        s.network_state = 2;
+                        s.restored = Some(stream);
+                        ok(encode!(BkpRestoreCommitRsp {
+                            nwk_fc_start: s.nwk_limit,
+                            aps_fc_start: s.aps_limit,
+                            link_keys_on_ncp: keys,
+                            link_keys_host_backed: 0,
+                            children,
+                        }))
+                    }
+                },
+            },
+            ids::BKP_RESTORE_ABORT => {
+                s.restore = None;
+                status(Status::Success)
+            }
             ids::NWK_PERMIT_JOIN => {
                 let p: NwkPermitJoin = m.decode().unwrap();
                 if !s.silent_permit_join {
@@ -449,6 +719,11 @@ impl SimNcp {
                     Duration::from_millis(10),
                     event(&EvtApsDataConfirm { req_tid: tid, status: 0, zb_status: 0, aps_counter: 7, dst_nwk: dst, flags: 1, elapsed_ms: 10 }),
                 ));
+                if req.profile == 0
+                    && let Some(rsp) = s.remotes.iter().find(|r| r.nwk == dst).and_then(|r| remote_zdo(r, req.cluster, req.asdu))
+                {
+                    actions.push((Duration::from_millis(15), Action::Event(ids::EVT_APS_DATA_INDICATION, rsp)));
+                }
                 status(Status::Success)
             }
             ids::SEC_GET_NETWORK_KEY => ok(encode!(SecGetNetworkKeyRsp { key: s.key, seq: 0, nwk_fc_limit: s.nwk_limit })),
@@ -626,6 +901,117 @@ impl SimNcp {
 enum Action {
     Reboot,
     Event(u16, Vec<u8>),
+}
+
+/// The export stream of the simulated network (spec 9.5 order).
+fn export_stream(s: &SimState, keys: bool) -> Vec<u8> {
+    let ieee = Ieee([0x5A, 0x51, 0, 0, 0, 0, 0x01, 0x02]);
+    let mut records = vec![
+        Record::Node(NodeRecord { ieee, nwk: 0, logical_type: 0, flags: 0 }),
+        Record::Network(NetworkRecord {
+            pan_id: s.pan_id,
+            ext_pan_id: s.ext_pan_id,
+            channel: s.channel,
+            channel_mask: 1 << s.channel,
+            nwk_update_id: s.nwk_update_id,
+            nwk_manager: 0,
+            security_level: 5,
+            tx_power: s.tx_power,
+        }),
+    ];
+    if keys {
+        records.push(Record::NetworkKey(NetworkKeyRecord { key: s.key, seq: 0, tx_counter: s.nwk_limit, flags: 1 }));
+        records.push(Record::TcLinkKey(TcLinkKeyRecord { key: *b"ZigBeeAlliance09", tc_ieee: ieee, tx_counter: s.aps_limit, flags: 0 }));
+    }
+    for &(ieee, nwk, cap) in &s.table_devices {
+        let link = s.link_keys.iter().find(|(i, _)| *i == ieee).filter(|_| keys).map(|(_, key)| LinkBlock {
+            key: *key,
+            key_seq: 0,
+            attrs: 2,
+            origin: 2,
+            tx_counter: s.aps_limit,
+            rx_floor: 0,
+        });
+        records.push(Record::Device(DeviceRecord {
+            ieee: Ieee(ieee),
+            nwk,
+            flags: device_flags::NWK_VALID
+                | if cap.is_some() { device_flags::IS_CHILD | device_flags::CHILD_INFO } else { 0 }
+                | if link.is_some() { device_flags::LINK } else { 0 },
+            child: cap.map(|capability| ChildInfo { capability, timeout_exp: 8 }),
+            link,
+        }));
+    }
+    records.push(Record::RsParams(RsParamsRecord {
+        fc_stride: STRIDE,
+        table_epoch: 0xE0E0_0001,
+        nwk_fc_limit: s.nwk_limit,
+        aps_fc_limit: s.aps_limit,
+        flags: 0,
+    }));
+    let mut buf = vec![0u8; 64 + 64 * records.len()];
+    let mut w = zigbee_zrhp::codec::Writer::new(&mut buf);
+    let mut crc = StreamCrc::new();
+    for r in &records {
+        crc.write_record(r, &mut w).unwrap();
+    }
+    zigbee_zrhp::codec::Wire::write(&Record::End(crc.end()), &mut w).unwrap();
+    let n = w.len();
+    buf.truncate(n);
+    buf
+}
+
+/// A remote node's answer to a ZDO request (as `EVT_APS_DATA_INDICATION`
+/// payload): Mgmt_Lqi_rsp and Mgmt_Rtg_rsp, three entries per page.
+fn remote_zdo(r: &SimRemote, cluster: u16, asdu: &[u8]) -> Option<Vec<u8>> {
+    let (&tsn, &start) = (asdu.first()?, asdu.get(1)?);
+    let mut zdp = vec![tsn, 0];
+    let rsp_cluster: u16 = match cluster {
+        0x0031 => {
+            zdp.extend([r.neighbors.len() as u8, start]);
+            let page: Vec<_> = r.neighbors.iter().skip(usize::from(start)).take(3).collect();
+            zdp.push(page.len() as u8);
+            for &&(ieee, nwk, dtype, rel, lqi) in &page {
+                zdp.extend([0xDD; 8]);
+                zdp.extend(ieee);
+                zdp.extend(nwk.to_le_bytes());
+                let rx_on = if dtype == 2 { 0 } else { 1 };
+                zdp.push(dtype & 3 | rx_on << 2 | (rel & 7) << 4);
+                zdp.push(2);
+                zdp.push(1);
+                zdp.push(lqi);
+            }
+            0x8031
+        }
+        0x0032 => {
+            zdp.extend([r.routes.len() as u8, start]);
+            let page: Vec<_> = r.routes.iter().skip(usize::from(start)).take(3).collect();
+            zdp.push(page.len() as u8);
+            for &&(dst, next_hop, status) in &page {
+                zdp.extend(dst.to_le_bytes());
+                zdp.push(status & 7);
+                zdp.extend(next_hop.to_le_bytes());
+            }
+            0x8032
+        }
+        _ => return None,
+    };
+    let mut p = vec![0x02, 0, 0, 0];
+    p.extend(r.nwk.to_le_bytes());
+    p.extend(r.ieee);
+    p.push(0);
+    p.extend(0u16.to_le_bytes());
+    p.extend(rsp_cluster.to_le_bytes());
+    p.push(0x06);
+    p.push(180);
+    p.push(-60i8 as u8);
+    p.extend(r.nwk.to_le_bytes());
+    p.push(0);
+    p.push(0);
+    p.extend(0u32.to_le_bytes());
+    p.extend((zdp.len() as u16).to_le_bytes());
+    p.extend(zdp);
+    Some(p)
 }
 
 fn event<'a, T: zigbee_zrhp::codec::Wire<'a> + zigbee_zrhp::msg::MessageDef>(body: &T) -> Action {
