@@ -12,7 +12,7 @@ use crate::hub::ApiError;
 pub const API_VERSION: &str = "1.2";
 
 /// Topics of `subscribe`.
-pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp", "network"];
+pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp", "network", "catalog"];
 
 /// The first frame from the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,6 +160,13 @@ pub enum Request {
         source: Option<String>,
         #[serde(default)]
         device: Option<String>,
+        /// Substring of `id`, vendor or model (case-insensitive).
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
     },
     #[serde(rename = "definitions/get")]
     DefinitionsGet {

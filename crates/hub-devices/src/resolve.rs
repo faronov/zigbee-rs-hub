@@ -33,8 +33,70 @@ pub trait Catalog {
     fn candidates(&self, fp: &Fingerprint) -> Vec<Arc<Definition>>;
     /// A definition by ID (pinning, API).
     fn get(&self, id: &str) -> Option<Arc<Definition>>;
-    /// All definitions (API listing).
+    /// All definitions held decoded or small enough to decode at once
+    /// (API listing; a bank returns none, see [`Catalog::list`]).
     fn all(&self) -> Vec<Arc<Definition>>;
+    /// A page of identity summaries matching `query` (substring of `id`,
+    /// vendor or model, case-insensitive): `(total matches, page)`.
+    fn list(&self, offset: usize, limit: usize, query: Option<&str>) -> (usize, Vec<DefSummary>) {
+        list_defs(&self.all(), offset, limit, query)
+    }
+    /// Facts for `catalog/status`.
+    fn status(&self) -> serde_json::Value {
+        serde_json::json!({"definitions": self.all().len()})
+    }
+    /// The concrete catalog, for the owner that installed it.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+}
+
+/// Identity of a definition for listings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefSummary {
+    /// `id`.
+    pub id: String,
+    /// `revision`.
+    pub revision: u32,
+    /// `vendor`.
+    pub vendor: String,
+    /// `model`.
+    pub model: String,
+    /// Source.
+    pub source: LayerSource,
+}
+
+/// [`Catalog::list`] over decoded definitions.
+pub fn list_defs(
+    defs: &[Arc<Definition>],
+    offset: usize,
+    limit: usize,
+    query: Option<&str>,
+) -> (usize, Vec<DefSummary>) {
+    let q = query.map(str::to_lowercase);
+    let hits: Vec<&Arc<Definition>> = defs
+        .iter()
+        .filter(|d| {
+            q.as_deref().is_none_or(|q| {
+                [&d.id, &d.vendor, &d.model]
+                    .iter()
+                    .any(|f| f.to_lowercase().contains(q))
+            })
+        })
+        .collect();
+    let page = hits
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|d| DefSummary {
+            id: d.id.clone(),
+            revision: d.revision,
+            vendor: d.vendor.clone(),
+            model: d.model.clone(),
+            source: d.source,
+        })
+        .collect();
+    (hits.len(), page)
 }
 
 /// An in-memory catalog.

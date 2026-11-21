@@ -334,6 +334,20 @@ fn bank_build_lookup_tamper() {
     assert_eq!(man, man0);
     assert_eq!(man.banks[0].sha256, zdef::hash::sha256(&signed));
     assert_eq!(man.shards.len(), 256);
+    // The hub's summary: no shard hashes in RAM, each read in place.
+    let (sum, payload) = zdef::sign::Manifest::verify_summary(&m, &keys).unwrap();
+    assert!(sum.shards.is_empty());
+    assert_eq!(
+        zdef::sign::Manifest {
+            shards: man.shards.clone(),
+            ..sum
+        },
+        man
+    );
+    for (i, h) in man.shards.iter().enumerate() {
+        assert_eq!(zdef::sign::manifest_shard(payload, i).unwrap(), *h);
+    }
+    assert_eq!(zdef::sign::manifest_shard(payload, 256).unwrap(), None);
     let mut recs = 0;
     for (h, s) in &shards {
         assert_eq!(man.shards[*h as usize], Some(zdef::hash::sha256(s)));

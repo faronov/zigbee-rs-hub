@@ -438,6 +438,71 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.catalog.as_ref()
     }
 
+    /// Mutable catalog (the store adds fetched definitions; downcast with
+    /// [`Catalog::as_any_mut`]). Call [`Hub::reresolve`] after a change.
+    pub fn catalog_mut(&mut self) -> &mut dyn Catalog {
+        self.catalog.as_mut()
+    }
+
+    /// Replaces the catalog (an installed bank) and re-resolves every
+    /// device (3.4); returns what changed per device.
+    pub fn set_catalog(&mut self, c: Box<dyn Catalog>, now: Millis) -> Vec<serde_json::Value> {
+        self.catalog = c;
+        self.reresolve(None, now)
+    }
+
+    /// Re-resolves `ids` (all devices for `None`) and reconfigures those
+    /// whose layers changed; returns `{device, from, to, added, orphaned}`
+    /// for each changed device (`from`/`to`: definition IDs above generic).
+    pub fn reresolve(&mut self, ids: Option<&[String]>, now: Millis) -> Vec<serde_json::Value> {
+        let ids: Vec<String> = match ids {
+            Some(v) => v.to_vec(),
+            None => self.devices.keys().cloned().collect(),
+        };
+        let mut report = Vec::new();
+        for id in ids {
+            let Some(d) = self.devices.get(&id) else {
+                continue;
+            };
+            let layer_ids = |d: &Device| -> Vec<String> {
+                d.resolution
+                    .layers
+                    .iter()
+                    .filter(|l| l.source != LayerSource::Generic)
+                    .map(|l| l.id.clone())
+                    .collect()
+            };
+            let before = d.resolution.layers.clone();
+            let from = layer_ids(d);
+            // Vectors, not sets: a collected set brings a sort (flash).
+            let live = |d: &Device| -> Vec<String> {
+                d.entities
+                    .iter()
+                    .filter(|e| !e.orphaned)
+                    .map(|e| e.uid.clone())
+                    .collect()
+            };
+            let old_uids = live(d);
+            self.resolve_device(&id, now);
+            let Some(d) = self.devices.get(&id) else {
+                continue;
+            };
+            if d.resolution.layers == before {
+                continue;
+            }
+            let new_uids = live(d);
+            report.push(serde_json::json!({
+                "device": id,
+                "from": from,
+                "to": layer_ids(d),
+                                "added": new_uids.iter().filter(|u| !old_uids.contains(u)).collect::<Vec<_>>(),
+                "orphaned": old_uids.iter().filter(|u| !new_uids.contains(u)).collect::<Vec<_>>(),
+            }));
+            self.redo_configure(&id, now);
+        }
+        report
+    }
+
     pub(crate) fn next_zcl_tsn(&mut self) -> u8 {
         self.zcl_tsn = self.zcl_tsn.wrapping_add(1);
         self.zcl_tsn

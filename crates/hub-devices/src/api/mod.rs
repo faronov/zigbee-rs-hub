@@ -152,6 +152,19 @@ impl ApiServer {
         text: &str,
         now: Millis,
     ) -> Vec<String> {
+        self.handle_text_ext(hub, s, text, now, None)
+    }
+
+    /// [`handle_text`](Self::handle_text) with requests an
+    /// [`ApiExtension`] serves.
+    pub fn handle_text_ext<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        text: &str,
+        now: Millis,
+        ext: Option<&mut dyn ApiExtension<T>>,
+    ) -> Vec<String> {
         let Some(sess) = self.sessions.get_mut(&s) else {
             return Vec::new();
         };
@@ -176,6 +189,21 @@ impl ApiServer {
                     .to_text(),
                 ],
             };
+        }
+        // Only requests an extension may serve are parsed twice.
+        if let Some(ext) = ext
+            && (text.contains("catalog/") || text.contains("definitions/fetch"))
+            && let Ok(raw) = serde_json::from_str::<J>(text)
+            && let (Some(id), Some(kind)) = (raw["id"].as_u64(), raw["type"].as_str())
+            && let Some(r) = ext.request(hub, kind, &raw, now)
+        {
+            return vec![
+                match r {
+                    Ok(v) => ServerMessage::ok(id, v),
+                    Err(e) => ServerMessage::err(id, e),
+                }
+                .to_text(),
+            ];
         }
         let env: Envelope = match serde_json::from_str(text) {
             Ok(e) => e,
@@ -451,37 +479,74 @@ impl ApiServer {
                 hub.delete_user_definition(&id, now)?;
                 J::Null
             }
-            R::DefinitionsList { source, device } => {
-                let fp = device
-                    .as_ref()
-                    .map(|d| {
-                        hub.device(d)
-                            .map(|x| x.fp.clone())
-                            .ok_or_else(|| missing(d))
-                    })
-                    .transpose()?;
-                let mut all: Vec<std::sync::Arc<Definition>> = hub.catalog().all();
-                all.extend(hub.user_definitions().all());
-                all.into_iter()
-                    .filter(|d| {
-                        source.as_deref().is_none_or(|s| {
-                            serde_json::to_value(d.source).ok().is_some_and(|v| v == s)
-                        })
-                    })
-                    .filter(|d| {
-                        fp.as_ref()
-                            .is_none_or(|f| crate::resolve::score(d, f).is_some())
-                    })
-                    .map(|d| def_summary(&d))
-                    .collect()
+            R::DefinitionsList {
+                source,
+                device,
+                query,
+                offset,
+                limit,
+            } => {
+                let want = |src: LayerSource| {
+                    source
+                        .as_deref()
+                        .is_none_or(|s| serde_json::to_value(src).ok().is_some_and(|v| v == s))
+                };
+                if let Some(dev) = &device {
+                    // Candidates by index key, re-checked against the
+                    // fingerprint (a bank is never listed whole).
+                    let fp = hub
+                        .device(dev)
+                        .map(|x| x.fp.clone())
+                        .ok_or_else(|| missing(dev))?;
+                    let mut all = hub.catalog().candidates(&fp);
+                    all.extend(hub.user_definitions().candidates(&fp));
+                    return Ok(all
+                        .into_iter()
+                        .filter(|d| want(d.source))
+                        .filter(|d| crate::resolve::score(d, &fp).is_some())
+                        .map(|d| def_summary(&d))
+                        .collect());
+                }
+                // User definitions first, then the catalog (built-in,
+                // fetched, bank) page by page.
+                let paged = offset.is_some() || limit.is_some() || query.is_some();
+                let (offset, limit) = (offset.unwrap_or(0), limit.unwrap_or(200).min(500));
+                let user: Vec<_> = hub.user_definitions().all();
+                let (un, mut items) = if want(LayerSource::User) {
+                    crate::resolve::list_defs(&user, offset, limit, query.as_deref())
+                } else {
+                    (0, Vec::new())
+                };
+                let mut total = un;
+                let wants_catalog = [LayerSource::Catalog, LayerSource::Fetched]
+                    .iter()
+                    .any(|s| want(*s));
+                if wants_catalog {
+                    let (n, more) = hub.catalog().list(
+                        offset.saturating_sub(un),
+                        limit - items.len(),
+                        query.as_deref(),
+                    );
+                    total += n;
+                    items.extend(more.into_iter().filter(|d| want(d.source)));
+                }
+                let items: Vec<J> = items
+                    .iter()
+                    .map(|d| json!({"id": d.id, "revision": d.revision, "vendor": d.vendor, "model": d.model, "source": d.source}))
+                    .collect();
+                if paged {
+                    json!({"total": total, "offset": offset, "items": items})
+                } else {
+                    J::Array(items)
+                }
             }
             R::DefinitionsGet {
                 id,
                 content_hash,
                 format,
             } => {
-                let mut all = hub.catalog().all();
-                all.extend(hub.user_definitions().all());
+                let mut all = hub.user_definitions().all();
+                all.extend(hub.catalog().all());
                 let d = all
                     .into_iter()
                     .find(|d| {
@@ -492,6 +557,8 @@ impl ApiServer {
                                     .is_some_and(|x| x.starts_with(h.as_str()))
                             })
                     })
+                    // A bank is searched by `id` only.
+                    .or_else(|| id.as_deref().and_then(|i| hub.catalog().get(i)))
                     .ok_or_else(|| ApiError::new("not_found", "no such definition"))?;
                 let mut r = def_summary(&d);
                 if format.as_deref() == Some("json") {
@@ -829,25 +896,47 @@ impl ApiServer {
                 }
                 HubEvent::CommandResult { .. } => continue,
             };
-            self.seq += 1;
-            for (sid, sess) in &self.sessions {
-                for (sub, topics) in &sess.subs {
-                    if topics.contains(topic) {
-                        out.push((
-                            *sid,
-                            ServerMessage::Event {
-                                id: *sub,
-                                seq: self.seq,
-                                event: body.clone(),
-                            }
-                            .to_text(),
-                        ));
-                    }
+            out.extend(self.publish(topic, body));
+        }
+        out
+    }
+
+    /// An event on `topic` for its subscribers (next `seq`), e.g. from a
+    /// service outside the engine (catalog updates).
+    pub fn publish(&mut self, topic: &str, body: J) -> Vec<(SessionId, String)> {
+        let mut out = Vec::new();
+        self.seq += 1;
+        for (sid, sess) in &self.sessions {
+            for (sub, topics) in &sess.subs {
+                if topics.contains(topic) {
+                    out.push((
+                        *sid,
+                        ServerMessage::Event {
+                            id: *sub,
+                            seq: self.seq,
+                            event: body.clone(),
+                        }
+                        .to_text(),
+                    ));
                 }
             }
         }
         out
     }
+}
+
+/// Requests served outside the engine (the application's catalog store:
+/// `catalog/*`, `definitions/fetch`). Asked first for every request of an
+/// authenticated session; `None` = not handled here.
+pub trait ApiExtension<T: ZigbeeTransport> {
+    /// Handles request `kind`; `req` is the whole request object.
+    fn request(
+        &mut self,
+        hub: &mut Hub<T>,
+        kind: &str,
+        req: &J,
+        now: Millis,
+    ) -> Option<Result<J, ApiError>>;
 }
 
 /// The host core's facts plus `time`, the hub's clock (s, the time base of

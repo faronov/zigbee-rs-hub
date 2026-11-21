@@ -57,6 +57,99 @@ pub enum Layout {
     Other,
 }
 
+/// One area of `hubdata`: offset from the partition start and size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Area {
+    /// Offset in `hubdata`.
+    pub offset: u32,
+    /// Size in bytes.
+    pub size: u32,
+}
+
+impl Area {
+    /// First byte after the area.
+    pub const fn end(&self) -> u32 {
+        self.offset + self.size
+    }
+}
+
+/// The areas of `hubdata` (device-support 16.1, 16.2). Every area starts
+/// and ends on a 4 KiB sector; the journal stays where earlier builds put
+/// it, so a firmware update keeps the network and the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HubdataMap {
+    /// Host store journal (ZRHP host tables, registry, user definitions).
+    pub journal: Area,
+    /// Catalog state: two 4 KiB slots of the active-bank record (9.1).
+    pub catalog_state: Area,
+    /// The verified `manifest.cose` of the installed catalog (9.3).
+    pub manifest: Area,
+    /// Converter bank slot A.
+    pub bank_a: Area,
+    /// Converter bank slot B.
+    pub bank_b: Area,
+    /// Fetched definitions and self-description schemas (9.2): two halves
+    /// written alternately.
+    pub local: Area,
+    /// Staging of one downloaded shard (9.3).
+    pub scratch: Area,
+    /// Web tools: the definition compiler for the web UI (zdefc WebAssembly).
+    pub web: Area,
+}
+
+const KIB: u32 = 1024;
+
+impl HubdataMap {
+    /// The map of a `hubdata` partition of `size` bytes: the 8 MB layout
+    /// (1 920 KiB) gets 576 KiB banks and 128 KiB of local definitions, the
+    /// 4 MB dev layout (1 MiB) 256 KiB banks and 64 KiB; `None` below 1 MiB.
+    pub fn for_size(size: u32) -> Option<HubdataMap> {
+        let (bank, local) = if size >= PRODUCTION_HUBDATA {
+            (576 * KIB, 128 * KIB)
+        } else if size >= DEV_HUBDATA {
+            (256 * KIB, 64 * KIB)
+        } else {
+            return None;
+        };
+        let mut at = 0;
+        let mut area = |n: u32| {
+            let a = Area { offset: at, size: n };
+            at += n;
+            a
+        };
+        let map = HubdataMap {
+            journal: area(128 * KIB),
+            catalog_state: area(8 * KIB),
+            manifest: area(24 * KIB),
+            bank_a: area(bank),
+            bank_b: area(bank),
+            local: area(local),
+            scratch: area(32 * KIB),
+            web: area(256 * KIB),
+        };
+        (map.web.end() <= size).then_some(map)
+    }
+
+    /// Bank slot `0` (A) or `1` (B).
+    pub fn bank(&self, slot: u8) -> Area {
+        if slot == 0 { self.bank_a } else { self.bank_b }
+    }
+
+    /// All areas in order, with names.
+    pub fn areas(&self) -> [(&'static str, Area); 8] {
+        [
+            ("journal", self.journal),
+            ("catalog_state", self.catalog_state),
+            ("manifest", self.manifest),
+            ("bank_a", self.bank_a),
+            ("bank_b", self.bank_b),
+            ("local", self.local),
+            ("scratch", self.scratch),
+            ("web", self.web),
+        ]
+    }
+}
+
 /// Result of the boot check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -135,6 +228,28 @@ mod tests {
     ];
     const MB4: u32 = 4 << 20;
     const MB8: u32 = 8 << 20;
+
+    #[test]
+    fn hubdata_maps_are_contiguous_sector_aligned_and_fit() {
+        for (size, bank, local) in [(DEV_HUBDATA, 256 * KIB, 64 * KIB), (PRODUCTION_HUBDATA, 576 * KIB, 128 * KIB)] {
+            let m = HubdataMap::for_size(size).unwrap();
+            assert_eq!(m.journal, Area { offset: 0, size: 128 * KIB }, "journal stays at the start");
+            assert_eq!((m.bank_a.size, m.bank_b.size, m.local.size), (bank, bank, local));
+            let mut at = 0;
+            for (name, a) in m.areas() {
+                assert_eq!(a.offset, at, "{name} follows the previous area");
+                assert_eq!(a.offset % 4096, 0, "{name}");
+                assert_eq!(a.size % 4096, 0, "{name}");
+                at = a.end();
+            }
+            assert!(at <= size);
+            assert_eq!(m.bank(0), m.bank_a);
+            assert_eq!(m.bank(1), m.bank_b);
+        }
+        assert_eq!(HubdataMap::for_size(DEV_HUBDATA).unwrap().web.end(), DEV_HUBDATA, "the 4 MB map is full");
+        assert_eq!(HubdataMap::for_size(PRODUCTION_HUBDATA).unwrap().web.end(), 0x1B_0000, "192 KiB spare on 8 MB");
+        assert_eq!(HubdataMap::for_size(DEV_HUBDATA - 1), None);
+    }
 
     #[test]
     fn each_layout_belongs_to_its_flash_size() {

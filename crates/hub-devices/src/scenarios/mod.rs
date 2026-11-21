@@ -1,6 +1,7 @@
 //! Golden scenarios: captured/synthesized frames through the full engine
 //! (interview → resolution → entities → configure → states → commands).
 
+mod bank;
 mod gp;
 mod plain;
 mod props;
