@@ -2228,7 +2228,9 @@ while a job runs fails with `busy` (`"<job> is running"`). `hub/info` gains
 `backup`, `restore` by NCP capability bits; `wifi`, `reboot`, `mode`,
 `logs`, `token_rotate` by platform). An NCP image that lacks a command
 answers it `UNSUPPORTED_COMMAND`, reported as `unsupported`. Further error
-codes: `failed` (anything else), `device_unavailable` (NCP link lost).
+codes: `failed` (anything else), `device_unavailable` (NCP link lost),
+`no_space` (the result does not fit the hub's free memory; large results are
+written as text with fallible allocation, never as a JSON tree).
 
 | Type | Parameters | Result |
 |---|---|---|

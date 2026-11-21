@@ -693,7 +693,13 @@ thread. On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
 `hub/reboot`, the network map (the C6 as the coordinator's child), backup,
 and channel change 17 → 25 → 17 (about 9 s each; the C6 followed within a
 minute) work; `hub/wifi/set` and `hub/mode/set` were not tried on the shared
-board.
+board. The first try of `network/diagnostics` there ran the heap out
+(minimum free 12.7 KB, then an abort and a reboot: its result was a
+serde_json tree, about 0.7 KB per counter object); maintenance results are
+now written as text into the result frame with fallible allocation
+(`no_space` instead of an abort). Afterwards: 46 counters in a 4 KB frame in
+170 ms, minimum free heap 27.5 KB, 22 KB with the web UI's map scan and
+three sessions.
 
 **Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
