@@ -258,3 +258,29 @@ fn network_info_and_permit_join_events() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+/// A connection that goes away without a close notification.
+struct Vanishing(Arc<std::sync::atomic::AtomicBool>);
+
+impl crate::SessionSink for Vanishing {
+    fn send(&mut self, _text: &str) -> bool {
+        true
+    }
+    fn alive(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn silently_closed_connections_lose_their_session() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    assert!(app.connect(Box::new(Vanishing(alive.clone()))).is_some());
+    assert!(app.wait(T, |s| s.sessions == 1));
+    alive.store(false, Ordering::SeqCst);
+    assert!(app.wait(T, |s| s.sessions == 0), "{:?}", app.status());
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}

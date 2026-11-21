@@ -32,6 +32,9 @@ impl SessionSink for WsSink {
     fn send(&mut self, text: &str) -> bool {
         !self.0.is_closed() && self.0.send(FrameType::Text(false), text.as_bytes()).is_ok()
     }
+    fn alive(&self) -> bool {
+        !self.0.is_closed()
+    }
 }
 
 fn set_state(s: String) {
@@ -126,13 +129,28 @@ fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
             }
             return Ok(());
         }
-        let (_, len) = ws.recv(&mut [])?;
+        let (kind, len) = ws.recv(&mut [])?;
+        if matches!(kind, FrameType::Close | FrameType::SocketClose) {
+            // A browser closing the page sends a Close frame; answer it and
+            // end the session (esp_http_server then closes the socket).
+            let _ = ws.send(FrameType::Close, &[]);
+            if let Some(sid) = map.remove(&ws.session()) {
+                app.disconnect(sid);
+            }
+            return Ok(());
+        }
         if len > MAX_FRAME {
             ws.send(FrameType::Close, &[])?;
             return Err(EspError::from_infallible::<ESP_ERR_INVALID_SIZE>());
         }
         let mut buf = vec![0u8; len];
         ws.recv(&mut buf)?;
+        if kind == FrameType::Ping {
+            return ws.send(FrameType::Pong, &buf);
+        }
+        if !matches!(kind, FrameType::Text(_)) {
+            return Ok(());
+        }
         while buf.last() == Some(&0) {
             buf.pop();
         }

@@ -33,6 +33,13 @@ use crate::transport::{ApsCounters, NcpTransport};
 pub trait SessionSink: Send {
     /// Send one text frame.
     fn send(&mut self, text: &str) -> bool;
+
+    /// Whether the connection still exists. Checked every second, so a
+    /// connection that went away silently (no close notification, no frame
+    /// to fail on) does not keep its session.
+    fn alive(&self) -> bool {
+        true
+    }
 }
 
 impl SessionSink for Sender<String> {
@@ -364,6 +371,11 @@ impl Runner {
 
     fn tick(&mut self) {
         let now = self.now();
+        let dead: Vec<SessionId> = self.sinks.iter().filter(|(_, s)| !s.alive()).map(|(sid, _)| *sid).collect();
+        for sid in dead {
+            self.sinks.remove(&sid);
+            self.api.disconnect(sid);
+        }
         if !self.registered && self.ncp.client().state() == SessionState::Ready {
             self.register();
         }
