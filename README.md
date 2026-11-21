@@ -693,7 +693,17 @@ brightness), numbers, selects and buttons, rename, re-interview and remove
 layout, light/dark from `prefers-color-scheme`. The page is split into
 tabs (`#/devices`, …): each `<div class="tab" data-tab="id" data-title="…">`
 in `<main>` becomes one, in document order, and `onTab[id]` runs when it is
-shown, so a feature adds its own tab without touching the others. It asks for the API token
+shown, so a feature adds its own tab without touching the others.
+The **Green Power** tab (`#/gp`) opens and closes the GP commissioning
+window (duration, proxies, exit on first pairing) with a countdown, lists the
+GPDs in bidirectional commissioning, recent failures with their reason and the
+GP devices (ID, type, security level, frame counter, sink mode, an
+`unsecured` badge, remove with or without the proxies), and manages GP
+bindings (create, edit, delete, verify; target probe; executor auto, device
+or hub; per-target state) and the sink's security level and communication
+mode (topic `gp`); API 1.2 added `gp/commissioning/status` and
+`gp/config/get` for it.
+It asks for the API token
 once (console `token`; a link ending in `#token=…` stores it too) and keeps
 it in the browser. `build.rs` gzips the page at build time (deterministic,
 pure Rust, no node toolchain) and derives a strong ETag; the hub answers

@@ -56,6 +56,9 @@ nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-botto
 .tab{display:grid;gap:1em;min-width:0}
 nav#tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:.5em .8em;color:var(--mut);white-space:nowrap}
 nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+.card h3{font-size:.9em;margin:.8em 0 0;color:var(--mut)}
+#gcw{display:inline-block;margin:.6em 0 0}
+@media(max-width:600px){#gpl li,#gpb li{flex-wrap:wrap}#gpl .n,#gpb .n{flex-basis:100%}}
 </style>
 </head>
 <body>
@@ -77,6 +80,26 @@ nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 </section>
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
 <section class="devs" id="devs"></section>
+</div>
+<div data-tab="gp" data-title="Green Power" class="tab">
+<section class="card"><h2>Commissioning</h2>
+<div class="row"><select id="gpdu"><option value="60">1 min</option><option value="180" selected>3 min</option><option value="600">10 min</option></select>
+<label><input type="checkbox" id="gpx" checked> involve proxies</label><label><input type="checkbox" id="gpf"> exit on first pairing</label>
+<button class="p" id="gpo">Open</button><button id="gpc" class="hide">Close</button><span id="gpt" class="mut"></span></div>
+<div id="gpq"></div>
+</section>
+<section class="card"><h2>Devices <span id="gpn" class="mut"></span></h2><label class="mut"><input type="checkbox" id="gpr" checked> remove from proxies too</label><ul class="ents" id="gpl"></ul></section>
+<section class="card"><h2>Bindings</h2><p class="mut">Bound buttons still fire their events: HA automations on them run as well.</p><ul class="ents" id="gpb"></ul>
+<form id="gbf">
+<div class="row acts"><b>When</b><select id="bg"></select><input id="bc" list="bcl" class="num" placeholder="cmd" required><datalist id="bcl"></datalist><input id="bm" class="num" placeholder="mask"><input id="bv" class="num" placeholder="value"></div>
+<div class="row acts"><b>Then</b><select id="bt"></select><select id="be"></select><input id="bgr" class="num hide" placeholder="group"><select id="ba"><option value="">preset…</option><option value="6,2,fixed">toggle</option><option value="6,1,fixed">on</option><option value="6,0,fixed">off</option><option value="8,6,derived">level step</option><option value="8,5,derived">level move</option><option value="8,7,fixed">level stop</option><option value="5,5,derived">scene</option></select>
+<input id="bk" class="num" placeholder="cluster" required><input id="bx" class="num" placeholder="cmd" required><select id="bpm"><option>fixed</option><option>derived</option><option>copy</option></select><input id="bpb" class="num" placeholder="payload"></div>
+<div class="row acts"><b>By</b><select id="bxe"><option>auto</option><option>device</option><option>hub</option></select><button class="p" id="bs">Create</button><button type="button" id="bcn">Clear</button><span id="bp" class="mut"></span></div>
+</form></section>
+<section class="card"><h2>Sink</h2>
+<div class="row"><select id="gsl"><option value="0">security 0: none</option><option value="1">1: short MIC</option><option value="2">2: MIC</option><option value="3">3: encrypted</option></select><select id="gcm"><option value="0">mode 0: unicast</option><option value="1">1: groupcast</option><option value="2">2: group</option><option value="3">3: lightweight</option></select><button id="gcs">Apply</button><span id="gcx" class="mut"></span></div>
+<p id="gcw" class="badge bad hide"></p>
+</section>
 </div>
 <div data-tab="map" data-title="Map" class="tab">
 <section class="card"><div class="row"><h2 style="flex:1;margin:0">Network map</h2><span id="mpt" class="mut"></span><button class="p" id="mpb">Scan</button></div>
@@ -141,7 +164,7 @@ function onMsg(m,tok){
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate()}).catch(()=>{});
-  call("subscribe",{topics:["devices","entities","network"]}).catch(e=>toast(e.message));return}
+  call("subscribe",{topics:["devices","entities","network","gp"]}).catch(e=>toast(e.message));return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="event")onEvent(m.event);
 }
@@ -152,7 +175,7 @@ function onEvent(e){
   if(e.entities){ents={};for(const x of e.entities)ents[x.uid]=x}
   if(e.states){states={};for(const s of e.states)states[s.uid]=s}
   if(e.network)setNet(e.network);
-  renderAll();break;
+  renderAll();gpForm();break;
  case"device_added":case"device_updated":if(e.device){devs[e.device.id]=e.device;renderDev(e.device.id)}break;
  case"device_removed":delete devs[e.id];for(const u in ents)if(ents[u].device==e.id)delete ents[u];renderAll();break;
  case"interview_progress":if(devs[e.device]){devs[e.device].interview="in_progress";devs[e.device].step=e.step;renderDev(e.device)}break;
@@ -162,6 +185,7 @@ function onEvent(e){
  case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"topology_progress":$("#mpt").textContent="scanning: "+e.scanned+" routers asked, "+e.queued+" queued";break;
+ default:if(/^gp\//.test(e.topic))gpEv(e);
  }
 }
 function setNet(n){net=n||{};if(net.time)skew=net.time-Date.now()/1000;if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();renderSNet();pjTick()}
@@ -341,6 +365,95 @@ function drawMap(m){
  $("#mpl").textContent="";$("#mpl").append(t);if(m.notes.length)$("#mpl").append(el("p",{class:"mut"},m.notes.join("; ")));
  $("#mpt").textContent=m.nodes.length+" nodes, "+Object.keys(pairs).length+" links · "+ago(m.time)+" · "+(m.duration_ms/1000).toFixed(1)+" s";
 }
+// ---- Green Power tab ----
+let gpW={},gpP=[],gpF=[],gpD=[],gpB={},gpK={},gpEnd=0,gpEd=0;
+const gpN={32:"Off",33:"On",34:"Toggle",96:"Press",97:"Release",105:"Press",106:"Release"};
+const gpCmd=c=>hex(c,2)+" "+(gpN[c]||"");
+const gpNm=id=>devs[id]&&devs[id].name||id;
+const bytes=b=>(b||[]).map(x=>x.toString(16).padStart(2,"0")).join("");
+const V=(i,x)=>{const e=$("#"+i);if(x!==undefined)e.value=x;return e.value};
+const gpL=(t,f)=>call(t).then(f).catch(()=>{});
+const gpLS=()=>gpL("gp/commissioning/status",gpSt),gpLD=()=>gpL("gp/devices/list",l=>{gpD=l;gpDev()}),gpLB=()=>gpL("gp/bindings/list",l=>{gpB={};for(const b of l)gpB[b.id]=b;gpBind()});
+onTab.gp=()=>{gpLS();gpLD();gpLB();gpL("gp/config/get",gpCfg)};
+function gpEv(e){const t=e.topic.slice(3),o=p=>p.gpd!=e.gpd;
+ if(t=="commissioning")gpSt(e);
+ if(t=="pending")(gpP=gpP.filter(o)).push(e);
+ if(t=="failed"){gpP=gpP.filter(o);gpF=[e,...gpF].slice(0,8)}
+ if(t=="commissioned"){gpP=gpP.filter(p=>p.gpd!=e.device.id);gpLD()}
+ if(t=="binding"){if(e.state=="removed")delete gpB[e.id];else gpB[e.id]=e;gpBind()}
+ if(t=="target"){gpK[e.device]=e.capabilities;gpProbe()}
+ if(t=="config")gpCfg(e);
+ gpQ();
+}
+function gpSt(s){gpW=s;gpP=s.pending||gpP;gpF=s.failed||gpF;gpEnd=s.state=="open"?s.remaining_s==null?Infinity:Date.now()+s.remaining_s*1000:0;gpTick();gpQ()}
+function gpTick(){
+ clearTimeout(gpTick.h);const l=Math.round((gpEnd-Date.now())/1000),o=l>0,r=gpW.exit_reason;
+ $("#gpt").textContent=o?"open"+(l<1e9?", "+l+" s left":"")+(gpW.exit_on_first_pairing?", until the first pairing":""):"closed"+(r&&r!="none"?" ("+r.replace("_"," ")+")":"");
+ $("#gpc").classList.toggle("hide",!o);if(o&&l<1e9)gpTick.h=setTimeout(gpTick,1000);
+}
+$("#gpo").onclick=()=>act("gp/commissioning/open",{duration_s:+V("gpdu"),involve_proxies:$("#gpx").checked,exit_on_first_pairing:$("#gpf").checked}).then(gpLS,()=>{});
+$("#gpc").onclick=()=>act("gp/commissioning/close").then(gpLS,()=>{});
+function gpQ(){
+ const q=$("#gpq");q.textContent="";
+ const sec=(t,l,f)=>{if(l.length)q.append(el("h3",{},t),el("ul",{class:"ents"},...l.map(x=>el("li",{},el("span",{class:"n"},gpNm(x.gpd)),f(x),el("span",{class:"mut"},ago(x.time))))))};
+ sec("Pending",gpP,p=>el("span",{class:"mut"},"step "+hex(p.command_id,2)));
+ sec("Failed",gpF,f=>el("span",{class:"badge bad"},f.reason));
+}
+function gpDev(){
+ const u=$("#gpl");u.textContent="";$("#gpn").textContent="("+gpD.length+")";$("#gbf").classList.toggle("hide",!gpD.length);
+ if(!gpD.length)u.append(el("li",{class:"mut"},"No GP devices yet: open commissioning."));
+ for(const d of gpD){const s=d.sink||{},m=s.communication_mode;
+  u.append(el("li",{},el("div",{class:"n"},el("b",{},d.name||d.id),el("div",{class:"mut"},"ID "+d.src_id+" · type "+hex(d.device_id??s.device_id??0,2)+" · security "+d.security_level+" · counter "+d.frame_counter+(m!=null?" · mode "+m+(m==2?" group "+hex(s.group,4):""):"")+" · seen "+ago(d.last_seen))),
+   (d.warnings||[]).includes("gp_unsecured")?el("span",{class:"badge bad"},"unsecured"):"",
+   el("button",{class:"d",onclick:()=>{if(confirm("Remove "+(d.name||d.id)+"?"))act("gp/devices/remove",{device:d.id,send_remove:$("#gpr").checked}).then(()=>{gpLD();gpLB()},()=>{})}},"Remove")))}
+ gpForm();
+}
+function gpBind(){
+ const u=$("#gpb"),l=Object.values(gpB);u.textContent="";
+ if(!l.length)u.append(el("li",{class:"mut"},"No bindings."));
+ for(const b of l){const t=b.target,a=b.action,p=a.payload,bt=(c,f,x)=>el("button",{class:c,onclick:f},x);
+  u.append(el("li",{},el("div",{class:"n"},el("b",{},gpNm(b.gpd)+": "+gpCmd(b.trigger.command_id)),
+    " → "+(t.group!=null?"group "+hex(t.group,4):gpNm(t.device)+" ep "+t.endpoint)+" · "+hex(a.cluster,4)+"/"+hex(a.command,2)+" "+p.mode+" "+bytes(p.bytes),
+    el("div",{class:"mut"},(b.executor||"deciding")+(b.choice!="auto"?" (forced)":"")+(b.executor=="hub"?", needs the hub":"")+b.targets.map(x=>" · "+gpNm(x.device)+": "+x.step+(x.last_verified?", verified "+ago(x.last_verified/1000):"")+(x.error?" ("+x.error+")":"")).join(""))),
+   el("span",{class:"badge"+(b.state=="active"?" ok":/fail|unsup/.test(b.state)?" bad":""),title:b.reason||""},b.state+" "+(b.zcl_status||"")),
+   b.executor=="device"?bt("",()=>act("gp/bindings/verify",{binding:b.id}).catch(()=>{}),"Verify"):"",
+   bt("",()=>gpEdit(b),"Edit"),
+   bt("d",()=>{if(confirm("Delete binding "+b.id+"?"))act("gp/bindings/delete",{binding:b.id}).then(gpLB,()=>{})},"Delete")))}
+}
+function gpOpts(i,l){const v=V(i),s=$("#"+i);s.textContent="";for(const[k,t]of l)s.append(el("option",{value:k},t));if(v)s.value=v}
+function gpForm(){
+ gpOpts("bg",gpD.map(d=>[d.id,d.name||d.id]));
+ gpOpts("bt",[["","target…"],...Object.values(devs).filter(d=>d.ieee).map(d=>[d.id,d.name||d.id]),["#","group…"]]);
+ gpTrig();gpTv();
+}
+function gpTrig(){const d=gpD.find(x=>x.id==V("bg")),c=$("#bcl");c.textContent="";for(const k of d&&d.commands.length?d.commands:[32,33,34])c.append(el("option",{value:hex(k,2)},gpCmd(k)))}
+function gpTv(){const g=V("bt")=="#";$("#bgr").classList.toggle("hide",!g);$("#be").classList.toggle("hide",g)}
+$("#bg").onchange=gpTrig;
+$("#bt").onchange=()=>{
+ const v=V("bt");gpTv();$("#bp").textContent="";if(v=="#"||!v)return;
+ call("devices/get",{device:v}).then(d=>gpOpts("be",d.endpoints.filter(e=>e.ep!=242).map(e=>[e.ep,"ep "+e.ep]))).catch(()=>{});
+ call("gp/targets/probe",{device:v}).then(c=>{if(!c.probing)gpK[v]=c;gpProbe()}).catch(e=>toast(e.message));
+};
+function gpProbe(){const v=V("bt"),c=gpK[v];if(v&&v!="#")$("#bp").textContent=!c?"probing…":c.sink&&c.translation_table?"on-device capable":"hub only"}
+$("#ba").onchange=()=>{const[k,x,m]=V("ba").split(",");if(m){V("bk",hex(+k,4));V("bx",hex(+x,2));V("bpm",m);V("bpb","")}};
+function gpEdit(b){
+ const h=(v,w)=>v==null?"":hex(v,w);gpEd=b?b.id:0;
+ for(const i of["bg","bt","be","bgr"])$("#"+i).disabled=!!b;
+ if(b){const a=b.action,t=b.trigger,g=b.target;V("bg",b.gpd);V("bt",g.group!=null?"#":g.device);if(g.device)gpOpts("be",[[g.endpoint,"ep "+g.endpoint]]);V("bgr",h(g.group,4));
+  V("bc",h(t.command_id,2));V("bm",h(t.contact_mask,2));V("bv",h(t.contact_value,2));
+  V("bk",h(a.cluster,4));V("bx",h(a.command,2));V("bpm",a.payload.mode);V("bpb",bytes(a.payload.bytes));V("bxe",b.choice)}else{$("#gbf").reset();$("#be").textContent=$("#bp").textContent=""}
+ $("#bs").textContent=b?"Save #"+b.id:"Create";gpTv();
+}
+$("#bcn").onclick=()=>gpEdit();
+$("#gbf").onsubmit=e=>{
+ e.preventDefault();const n=v=>v?+v:undefined,m=V("bpm"),t=V("bt"),ex=V("bxe");
+ const tr={command_id:+V("bc"),contact_mask:n(V("bm")),contact_value:n(V("bv"))};
+ const ac={cluster:+V("bk"),command:+V("bx"),payload:{mode:m,bytes:m=="fixed"?(V("bpb").match(/[0-9a-f]{2}/gi)||[]).map(x=>parseInt(x,16)):undefined}};
+ (gpEd?act("gp/bindings/update",{binding:gpEd,trigger:tr,action:ac,executor:ex}):act("gp/bindings/create",{gpd:V("bg"),trigger:tr,target:t=="#"?{group:+V("bgr")}:{device:t,endpoint:+V("be")},action:ac,executor:ex})).then(()=>{gpEdit();gpLB()},()=>{});
+};
+function gpCfg(c){V("gsl",c.security_level);V("gcm",c.communication_mode);$("#gcx").textContent=c.source+", group "+hex(c.group,4);const w=$("#gcw");w.textContent=c.warning;w.classList.toggle("hide",!c.warning)}
+$("#gcs").onclick=()=>{const l=+V("gsl");if(!l||confirm("Reject GPDs below level "+l+"?"))act("gp/config",{security_level:l,communication_mode:+V("gcm")}).then(gpCfg,()=>{})};
+// ---- end of Green Power tab ----
 connect();
 </script>
 </body>
