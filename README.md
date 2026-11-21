@@ -738,7 +738,8 @@ in device records (device-support 14.2); the header and the hub facts
 **Maintenance API (1.2).** Network settings and upkeep over the same
 WebSocket (device-support 14.6): `network/energy_scan` (per-channel energy,
 the channels under the hub's own Wi-Fi channel marked, a recommendation),
-`network/change_channel`, `network/set_tx_power` (re-applied after every NCP
+`network/active_scan` (the Zigbee networks around: PAN ID, EPID, LQI, permit
+join), `network/change_channel`, `network/set_tx_power` (re-applied after every NCP
 restart), `network/diagnostics` (NCP status incl. PTA, DIAG counters, frame
 counters, host link counters), `network/topology` (map from the
 coordinator's tables and Mgmt_Lqi/Mgmt_Rtg over the air),
@@ -755,13 +756,16 @@ simulated NCP with three routers that answer Mgmt_Lqi/Mgmt_Rtg, and
 and TX power. The web UI has a **Map** tab (an SVG drawn by the page: the
 coordinator in the middle, rings by hop count, end devices next to their
 parent, links coloured by LQI, a table with the best LQI per node) and a
-**Settings** tab (network facts, channel change, TX power, an energy-scan
-chart with the hub's Wi-Fi overlap and the recommendation, backup download,
+**Settings** tab (network facts, channel change, TX power with the applied
+and requested value, the chip's range and a regulatory note, a channel scan:
+utilization in % per channel over 1–10 rounds, averaged or peak, the hub's
+Wi-Fi channel and any others the user lists marked, a recommendation with
+its reasons and the Zigbee networks heard per channel, backup download,
 the last automatic backup, restore from a file in device batches, a new-network form
 that needs `RESET` typed, hub facts, Wi-Fi, token rotation, reboot, bridge
 mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
-are hidden (`maintenance` in `hub/info`). The page is 11.8 KB gzipped (6.1 KB
-before).
+are hidden (`maintenance` in `hub/info`). The page is 17.3 KB gzipped with the
+other tabs (Green Power included).
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
 application lives in ~295 KB of internal heap. On the first hardware run

@@ -2089,7 +2089,8 @@ code feels familiar:
   `network` topic and the device record's `nwk`; 1.2 added the maintenance
   requests of 14.6, `maintenance` in `hub/info`, the `network_updated`
   and `topology_progress` events, `gp/commissioning/status`,
-  `gp/config/get` and the GP fields of 14.5.
+  `gp/config/get`, the GP fields of 14.5, `network/active_scan` and
+  `tx_power_requested` in `network/info`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2235,8 +2236,9 @@ written as text with fallible allocation, never as a JSON tree).
 | Type | Parameters | Result |
 |---|---|---|
 | `network/energy_scan` | `channels` (list, default 11–26), `duration_exp` (0–8, default 4: ≈ 0.25 s per channel), `count` (1–4) | `channels`: [{`channel`, `energy` (0–255), `max_rssi_dbm`, `wifi_overlap`, `score`}], `current`, `wifi_channel` (the hub's own Wi-Fi channel, when known), `recommended`, `duration_ms`. `score` (lower is better) = 4 × energy, +1000 under the hub's 20 MHz Wi-Fi channel (Wi-Fi 1 → 11–14, 6 → 16–19, 11 → 21–24), +120 next to it, +160 for 26, +30 off the Light Link primaries 11/15/20/25 |
+| `network/active_scan` | `channels` (list, default 11–26), `duration_exp` (0–6, default 3) | `networks`: [{`channel`, `pan_id`, `ext_pan_id` (big-endian hex), `src` (the beacon's sender), `lqi`, `rssi`, `permit_join`, `stack_profile`, `update_id`, `own` (this hub's network)}] — one entry per beacon heard (ZRHP `NWK_ACTIVE_SCAN` 0x010A); `duration_ms`. `unsupported` on NCP images without it |
 | `network/change_channel` | `channel` (11–26) | `channel`, `nwk_update_id` once the NCP tuned (ZRHP `NWK_CHANGE_CHANNEL`: `Mgmt_NWK_Update_req` broadcast, switch ≈ 9 s later); the store follows. Sleepy devices find the network by their rejoin scan |
-| `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps); persisted in the host store and re-applied after every NCP restart |
+| `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps and rounds down to its radio's steps: ESP32-H2 −24…+20, ESP32-C6 −15…+20 dBm, 3 dB); persisted in the host store and re-applied after every NCP restart. `network/info` reports `tx_power` (applied, absent while the NCP reports 0x7F, unknown) and `tx_power_requested` |
 | `network/diagnostics` | `reset` (bool), `groups` (`DIAG` group mask, default all) | `ncp` (`SYS_GET_STATUS`: `uptime_s`, `free_aps_slots`, `pta_coex`, `key_export_locked`, `permit_join`, …), `counters` [{`id`, `group`, `name`, `value`}] (`DIAG_GET_COUNTERS`), `frame_counters`, `host_link` (the hub's link counters), `pta` {`capable`, `enabled`}, `tx_power_set`, `unsupported` (commands the NCP lacks), `errors` |
 | `network/topology` | `refresh` (default true; false returns the last map, null before the first scan), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); progress events `topology_progress` {`scanned`, `queued`} |
 | `network/backup` | `keys` (default true) | the backup file, Open ZigBee Coordinator Backup v1 (`zigpy/open-coordinator-backup`; ZRHP 9.1/9.2): the NCP's export (`BKP_EXPORT_*`) plus the hub's devices without keys, `metadata.internal.zigbee_rs`, `stack_specific.zigbee_rs` with the durable counter limits. With keys it is kept as the last backup in the host store; without keys (or when the NCP's key export is locked) it is marked `metadata.internal.incomplete` and cannot be restored. Keys need a non-empty API token |
