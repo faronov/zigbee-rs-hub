@@ -1,44 +1,25 @@
 //! Hub-mode network: Wi-Fi station (credentials in NVS `hub/wifi_ssid`,
 //! `hub/wifi_pass`, set from the console) and the WebSocket JSON API on
-//! `ws://<ip>/api` (esp_http_server), one API session per socket.
+//! `ws://<ip>/api` (esp_http_server, see `ws`), one API session per socket.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use embedded_svc::http::Method;
 use embedded_svc::io::Write;
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
-use embedded_svc::ws::FrameType;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::modem::Modem;
-use esp_idf_svc::http::server::{self, EspHttpServer, ws::EspHttpWsDetachedSender};
-use esp_idf_svc::sys::{EspError, ESP_ERR_INVALID_SIZE};
+use esp_idf_svc::http::server::{self, EspHttpServer};
+use esp_idf_svc::sys::{EspError, esp};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
-use hub_app::{App, SessionSink};
+use hub_app::App;
 use log::{info, warn};
 
 use crate::mode;
 
-/// Largest API frame accepted from a client.
-const MAX_FRAME: usize = 16 * 1024;
-
 /// Wi-Fi state for `hub status`.
 pub static STATE: Mutex<String> = Mutex::new(String::new());
-
-struct WsSink(EspHttpWsDetachedSender);
-
-impl SessionSink for WsSink {
-    fn send(&mut self, text: &str) -> bool {
-        !self.0.is_closed() && self.0.send(FrameType::Text(false), text.as_bytes()).is_ok()
-    }
-    fn alive(&self) -> bool {
-        !self.0.is_closed()
-    }
-    fn keepalive(&mut self) -> bool {
-        !self.0.is_closed() && self.0.send(FrameType::Ping, &[]).is_ok()
-    }
-}
 
 fn set_state(s: String) {
     info!("wifi: {s}");
@@ -73,6 +54,9 @@ fn run(app: App, modem: Modem<'static>, ssid: &str, pass: &str, on_up: impl Fn(b
     });
     wifi.set_configuration(&cfg)?;
     wifi.start()?;
+    // The hub is mains powered: modem sleep (the default) holds frames to the
+    // hub until the next DTIM beacon, adding 100-300 ms and lost pings.
+    esp!(unsafe { esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE) })?;
     let mut server_up = false;
     loop {
         set_state(format!("connecting to {ssid:?}"));
@@ -124,52 +108,6 @@ fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
         }
         req.into_response(200, None, &hub_web::HEADERS)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
     })?;
-    let sessions: Arc<Mutex<BTreeMap<i32, u64>>> = Arc::default();
-    server.ws_handler("/api", None, move |ws| {
-        let mut map = sessions.lock().unwrap();
-        if ws.is_new() {
-            let sender = ws.create_detached_sender()?;
-            if let Some(sid) = app.connect(Box::new(WsSink(sender))) {
-                map.insert(ws.session(), sid);
-                info!("api: socket {} session {sid}", ws.session());
-            }
-            return Ok(());
-        }
-        if ws.is_closed() {
-            if let Some(sid) = map.remove(&ws.session()) {
-                app.disconnect(sid);
-            }
-            return Ok(());
-        }
-        let (kind, len) = ws.recv(&mut [])?;
-        if matches!(kind, FrameType::Close | FrameType::SocketClose) {
-            // A browser closing the page sends a Close frame; answer it and
-            // end the session (esp_http_server then closes the socket).
-            let _ = ws.send(FrameType::Close, &[]);
-            if let Some(sid) = map.remove(&ws.session()) {
-                app.disconnect(sid);
-            }
-            return Ok(());
-        }
-        if len > MAX_FRAME {
-            ws.send(FrameType::Close, &[])?;
-            return Err(EspError::from_infallible::<ESP_ERR_INVALID_SIZE>());
-        }
-        let mut buf = vec![0u8; len];
-        ws.recv(&mut buf)?;
-        if kind == FrameType::Ping {
-            return ws.send(FrameType::Pong, &buf);
-        }
-        if !matches!(kind, FrameType::Text(_)) {
-            return Ok(());
-        }
-        while buf.last() == Some(&0) {
-            buf.pop();
-        }
-        if let (Some(sid), Ok(text)) = (map.get(&ws.session()), String::from_utf8(buf)) {
-            app.text(*sid, text);
-        }
-        Ok::<(), EspError>(())
-    })?;
+    crate::ws::register(&server, app)?;
     Ok(server)
 }
