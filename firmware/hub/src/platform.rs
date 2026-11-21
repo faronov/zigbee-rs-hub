@@ -76,9 +76,15 @@ impl hub_app::Platform for S3 {
             "uptime_s": unsafe { sys::esp_timer_get_time() } / 1_000_000,
             "heap": {"free": free, "min_free": min, "largest_block": largest, "psram": psram},
             "mode": boot.map(|b| if b.once { "hub (once)" } else { "hub" }),
-            "persisted_mode": match mode::stored() { Some(Mode::Hub) => "hub", Some(Mode::Bridge) => "bridge", None => "unknown" },
+            "persisted_mode": match mode::stored() { Some(Mode::Hub) => "hub", Some(Mode::Bridge) => "bridge", None => "default (hub)" },
             "wifi": net::info(),
             "reset_reason": unsafe { sys::esp_reset_reason() },
+            "flash": crate::esp::FLASH.get().map(|f| json!({
+                "chip_kib": f.chip / 1024,
+                "image_kib": f.image / 1024,
+                "layout": f.layout.map(|l| format!("{l:?}")),
+                "warning": f.warning,
+            })),
         })
     }
     fn wifi_channel(&self) -> Option<u8> {

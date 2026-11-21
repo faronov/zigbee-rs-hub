@@ -1,13 +1,16 @@
-//! Boot mode: the phase-0 bridge (default) or the hub.
+//! Boot mode: the hub (default) or the phase-0 bridge.
 //!
-//! - NVS `hub/mode`: 0 bridge, 1 hub (absent = bridge).
+//! - NVS `hub/mode`: 0 bridge, 1 hub (absent = hub, so a freshly flashed
+//!   board comes up as a hub with its setup access point; the bridge stays
+//!   one console command away: `mode bridge`, also `hub/mode/set`).
 //! - RTC no-init word (survives `esp_restart`, random after power-on):
 //!   `HUB1` boots the hub once, `ROM1` boots the bridge once with the H2 in
 //!   its ROM serial loader (manual NCP recovery). Both are cleared on use,
 //!   so any later reset falls back to the persisted mode.
 //! - A boot after a panic or watchdog reset: a persisted hub restarts (up
-//!   to three crashes in a row, each within 10 min of boot); otherwise the
-//!   bridge safe mode (USB on USB-Serial-JTAG) takes over.
+//!   to three crashes in a row, each within 10 min of boot; a hub by
+//!   default counts as persisted); otherwise the bridge safe mode (USB on
+//!   USB-Serial-JTAG) takes over.
 
 use std::sync::Mutex;
 
@@ -66,7 +69,8 @@ fn persisted() -> Option<Mode> {
     let g = NVS.lock().unwrap();
     match g.as_ref()?.get_u8("mode") {
         Ok(Some(1)) => Some(Mode::Hub),
-        Ok(_) => Some(Mode::Bridge),
+        Ok(Some(_)) => Some(Mode::Bridge),
+        Ok(None) => None,
         Err(e) => {
             warn!("nvs hub/mode: {e}");
             None
@@ -90,11 +94,11 @@ pub fn boot() -> Boot {
     match shot {
         HUB_ONCE => Boot { mode: Mode::Hub, h2_rom: false, once: true },
         ROM_ONCE => Boot { mode: Mode::Bridge, h2_rom: true, once: true },
-        _ => Boot { mode: persisted().unwrap_or(Mode::Bridge), h2_rom: false, once: false },
+        _ => Boot { mode: persisted().unwrap_or(Mode::Hub), h2_rom: false, once: false },
     }
 }
 
-/// The persisted mode (`None` without NVS).
+/// The persisted mode (`None`: none stored, or no NVS; the hub runs).
 pub fn stored() -> Option<Mode> {
     persisted()
 }

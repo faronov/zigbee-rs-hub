@@ -7,6 +7,10 @@
 /// The page, gzip-compressed at build time (`Content-Encoding: gzip`).
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
 
+/// The setup access point's page (`web/setup.html`, Wi-Fi credentials;
+/// talks to `/setup/*`), gzip-compressed (`Content-Encoding: gzip`).
+pub const SETUP_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/setup.html.gz"));
+
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
 pub const ETAG: &str = include_str!(concat!(env!("OUT_DIR"), "/etag"));
 
@@ -30,7 +34,10 @@ mod tests {
     use std::string::String;
 
     fn page() -> std::vec::Vec<u8> {
-        let gz = INDEX_HTML_GZ;
+        gunzip(INDEX_HTML_GZ)
+    }
+
+    fn gunzip(gz: &[u8]) -> std::vec::Vec<u8> {
         assert_eq!(&gz[..4], &[0x1f, 0x8b, 8, 0], "gzip, deflate, no optional fields");
         let body = &gz[10..gz.len() - 8];
         let html = miniz_oxide::inflate::decompress_to_vec(body).expect("deflate stream");
@@ -43,6 +50,19 @@ mod tests {
     fn embedded_page_is_the_source_and_small() {
         assert_eq!(page(), include_bytes!("../web/index.html"));
         assert!(INDEX_HTML_GZ.len() <= 25 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
+    }
+
+    #[test]
+    fn setup_page_is_the_source_small_and_uses_only_the_setup_endpoints() {
+        let html = gunzip(SETUP_HTML_GZ);
+        assert_eq!(html, include_bytes!("../web/setup.html"));
+        assert!(SETUP_HTML_GZ.len() <= 2 * 1024, "{} B compressed", SETUP_HTML_GZ.len());
+        let html = String::from_utf8(html).unwrap();
+        for external in ["src=", "<link", "import("] {
+            assert!(!html.contains(external), "external reference {external:?}");
+        }
+        let fetches: std::vec::Vec<&str> = html.split("fetch(\"").skip(1).map(|s| s.split('"').next().unwrap()).collect();
+        assert_eq!(fetches, ["/setup/state?t=", "/setup/scan", "/setup/wifi"]);
     }
 
     #[test]
