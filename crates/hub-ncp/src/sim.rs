@@ -12,25 +12,26 @@ use std::time::{Duration, Instant};
 use zigbee_zrhp::codec::{Bytes8, List};
 use zigbee_zrhp::frame::{ResetReason, TX_BUFFER_LEN};
 use zigbee_zrhp::link::{Link, LinkConfig, LinkEvent};
+use zigbee_zrhp::msg::backup::{
+    BkpExportBegin, BkpExportBeginRsp, BkpExportRead, BkpRestoreBegin, BkpRestoreBeginRsp, BkpRestoreCommitRsp, BkpRestorePutRsp, RestoreNote,
+};
 use zigbee_zrhp::msg::data::{ApsDataRequest, EvtApsDataConfirm};
+use zigbee_zrhp::msg::diag::{
+    Child, Counter, DiagGetChildren, DiagGetChildrenRsp, DiagGetCounters, DiagGetCountersRsp, DiagGetNeighbors, DiagGetNeighborsRsp, DiagGetRoutes,
+    DiagGetRoutesRsp, DiagResetCounters, Neighbor, Route,
+};
 use zigbee_zrhp::msg::firmware::{FwBegin, FwBeginRsp, FwFinishRsp, FwGetSlotsRsp, FwSlot, FwWrite, FwWriteRsp};
-use zigbee_zrhp::msg::backup::{BkpExportBegin, BkpExportBeginRsp, BkpExportRead, BkpRestoreBegin, BkpRestoreBeginRsp, BkpRestoreCommitRsp, BkpRestorePutRsp, RestoreNote};
 use zigbee_zrhp::msg::network::{
-    EnergyResult, EvtChannelChanged, EvtEnergyScanResult, EvtNetworkState, EvtPermitJoinState, NwkChangeChannel, NwkEnergyScan,
-    NwkActiveScan, NwkActiveScanRsp, NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin, NwkSetTxPower,
-    NwkSetTxPowerRsp, ScanResult,
+    EnergyResult, EvtChannelChanged, EvtEnergyScanResult, EvtNetworkState, EvtPermitJoinState, NwkActiveScan, NwkActiveScanRsp, NwkChangeChannel,
+    NwkEnergyScan, NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin, NwkSetTxPower, NwkSetTxPowerRsp, ScanResult,
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKeyRsp};
 use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysGetStatusRsp, SysNegotiateRsp, caps};
-use zigbee_zrhp::msg::diag::{
-    Child, Counter, DiagGetChildren, DiagGetChildrenRsp, DiagGetCounters, DiagGetCountersRsp, DiagGetNeighbors,
-    DiagGetNeighborsRsp, DiagGetRoutes, DiagGetRoutesRsp, DiagResetCounters, Neighbor, Route,
-};
-use zigbee_zrhp::records::{NetworkKeyRecord, NetworkRecord, NodeRecord, RawRecords, RsParamsRecord, StreamCrc, TcLinkKeyRecord, verify_stream};
 use zigbee_zrhp::msg::tables::{TblRead, TblReadEntry, TblReadRsp, TblSyncRsp};
-use zigbee_zrhp::records::{ChildInfo, DeviceRecord, LinkBlock, Record, device_flags};
 use zigbee_zrhp::msg::{Batch, Kind, RawMessage, ids};
 use zigbee_zrhp::queue::EndpointQueues;
+use zigbee_zrhp::records::{ChildInfo, DeviceRecord, LinkBlock, Record, device_flags};
+use zigbee_zrhp::records::{NetworkKeyRecord, NetworkRecord, NodeRecord, RawRecords, RsParamsRecord, StreamCrc, TcLinkKeyRecord, verify_stream};
 use zigbee_zrhp::types::{Endpoint, Ieee, Status};
 
 use crate::fw::{sha256, slot_state};
@@ -130,6 +131,10 @@ pub struct SimState {
     /// Beacons `NWK_ACTIVE_SCAN` finds: `(channel, PAN, EPID, src, LQI,
     /// RSSI, permit join)`.
     pub beacons: Vec<SimBeacon>,
+    /// How long an energy or active scan takes.
+    pub scan_time: Duration,
+    /// Send the proposed `EVT_SCAN_PROGRESS` (0x018B) after each channel.
+    pub scan_progress: bool,
 }
 
 /// A network the simulated NCP hears in an active scan.
@@ -209,6 +214,8 @@ impl SimNcp {
             restore: None,
             restored: None,
             beacons: Vec::new(),
+            scan_time: Duration::from_millis(20),
+            scan_progress: true,
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
@@ -344,7 +351,9 @@ impl SimNcp {
                             let _ = q.event(seq, &ready);
                         }
                         Some(payload) => {
-                            let Ok(batch) = Batch::parse(&payload) else { continue };
+                            let Ok(batch) = Batch::parse(&payload) else {
+                                continue;
+                            };
                             for m in batch.iter() {
                                 if m.header.kind != Kind::Request {
                                     continue;
@@ -477,10 +486,7 @@ impl SimNcp {
                     s.channel = (11..=26).find(|c| form.channel_mask & (1 << c) != 0).unwrap_or(11);
                     s.network_state = 2;
                     actions.push((Duration::from_millis(30), event(&EvtNetworkState { state: 2, reason: 0, zb_status: 0, req_tid: tid })));
-                    actions.push((
-                        Duration::from_millis(40),
-                        event(&EvtFcCheckpoint { domain: 1, key_seq: 0, durable_limit: s.nwk_limit, generation: 1 }),
-                    ));
+                    actions.push((Duration::from_millis(40), event(&EvtFcCheckpoint { domain: 1, key_seq: 0, durable_limit: s.nwk_limit, generation: 1 })));
                     status(Status::Success)
                 }
             }
@@ -510,10 +516,14 @@ impl SimNcp {
                         EnergyResult { channel: c, max_rssi_dbm: (-100 + i16::from(energy) * 60 / 255) as i8, energy }
                     })
                     .collect();
-                actions.push((
-                    Duration::from_millis(20),
-                    event(&EvtEnergyScanResult { req_tid: tid, status: 0, results: List::new(&results) }),
-                ));
+                if s.scan_progress {
+                    let n = results.len() as u32;
+                    for (i, c) in results.iter().enumerate() {
+                        let p = scan_progress(tid, 0, c.channel, i + 1, n, 0);
+                        actions.push((s.scan_time * (i as u32 + 1) / (n + 1), p));
+                    }
+                }
+                actions.push((s.scan_time, event(&EvtEnergyScanResult { req_tid: tid, status: 0, results: List::new(&results) })));
                 status(Status::Success)
             }
             ids::NWK_CHANGE_CHANNEL => {
@@ -535,6 +545,19 @@ impl SimNcp {
             }
             ids::NWK_ACTIVE_SCAN => {
                 let r: NwkActiveScan = m.decode().unwrap();
+                // The real response comes after the scan; this thread only
+                // holds the sim, not the link.
+                let (wait, progress) = (s.scan_time, s.scan_progress);
+                let chans: Vec<u8> = (11u8..=26).filter(|c| r.channel_mask & (1 << c) != 0).collect();
+                let n = chans.len().max(1) as u32;
+                drop(s);
+                for (i, &c) in chans.iter().enumerate() {
+                    thread::sleep(wait / n);
+                    if progress && let Action::Event(id, p) = scan_progress(tid, 1, c, i + 1, n, 0) {
+                        self.inject.lock().unwrap().push((id, p));
+                    }
+                }
+                s = self.state.lock().unwrap();
                 let found: Vec<ScanResult> = s
                     .beacons
                     .iter()
@@ -762,14 +785,9 @@ impl SimNcp {
                 aps_limit: s.aps_limit,
                 stride: STRIDE,
             })),
-            ids::TBL_SYNC => ok(encode!(TblSyncRsp {
-                ncp_table_epoch: 0xE0E0_0001,
-                host_acked_rev: 0,
-                dirty: 0,
-                cached_devices: 0,
-                cached_routes: 0,
-                paging_active: 0,
-            })),
+            ids::TBL_SYNC => {
+                ok(encode!(TblSyncRsp { ncp_table_epoch: 0xE0E0_0001, host_acked_rev: 0, dirty: 0, cached_devices: 0, cached_routes: 0, paging_active: 0 }))
+            }
             ids::LOG_CONFIG => status(Status::Success),
             // Pages of two, to exercise the cursors.
             ids::TBL_READ => {
@@ -1040,6 +1058,14 @@ fn remote_zdo(r: &SimRemote, cluster: u16, asdu: &[u8]) -> Option<Vec<u8>> {
     p.extend((zdp.len() as u16).to_le_bytes());
     p.extend(zdp);
     Some(p)
+}
+
+/// The proposed `EVT_SCAN_PROGRESS`: `u16 req_tid, u8 scan, u8 channel,
+/// u8 done, u8 total, u8 networks_found`.
+fn scan_progress(tid: u16, scan: u8, channel: u8, done: usize, total: u32, found: u8) -> Action {
+    let mut p = tid.to_le_bytes().to_vec();
+    p.extend([scan, channel, done as u8, total as u8, found]);
+    Action::Event(0x018B, p)
 }
 
 fn event<'a, T: zigbee_zrhp::codec::Wire<'a> + zigbee_zrhp::msg::MessageDef>(body: &T) -> Action {

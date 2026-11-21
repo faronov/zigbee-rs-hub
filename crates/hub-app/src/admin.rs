@@ -10,9 +10,10 @@
 //! back through the app's input channel. Keys only appear in backup files
 //! sent to the requesting session and in the host store, never in logs.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
-use hub_devices::api::{ApiServer, SessionId, ServerMessage};
+use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
 use hub_ncp::lifecycle::{EnergyChannel, FormRequest, RestoreOptions};
 use hub_ncp::{Error, Hub as Ncp};
@@ -21,6 +22,7 @@ use serde_json::{Value as J, json};
 use zigbee_zrhp::msg::system::caps;
 use zigbee_zrhp::types::Status;
 
+use crate::jobs::{self, Lane};
 use crate::jw::{Jw, oom};
 use crate::ocb;
 use crate::platform::Platform;
@@ -36,6 +38,9 @@ pub const TYPES: &[&str] = &[
     "network/topology",
     "network/backup",
     "network/backup/last",
+    "network/jobs",
+    "network/job/result",
+    "network/job/cancel",
     "network/restore",
     "network/reset",
     "hub/system",
@@ -50,8 +55,6 @@ pub const TYPES: &[&str] = &[
 pub const LAST_BACKUP_KEY: &str = "bkp/last";
 /// Devices a staged restore accepts.
 pub const MAX_RESTORE_DEVICES: usize = 2000;
-/// Network maps up to this size are kept for `refresh: false`.
-const MAX_CACHED_MAP: usize = 8 * 1024;
 
 /// A request this module handles: `id`, `type` and the whole frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,9 +84,6 @@ pub enum JobOut {
     Reply(SessionId, String),
     /// A `network` topic event.
     Event(J),
-    /// The last network map (text), served by `network/topology` without
-    /// `refresh`.
-    Topology(String),
     /// The NCP's network was replaced: import its devices again.
     Reimport,
 }
@@ -115,10 +115,8 @@ pub struct Admin {
     pub source: String,
     /// Stack of the job thread.
     pub job_stack: usize,
-    busy: Arc<Mutex<Option<&'static str>>>,
+    board: jobs::Shared,
     staged: Option<Staged>,
-    /// Last network map.
-    pub topology: Option<String>,
 }
 
 fn ncp_error(what: &str, e: Error) -> ApiError {
@@ -140,7 +138,7 @@ fn bad(msg: impl Into<String>) -> ApiError {
     ApiError::new("invalid_value", msg)
 }
 
-fn frame(id: u64, r: Result<J, ApiError>) -> String {
+pub(crate) fn frame(id: u64, r: Result<J, ApiError>) -> String {
     match r {
         Ok(v) => ServerMessage::ok(id, v),
         Err(e) => ServerMessage::err(id, e),
@@ -153,11 +151,6 @@ fn raw_frame(id: u64, json_text: &str) -> Result<String, ApiError> {
     let mut w = Jw::result(id, json_text.len() + 64)?;
     w.raw(json_text);
     w.finish()
-}
-
-/// The result value inside a frame written by [`Jw::result`].
-fn result_part(frame: &str) -> &str {
-    frame.find("\"result\":").map_or("null", |i| &frame[i + 9..frame.len() - 1])
 }
 
 type Job = Box<dyn FnOnce(&Out) -> Result<Reply, ApiError> + Send>;
@@ -249,6 +242,9 @@ const COUNTER_NAMES: &[(u16, &str)] = &[
     (0x0206, "mac_data_requests"),
     (0x0207, "frame_pending_acks"),
     (0x0208, "mac_ack_stall_recoveries"),
+    (0x0220, "coex_denied"),
+    (0x0221, "coex_ack_rx_denied"),
+    (0x0222, "coex_ack_tx_denied"),
     (0x0301, "nwk_secured_rx"),
     (0x0302, "nwk_decrypt_failures"),
     (0x0303, "nwk_missing_key"),
@@ -287,6 +283,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 struct ScanReq {
+    passes: Option<u8>,
     channels: Option<Vec<u8>>,
     duration_exp: Option<u8>,
     count: Option<u8>,
@@ -346,7 +343,6 @@ struct LogsReq {
     lines: Option<usize>,
 }
 
-
 /// Request parameters from the frame's JSON (no serde derives: each derive
 /// costs kilobytes of firmware).
 fn field<'a>(v: &'a J, k: &str) -> Option<&'a J> {
@@ -383,7 +379,7 @@ fn channels(v: &J, k: &str) -> Result<Option<Vec<u8>>, ApiError> {
 
 impl ScanReq {
     fn from(v: &J) -> Result<Self, ApiError> {
-        Ok(Self { channels: channels(v, "channels")?, duration_exp: num(v, "duration_exp")?, count: num(v, "count")? })
+        Ok(Self { channels: channels(v, "channels")?, duration_exp: num(v, "duration_exp")?, count: num(v, "count")?, passes: num(v, "passes")? })
     }
 }
 
@@ -433,10 +429,7 @@ impl ResetReq {
 
 impl WifiReq {
     fn from(v: &J) -> Result<Self, ApiError> {
-        Ok(Self {
-            ssid: need(text(v, "ssid")?, "ssid")?.to_string(),
-            password: text(v, "password")?.unwrap_or_default().to_string(),
-        })
+        Ok(Self { ssid: need(text(v, "ssid")?, "ssid")?.to_string(), password: text(v, "password")?.unwrap_or_default().to_string() })
     }
 }
 
@@ -453,9 +446,7 @@ impl LogsReq {
 }
 
 fn mask_of(channels: &[u8]) -> Result<u32, ApiError> {
-    channels.iter().try_fold(0u32, |m, c| {
-        if (11..=26).contains(c) { Ok(m | 1 << c) } else { Err(bad(format!("channel {c} outside 11–26"))) }
-    })
+    channels.iter().try_fold(0u32, |m, c| if (11..=26).contains(c) { Ok(m | 1 << c) } else { Err(bad(format!("channel {c} outside 11–26"))) })
 }
 
 /// A backup: the result frame of request `id` holding the OCB file, and
@@ -508,18 +499,15 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
-        Self { platform, source, job_stack: 16 * 1024, busy: Arc::default(), staged: None, topology: None }
+        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None }
     }
 
     /// `hub/info` `maintenance`: what this hub and its NCP support.
     pub fn features(&self, ncp: &Ncp) -> Vec<&'static str> {
         let mut f = vec!["diagnostics", "topology", "change_channel", "reset"];
-        for (bit, name) in [
-            (caps::ENERGY_SCAN, "energy_scan"),
-            (caps::TX_POWER, "tx_power"),
-            (caps::BACKUP_RESTORE, "backup"),
-            (caps::BACKUP_RESTORE, "restore"),
-        ] {
+        for (bit, name) in
+            [(caps::ENERGY_SCAN, "energy_scan"), (caps::TX_POWER, "tx_power"), (caps::BACKUP_RESTORE, "backup"), (caps::BACKUP_RESTORE, "restore")]
+        {
             if ncp.ncp_has(bit) {
                 f.push(name);
             }
@@ -551,11 +539,28 @@ impl Admin {
             }
             "network/topology" => match TopologyReq::from(v) {
                 Ok(q) if !q.refresh => {
-                    let r = raw_frame(id, self.topology.as_deref().map_or("null", result_part));
+                    let b = self.board.lock().unwrap();
+                    let r = raw_frame(id, b.result(None, Some("topology")).map_or("null", |(_, _, t)| t));
                     return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
                 }
                 Ok(q) => return self.job_topology(ctx, sid, id, q),
                 Err(e) => Err(e),
+            },
+            "network/jobs" => {
+                let r = self.board.lock().unwrap().list_frame(id);
+                return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
+            }
+            "network/job/result" => {
+                let job = field(v, "job").and_then(J::as_u64);
+                let r = self.board.lock().unwrap().result_reply(id, job, field(v, "kind").and_then(J::as_str));
+                return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
+            }
+            "network/job/cancel" => match field(v, "job").and_then(J::as_u64) {
+                Some(job) if self.board.lock().unwrap().cancel(job) => {
+                    return vec![format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{{\"cancelling\":true}}}}")];
+                }
+                Some(_) => Err(ApiError::new("not_found", "no such running job")),
+                None => Err(bad("job: the job ID")),
             },
             "network/restore" => return self.restore(ctx, sid, id, v),
             _ => return self.ncp_job(ctx, sid, head, v),
@@ -649,42 +654,53 @@ impl Admin {
     }
 
     fn spawn_job(&mut self, name: &'static str, out: Out, sid: SessionId, id: u64, f: Job) -> Vec<String> {
-        {
-            let mut busy = self.busy.lock().unwrap();
-            if let Some(running) = *busy {
-                return vec![frame(id, Err(ApiError::new("busy", format!("{running} is running"))))];
-            }
-            *busy = Some(name);
-        }
-        struct Done(Arc<Mutex<Option<&'static str>>>);
-        impl Drop for Done {
-            fn drop(&mut self) {
-                if let Ok(mut b) = self.0.lock() {
-                    *b = None;
-                }
-            }
-        }
-        let done = Done(self.busy.clone());
-        let spawned = std::thread::Builder::new().name("hub-admin".into()).stack_size(self.job_stack).spawn(move || {
-            let r = f(&out);
-            drop(done);
-            let text = match r {
-                Ok(Reply::Json(v)) => frame(id, Ok(v)),
-                Ok(Reply::Frame(t)) => t,
-                Err(e) => {
-                    warn!("admin: {name}: {}", e.message);
-                    frame(id, Err(e))
-                }
-            };
-            out(JobOut::Reply(sid, text));
+        let body: jobs::BgBody = Box::new(move |bg| {
+            f(bg.out()).map(|r| match r {
+                Reply::Json(v) => frame(id, Ok(v)),
+                Reply::Frame(t) => t,
+            })
         });
-        match spawned {
-            Ok(_) => Vec::new(),
-            Err(e) => {
-                *self.busy.lock().unwrap() = None;
-                vec![frame(id, Err(ApiError::new("failed", format!("job thread: {e}"))))]
+        self.launch(name, false, 1, Duration::from_secs(1), out, sid, id, body)
+    }
+
+    /// A background job on the heavy lane: answered at once with its ID;
+    /// progress and the end come as `network` events, the result as a
+    /// `job_result` frame to this session (and `network/job/result`).
+    #[allow(clippy::too_many_arguments)]
+    fn start_bg(&mut self, kind: &'static str, passes: u32, estimate: Duration, out: Out, sid: SessionId, id: u64, body: jobs::BgBody) -> Vec<String> {
+        self.launch(kind, true, passes, estimate, out, sid, id, body)
+    }
+
+    /// Register and start a job: a request/response one (its body returns
+    /// the whole result frame) or a background one.
+    #[allow(clippy::too_many_arguments)]
+    fn launch(&mut self, kind: &'static str, background: bool, passes: u32, estimate: Duration, out: Out, sid: SessionId, id: u64, body: jobs::BgBody) -> Vec<String> {
+        // Reads and settings do not wait for a scan.
+        let lane = if !background && matches!(kind, "diagnostics" | "TX power") { Lane::Light } else { Lane::Heavy };
+        let (job, cancel) = match self.board.lock().unwrap().start(lane, kind, background, passes, estimate) {
+            Ok(j) => j,
+            Err(e) => return vec![frame(id, Err(e))],
+        };
+        match jobs::run(self.board.clone(), job, kind, cancel, out, sid, self.job_stack, (!background).then_some(id), body) {
+            Ok(()) if background => {
+                vec![format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{{\"job\":{job},\"kind\":\"{kind}\",\"passes\":{passes}}}}}")]
             }
+            Ok(()) => Vec::new(),
+            Err(e) => vec![frame(id, Err(e))],
         }
+    }
+
+    /// Progress events of the running background jobs (the app sends them
+    /// once a second).
+    #[inline(never)]
+    pub fn progress_events(&self) -> Vec<J> {
+        self.board.lock().unwrap().progress_events()
+    }
+
+    /// The NCP's optional `EVT_SCAN_PROGRESS`.
+    #[inline(never)]
+    pub fn ncp_progress(&self, payload: &[u8]) {
+        self.board.lock().unwrap().ncp_progress(payload);
     }
 
     fn ncp_job(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, v: &J) -> Vec<String> {
@@ -694,71 +710,71 @@ impl Admin {
         let fail = |e: ApiError| vec![frame(id, Err(e))];
         match head.ty.as_str() {
             "network/energy_scan" => {
-                let q = match ScanReq::from(v) {
-                    Ok(q) => q,
+                let (mask, duration, passes) = match scan_params(v, 8) {
+                    Ok(p) => p,
                     Err(e) => return fail(e),
                 };
-                let mask = match q.channels.as_deref().map(mask_of).transpose() {
-                    Ok(m) => m.unwrap_or(0x07FF_F800),
-                    Err(e) => return fail(e),
-                };
-                if mask == 0 {
-                    return fail(bad("no channels"));
-                }
-                let duration = q.duration_exp.unwrap_or(4).min(8);
-                let count = q.count.unwrap_or(1).clamp(1, 4);
                 let wifi = self.platform.as_ref().and_then(|p| p.wifi_channel());
-                self.spawn("energy scan", out, sid, id, move |_| {
-                    let t = std::time::Instant::now();
-                    let scan = ncp.energy_scan(mask, duration, count).map_err(|e| ncp_error("energy scan", e))?;
-                    let (best, scored) = recommend(&scan, wifi);
-                    let current = ncp.status().network.map(|n| n.channel);
-                    let mut w = Jw::result(id, 160 + 90 * scan.len())?;
-                    w.obj().key("channels").arr();
-                    for (c, (_, overlap, score)) in scan.iter().zip(&scored) {
-                        w.obj().key("channel").num(c.channel).key("energy").num(c.energy).key("max_rssi_dbm").num(c.max_rssi_dbm);
-                        w.key("wifi_overlap").num(overlap).key("score").num(score).end_obj();
-                    }
-                    w.end_arr();
-                    let opt = |w: &mut Jw, k: &str, v: Option<u8>| {
-                        w.key(k);
-                        match v {
-                            Some(v) => w.num(v),
-                            None => w.null(),
-                        };
-                    };
-                    opt(&mut w, "current", current);
-                    opt(&mut w, "wifi_channel", wifi);
-                    opt(&mut w, "recommended", best);
-                    w.key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
-                    Ok(Reply::Frame(w.finish()?))
-                })
+                let est = scan_estimate(mask, duration);
+                self.start_bg(
+                    "energy_scan",
+                    passes,
+                    est,
+                    out,
+                    sid,
+                    id,
+                    Box::new(move |bg| {
+                        let t = std::time::Instant::now();
+                        // Per channel 11..=26: (sum, max) of the energy, max RSSI.
+                        let mut agg = [(0u32, 0u8, i8::MIN); 16];
+                        let mut done = 0;
+                        let mut text = String::new();
+                        while done < passes && !bg.cancelled() {
+                            let p = std::time::Instant::now();
+                            let scan = ncp.energy_scan(mask, duration, 1).map_err(|e| ncp_error("energy scan", e))?;
+                            for c in scan.iter().filter(|c| (11..=26).contains(&c.channel)) {
+                                let a = &mut agg[usize::from(c.channel - 11)];
+                                *a = (a.0 + u32::from(c.energy), a.1.max(c.energy), a.2.max(c.max_rssi_dbm));
+                            }
+                            done += 1;
+                            bg.pass_done(done, p.elapsed());
+                            text = energy_result(&agg, mask, done, passes, bg.cancelled(), wifi, ncp.status().network.map(|n| n.channel), t)?;
+                            if done < passes && !bg.cancelled() {
+                                bg.partial(&text);
+                            }
+                        }
+                        Ok(text)
+                    }),
+                )
             }
             "network/active_scan" => {
-                let q = match ScanReq::from(v) {
-                    Ok(q) => q,
+                let (mask, duration, _) = match scan_params(v, 6) {
+                    Ok(p) => p,
                     Err(e) => return fail(e),
                 };
-                let mask = match q.channels.as_deref().map(mask_of).transpose() {
-                    Ok(m) => m.unwrap_or(0x07FF_F800),
-                    Err(e) => return fail(e),
-                };
-                let duration = q.duration_exp.unwrap_or(3).min(6);
-                self.spawn("active scan", out, sid, id, move |_| {
-                    let t = std::time::Instant::now();
-                    let found = ncp.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
-                    let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
-                    let mut w = Jw::result(id, 100 + 190 * found.len())?;
-                    w.obj().key("networks").arr();
-                    for b in &found {
-                        w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan).key("ext_pan_id").str(&be_hex(&b.epid));
-                        w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit != 0);
-                        w.key("stack_profile").num(b.stack_profile).key("update_id").num(b.update_id);
-                        w.key("own").num(own == Some((b.pan, b.epid))).end_obj();
-                    }
-                    w.end_arr().key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
-                    Ok(Reply::Frame(w.finish()?))
-                })
+                self.start_bg(
+                    "active_scan",
+                    1,
+                    scan_estimate(mask, duration),
+                    out,
+                    sid,
+                    id,
+                    Box::new(move |_| {
+                        let t = std::time::Instant::now();
+                        let found = ncp.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
+                        let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
+                        let mut w = Jw::value(100 + 190 * found.len())?;
+                        w.obj().key("networks").arr();
+                        for b in &found {
+                            w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan).key("ext_pan_id").str(&be_hex(&b.epid));
+                            w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit != 0);
+                            w.key("stack_profile").num(b.stack_profile).key("update_id").num(b.update_id);
+                            w.key("own").num(own == Some((b.pan, b.epid))).end_obj();
+                        }
+                        w.end_arr().key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
+                        w.finish_value()
+                    }),
+                )
             }
             "network/change_channel" => {
                 let q = match ChannelReq::from(v) {
@@ -770,7 +786,9 @@ impl Admin {
                 }
                 self.spawn("channel change", out, sid, id, move |out| {
                     let r = ncp.change_channel(q.channel).map_err(|e| ncp_error("channel change", e))?;
-                    out(JobOut::Event(json!({"topic": "network_updated", "reason": "channel_changed", "channel": r.channel, "nwk_update_id": r.nwk_update_id})));
+                    out(JobOut::Event(
+                        json!({"topic": "network_updated", "reason": "channel_changed", "channel": r.channel, "nwk_update_id": r.nwk_update_id}),
+                    ));
                     Ok(Reply::Json(json!({"channel": r.channel, "nwk_update_id": r.nwk_update_id})))
                 })
             }
@@ -807,9 +825,7 @@ impl Admin {
                 let known = (ctx.known)();
                 let source = self.source.clone();
                 let now_s = ctx.now_s;
-                self.spawn("backup", out, sid, id, move |_| {
-                    take_backup(&ncp, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame))
-                })
+                self.spawn("backup", out, sid, id, move |_| take_backup(&ncp, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame)))
             }
             "network/reset" => self.reset(ctx, sid, id, v),
             other => fail(ApiError::new("unsupported", other.to_string())),
@@ -820,20 +836,19 @@ impl Admin {
         let ncp = ctx.ncp.clone();
         let known = (ctx.known)();
         let now_s = ctx.now_s;
-        let opts = ScanOpts { routes: q.routes, ..ScanOpts::default() };
-        self.spawn("network map", ctx.out.clone(), sid, id, move |out| {
-            let mut progress = |scanned: usize, queued: usize| {
-                out(JobOut::Event(json!({"topic": "topology_progress", "scanned": scanned, "queued": queued})));
-            };
-            let map = topology::scan(&ncp, &known, opts, now_s, id, &mut progress)?;
-            // Kept for `refresh: false` unless it is large (RAM).
-            if map.len() <= MAX_CACHED_MAP
-                && let Ok(copy) = raw_frame(0, result_part(&map))
-            {
-                out(JobOut::Topology(copy));
-            }
-            Ok(Reply::Frame(map))
-        })
+        self.start_bg(
+            "topology",
+            1,
+            Duration::from_secs(10),
+            ctx.out.clone(),
+            sid,
+            id,
+            Box::new(move |bg| {
+                let opts = ScanOpts { routes: q.routes, cancel: Some(bg.cancel_flag()), ..ScanOpts::default() };
+                let mut progress = |scanned: usize, queued: usize| bg.fraction((scanned * 1000 / (scanned + queued).max(1)) as u32);
+                topology::scan(&ncp, &known, opts, now_s, &mut progress)
+            }),
+        )
     }
 
     /// `network/restore`: `backup` (OCB, its `devices` optional), then any
@@ -892,11 +907,8 @@ impl Admin {
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
-        let opts = RestoreOptions {
-            allow_ieee_change,
-            nwk_margin: 10_000,
-            aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN },
-        };
+        let opts =
+            RestoreOptions { allow_ieee_change, nwk_margin: 10_000, aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN } };
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
             let mut previous = false;
             if ncp.status().network_state == 2 && !skip_backup {
@@ -1001,11 +1013,63 @@ impl Admin {
             Ok(Reply::Frame(w.finish()?))
         })
     }
+}
 
-    /// Whether a job is running (and which).
-    pub fn running(&self) -> Option<&'static str> {
-        *self.busy.lock().unwrap()
+/// `(channel mask, duration_exp, passes)` of a scan request.
+#[inline(never)]
+fn scan_params(v: &J, max_exp: u8) -> Result<(u32, u8, u32), ApiError> {
+    let q = ScanReq::from(v)?;
+    let mask = q.channels.as_deref().map(mask_of).transpose()?.unwrap_or(0x07FF_F800);
+    if mask == 0 {
+        return Err(bad("no channels"));
     }
+    Ok((mask, q.duration_exp.unwrap_or(3).min(max_exp), u32::from(q.passes.unwrap_or(q.count.unwrap_or(1)).clamp(1, 10))))
+}
+
+/// Radio time of one scan pass (spec 7.2: 15.36 ms × (2ⁿ + 1) per channel),
+/// ×1.5 for the NCP interleaving it with the stack.
+fn scan_estimate(mask: u32, duration_exp: u8) -> Duration {
+    let per_us = 15_360 * ((1u64 << duration_exp.min(14)) + 1);
+    Duration::from_micros(per_us * u64::from((mask & 0x07FF_F800).count_ones()) * 3 / 2 + 200_000)
+}
+
+/// The energy-scan result after `done` passes: average and peak energy per
+/// channel, the recommendation on the averages.
+#[allow(clippy::too_many_arguments)]
+fn energy_result(
+    agg: &[(u32, u8, i8); 16],
+    mask: u32,
+    done: u32,
+    passes: u32,
+    cancelled: bool,
+    wifi: Option<u8>,
+    current: Option<u8>,
+    t: std::time::Instant,
+) -> Result<String, ApiError> {
+    let avg: Vec<EnergyChannel> = (11u8..=26)
+        .filter(|c| mask & (1 << c) != 0)
+        .map(|c| {
+            let a = agg[usize::from(c - 11)];
+            EnergyChannel { channel: c, max_rssi_dbm: a.2, energy: (a.0 / done.max(1)) as u8 }
+        })
+        .collect();
+    let (best, scored) = recommend(&avg, wifi);
+    let mut w = Jw::value(200 + 110 * avg.len())?;
+    w.obj().key("passes").num(done).key("passes_requested").num(passes).key("cancelled").num(cancelled).key("channels").arr();
+    for (c, (_, overlap, score)) in avg.iter().zip(&scored) {
+        w.obj().key("channel").num(c.channel).key("energy").num(c.energy).key("energy_max").num(agg[usize::from(c.channel - 11)].1);
+        w.key("max_rssi_dbm").num(c.max_rssi_dbm).key("wifi_overlap").num(overlap).key("score").num(score).end_obj();
+    }
+    w.end_arr();
+    for (k, v) in [("current", current), ("wifi_channel", wifi), ("recommended", best)] {
+        w.key(k);
+        match v {
+            Some(v) => w.num(v),
+            None => w.null(),
+        };
+    }
+    w.key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
+    w.finish_value()
 }
 
 fn diagnostics(ncp: &Ncp, groups: u8, reset: bool, id: u64) -> Result<String, ApiError> {

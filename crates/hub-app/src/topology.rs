@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use hub_ncp::{Hub as Ncp, Message};
 use hub_devices::hub::ApiError;
+use hub_ncp::{Hub as Ncp, Message};
 
 use crate::jw::Jw;
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication};
@@ -39,7 +39,7 @@ pub struct Known {
 }
 
 /// Scan limits.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ScanOpts {
     /// Also read routing tables.
     pub routes: bool,
@@ -49,11 +49,13 @@ pub struct ScanOpts {
     pub timeout: Duration,
     /// Whole scan.
     pub budget: Duration,
+    /// Stop early (the routers not asked yet are noted).
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for ScanOpts {
     fn default() -> Self {
-        Self { routes: true, max_routers: 48, timeout: Duration::from_secs(4), budget: Duration::from_secs(150) }
+        Self { routes: true, max_routers: 48, timeout: Duration::from_secs(4), budget: Duration::from_secs(150), cancel: None }
     }
 }
 
@@ -177,11 +179,15 @@ impl Zdo<'_> {
         }
         let until = Instant::now() + self.timeout;
         while let Some(left) = until.checked_duration_since(Instant::now()) {
-            let Ok(m) = self.events.recv_timeout(left) else { break };
+            let Ok(m) = self.events.recv_timeout(left) else {
+                break;
+            };
             if m.msg_id != ids::EVT_APS_DATA_INDICATION {
                 continue;
             }
-            let Ok(ind) = m.decode::<EvtApsDataIndication>() else { continue };
+            let Ok(ind) = m.decode::<EvtApsDataIndication>() else {
+                continue;
+            };
             if ind.src_nwk == nwk && ind.profile == 0 && ind.cluster == cluster | 0x8000 && ind.asdu.0.first() == Some(&tsn) {
                 return Ok(ind.asdu.0[1..].to_vec());
             }
@@ -268,16 +274,8 @@ struct Node {
 }
 
 /// Scan the network. `progress(scanned, queued)` after every router.
-/// The map is written straight into the result frame of request `id`
-/// (structs while scanning, no JSON tree: RAM).
-pub fn scan(
-    ncp: &Ncp,
-    known: &[Known],
-    opts: ScanOpts,
-    now_s: f64,
-    id: u64,
-    progress: &mut dyn FnMut(usize, usize),
-) -> Result<String, ApiError> {
+/// The map's JSON text (structs while scanning, no JSON tree: RAM).
+pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> Result<String, ApiError> {
     let started = Instant::now();
     let mut nodes: BTreeMap<u16, Node> = BTreeMap::new();
     let mut links: Vec<Link> = Vec::new();
@@ -290,14 +288,7 @@ pub fn scan(
     match ncp.coordinator_neighbors() {
         Ok(list) => {
             for nb in list.iter().filter(|n| n.relationship != 4) {
-                let e = NeighborEntry {
-                    ieee: nb.ieee.0,
-                    nwk: nb.nwk,
-                    device_type: nb.device_type,
-                    relationship: nb.relationship,
-                    lqi: nb.lqi,
-                    depth: None,
-                };
+                let e = NeighborEntry { ieee: nb.ieee.0, nwk: nb.nwk, device_type: nb.device_type, relationship: nb.relationship, lqi: nb.lqi, depth: None };
                 learn(&mut nodes, &mut queue, &e);
                 add_link(&mut links, 0, &e);
             }
@@ -338,7 +329,8 @@ pub fn scan(
     let mut zdo = Zdo { ncp, events: ncp.subscribe(), tsn: 0xA0, timeout: opts.timeout };
     let mut asked = 0;
     while let Some(nwk) = queue.pop_front() {
-        if asked >= opts.max_routers || started.elapsed() > opts.budget {
+        let cancelled = opts.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+        if cancelled || asked >= opts.max_routers || started.elapsed() > opts.budget {
             notes.push(format!("stopped after {asked} routers ({} not asked)", queue.len() + 1));
             break;
         }
@@ -365,7 +357,7 @@ pub fn scan(
     // Linear lookups: a collected map would pull a sort into the firmware.
     let by_ieee = |i: &[u8; 8]| known.iter().find(|k| k.ieee.to_le_bytes() == *i);
     let by_nwk = |n: u16| known.iter().find(|k| k.nwk == Some(n));
-    let mut w = Jw::result(id, 256 + 150 * nodes.len() + 90 * links.len() + 70 * routes.len())?;
+    let mut w = Jw::value(256 + 150 * nodes.len() + 90 * links.len() + 70 * routes.len())?;
     w.obj().key("time").num(now_s).key("duration_ms").num(started.elapsed().as_millis() as u64);
     w.key("nodes").arr();
     for (nwk, n) in &nodes {
@@ -403,7 +395,7 @@ pub fn scan(
         w.str(n);
     }
     w.end_arr().end_obj();
-    w.finish()
+    w.finish_value()
 }
 
 #[cfg(test)]

@@ -113,7 +113,8 @@ nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 <p class="mut f-tx_power" id="txh"></p></section>
 <section class="card"><h2>Channel scan</h2>
 <p class="mut">Utilization per channel (energy detect, 0–100 %, as in ZHA), several rounds averaged or as the peak; then the Zigbee networks around (beacons). Orange: under a Wi-Fi channel (the hub's own, plus any you list).</p>
-<div class="row"><label>Rounds <select id="esn"><option>1</option><option>3</option><option selected>5</option><option>10</option></select></label><label>Show <select id="esm"><option value="avg">average</option><option value="max">peak</option></select></label><label>Other Wi-Fi channels <input id="eswf" placeholder="e.g. 1,6,11" size="9"></label><button class="p f-energy_scan" id="esb">Scan</button><button id="ess" class="hide">Stop</button><button id="asb">Find Zigbee networks</button><span id="est" class="mut"></span></div>
+<div class="row"><label>Rounds <select id="esn"><option>1</option><option>3</option><option selected>5</option><option>10</option></select></label><label>Show <select id="esm"><option value="avg">average</option><option value="max">peak</option></select></label><label>Other Wi-Fi channels <input id="eswf" placeholder="e.g. 1,6,11" size="9"></label><button class="p f-energy_scan" id="esb">Scan</button><button id="ess" class="hide">Stop</button><button id="asb">Find Zigbee networks</button></div>
+<div class="row hide" id="espr"><progress id="esp" max="100" value="0" style="flex:1;min-width:10em"></progress><span id="est" class="mut"></span></div>
 <p class="mut hide" id="esno">This NCP firmware has no energy scan.</p>
 <div id="es"></div><div id="esr"></div><div id="as"></div></section>
 <section class="card"><h2>Backup and restore</h2>
@@ -169,8 +170,11 @@ function onMsg(m,tok){
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate()}).catch(()=>{});
-  call("subscribe",{topics:["devices","entities","network","gp"]}).catch(e=>toast(e.message));return}
+  call("subscribe",{topics:["devices","entities","network","gp"]}).catch(e=>toast(e.message));
+  // A scan started before (by this page or another client) is still running?
+  for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
+ if(m.type=="job_result"){jobRes(m);return}
  if(m.type=="event")onEvent(m.event);
 }
 function onEvent(e){
@@ -189,7 +193,8 @@ function onEvent(e){
  case"entity_state":states[e.uid]=e;{const x=ents[e.uid];if(x)renderEnt(x)}break;
  case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
- case"topology_progress":$("#mpt").textContent="scanning: "+e.scanned+" routers asked, "+e.queued+" queued";break;
+ case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
+ case"job_done":case"job_failed":jobEnd(e);break;
  default:if(/^gp\//.test(e.topic))gpEv(e);
  }
 }
@@ -267,7 +272,7 @@ setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById
 // ── Views: map and settings (API 1.2, device-support 14.6) ──
 const has=f=>(hub.maintenance||[]).includes(f);
 onTab.map=()=>{if(authed&&!mapData)call("network/topology",{refresh:false}).then(drawMap).catch(()=>{})};
-onTab.settings=()=>{if(authed){renderSNet();loadSys()}};
+onTab.settings=()=>{if(authed){renderSNet();loadSys();for(const k of["energy_scan","active_scan"])if(!(k=="energy_scan"?Object.keys(esAgg).length:asNets))call("network/job/result",{kind:k}).then(jobRes).catch(()=>{})}};
 function gate(){$("#esno").classList.toggle("hide",!hub.maintenance||has("energy_scan"));for(const e of document.querySelectorAll("[class*=f-]")){const f=[...e.classList].find(c=>c.startsWith("f-"));if(f)e.classList.toggle("hide",!has(f.slice(2)))}}
 const kv=(box,rows)=>{box.textContent="";for(const[k,v]of rows)if(v!=null&&v!==""&&v!==false)box.append(el("dt",{},k),el("dd",{},String(v)))};
 const dur=s=>s<3600?Math.round(s/60)+" min":s<86400?(s/3600).toFixed(1)+" h":(s/86400).toFixed(1)+" d";
@@ -293,19 +298,36 @@ $("#txb").onclick=e=>{const d=+$("#txp").value;busy(e.target,act("network/set_tx
 // Channel scan: rounds of NWK_ENERGY_SCAN merged here; the recommendation
 // mirrors the hub's scoring (4 × energy, +1000 under Wi-Fi, +120 next to
 // it, +160 for 26, +30 off the Light Link primaries 11/15/20/25).
-let esAgg={},esMeta={},esStop=false,asNets=null;
+let esAgg={},esMeta={},asNets=null;
 const zMHz=c=>2405+5*(c-11),wMHz=w=>w==14?2484:2407+5*w;
 const wifiList=()=>[...new Set([esMeta.wifi,...$("#eswf").value.split(/[ ,;]+/).map(Number)].filter(w=>w>=1&&w<=14))];
 const pct=e=>Math.round(e/2.55);
 $("#eswf").value=localStorage.getItem("zrhWifi")||"";$("#eswf").onchange=()=>{localStorage.setItem("zrhWifi",$("#eswf").value);drawScan()};$("#esm").onchange=()=>drawScan();
-$("#ess").onclick=()=>esStop=true;
-$("#esb").onclick=async e=>{const n=+$("#esn").value;esAgg={};esStop=false;e.target.disabled=true;$("#ess").classList.remove("hide");
- try{for(let i=1;i<=n&&!esStop;i++){$("#est").textContent="round "+i+" of "+n+"…";const r=await call("network/energy_scan",{duration_exp:3});
-  esMeta={wifi:r.wifi_channel,current:r.current,rounds:i};for(const c of r.channels){const a=esAgg[c.channel]||(esAgg[c.channel]={sum:0,max:0,rssi:-128});a.sum+=c.energy;a.max=Math.max(a.max,c.energy);a.rssi=Math.max(a.rssi,c.max_rssi_dbm)}drawScan()}
-  $("#est").textContent=esMeta.rounds+" round(s)"}
- catch(err){$("#est").textContent="";if(/not implement/.test(err.message))$("#esno").classList.remove("hide");else toast("energy scan: "+err.message)}
- finally{e.target.disabled=false;$("#ess").classList.add("hide")}};
-function scored(){const W=wifiList(),mx=$("#esm").value=="max";return Object.keys(esAgg).map(Number).map(ch=>{const a=esAgg[ch],en=mx?a.max:a.sum/esMeta.rounds,d=W.map(w=>Math.abs(zMHz(ch)-wMHz(w))),ov=d.some(x=>x<12),near=!ov&&d.some(x=>x<17),zb=asNets?asNets.filter(x=>x.channel==ch&&!x.own).length:0;
+// Background jobs (14.6): a scan answers {job} at once; progress comes as
+// job_progress events (once a second, refined by the NCP's per-channel
+// EVT_SCAN_PROGRESS when it sends it), results as job_result frames (one per
+// energy-scan pass). Any page connected meanwhile follows the same job.
+const JOB={},KINDS=["energy_scan","active_scan","topology"],sec=ms=>(ms/1000).toFixed(ms<1e4?1:0)+" s";
+function jobUi(){const e=JOB.energy_scan,a=JOB.active_scan,t=JOB.topology,any=e||a||t;$("#esb").disabled=$("#asb").disabled=!!any;$("#ess").classList.toggle("hide",!e);$("#mpb").textContent=t?"Stop":"Scan";$("#mpb").disabled=!!any&&!t}
+function jobProg(e){const p=Math.round(e.progress*100),tail=" · "+p+" % · "+sec(e.elapsed_ms)+(e.eta_ms?", about "+sec(e.eta_ms)+" left":"")+(e.cancelling?" · stopping":"");
+ if(e.kind=="topology"){$("#mpt").textContent="scanning"+tail;return}
+ $("#espr").classList.remove("hide");$("#esp").value=p;$("#est").textContent=(e.kind=="active_scan"?"listening for beacons":"pass "+Math.min(e.pass+1,e.passes)+" of "+e.passes)+tail}
+function progEnd(t){$("#esp").value=100;$("#est").textContent=t;setTimeout(()=>{if(!JOB.energy_scan&&!JOB.active_scan)$("#espr").classList.add("hide")},4000)}
+function jobStart(type,p,kind){return act(type,p).then(r=>{JOB[kind]=r.job;jobUi();jobProg({kind,progress:0,pass:0,passes:r.passes||1,elapsed_ms:0,eta_ms:0})})}
+function jobRes(m){if(!m.partial&&JOB[m.kind]==m.job){delete JOB[m.kind];jobUi()}
+ if(m.error)return jobErr(m.kind,m.error);const r=m.result;if(!r)return;
+ if(m.kind=="energy_scan")esShow(r,m.partial);else if(m.kind=="active_scan"){asShow(r);if(!m.partial)progEnd("")}else if(m.kind=="topology")drawMap(r)}
+function jobEnd(e){if(JOB[e.kind]!=e.job)return;delete JOB[e.kind];jobUi();
+ if(e.error)jobErr(e.kind,e.error);else call("network/job/result",{job:e.job}).then(jobRes).catch(()=>{})}
+function jobErr(k,e){if(k=="topology")$("#mpt").textContent="";else progEnd("");const un=e.code=="unsupported";
+ if(k=="energy_scan"&&un)$("#esno").classList.remove("hide");else if(k=="active_scan")$("#as").textContent=un?"This NCP firmware cannot scan for networks yet (NWK_ACTIVE_SCAN).":"active scan: "+e.message;else toast(k.replace("_"," ")+": "+e.message)}
+const jobStop=k=>call("network/job/cancel",{job:JOB[k]}).then(()=>{const x=$(k=="topology"?"#mpt":"#est");if(!/stopping/.test(x.textContent))x.textContent+=" · stopping"}).catch(()=>{});
+$("#ess").onclick=()=>jobStop("energy_scan");
+$("#esb").onclick=()=>{$("#esno").classList.add("hide");jobStart("network/energy_scan",{passes:+$("#esn").value,duration_exp:3},"energy_scan").catch(()=>{})};
+// The hub averages the passes and keeps the peak per channel.
+function esShow(r,partial){esAgg={};for(const c of r.channels)esAgg[c.channel]={avg:c.energy,max:c.energy_max,rssi:c.max_rssi_dbm};esMeta={wifi:r.wifi_channel,current:r.current,rounds:r.passes};drawScan();
+ if(!partial)progEnd(r.passes+" pass(es) in "+sec(r.duration_ms)+(r.cancelled?" (stopped)":""))}
+function scored(){const W=wifiList(),mx=$("#esm").value=="max";return Object.keys(esAgg).map(Number).map(ch=>{const a=esAgg[ch],en=mx?a.max:a.avg,d=W.map(w=>Math.abs(zMHz(ch)-wMHz(w))),ov=d.some(x=>x<12),near=!ov&&d.some(x=>x<17),zb=asNets?asNets.filter(x=>x.channel==ch&&!x.own).length:0;
  return{ch,en,p:pct(en),ov,near,zb,rssi:a.rssi,s:4*en+(ov?1000:near?120:0)+(ch==26?160:0)+([11,15,20,25].includes(ch)?0:30)+20*zb}})}
 function drawScan(){
  const L=scored();if(!L.length)return;const best=L.reduce((a,b)=>b.s<a.s?b:a),cur=L.find(x=>x.ch==esMeta.current);
@@ -326,12 +348,13 @@ function drawScan(){
  if(cur&&best.ch!=cur.ch&&cur.s-best.s>=60)t.push(el("button",{onclick:()=>{$("#ch").value=best.ch;$("#chb").click()}},"Move to channel "+best.ch));
  $("#esr").textContent="";$("#esr").append(...t);
 }
-$("#asb").onclick=e=>{$("#as").textContent="scanning beacons…";busy(e.target,call("network/active_scan",{}).then(r=>{const seen={};asNets=[];
+$("#asb").onclick=()=>{$("#as").textContent="";jobStart("network/active_scan",{},"active_scan").catch(()=>{})};
+function asShow(r){const seen={};asNets=[];
  // One row per network and channel (routers of one network send beacons too), the best link kept.
  for(const n of r.networks){const k=n.channel+n.ext_pan_id+n.pan_id,o=seen[k];if(!o){seen[k]=n;asNets.push(n)}else if(n.lqi>o.lqi)Object.assign(o,n)}
  const t=el("table",{},el("tr",{},...["Channel","PAN ID","Extended PAN ID","LQI","RSSI","Joining",""].map(h=>el("th",{},h))));
  for(const n of asNets.slice().sort((a,b)=>a.channel-b.channel))t.append(el("tr",{},el("td",{},n.channel),el("td",{},hex(n.pan_id,4)),el("td",{},n.ext_pan_id),el("td",{},n.lqi),el("td",{},n.rssi+" dBm"),el("td",{},n.permit_join?"open":"closed"),el("td",{class:"mut"},n.own?"this hub":"")));
- $("#as").textContent="";$("#as").append(asNets.length?t:el("p",{class:"mut"},"No other Zigbee networks heard."));drawScan()}).catch(err=>{$("#as").textContent=/not implement/.test(err.message)?"This NCP firmware cannot scan for networks yet (NWK_ACTIVE_SCAN).":"active scan: "+err.message})).catch(()=>{})};
+ $("#as").textContent="";$("#as").append(asNets.length?t:el("p",{class:"mut"},"No other Zigbee networks heard."));drawScan()}
 $("#bkb").onclick=e=>busy(e.target,act("network/backup",{}).then(b=>{saveBackup(b);$("#bks").textContent="Backup of PAN "+b.pan_id+": "+b.devices.length+" devices"+(b.network_key?"":" — incomplete (no keys), cannot be restored")})).catch(()=>{});
 $("#bkl").onclick=()=>act("network/backup/last").then(r=>r.backup?saveBackup(r.backup):toast("No backup yet")).catch(()=>{});
 async function upload(b,force){const d=b.devices||[],n=8;let r=await call("network/restore",{backup:Object.assign({},b,{devices:d.slice(0,n)}),force,more:d.length>n});for(let o=n;o<d.length;o+=n)r=await call("network/restore",{devices:d.slice(o,o+n),more:o+n<d.length});return r}
@@ -370,7 +393,7 @@ function diag(reset,b){busy(b,act("network/diagnostics",reset?{reset:true}:{}).t
 $("#dgb").onclick=e=>diag(false,e.target);$("#dgr").onclick=e=>{if(confirm("Reset the NCP's counters?"))diag(true,e.target)};
 $("#lgb").onclick=()=>act("hub/logs",{lines:200}).then(r=>{const p=$("#lg");p.textContent=r.lines.join("\n");p.classList.remove("hide");p.scrollTop=p.scrollHeight}).catch(()=>{});
 let mapData=null;
-$("#mpb").onclick=e=>{$("#mpt").textContent="scanning…";busy(e.target,act("network/topology",{}).then(drawMap)).catch(()=>$("#mpt").textContent="")};
+$("#mpb").onclick=()=>{if(JOB.topology)return jobStop("topology");$("#mpt").textContent="scanning…";jobStart("network/topology",{},"topology").catch(()=>$("#mpt").textContent="")};
 function drawMap(m){
  if(!m||!m.nodes)return;mapData=m;
  const N={},adj={},pairs={};for(const n of m.nodes){N[n.nwk]=n;adj[n.nwk]=[]}

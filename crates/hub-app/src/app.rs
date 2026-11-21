@@ -377,6 +377,7 @@ impl Runner {
     fn handle(&mut self, input: Input) {
         let now = self.now();
         match input {
+            Input::Ncp(m) if m.msg_id == crate::jobs::EVT_SCAN_PROGRESS => self.admin.ncp_progress(&m.payload),
             Input::Ncp(m) => match engine_input(&m) {
                 Some(EngineInput::Indication(i)) => {
                     if let Some(ieee) = i.src_ieee {
@@ -429,7 +430,6 @@ impl Runner {
                     }
                 }
                 JobOut::Event(body) => self.engine.network_event(body),
-                JobOut::Topology(map) => self.admin.topology = Some(map),
                 JobOut::Reimport => {
                     self.imported_in = None;
                     self.import_retry = None;
@@ -523,6 +523,10 @@ impl Runner {
             if n > 0 {
                 info!("app: reading {n} unknown states of restored devices");
             }
+        }
+        // Background maintenance jobs report progress once a second.
+        for ev in self.admin.progress_events() {
+            self.engine.network_event(ev);
         }
         self.engine.tick(now);
         self.engine.transport.poll();

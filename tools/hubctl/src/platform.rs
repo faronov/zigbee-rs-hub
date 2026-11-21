@@ -99,15 +99,12 @@ pub fn sim_demo(hub: &Hub, sim: &SimNcp) -> Result<(), String> {
                 neighbors: vec![(own, 0, 0, 2, 180), (r1, 0x1A01, 1, 2, 110), (e3, 0x6F13, 2, 1, 75)],
                 routes: vec![(0x0000, 0x0000, 0)],
             },
-            SimRemote {
-                nwk: 0x3C03,
-                ieee: r3,
-                neighbors: vec![(r1, 0x1A01, 1, 2, 150), (e4, 0x7A14, 2, 1, 40)],
-                routes: vec![(0x0000, 0x1A01, 0)],
-            },
+            SimRemote { nwk: 0x3C03, ieee: r3, neighbors: vec![(r1, 0x1A01, 1, 2, 150), (e4, 0x7A14, 2, 1, 40)], routes: vec![(0x0000, 0x1A01, 0)] },
         ];
     });
     sim.with(|s| {
+        // Scans take as long as on the H2 (16 channels, duration_exp 3).
+        s.scan_time = Duration::from_millis(2800);
         s.beacons = vec![
             (15, 0x2F11, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88], 0x0000, 140, -71, false),
             (20, 0x6A0B, [0xA0, 0xB0, 0xC0, 0xD0, 0x00, 0x8D, 0x15, 0x00], 0x0000, 90, -84, true),
