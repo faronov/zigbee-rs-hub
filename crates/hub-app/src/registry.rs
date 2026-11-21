@@ -5,7 +5,8 @@
 //! Keys: `dev/<device id>` → JSON [`DeviceSnapshot`] (plain: a deflate
 //! compressor needs ~250 KB of RAM, which a hub without PSRAM does not
 //! have; deflated values written by earlier builds are still read);
-//! `udef/<definition id>` → zdef CBOR of a user definition. A device is
+//! `udef/<definition id>` → zdef CBOR of a user definition, `usrc/<id>` →
+//! its source text for the editor (`{"format", "text"}`). A device is
 //! written when the engine reports it added or changed, and in a sweep
 //! every [`SWEEP_MS`]; the store skips identical values, and a snapshot
 //! holds no measured values, so reports alone never write flash.
@@ -25,6 +26,8 @@ use log::{info, warn};
 pub const DEV: &str = "dev/";
 /// User definition key prefix.
 pub const UDEF: &str = "udef/";
+/// Source text of a user definition (`{"format", "text"}`).
+pub const USRC: &str = "usrc/";
 /// Full sweep period.
 pub const SWEEP_MS: Millis = 30_000;
 /// Coalescing delay of event-driven writes.
@@ -64,12 +67,21 @@ pub struct Registry {
 impl Registry {
     /// Restores user definitions, then devices, from the store.
     pub fn load<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &mut Engine<T>, now: Millis) {
-        let (udefs, devs): (Records, Records) = ncp.with_store(|s| {
+        let (udefs, devs, srcs): (Records, Records, Records) = ncp.with_store(|s| {
             (
                 s.kv_prefix(UDEF).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
                 s.kv_prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
+                s.kv_prefix(USRC).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
             )
         });
+        // `<format>\n<text>`.
+        for (key, v) in srcs {
+            if let Ok(v) = String::from_utf8(v)
+                && let Some((f, t)) = v.split_once('\n')
+            {
+                engine.user_sources.insert(key[USRC.len()..].to_string(), (f.to_string(), t.to_string()));
+            }
+        }
         for (key, cbor) in udefs {
             match load_cbor(&cbor, LayerSource::User) {
                 Ok(d) => {
@@ -139,11 +151,25 @@ impl Registry {
                 .filter_map(|d| Some((format!("{UDEF}{}", d.id), d.zdef.as_ref()?.encode().ok()?)))
                 .collect();
             let live: BTreeSet<String> = engine.devices().map(|d| format!("{DEV}{}", d.id)).collect();
+            // Sources of the user definitions still stored, `<format>\n<text>`
+            // (ascending ids, as the map iterates).
+            let srcs: Records = engine
+                .user_sources
+                .iter()
+                .filter(|(id, _)| defs.contains_key(&format!("{UDEF}{id}")))
+                .map(|(id, (f, t))| (format!("{USRC}{id}"), format!("{f}\n{t}").into_bytes()))
+                .collect();
             ncp.with_store(|s| {
+                dels.extend(
+                    s.kv_prefix(USRC)
+                        .filter(|(k, _)| srcs.binary_search_by(|(x, _)| x.as_str().cmp(k)).is_err())
+                        .map(|(k, _)| k.to_string()),
+                );
                 dels.extend(s.kv_prefix(UDEF).filter(|(k, _)| !defs.contains_key(*k)).map(|(k, _)| k.to_string()));
                 dels.extend(s.kv_prefix(DEV).filter(|(k, _)| !live.contains(*k)).map(|(k, _)| k.to_string()));
             });
             puts.extend(defs);
+            puts.extend(srcs);
         }
         self.dirty_since = None;
         ncp.with_store(|s| {

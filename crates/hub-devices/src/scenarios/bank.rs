@@ -262,3 +262,74 @@ fn sml001_fp() -> crate::fingerprint::Fingerprint {
         ..Default::default()
     }
 }
+
+#[test]
+fn converters_view_clause_mappings_and_source_text() {
+    let (mut hub, _sim) = hub_on(StoreCatalog {
+        bank: Some(bank_catalog()),
+        ..Default::default()
+    });
+    let mut api = ApiServer::new("hub", "t");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type":"auth","token":"t"}"#, T0);
+    let d = call(
+        &mut api,
+        &mut hub,
+        s,
+        1,
+        json!({"type": "devices/get", "device": ID}),
+    );
+    let top = d["resolution"]["layers"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (top["id"].as_str(), top["clause"].as_u64()),
+        (Some("philips/sml001"), Some(0)),
+        "{d}"
+    );
+    let maps = d["resolution"]["mappings"].as_array().unwrap();
+    assert!(
+        maps.iter()
+            .any(|m| m["uid"] == format!("{ID}:2:occupancy")
+                && m["binding"] == "zcl ep 2 0x0406/0x0000"),
+        "{maps:?}"
+    );
+    assert_eq!(d["resolution"]["pinned"], J::Null);
+    // A user definition keeps its source text for the editor.
+    let cbor = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        golden_cbor("philips-sml001-motion"),
+    );
+    let text = "zdef: 1\nid: philips/sml001\n# my comment\n";
+    let up = call(
+        &mut api,
+        &mut hub,
+        s,
+        2,
+        json!({"type": "definitions/upload", "cbor": cbor, "source": text, "source_format": "yaml"}),
+    );
+    assert_eq!(up["matches"], json!([ID]), "{up}");
+    let g = call(
+        &mut api,
+        &mut hub,
+        s,
+        3,
+        json!({"type": "definitions/get", "definition": "philips/sml001"}),
+    );
+    assert_eq!(
+        (g["source"].as_str(), g["source_text"].as_str()),
+        (Some("user"), Some(text)),
+        "{g}"
+    );
+    call(
+        &mut api,
+        &mut hub,
+        s,
+        4,
+        json!({"type": "definitions/delete", "definition": "philips/sml001"}),
+    );
+    assert!(hub.user_sources.is_empty());
+}

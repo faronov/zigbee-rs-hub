@@ -148,6 +148,11 @@ pub enum Request {
         cbor: String,
         #[serde(default)]
         replace: Option<String>,
+        /// The user's source text (YAML …), kept for editing (≤ 8 KiB).
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        source_format: Option<String>,
     },
     #[serde(rename = "definitions/delete")]
     DefinitionsDelete {

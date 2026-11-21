@@ -48,9 +48,12 @@ mod tests {
     #[test]
     fn page_is_self_contained_and_uses_only_the_api() {
         let html = String::from_utf8(page()).unwrap();
-        for external in ["http://", "https://", "src=\"//", "<link", "<script src", "import("] {
+        for external in ["http://", "https://", "src=\"//", "<link", "<script src"] {
             assert!(!html.contains(external), "external reference {external:?}");
         }
+        // Dynamic imports only of the hub's own web tools (`/zdefc/`, served
+        // from hubdata).
+        assert!(html.match_indices("import(").all(|(i, _)| html[i..].starts_with("import(\"/zdefc/")));
         assert!(html.contains("+\"/api\""));
     }
 

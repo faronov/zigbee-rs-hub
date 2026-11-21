@@ -301,6 +301,9 @@ pub struct Hub<T: ZigbeeTransport> {
     pub cfg: HubConfig,
     pub(crate) catalog: Box<dyn Catalog>,
     pub(crate) user: MemoryCatalog,
+    /// Source texts of user definitions by id: `(format, text)`; the hub
+    /// never parses them (D15), it keeps them for the editor.
+    pub user_sources: BTreeMap<String, (String, String)>,
     pub(crate) devices: BTreeMap<String, Device>,
     pub(crate) dispatch: BTreeMap<String, BTreeMap<DKey, Vec<(usize, Option<usize>)>>>,
     nwk_index: BTreeMap<u16, String>,
@@ -380,6 +383,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             cfg,
             catalog,
             user: MemoryCatalog::default(),
+            user_sources: BTreeMap::new(),
             devices: BTreeMap::new(),
             dispatch: BTreeMap::new(),
             nwk_index: BTreeMap::new(),
@@ -2428,6 +2432,7 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Deletes a user definition.
     pub fn delete_user_definition(&mut self, id: &str, now: Millis) -> Result<(), ApiError> {
+        self.user_sources.remove(id);
         if !self.user.remove(id) {
             return Err(ApiError::new(
                 "not_found",

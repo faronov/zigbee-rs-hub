@@ -309,6 +309,40 @@ pub fn score(d: &Definition, fp: &Fingerprint) -> Option<u32> {
     d.matches.iter().filter_map(|c| score_clause(c, fp)).max()
 }
 
+/// Index of the clause of `d` that scores best for `fp`.
+pub fn best_clause(d: &Definition, fp: &Fingerprint) -> Option<u16> {
+    let scores: Vec<Option<u32>> = match &d.zdef {
+        Some(z) => {
+            let zf;
+            let zg;
+            let id = match &fp.gp {
+                Some(g) => {
+                    zg = crate::zdef_adapter::zdef_gp_fingerprint(g);
+                    zdef::Identity::Gp(&zg)
+                }
+                None => {
+                    zf = crate::zdef_adapter::zdef_fingerprint(fp);
+                    zdef::Identity::Zigbee(&zf)
+                }
+            };
+            z.match_
+                .iter()
+                .map(|c| zdef::matching::score_clause(c, id).map(u32::from))
+                .collect()
+        }
+        None => d.matches.iter().map(|c| score_clause(c, fp)).collect(),
+    };
+    let mut best: Option<(u16, u32)> = None;
+    for (i, s) in scores.iter().enumerate() {
+        if let Some(s) = s
+            && best.is_none_or(|b| *s > b.1)
+        {
+            best = Some((i as u16, *s));
+        }
+    }
+    best.map(|b| b.0)
+}
+
 /// The features of `d` this hub lacks.
 pub fn missing_features(d: &Definition, features: &[&str]) -> Vec<String> {
     d.used_features()
@@ -377,6 +411,9 @@ pub struct LayerRef {
     pub content_hash: Option<String>,
     /// Match score.
     pub score: Option<u32>,
+    /// Index of the match clause that scored (`match[n]` of the definition).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clause: Option<u16>,
 }
 
 /// The merged result for one device.
@@ -629,6 +666,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         revision: 1,
         content_hash: None,
         score: None,
+        clause: None,
     });
     let disable = layers.iter().any(|(d, _)| d.generic.disable);
     // Boxed values: the Xtensa LLVM backend (Rust 1.90.0.0) fails
@@ -697,6 +735,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             revision: d.revision,
             content_hash: d.content_hash.clone(),
             score: *s,
+            clause: s.and_then(|_| best_clause(d, fp)),
         });
         for e in &d.entities {
             if let Some(p) = &e.present_if {
