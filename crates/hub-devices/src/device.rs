@@ -280,6 +280,8 @@ pub struct Device {
     pub entities: Vec<Entity>,
     /// Last frame, ms.
     pub last_seen: Option<Millis>,
+    /// When `last_seen` was last published (at most once a minute).
+    pub last_seen_published: Option<Millis>,
     /// LQI.
     pub lqi: Option<u8>,
     /// RSSI.
@@ -337,6 +339,7 @@ impl Device {
             resolution: Resolution::default(),
             entities: Vec::new(),
             last_seen: Some(now),
+            last_seen_published: None,
             lqi: None,
             rssi: None,
             available: true,
