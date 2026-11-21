@@ -4,6 +4,11 @@
       "permit_join": {
         "default": "mdi:link-plus"
       }
+    },
+    "sensor": {
+      "catalog_version": {
+        "default": "mdi:book-open-variant"
+      }
     }
   },
   "services": {
@@ -15,6 +20,9 @@
     },
     "reconfigure_device": {
       "service": "mdi:cog-refresh"
+    },
+    "update_catalog": {
+      "service": "mdi:book-sync"
     }
   }
 }

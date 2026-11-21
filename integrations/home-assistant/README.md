@@ -28,7 +28,24 @@ has, and the integration maps them 1:1 onto HA platforms.
   hub yet).
 - Services: `zigbee_rs_hub.permit_join` (duration, Green Power window, a
   router to join through), `zigbee_rs_hub.reinterview_device`,
-  `zigbee_rs_hub.reconfigure_device`.
+  `zigbee_rs_hub.reconfigure_device`, `zigbee_rs_hub.update_catalog`.
+- Definitions catalog (hubs with the `catalog/*` API): the hub downloads
+  nothing itself, so the integration fetches the signed release files from
+  the mirror set on the hub (`catalog/config` `base_url`, default
+  `https://faronov.github.io/zigbee-rs-definitions/latest`) with HA's aiohttp
+  session and uploads them as `hubctl catalog-push` does: `manifest.cose`,
+  then the bank and web tools the hub `wants`, then the `shard-hh.cbor`
+  files of devices that resolve to generic only. Uploads go in 4 KiB chunks
+  (the most the hub accepts) and continue after a dropped connection from
+  `upload.written`. `zigbee_rs_hub.update_catalog` (optional
+  `config_entry_id`, `force` to pass the bank anti-rollback check, `base_url`
+  to use another mirror for this run) runs it now; automatically it runs two
+  minutes after set-up and then every 24 h when the hub's `auto_update` or
+  `auto_fetch` is on (each enables its part), and on the hub's
+  `definition_needed` event when `auto_fetch` is on (at most once an hour
+  per device). A **Catalog version** diagnostic sensor on the hub device
+  shows `catalog_date.serial` of the installed bank (`none` without one),
+  the manifest, missing definitions and the last check's error.
 - HA's **Delete device** removes the device from the network
   (`devices/remove`); devices removed on the hub disappear from HA.
 - Diagnostics (entry and device; the device download includes the hub's
@@ -90,6 +107,7 @@ delete the entry, then the directory, then restart.
 | HA service call | `entities/command {uid, command, params}` with HA's service and parameter names (`turn_on {brightness, transition, color_temp_kelvin, xy_color, hs_color}`, `set_value {value}`, `select_option {option}`, `press`, `set_temperature`, `set_cover_position`, …); hub errors become `HomeAssistantError` |
 | `network/permit_join` | Permit join button (254 s, Green Power included) and the `permit_join` service |
 | `devices/remove`, `devices/reinterview`, `devices/reconfigure`, `devices/diagnostics` | Delete device, services, device diagnostics |
+| `catalog/status`, `catalog/upload_chunk`, `catalog/commit`, events `definition_needed`, `catalog_*` | `update_catalog` service, automatic checks, **Catalog version** sensor |
 
 ## Development and tests
 
@@ -99,9 +117,12 @@ The tests use
 and a fake hub (`tests/fake_hub.py`, an aiohttp WebSocket server speaking
 the hub API) for the config flow, entity creation, pushed state,
 availability, commands on every platform, runtime entities and devices,
-reconnect with resync, the keepalive, services, device removal and
-diagnostics. `tests/test_e2e_hubctl.py` runs against the real API server,
-`hubctl --sim serve` (simulated NCP), when `HUBCTL` names a hubctl binary.
+reconnect with resync, the keepalive, services, device removal,
+diagnostics and the catalog client (with a local HTTP mirror; the fake hub
+refuses chunks over 4 KiB). `tests/test_e2e_hubctl.py` runs against the
+real API server, `hubctl --sim serve` (simulated NCP), when `HUBCTL` names
+a hubctl binary; its catalog test also needs `zdefc` (next to hubctl, or
+`ZDEFC`) to build and sign a test release.
 
 ```sh
 cd integrations/home-assistant
@@ -110,7 +131,7 @@ python3.14 -m venv .venv            # or: uv venv --python 3.14 .venv
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 .venv/bin/python -m pytest
 # end to end against the simulated hub:
-cargo build -p hubctl
+cargo build -p hubctl -p zdefc
 HUBCTL=$PWD/../../target/debug/hubctl .venv/bin/python -m pytest
 ```
 
@@ -121,5 +142,5 @@ CI runs the same in the `home-assistant` job of `.github/workflows/ci.yml`.
 - No zeroconf discovery until the hub advertises `_zigbee-rs-hub._tcp`.
 - No device triggers yet; remotes and GP switches are `event` entities.
 - Renaming a device in HA does not rename it on the hub (`devices/update`).
-- Definitions, catalog and Green Power bindings are not exposed in HA; use
-  the hub's own tools for them.
+- User definitions and Green Power bindings are not exposed in HA, nor are
+  the catalog settings (`catalog/config`); use the hub's own tools for them.

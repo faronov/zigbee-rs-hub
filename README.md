@@ -914,6 +914,16 @@ diagnostics. It identifies the hub by `hub/info` (`coordinator_ieee`, added for
 it; minor API addition). Installation, tests and the API mapping:
 [integrations/home-assistant/README.md](integrations/home-assistant/README.md).
 
+The integration is also a catalog client: since the hub downloads nothing,
+Home Assistant fetches the signed release files from the mirror set on the
+hub (`catalog/config` `base_url`, GitHub Pages by default) and uploads them
+over the API in 4 KiB chunks, resuming after a dropped connection. Service
+`zigbee_rs_hub.update_catalog` (optional `config_entry_id`, `force`,
+`base_url`) runs it on demand; otherwise it runs every 24 h (first two
+minutes after set-up) as the hub's `auto_update` / `auto_fetch` allow, and on
+`definition_needed` events when `auto_fetch` is on. A **Catalog version**
+sensor shows the installed bank.
+
 ## License
 
 MIT OR Apache-2.0, like zigbee-rs.

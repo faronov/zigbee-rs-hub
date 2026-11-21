@@ -27,6 +27,8 @@ async def async_setup_entry(
     hub = entry.runtime_data
     if hub.supports_network:
         async_add_entities([NetworkStateSensor(hub), ChannelSensor(hub), PermitJoinEndsSensor(hub)])
+    if hub.catalog.supported:
+        async_add_entities([CatalogSensor(hub)])
     setup_platform(entry, "sensor", async_add_entities, ZigbeeRsSensor)
 
 
@@ -128,3 +130,51 @@ class PermitJoinEndsSensor(HubEntity, SensorEntity):
         """The deadline."""
         until = self.hub.permit_join_until
         return until if until is not None and until > dt_util.utcnow() else None
+
+
+class CatalogSensor(HubEntity, SensorEntity):
+    """Version (`catalog_date.serial`) of the hub's definitions bank, `none` without one."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hub: Any) -> None:
+        """Sensor of `hub`."""
+        super().__init__(hub, "catalog_version")
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the connection and the catalog updater."""
+        await super().async_added_to_hass()
+        self.async_on_remove(self.hub.catalog.add_listener(self._hub_update))
+
+    @property
+    def available(self) -> bool:
+        """Connected and the status is known."""
+        return self.hub.connected and self.hub.catalog.status is not None
+
+    @property
+    def native_value(self) -> str | None:
+        """`catalog_date.serial` of the installed bank."""
+        if self.hub.catalog.status is None:
+            return None
+        return self.hub.catalog.installed_version or "none"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Bank, manifest, fetched definitions, settings, last check."""
+        cat = self.hub.catalog
+        st = cat.status or {}
+        inst = st.get("installed") if isinstance(st.get("installed"), dict) else {}
+        man = st.get("manifest") if isinstance(st.get("manifest"), dict) else {}
+        local = st.get("local") if isinstance(st.get("local"), dict) else {}
+        missing = st.get("missing") if isinstance(st.get("missing"), list) else []
+        return {
+            "generation": inst.get("generation"),
+            "definitions": inst.get("definitions"),
+            "manifest_version": man.get("version"),
+            "fetched_definitions": local.get("definitions"),
+            "missing_definitions": len(missing),
+            "auto_update": cat.auto_update,
+            "auto_fetch": cat.auto_fetch,
+            "last_check": cat.last_check,
+            "last_error": cat.last_error,
+        }

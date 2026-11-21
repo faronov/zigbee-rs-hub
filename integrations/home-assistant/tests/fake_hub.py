@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 from typing import Any
 
@@ -24,6 +26,187 @@ ON_LEVEL_UID = f"{LIGHT_DEV}:11:on_level"
 IDENTIFY_UID = f"{LIGHT_DEV}:11:identify"
 SWITCH_UID = f"{LIGHT_DEV}:12:switch"
 ACTION_UID = f"{REMOTE_DEV}:1:action"
+
+CATALOG_DATE = 20261121
+CATALOG_SERIAL = 3
+BANK = "bank-4m.zdb"
+WEB = "zdefc-web.zwb"
+SHARD = 0x1A
+# Decoded bytes per `catalog/upload_chunk` the hub accepts.
+UPLOAD_CHUNK_MAX = 4 * 1024
+
+
+def sha(data: bytes) -> str:
+    """SHA-256 (hex)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def make_release(
+    bank_size: int = 30_000, version: int = 7, generation: int = 5
+) -> dict[str, bytes]:
+    """Release files; the fake's `manifest.cose` is JSON instead of COSE."""
+    bank = bytes(i % 251 for i in range(bank_size))
+    web = b"web tools " * 100
+    shard = b"shard 1a records"
+    manifest = {
+        "version": version,
+        "catalog_date": CATALOG_DATE,
+        "catalog_serial": CATALOG_SERIAL,
+        "bank": {"name": BANK, "size": len(bank), "sha256": sha(bank), "generation": generation},
+        "web": {"name": WEB, "size": len(web), "sha256": sha(web)},
+        "shards": {f"{SHARD:02x}": sha(shard)},
+    }
+    return {
+        "manifest.cose": json.dumps(manifest).encode(),
+        BANK: bank,
+        WEB: web,
+        f"shard-{SHARD:02x}.cbor": shard,
+    }
+
+
+class FakeCatalog:
+    """The hub's catalog store and its API (spec 9.3, 14.4), minimal."""
+
+    def __init__(self) -> None:
+        """No manifest, no bank, no web tools."""
+        self.config = {
+            "base_url": "http://127.0.0.1:1/latest",
+            "auto_update": False,
+            "auto_fetch": False,
+        }
+        self.manifest: dict[str, Any] | None = None
+        self.installed: dict[str, Any] | None = None
+        self.web_sha: str | None = None
+        self.upload: dict[str, Any] | None = None
+        self.missing: list[dict[str, Any]] = []
+        self.local = 0
+        self.forced: list[bool] = []
+        # Close the connection after storing this many more chunks, unanswered.
+        self.drop_after_chunks: int | None = None
+
+    def install(self, release: dict[str, bytes]) -> None:
+        """As if `release` had been installed completely."""
+        self.manifest = json.loads(release["manifest.cose"])
+        bank = self.manifest["bank"]
+        self.installed = self._installed(bank)
+        self.web_sha = self.manifest["web"]["sha256"]
+
+    def _installed(self, bank: dict[str, Any]) -> dict[str, Any]:
+        assert self.manifest is not None
+        return {
+            "generation": bank["generation"],
+            "catalog_date": self.manifest["catalog_date"],
+            "catalog_serial": self.manifest["catalog_serial"],
+            "definitions": 12,
+            "kid": "47bad820d263b77e",
+            "size": bank["size"],
+        }
+
+    def wants(self) -> dict[str, Any] | None:
+        """What the installed manifest offers that the hub lacks."""
+        if self.manifest is None:
+            return None
+        bank = self.manifest["bank"]
+        web = self.manifest["web"]
+
+        def asset(a: dict[str, Any]) -> dict[str, Any]:
+            return {k: a[k] for k in ("name", "size", "sha256")}
+
+        newer = self.installed is None or bank["generation"] > self.installed["generation"]
+        return {
+            "bank": asset(bank) if newer else None,
+            "web": asset(web) if web["sha256"] != self.web_sha else None,
+        }
+
+    def status(self) -> dict[str, Any]:
+        """`catalog/status`."""
+        m = self.manifest
+        return {
+            "installed": copy.deepcopy(self.installed),
+            "active_slot": "a" if self.installed else None,
+            "manifest": None
+            if m is None
+            else {
+                "version": m["version"],
+                "catalog_date": m["catalog_date"],
+                "catalog_serial": m["catalog_serial"],
+                "source": "zhc 25.0.0",
+            },
+            "wants": self.wants(),
+            "missing": copy.deepcopy(self.missing),
+            "upload": None
+            if self.upload is None
+            else {"target": self.upload["target"], "written": len(self.upload["data"])},
+            "web_tools": {"installed": self.web_sha is not None},
+            "local": {"definitions": self.local, "used": 0, "size": 65536},
+            "slot_size": 262144,
+            "config": dict(self.config),
+            "warnings": [],
+        }
+
+    def chunk(self, req: dict[str, Any]) -> tuple[str | None, Any]:
+        """`catalog/upload_chunk`: (error, result)."""
+        data = base64.b64decode(req["data"])
+        if len(data) > UPLOAD_CHUNK_MAX:
+            return "invalid_value", f"chunks are at most {UPLOAD_CHUNK_MAX} bytes"
+        if req["offset"] == 0:
+            self.upload = {"target": req["target"], "data": bytearray(), "size": req.get("size")}
+        up = self.upload
+        if up is None or up["target"] != req["target"]:
+            return "invalid_value", f"no {req['target']} upload in progress"
+        if req["offset"] != len(up["data"]):
+            return "invalid_value", f"expected offset {len(up['data'])}"
+        up["data"] += data
+        return None, {"written": len(up["data"])}
+
+    def commit(self, req: dict[str, Any]) -> tuple[str | None, Any, dict[str, Any] | None]:
+        """`catalog/commit`: (error, result, event)."""
+        up = self.upload
+        target = req["target"]
+        if up is None or up["target"] != target:
+            return "invalid_value", f"no {target} upload in progress", None
+        self.upload = None
+        data = bytes(up["data"])
+        if target == "manifest":
+            try:
+                m = json.loads(data)
+            except ValueError:
+                return "verification_failed", "manifest: signature", None
+            if self.manifest is not None and m["version"] < self.manifest["version"]:
+                return "verification_failed", "older manifest", None
+            self.manifest = m
+            r = {k: m[k] for k in ("version", "catalog_date", "catalog_serial")}
+            r["wants"] = self.wants()
+            return None, r, {"topic": "catalog_manifest", **r}
+        if self.manifest is None:
+            return "verification_failed", "no manifest", None
+        if target == "bank":
+            bank = self.manifest["bank"]
+            if sha(data) != bank["sha256"]:
+                return "verification_failed", "bank: SHA-256", None
+            self.forced.append(bool(req.get("force")))
+            self.installed = self._installed(bank)
+            r = {
+                "sha256": sha(data),
+                "generation": bank["generation"],
+                "definitions": 12,
+                "devices": [],
+            }
+            return None, r, {"topic": "catalog_updated", **r}
+        if target == "web":
+            if sha(data) != self.manifest["web"]["sha256"]:
+                return "verification_failed", "web: SHA-256", None
+            self.web_sha = sha(data)
+            r = {"size": len(data), "files": 3}
+            return None, r, {"topic": "web_tools_updated", **r}
+        n = req.get("shard")
+        if not isinstance(n, int) or self.manifest["shards"].get(f"{n:02x}") != sha(data):
+            return "verification_failed", f"shard {n}: SHA-256", None
+        devices = [m["device"] for m in self.missing if n in m["shards"]]
+        self.missing = [m for m in self.missing if n not in m["shards"]]
+        self.local += len(devices)
+        r = {"definitions": [f"def-{d}" for d in devices], "skipped": [], "devices": devices}
+        return None, r, {"topic": "definition_fetched", **r}
 
 
 def device(dev_id: str, manufacturer: str, model: str, **extra: Any) -> dict[str, Any]:
@@ -200,6 +383,8 @@ class FakeHub:
         }
         # Answer only the first hub/info of a connection (a hung hub).
         self.hang_after_connect = False
+        # `None`: a hub without the catalog API.
+        self.catalog: FakeCatalog | None = None
         self.devices, self.entities, self.states = default_model()
         self.requests: list[dict[str, Any]] = []
         self.command_errors: dict[str, dict[str, str]] = {}
@@ -339,6 +524,8 @@ class FakeHub:
         elif kind == "subscribe":
             topics = set(req.get("topics", []))
             known = {"devices", "entities", "events", "gp"}
+            if self.catalog is not None:
+                known.add("catalog")
             if self.api_version >= "1.1":
                 known.add("network")
             if topics - known:
@@ -346,7 +533,7 @@ class FakeHub:
                 return
             subs[rid] = topics
             await ok({"seq": self.seq})
-            snap = self.snapshot()
+            snap = self.snapshot() if topics != {"catalog"} else {"topic": "snapshot"}
             if "network" in topics:
                 snap["network"] = copy.deepcopy(self.network)
             await ws.send_json({"type": "event", "id": rid, "seq": self.seq, "event": snap})
@@ -378,5 +565,93 @@ class FakeHub:
             await ok({"frames": [], "gp_data": {"key": "00112233445566778899aabbccddeeff"}})
         elif kind in ("devices/reinterview", "devices/reconfigure"):
             await ok({"started": True})
+        elif kind.startswith(("catalog/", "definitions/")) and self.catalog is not None:
+            await self._answer_catalog(ws, req, ok, err)
         else:
             await err("invalid_format", f"unknown variant `{kind}`")
+
+    async def _answer_catalog(
+        self, ws: web.WebSocketResponse, req: dict[str, Any], ok, err
+    ) -> None:
+        cat = self.catalog
+        assert cat is not None
+        kind = req["type"]
+        if kind == "catalog/status":
+            await ok(cat.status())
+        elif kind == "catalog/config":
+            cat.config.update(
+                {k: req[k] for k in ("base_url", "auto_update", "auto_fetch") if k in req}
+            )
+            await ok(dict(cat.config))
+        elif kind == "catalog/upload_chunk":
+            code, result = cat.chunk(req)
+            if code is not None:
+                await err(code, result)
+                return
+            if cat.drop_after_chunks is not None:
+                cat.drop_after_chunks -= 1
+                if cat.drop_after_chunks <= 0:
+                    # Stored, but the answer never arrives.
+                    cat.drop_after_chunks = None
+                    await ws.close()
+                    return
+            await ok(result)
+        elif kind == "catalog/commit":
+            code, result, event = cat.commit(req)
+            if code is not None:
+                await err(code, result)
+                return
+            await ok(result)
+            if event is not None:
+                await self.push("catalog", event)
+        elif kind == "catalog/abort":
+            cat.upload = None
+            await ok(None)
+        elif kind == "definitions/fetch":
+            shards = next(
+                (m["shards"] for m in cat.missing if m["device"] == req.get("device")), []
+            )
+            await ok({"device": req.get("device"), "shards": shards})
+        else:
+            await err("invalid_format", f"unknown variant `{kind}`")
+
+
+class ReleaseServer:
+    """The catalog mirror: release files over HTTP on 127.0.0.1."""
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        """Serves `files` under `/latest/`."""
+        self.files = files
+        self.requests: list[str] = []
+        self.port = 0
+        self._runner: web.AppRunner | None = None
+
+    @property
+    def base_url(self) -> str:
+        """The mirror's base URL."""
+        return f"http://127.0.0.1:{self.port}/latest"
+
+    async def start(self) -> None:
+        """Listen."""
+        app = web.Application()
+        app.router.add_get("/latest/{name}", self._handler)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await site.start()
+        server = site._server
+        assert server is not None
+        self.port = server.sockets[0].getsockname()[1]
+
+    async def stop(self) -> None:
+        """Stop listening."""
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
+
+    async def _handler(self, request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        self.requests.append(name)
+        if name not in self.files:
+            raise web.HTTPNotFound
+        return web.Response(body=self.files[name], content_type="application/octet-stream")

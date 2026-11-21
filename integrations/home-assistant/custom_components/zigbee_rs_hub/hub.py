@@ -21,6 +21,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from . import const
 from .api import CannotConnect, HubApiError, HubClient, HubError, InvalidAuth, hub_url
+from .catalog import CatalogUpdater
 from .const import COMMAND_TIMEOUT, CONF_PATH, DEFAULT_PATH, DOMAIN, TOPICS
 
 _LOGGER = logging.getLogger(__name__)
@@ -120,6 +121,7 @@ class ZigbeeRsHub:
         self._ha_removed: set[str] = set()
         self._stopping = False
         self._hub_device_id: str | None = None
+        self.catalog = CatalogUpdater(hass, self, session)
 
     # Identity
 
@@ -138,6 +140,11 @@ class ZigbeeRsHub:
         """Coordinator IEEE (hub/info), if the hub tells it."""
         ieee = self.info.get("coordinator_ieee")
         return ieee if isinstance(ieee, str) and ieee else None
+
+    @property
+    def stopping(self) -> bool:
+        """The entry is unloading: no reconnect follows."""
+        return self._stopping
 
     # Connection
 
@@ -165,6 +172,7 @@ class ZigbeeRsHub:
                         w.cancel()
             if not self._snapshot.is_set():
                 raise CannotConnect("connection closed before the snapshot")
+            await self.catalog.async_connected(client)
         except TimeoutError as err:
             await client.close()
             self.client = None

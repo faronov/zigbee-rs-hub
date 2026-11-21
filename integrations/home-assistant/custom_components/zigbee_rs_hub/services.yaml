@@ -33,3 +33,18 @@ reconfigure_device:
       selector:
         device:
           integration: zigbee_rs_hub
+update_catalog:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: zigbee_rs_hub
+    force:
+      default: false
+      selector:
+        boolean:
+    base_url:
+      example: "https://faronov.github.io/zigbee-rs-definitions/latest"
+      selector:
+        text:
+          type: url

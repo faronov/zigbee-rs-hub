@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Final
 
 from homeassistant.const import Platform
@@ -47,10 +48,36 @@ PLATFORMS: Final = [
 SERVICE_PERMIT_JOIN: Final = "permit_join"
 SERVICE_REINTERVIEW: Final = "reinterview_device"
 SERVICE_RECONFIGURE: Final = "reconfigure_device"
+SERVICE_UPDATE_CATALOG: Final = "update_catalog"
 
 ATTR_DURATION: Final = "duration"
 ATTR_INCLUDE_GP: Final = "include_gp"
 ATTR_CONFIG_ENTRY_ID: Final = "config_entry_id"
+ATTR_FORCE: Final = "force"
+ATTR_BASE_URL: Final = "base_url"
+
+# Definitions catalog (device-support 9.3/9.4): the hub downloads nothing;
+# the integration fetches the signed release files and uploads them.
+CATALOG_DEFAULT_BASE: Final = "https://faronov.github.io/zigbee-rs-definitions/latest"
+# Decoded bytes per `catalog/upload_chunk`: the most the hub accepts (without
+# PSRAM it holds the frame, the parsed request and the decoded bytes at once).
+CATALOG_CHUNK: Final = 4 * 1024
+# Largest release file the integration downloads.
+CATALOG_MAX_FILE: Final = 4 * 1024 * 1024
+CATALOG_DOWNLOAD_TIMEOUT: Final = 120.0
+CATALOG_CHUNK_TIMEOUT: Final = 30.0
+# A commit verifies (and for a bank decodes) the whole file in flash.
+CATALOG_COMMIT_TIMEOUT: Final = 180.0
+# How long an interrupted upload waits for the hub to come back.
+CATALOG_RECONNECT_WAIT: Final = 120.0
+CATALOG_RESUMES: Final = 3
+# First check after set-up, then daily (`auto_update`).
+CATALOG_FIRST_CHECK: Final = 120.0
+CATALOG_INTERVAL: Final = timedelta(days=1)
+# `definition_needed` (`auto_fetch`): one attempt per device per hour,
+# events of a burst handled together.
+CATALOG_FETCH_RETRY: Final = 3600.0
+CATALOG_FETCH_DEBOUNCE: Final = 2.0
 
 # Entity keys that are the device's main feature: the entity takes the
 # device name (HA's `has_entity_name` with `name = None`).

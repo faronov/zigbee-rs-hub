@@ -21,8 +21,10 @@ from homeassistant.helpers.typing import ConfigType
 
 from .api import HubError, InvalidAuth
 from .const import (
+    ATTR_BASE_URL,
     ATTR_CONFIG_ENTRY_ID,
     ATTR_DURATION,
+    ATTR_FORCE,
     ATTR_INCLUDE_GP,
     DOMAIN,
     PERMIT_JOIN_DEFAULT,
@@ -30,6 +32,7 @@ from .const import (
     SERVICE_PERMIT_JOIN,
     SERVICE_RECONFIGURE,
     SERVICE_REINTERVIEW,
+    SERVICE_UPDATE_CATALOG,
 )
 from .hub import ZigbeeRsHub
 
@@ -52,6 +55,13 @@ PERMIT_JOIN_SCHEMA = vol.Schema(
     }
 )
 DEVICE_SCHEMA = vol.Schema({vol.Required(ATTR_DEVICE_ID): cv.string})
+UPDATE_CATALOG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Optional(ATTR_FORCE, default=False): cv.boolean,
+        vol.Optional(ATTR_BASE_URL): cv.url,
+    }
+)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -101,7 +111,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def reconfigure(call: ServiceCall) -> None:
         await device_request(call, "devices/reconfigure")
 
+    async def update_catalog(call: ServiceCall) -> None:
+        hubs = loaded_hubs()
+        if entry_id := call.data.get(ATTR_CONFIG_ENTRY_ID):
+            hubs = [h for h in hubs if h.entry.entry_id == entry_id]
+        if not hubs:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_hub")
+        hubs = [h for h in hubs if h.catalog.supported]
+        if not hubs:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_catalog")
+        errors = []
+        for hub in hubs:
+            try:
+                await hub.catalog.async_update(
+                    force=call.data[ATTR_FORCE], base_url=call.data.get(ATTR_BASE_URL)
+                )
+            except HomeAssistantError as err:
+                errors.append(f"{hub.entry.title}: {err}")
+        if errors:
+            raise HomeAssistantError("; ".join(errors))
+
     hass.services.async_register(DOMAIN, SERVICE_PERMIT_JOIN, permit_join, PERMIT_JOIN_SCHEMA)
+    hass.services.async_register(
+        DOMAIN, SERVICE_UPDATE_CATALOG, update_catalog, UPDATE_CATALOG_SCHEMA
+    )
     hass.services.async_register(DOMAIN, SERVICE_REINTERVIEW, reinterview, DEVICE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_RECONFIGURE, reconfigure, DEVICE_SCHEMA)
     return True
@@ -123,6 +156,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZigbeeRsHubConfigEntry) 
     _adopt_coordinator_ieee(hass, entry, hub)
     entry.async_on_unload(hub.async_stop)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    for cancel in hub.catalog.async_start():
+        entry.async_on_unload(cancel)
     return True
 
 
