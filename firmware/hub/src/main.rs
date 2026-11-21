@@ -2,15 +2,16 @@
 //!
 //! Two boot modes (see [`mode`]):
 //!
-//! - **bridge** (default): exactly the phase-0 `tbr-bridge` (CDC 0 ↔ H2
-//!   UART with esptool auto-reset, console on CDC 1), so a desktop can still
-//!   flash and talk to the H2 NCP;
-//! - **hub**: the `hub-ncp` ZRHP host on UART1 (921 600 with RTS/CTS on the
-//!   reserved lines, 460 800 fallback), the host store in `hubdata` (RAM if
+//! - **bridge**: exactly the phase-0 `tbr-bridge` (CDC 0 ↔ H2 UART with
+//!   esptool auto-reset, console on CDC 1), so a desktop can still flash and
+//!   talk to the H2 NCP;
+//! - **hub** (default): the `hub-ncp` ZRHP host on UART1 (921 600 with
+//!   RTS/CTS on the reserved lines, 460 800 fallback), the host store in `hubdata` (RAM if
 //!   the partition is missing), the application (`hub-app`: device engine,
 //!   registry) with its WebSocket JSON API on `ws://<ip>/api` once Wi-Fi is
-//!   configured, the same API as JSON lines on CDC 0 (test path), console on
-//!   CDC 1 with `hub …`, `wifi …` and `token` commands.
+//!   configured (until then the setup access point, see `setup`), the same
+//!   API as JSON lines on CDC 0 (test path), console on CDC 1 with `hub …`,
+//!   `wifi …` and `token` commands.
 //!
 //! USB recovery (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode)
 //! works the same in both modes.
@@ -21,6 +22,8 @@ mod mode;
 mod net;
 #[cfg(feature = "app")]
 mod platform;
+#[cfg(feature = "app")]
+mod setup;
 #[cfg(feature = "app")]
 mod ws;
 #[cfg(feature = "app")]
@@ -65,6 +68,7 @@ hub firmware:\r
   wifi                 Wi-Fi state and the API address (hub mode, app build)\r
   wifi set <ssid> [pw] store Wi-Fi credentials (hub mode: connect with them now)\r
   wifi clear           forget them\r
+  wifi setup           open the setup access point (as holding BOOT for 3 s)\r
   token                the API token (generated at the first hub boot)\r
   catalog              trusted definitions-catalog keys (app build)\r
 ";
@@ -127,6 +131,9 @@ fn status_text(hub: &Hub) -> String {
     };
     if let Some(e) = &s.last_error {
         out += &format!("last error: {e}\r\n");
+    }
+    if let Some(w) = esp::flash_warning() {
+        out += &format!("WARNING: {w}\r\n");
     }
     #[cfg(feature = "app")]
     if let Some(app) = APP.get() {
@@ -279,6 +286,11 @@ fn extension(words: &[&str]) -> Option<String> {
         ["wifi"] => format!("wifi: {}\r\n", net::STATE.lock().unwrap()),
         #[cfg(feature = "app")]
         ["catalog"] => catalog_keys(),
+        #[cfg(feature = "app")]
+        ["wifi", "setup"] if hub_mode && APP.get().is_some() => {
+            setup::request();
+            format!("opening the setup access point {} (http://<its address>/setup)\r\n", setup::names().ap_ssid)
+        }
         #[cfg(feature = "app")]
         ["wifi", "set", ssid, rest @ ..] if hub_mode && APP.get().is_some() => match net::configure(ssid, &rest.join(" ")) {
             Ok(()) => "stored; connecting with them now\r\n".into(),

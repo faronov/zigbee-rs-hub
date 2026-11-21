@@ -16,7 +16,7 @@ interface will be a WebSocket JSON API.
 | Phase | Content | Status |
 |---|---|---|
 | **0** | S3 firmware `tbr-bridge`: USB ↔ H2 UART bridge with esptool auto-reset, so the H2 can be flashed and spoken to from a desktop; flash backups of both chips | **done**: bridge 0.2.2 on the board; esptool through the auto-reset, verified backups of both chips, spinel round trip; S3 reflash cycle through hwlab without buttons; RTS/CTS on the reserved lines, measured up to 2 Mbaud (see Status) |
-| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode); on hardware: resets/resume, soak, `FW_*` update with rollback and confirm, `tbr-hub` on the S3 (see "Phase 1 status") |
+| **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode by default + the bridge mode); on hardware: resets/resume, soak, `FW_*` update with rollback and confirm, `tbr-hub` on the S3 (see "Phase 1 status") |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | **in progress** (branch `stage2`): engine on the host core, device registry in `hubdata`, WebSocket JSON API on a desktop (`hubctl serve`) and on the S3 over Wi-Fi, catalog verifier, 8 MB production / 4 MB dev layouts; the S3 application build is 2.1 MiB, see "Stage 2" |
 
 ## Releases and the web flasher
@@ -43,8 +43,9 @@ details in the zigbee-rs book, "Web Flasher").
 - While tbr-hub or tbr-bridge runs, USB2 shows the bridge's two ports, not
   the S3's USB-Serial-JTAG: switch first with the page's button (1200 bps
   touch on the second, console port) or the console command `s3 usj`. After
-  the install the S3 starts in bridge mode; `mode hub` and
-  `wifi set <ssid> <password>` on the console make it a hub.
+  the install the S3 starts as a hub and, without Wi-Fi credentials, opens
+  its setup access point (next section); the console (`wifi set <ssid>
+  <password>`, `token`) works as well.
 - The 8 MB images have not run on an 8 MB board yet (only the 4 MB sample
   so far).
 
@@ -61,6 +62,81 @@ tools and attaches per layout the full flash image (`…-merged.bin`, offset
 within six hours, or at once when this repository has the secret
 `FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
 faronov/zigbee-rs).
+
+## First-time setup without a console
+
+A freshly flashed hub (or one whose `nvs` was erased) needs no serial
+console:
+
+1. Flash both chips from the web flasher: the H2 (USB1) with the ZRHP NCP,
+   the S3 (USB2) with the image for its flash size (4 MB or 8 MB, see
+   "Picking the image" below). Tick *Erase* the first time.
+2. The S3 boots as a hub (no stored mode = hub) and, without Wi-Fi
+   credentials, opens the open access point **`zigbee-rs-hub-XXXX`** (XXXX:
+   the end of its Wi-Fi MAC). Zigbee and the NCP keep running.
+3. Join it with a phone or laptop: the setup page opens by itself (the AP's
+   DNS answers every name with the hub, DHCP option 114 names the portal),
+   or browse to `http://192.168.71.1/setup`.
+4. Pick the network from the scan list (or type the SSID), enter the
+   password, *Connect*. The page then shows the hub's addresses
+   (`http://<ip>/`, `http://zigbee-rs-hub-xxxx.local/`,
+   `http://zigbee-rs-hub.local/`) and the **API token**, only to the browser
+   that sent the credentials; the links carry the token (`#token=…`) into
+   the hub's page, which keeps it. Later: console `token`, or a new one with
+   the token rotation in *Settings*.
+5. Two minutes after the station is up the AP closes.
+
+| The setup AP opens when | API token needed on the page | It closes |
+|---|---|---|
+| no Wi-Fi credentials are stored | no | 2 min after the station is up (no time limit before) |
+| credentials are stored, but the station has not connected within 5 min of boot (once per boot) | **yes**: otherwise anyone in range could move the hub to their network | 15 min without a client (30 min at most), or 2 min after the station is up |
+| the S3 **BOOT** button is held for 3 s while the hub runs, or console `wifi setup` | no (physical or console access) | as above |
+
+- AP and station run together only while the AP is open. The station's
+  connection attempts scan all channels and take the AP off its channel, so
+  they pause while a phone is associated, except right after new
+  credentials. When the station joins the router, the AP follows its
+  channel (with a channel switch announcement); a phone that drops off is
+  told so by the page: open `http://zigbee-rs-hub.local/` from the home
+  network.
+- `/setup`, `/setup/state`, `/setup/scan` and `/setup/wifi` answer only
+  while the AP is open, and any page asked through the AP leads to `/setup`
+  (the captive portal probes too). The WebSocket API keeps needing the
+  token on every interface.
+- mDNS: `zigbee-rs-hub.local` and the unique `zigbee-rs-hub-xxxx.local`
+  (A records of the station address); the DHCP host name is
+  `zigbee-rs-hub-xxxx`.
+- **Hub by default.** Without a stored `hub/mode` the S3 boots the hub
+  (until 0.1.2: the bridge); boards with a stored mode keep it. Back to the
+  USB bridge (H2 flashing through the S3, lab work): console `mode bridge`
+  (CDC 1), *Settings → bridge mode*, or `hub/mode/set`; `hub rom` for the
+  H2 ROM loader; a crash loop still ends in the bridge's safe mode. Holding
+  BOOT *while resetting* starts the S3 ROM download mode instead; the hub
+  reads the button only while it runs.
+- **Flash size check.** The hub compares the image's flash size (the
+  bootloader header, which the partition table was made for) with the
+  chip's own size (JEDEC ID). The 4 MB image on an 8 MB board runs, but the
+  boot log, console (`info`, `hub status`), `hub/system` (`flash`), a banner
+  in the web UI and the setup page warn: flash the 8 MB image (Erase, then
+  set Wi-Fi up again) for OTA and the full `hubdata`. An 8 MB image on a
+  4 MB chip never gets that far: ESP-IDF refuses a header larger than the
+  chip and the S3 boot-loops, so the flasher has to pick the image. A hub
+  table for another size, or partitions beyond the flash, still keep the
+  hub from starting (console only).
+- **Picking the image** (web flasher): read the S3's JEDEC flash ID after
+  connecting (esptool's `flash_id`; capacity byte = log2 of the size:
+  0x16 = 4 MB, 0x17 = 8 MB, 0x18 = 16 MB), then offer the release board
+  whose `flash_size` in `release-manifest.json` is the largest one not
+  above the chip's (4 MB → `thread-br-s3-hub-4mb-dev`, 8 MB or more →
+  `thread-br-s3-hub-8mb`); refuse smaller chips and never write an image
+  larger than the chip.
+- Cost: +32 416 B of app image (2 382 896 → 2 415 312 B: the setup
+  endpoints and page ≈ 10.6 KB, the scan list ≈ 5.2 KB, mDNS ≈ 2.5 KB, the
+  rest AP switching, policy, catch-all DNS, the Wi-Fi loop and the flash
+  check), +208 B static RAM, no extra threads (the Wi-Fi thread polls every
+  100 ms), one UDP socket for mDNS while the station is up and one for DNS
+  while the AP is open (`CONFIG_LWIP_MAX_SOCKETS` 10 → 12). Heap on the
+  board: not measured yet.
 
 ## Device support
 
@@ -126,13 +202,13 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | Path | What |
 |---|---|
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
-| `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
-| `crates/hub-web` | The embedded web UI: one static page (`web/index.html`), gzip-compressed by `build.rs` |
+| `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), flash layout check (`layout`), setup AP policy and DNS/mDNS answers (`setup`, `dns`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
+| `crates/hub-web` | The embedded web UI: one static page (`web/index.html`) and the setup AP's page (`web/setup.html`), gzip-compressed by `build.rs` |
 | `crates/hub-app` | Stage 2: the engine on the host core: event/request conversion, transport, device registry in the host store, app thread with the API sessions, catalog verifier (trusted keys) |
 | `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, host store journal, simulated NCP (`sim`) |
 | `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim` |
-| `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
-| `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
+| `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the bridge mode of `tbr-hub` |
+| `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): hub mode (default; setup access point in `src/setup.rs`) and bridge mode; 4 MB / 8 MB partition tables for provisioning |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF), optional size limit |
 | `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`); button-free S3 reflash `s3_reflash.sh IMAGE TAG [4mb-dev or 8mb]` (the app offset comes from the partition table on the device via `s3_partition.py`; a different layout is refused) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
@@ -202,7 +278,8 @@ separate image for H2 work. The hub detects the flash size at boot and
 checks that the table belongs to it (`hub_core::layout`): a hub table for
 another size, or partitions beyond the flash, is fatal (the hub does not
 start); a foreign table (the stock one during bring-up) runs with the host
-store in RAM. Tables: `firmware/hub/partitions-8mb.csv`,
+store in RAM. A chip larger than the image's size gets a warning ("First-time setup
+without a console"). Tables: `firmware/hub/partitions-8mb.csv`,
 `partitions-4mb-dev.csv`; binaries with `tools/make-partition-table.sh`.
 
 | Partition | 8 MB production | 4 MB dev |
@@ -445,7 +522,7 @@ so the bridge hands the PHY back to the USJ explicitly:
 |---|---|
 | console `s3 usj` / `s3 download`, or the console port set to 1200 baud | PHY → USJ, the app keeps running with the bridge off (verified) |
 | USB not enumerated within 20 s of boot | PHY → USJ |
-| boot after a panic or watchdog reset | persisted hub mode: the hub restarts (`info` shows the panic and the crash streak); bridge mode, or a fourth crash in a row each within 10 min of boot: safe mode, TinyUSB never starts, PHY → USJ |
+| boot after a panic or watchdog reset | hub mode (persisted or by default): the hub restarts (`info` shows the panic and the crash streak); bridge mode, or a fourth crash in a row each within 10 min of boot: safe mode, TinyUSB never starts, PHY → USJ |
 | power cycle, or S3 BOOT held + RESET pressed | cold boot / ROM download on USJ |
 
 The hand-back makes the host see a real detach and a new attach. It drops the
@@ -531,8 +608,8 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` 0.2.4 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
-| **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
+| **bridge** | `tbr-bridge` 0.2.4 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **hub** (default; no NVS key) | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
 reboot), `mode hub once` (one boot in hub mode, any later reset returns to
@@ -675,7 +752,8 @@ the firmware's keys. `--sim` works for all of them.
 **S3.** `tbr-hub` (hub mode) runs the application, the
 WebSocket API on `ws://<ip>/api` (esp_http_server, one session per socket,
 pushes through detached senders) once Wi-Fi credentials are stored
-(console `wifi set <ssid> <password>`, `wifi`, `token`, `catalog`), and the
+(setup access point, see "First-time setup without a console"; console
+`wifi set <ssid> <password>`, `wifi`, `wifi setup`, `token`, `catalog`), and the
 same API as JSON lines on CDC 0 while a host holds the port (a test path
 without network).
 `hub/info` returns the hub name, API version, features, current `seq`,
@@ -683,11 +761,12 @@ device/entity counts and, once the NCP session is up, `coordinator_ieee`,
 `ncp_board` and `ncp_product` (the Home Assistant integration's unique ID).
 The S3 implements the hub side of the maintenance API (1.2,
 `firmware/hub/src/platform.rs`): `hub/wifi/set` stores the credentials in
-NVS and the station reconnects with them at once, or starts if the hub
-booted without any (console `wifi set` does the same in hub mode);
+NVS and the station reconnects with them at once (console `wifi set` and
+the setup page do the same);
 `hub/token/rotate` stores the new token in NVS; `hub/reboot`;
 `hub/mode/set`; `hub/system` (internal heap free, minimum and largest block,
-uptime, Wi-Fi SSID/IP/RSSI/channel, reset reason); `hub/logs` from a 3 KiB
+uptime, Wi-Fi SSID/IP/RSSI/channel and the open setup AP, reset reason,
+`flash`: chip and image size, layout, warning); `hub/logs` from a 3 KiB
 RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it). The
 energy-scan advice avoids the AP's channel. Maintenance jobs run on 12 KiB
 threads, at most two at a time (a scan and a diagnostics read). On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,

@@ -34,8 +34,11 @@ APP_DESC_MAGIC = 0xABCD5432
 CONNECT = ("Connect the S3's USB port: USB2 on the board (USB1 is the H2's). "
            "A board running Espressif's firmware shows the S3's USB-Serial-JTAG port directly.")
 CONNECT_STEPS = [
-    "After the install the S3 boots tbr-hub in bridge mode (the default without a stored mode); "
-    "the console commands mode hub and wifi set <ssid> <password> (second serial port) make it a hub.",
+    "After the install the S3 boots tbr-hub as a hub (the default without a stored mode). Without Wi-Fi "
+    "credentials it opens the open access point zigbee-rs-hub-XXXX: join it with a phone or laptop, the "
+    "setup page opens by itself (or browse to http://192.168.71.1/setup), pick your network, enter its "
+    "password, and note the hub's address and API token it shows.",
+    "Console instead (second serial port): wifi set <ssid> <password>, token; mode bridge for the USB bridge.",
 ]
 BOARDS = [
     {

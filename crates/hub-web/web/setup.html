@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zigbee-rs hub setup</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:28em;margin:1em auto;padding:0 1em;color:#1d2228;background:#f4f5f7}
+input,select,button{font:inherit;width:100%;box-sizing:border-box;margin:.25em 0 .8em;padding:.5em}
+label{color:#6b7380;font-size:.9em}.w{color:#b45309}.e{color:#dc2626}.ok{color:#16a34a}.hide{display:none}code{word-break:break-all}
+</style></head><body>
+<h2>zigbee-rs hub setup</h2>
+<p id="warn" class="w hide"></p>
+<form id="f">
+<label>Wi-Fi network<select id="list"><option value="">scanning…</option></select></label>
+<label>Network name (SSID)<input id="ssid" autocomplete="off" required maxlength="32"></label>
+<label>Password<input id="pass" type="password" maxlength="64"></label>
+<label id="tl" class="hide">API token (console <code>token</code>; or hold the S3 BOOT button for 3 s to reopen setup without it)<input id="tok" autocomplete="off"></label>
+<button>Connect</button>
+</form>
+<button id="rescan" type="button">Scan again</button>
+<p id="st"></p>
+<div id="res"></div>
+<script>
+const $=i=>document.getElementById(i),T=()=>sessionStorage.t||"";let nets="",shown="",lost=0;
+function txt(e,t,c){e.textContent=t;e.className=c||""}
+function render(s){lost=0;const w=s.wifi||{};
+ $("warn").textContent=s.warning||"";$("warn").classList.toggle("hide",!s.warning);
+ $("tl").classList.toggle("hide",!s.need_token);
+ const n=JSON.stringify(s.networks);if(n!=nets){nets=n;const l=$("list");l.textContent="";
+  l.append(new Option(s.networks.length?"choose…":"no networks found",""));
+  for(const[x,r,o]of s.networks.sort((a,b)=>b[1]-a[1]))l.append(new Option(x+"  "+r+" dBm"+(o?" (open)":""),x))}
+ txt($("st"),"Setup network "+s.ap+(s.scanning?" · scanning…":"")+" · Wi-Fi: "+[w.ssid,w.state].filter(Boolean).join(" "));
+ const r=$("res"),k=w.ip+"|"+s.token;if(k==shown)return;shown=k;r.textContent="";
+ if(w.ip){const a=document.createElement("p");a.className="ok";
+  a.append("Connected. Open the hub from your home network: ");
+  for(const h of[w.ip,s.host,"zigbee-rs-hub.local"]){const k=document.createElement("a"),u="http://"+h+"/"+(s.token?"#token="+s.token:"");k.href=u;k.textContent="http://"+h+"/";a.append(k," ")}
+  r.append(a);if(s.token){const p=document.createElement("p");p.append("API token: ");const c=document.createElement("code");c.textContent=s.token;p.append(c,
+   " — the links above hand it to the hub's page; later it is shown by the console command token, or rotated in the hub's Settings tab.");r.append(p)}
+  r.append("The setup network closes in about two minutes.")}}
+function poll(){fetch("/setup/state?t="+T()).then(r=>r.json()).then(render).catch(()=>{if(++lost>2)txt($("st"),
+ "The setup network is gone: the hub has probably joined your Wi-Fi. Reconnect to your home network and open http://zigbee-rs-hub.local/ — or reconnect to the setup network if it is still there.","w")}).finally(()=>setTimeout(poll,2000))}
+$("list").onchange=e=>{if(e.target.value)$("ssid").value=e.target.value};
+$("rescan").onclick=()=>fetch("/setup/scan",{method:"POST"});
+$("f").onsubmit=e=>{e.preventDefault();txt($("st"),"connecting…");
+ fetch("/setup/wifi",{method:"POST",body:JSON.stringify({ssid:$("ssid").value,pass:$("pass").value,token:$("tok").value})})
+ .then(r=>r.json()).then(j=>{if(j.ticket)sessionStorage.t=j.ticket;else txt($("st"),j.error||"failed","e")}).catch(()=>txt($("st"),"no answer","e"))};
+poll();
+</script></body></html>
