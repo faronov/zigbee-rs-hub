@@ -35,6 +35,9 @@ impl SessionSink for WsSink {
     fn alive(&self) -> bool {
         !self.0.is_closed()
     }
+    fn keepalive(&mut self) -> bool {
+        !self.0.is_closed() && self.0.send(FrameType::Ping, &[]).is_ok()
+    }
 }
 
 fn set_state(s: String) {
@@ -103,7 +106,16 @@ fn run(app: App, modem: Modem<'static>, ssid: &str, pass: &str, on_up: impl Fn(b
 
 fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
     let mut server =
-        EspHttpServer::new(&server::Configuration { stack_size: 8192, ..Default::default() }).map_err(|e| e.0)?;
+        EspHttpServer::new(&server::Configuration {
+            stack_size: 8192,
+            // The web UI (page + WebSocket) and an integration at once; the
+            // least recently used socket is purged when they run out.
+            max_open_sockets: 6,
+            // Peers that vanished without a FIN.
+            keep_alive: Some(server::KeepAlive { idle_secs: 30, interval_secs: 5, probe_count: 3 }),
+            ..Default::default()
+        })
+        .map_err(|e| e.0)?;
     // The web UI: one pre-compressed page that talks to /api (crates/hub-web).
     server.fn_handler("/", Method::Get, |req| {
         if req.header("If-None-Match").is_some_and(hub_web::not_modified) {

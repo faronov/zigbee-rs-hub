@@ -40,7 +40,17 @@ pub trait SessionSink: Send {
     fn alive(&self) -> bool {
         true
     }
+
+    /// Probe the connection (a WebSocket ping), every
+    /// [`KEEPALIVE_S`] seconds; `false` ends the session. A peer that
+    /// half-closed its socket is only found by sending to it.
+    fn keepalive(&mut self) -> bool {
+        true
+    }
 }
+
+/// Period of [`SessionSink::keepalive`].
+pub const KEEPALIVE_S: u64 = 30;
 
 impl SessionSink for Sender<String> {
     fn send(&mut self, text: &str) -> bool {
@@ -371,7 +381,12 @@ impl Runner {
 
     fn tick(&mut self) {
         let now = self.now();
-        let dead: Vec<SessionId> = self.sinks.iter().filter(|(_, s)| !s.alive()).map(|(sid, _)| *sid).collect();
+        let probe = self.t0.elapsed().as_secs().is_multiple_of(KEEPALIVE_S);
+        let dead: Vec<SessionId> = self
+            .sinks
+            .iter_mut()
+            .filter_map(|(sid, s)| (!s.alive() || (probe && !s.keepalive())).then_some(*sid))
+            .collect();
         for sid in dead {
             self.sinks.remove(&sid);
             self.api.disconnect(sid);
