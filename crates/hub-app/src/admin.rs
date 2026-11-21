@@ -402,7 +402,7 @@ impl Admin {
                 return vec![raw_frame(id, &format!("{{\"backup\":{}}}", last.as_deref().unwrap_or("null")))];
             }
             "network/topology" => match params::<TopologyReq>(text) {
-                Ok(q) if !q.refresh && self.topology.is_some() => {
+                Ok(q) if !q.refresh => {
                     return vec![raw_frame(id, self.topology.as_deref().unwrap_or("null"))];
                 }
                 Ok(q) => return self.job_topology(ctx, sid, id, q),

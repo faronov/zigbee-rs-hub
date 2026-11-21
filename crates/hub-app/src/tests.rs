@@ -700,3 +700,14 @@ fn hub_settings_without_a_platform_are_unsupported() {
     assert!(ok(&f)["app"].is_object());
     app.shutdown();
 }
+
+#[test]
+fn cached_network_map_is_null_before_the_first_scan() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let f = call(&app, sid, &rx, 1, json!({"type": "network/topology", "refresh": false}));
+    assert_eq!(ok(&f), &J::Null);
+    assert!(r.sim.state().aps.iter().all(|p| p.get(5..7) != Some(&[0x31, 0x00])), "no scan started");
+    app.shutdown();
+}
