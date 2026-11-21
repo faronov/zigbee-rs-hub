@@ -59,6 +59,8 @@ nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 .card h3{font-size:.9em;margin:.8em 0 0;color:var(--mut)}
 #gcw{display:inline-block;margin:.6em 0 0}
 @media(max-width:600px){#gpl li,#gpb li{flex-wrap:wrap}#gpl .n,#gpb .n{flex-basis:100%}}
+textarea{width:100%;font:.85em/1.35 ui-monospace,Menlo,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:.5em}
+progress{width:12em}
 </style>
 </head>
 <body>
@@ -100,6 +102,19 @@ nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 <div class="row"><select id="gsl"><option value="0">security 0: none</option><option value="1">1: short MIC</option><option value="2">2: MIC</option><option value="3">3: encrypted</option></select><select id="gcm"><option value="0">mode 0: unicast</option><option value="1">1: groupcast</option><option value="2">2: group</option><option value="3">3: lightweight</option></select><button id="gcs">Apply</button><span id="gcx" class="mut"></span></div>
 <p id="gcw" class="badge bad hide"></p>
 </section>
+</div>
+<div data-tab="conv" data-title="Converters" class="tab">
+<section class="card"><div class="row"><select id="cvd"></select><button id="cvr">Re-interview</button><button id="cvc">Reconfigure</button><button id="cvf">Find definition</button><button id="cvs">Scaffold</button></div>
+<dl class="kv" id="cvl"></dl><div class="row acts"><label>Definition <select id="cvp"></select></label></div><ul class="ents" id="cvm"></ul></section>
+<section class="card"><h2>Definition <span id="cvi" class="mut"></span></h2><textarea id="cvt" rows="18" spellcheck="false"></textarea>
+<div class="row acts"><button id="cvk">Check</button><button id="cvv">Preview</button><button class="p" id="cvu">Upload as user definition</button><button class="d" id="cvx">Delete user definition</button></div><pre id="cvo"></pre></section>
+</div>
+<div data-tab="catalog" data-title="Catalog" class="tab">
+<section class="card"><h2>Catalog</h2><dl class="kv" id="ctl"></dl>
+<div class="row acts"><button class="p" id="ctu">Update from the mirror</button><button id="ctf">Fetch missing definitions</button><label>Files <input type="file" id="ctfi" multiple></label></div>
+<div class="row acts"><input id="ctb" size="48"><label><input type="checkbox" id="cta"> daily update</label><label><input type="checkbox" id="ctx"> fetch for new devices</label><button id="cts">Save</button></div>
+<div class="row"><progress id="ctp" class="hide"></progress><span id="ctm" class="mut"></span></div></section>
+<section class="card"><h2>Search</h2><input id="ctq" placeholder="vendor, model or id" size="30"><ul class="ents" id="ctr"></ul></section>
 </div>
 <div data-tab="map" data-title="Map" class="tab">
 <section class="card"><div class="row"><h2 style="flex:1;margin:0">Network map</h2><span id="mpt" class="mut"></span><button class="p" id="mpb">Scan</button></div>
@@ -170,7 +185,7 @@ function onMsg(m,tok){
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate()}).catch(()=>{});
-  call("subscribe",{topics:["devices","entities","network","gp"]}).catch(e=>toast(e.message));
+  call("subscribe",{topics:["devices","entities","network","gp","catalog"]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
@@ -195,7 +210,7 @@ function onEvent(e){
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
- default:if(/^gp\//.test(e.topic))gpEv(e);
+ default:if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
  }
 }
 function setNet(n){net=n||{};if(net.time)skew=net.time-Date.now()/1000;if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();renderSNet();pjTick()}
@@ -514,6 +529,73 @@ $("#gbf").onsubmit=e=>{
 function gpCfg(c){V("gsl",c.security_level);V("gcm",c.communication_mode);$("#gcx").textContent=c.source+", group "+hex(c.group,4);const w=$("#gcw");w.textContent=c.warning;w.classList.toggle("hide",!c.warning)}
 $("#gcs").onclick=()=>{const l=+V("gsl");if(!l||confirm("Reject GPDs below level "+l+"?"))act("gp/config",{security_level:l,communication_mode:+V("gcm")}).then(gpCfg,()=>{})};
 // ---- end of Green Power tab ----
+// ---- Converters and catalog tabs (device-support 9, 14.4) ----
+let zc,cvDev,cvDef,ct={config:{}};
+async function zdefc(){if(zc)return zc;try{const m=await import("/zdefc/zdefc_wasm.js");await m.default({module_or_path:"/zdefc/zdefc_wasm_bg.wasm"});return zc=m}catch(e){throw new Error("definition compiler not installed (Catalog: update)")}}
+const b64=u=>{let s="";for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)};
+const unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+const kvAdd=(kv,k,v)=>{if(v!=null&&v!=="")kv.append(el("dt",{},k),el("dd",{},String(v)))};
+onTab.conv=()=>{const s=$("#cvd"),v=s.value||cvDev;s.textContent="";for(const id of Object.keys(devs).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value)cvLoad(s.value)};
+$("#cvd").onchange=e=>cvLoad(e.target.value);
+async function cvLoad(id){
+ cvDev=id;const d=await act("devices/get",{device:id}),r=d.resolution||{},kv=$("#cvl");kv.textContent="";
+ for(const l of r.layers||[])kvAdd(kv,l.source,l.id+(l.revision>1?" r"+l.revision:"")+(l.score!=null?" · score "+l.score:"")+(l.clause!=null?" · match["+l.clause+"]":"")+(l.content_hash?" · "+l.content_hash.slice(0,8):""));
+ const ul=$("#cvm");ul.textContent="";
+ for(const m of r.mappings||[]){const e=ents[m.uid]||{};ul.append(el("li",{},el("span",{class:"n"},(e.name||m.uid.split(":").pop())+" · "+(e.platform||"")+(e.device_class?"/"+e.device_class:"")),el("span",{class:"mut"},m.source+" · "+m.binding)))}
+ const p=$("#cvp");p.textContent="";p.append(el("option",{value:""},"automatic"));
+ for(const c of await call("definitions/list",{device:id}).catch(()=>[]))p.append(el("option",{value:c.id},c.id+" ("+c.source+")"));
+ p.value=r.pinned||"";
+ const top=(r.layers||[]).filter(l=>l.source!="generic").pop();cvDef=top&&top.id;
+ $("#cvi").textContent=cvDef?cvDef+" ("+top.source+")":"generic only";$("#cvo").textContent="";$("#cvt").value="";
+ if(cvDef)cvShow(cvDef).catch(e=>$("#cvt").value="# "+e.message)}
+$("#cvp").onchange=e=>act("devices/pin_definition",{device:cvDev,definition:e.target.value||null}).then(()=>cvLoad(cvDev)).catch(()=>{});
+async function cvShow(id){const g=await act("definitions/get",{definition:id});$("#cvt").value=g.source_text||(await zdefc()).decompile(unb64(g.cbor),"yaml")}
+for(const[b,t]of[["cvr","devices/reinterview"],["cvc","devices/reconfigure"]])$("#"+b).onclick=()=>act(t,{device:cvDev}).then(()=>toast(t+": ok")).catch(()=>{});
+$("#cvf").onclick=()=>act("definitions/fetch",{device:cvDev}).then(r=>ctShards(r.shards)).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message));
+$("#cvs").onclick=()=>act("definitions/scaffold",{device:cvDev}).then(s=>{
+ const q=v=>JSON.stringify(v),i=s.identity||{},m=(s.match||[])[0]||{},y=["zdef: 1","id: "+q(((i.manufacturer||"vendor")+"/"+(i.model||"model")).toLowerCase().replace(/[^a-z0-9/_-]+/g,"-")),"revision: 1","vendor: "+q(i.manufacturer||""),"model: "+q(i.model||""),"match:","  - "+q(m),"entities:"];
+ for(const e of s.generic_entities||[])y.push("  # generic: "+e.key+" ("+e.platform+", ep "+e.ep+")");
+ for(const a of s.attributes||[])y.push("  # attribute ep "+a.ep+" "+a.cluster+"/"+a.attr+(a.mfr?" mfr "+a.mfr:"")+" = "+a.value);
+ for(const t of s.tuya_dps||[])y.push("  # tuya dp "+t.dp+" "+t.type+" "+t.data);
+ $("#cvt").value=y.join("\n")+"\n";cvDef=null}).catch(()=>{});
+async function cvCompile(){const z=await zdefc(),src=$("#cvt").value,c=JSON.parse(z.check(src,"yaml"));
+ if(!c.ok){$("#cvo").textContent=c.errors.map(e=>(e.line?"line "+e.line+": ":"")+e.path+" "+e.message).join("\n");throw new Error("not valid")}
+ return{src,cbor:z.compile(src,"yaml"),c}}
+const cvErr=e=>toast(e.message);
+$("#cvk").onclick=()=>cvCompile().then(({c})=>$("#cvo").textContent="ok · "+c.size+" B · "+c.content_hash.slice(0,12)+(c.requires.length?" · requires "+c.requires.join(", "):"")).catch(cvErr);
+$("#cvv").onclick=()=>cvCompile().then(x=>act("definitions/preview",{device:cvDev,cbor:b64(x.cbor)})).then(p=>$("#cvo").textContent=p.matches?["layers: "+p.layers.map(l=>l.id).join(" < "),"added: "+p.added.join(", "),"changed: "+p.changed.join(", "),"orphaned: "+p.orphaned.join(", ")].join("\n"):"does not match this device").catch(cvErr);
+$("#cvu").onclick=()=>cvCompile().then(x=>act("definitions/upload",{cbor:b64(x.cbor),source:x.src,source_format:"yaml"})).then(r=>{toast("uploaded "+r.id);if(cvDev)cvLoad(cvDev)}).catch(cvErr);
+$("#cvx").onclick=()=>{if(cvDev&&cvDef&&confirm("Delete the user definition "+cvDef+"?"))act("definitions/delete",{definition:cvDef}).then(()=>cvLoad(cvDev)).catch(()=>{})};
+onTab.catalog=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.installed,m=s.manifest,w=s.wants||{};kv.textContent="";
+ kvAdd(kv,"Bank",i?i.catalog_date+"."+i.catalog_serial+" · "+i.definitions+" definitions · slot "+s.active_slot+" · key "+i.kid:"none");
+ kvAdd(kv,"Manifest",m&&m.catalog_date+"."+m.catalog_serial+(m.source?" · zhc "+m.source:""));
+ kvAdd(kv,"To install",[w.bank&&w.bank.name,w.web&&w.web.name].filter(Boolean).join(", "));
+ kvAdd(kv,"Compiler",s.web_tools.installed?Math.round(s.web_tools.size/1024)+" KiB":"not installed");
+ kvAdd(kv,"Fetched",s.local.definitions+" definitions, "+Math.round(s.local.used/1024)+" of "+Math.round(s.local.size/1024)+" KiB");
+ kvAdd(kv,"Without definition",(s.missing||[]).map(x=>devs[x.device]&&devs[x.device].name||x.device).join(", "));
+ for(const x of s.warnings||[])kvAdd(kv,"Warning",x);
+ V("ctb",s.config.base_url);$("#cta").checked=s.config.auto_update;$("#ctx").checked=s.config.auto_fetch}).catch(()=>{});
+$("#cts").onclick=()=>act("catalog/config",{base_url:V("ctb"),auto_update:$("#cta").checked,auto_fetch:$("#ctx").checked}).then(onTab.catalog).catch(()=>{});
+const ctMsg=m=>$("#ctm").textContent=m;
+async function ctGet(n){const r=await fetch(ct.config.base_url+"/"+n,{cache:"no-cache"});if(!r.ok)throw new Error(n+": HTTP "+r.status);return new Uint8Array(await r.arrayBuffer())}
+// Chunked upload (resumable: `from` = the hub's `upload.written`), then commit.
+async function ctPut(target,u,extra={},from=0){const p=$("#ctp");p.max=u.length;p.classList.remove("hide");
+ try{for(let o=from;o==from||o<u.length;o+=4096){await call("catalog/upload_chunk",Object.assign({target,offset:o,data:b64(u.subarray(o,o+4096))},o?{}:{size:u.length}));p.value=o}
+ return await call("catalog/commit",Object.assign({target},extra))}finally{p.classList.add("hide")}}
+async function ctShards(sh){for(const n of sh||[]){const h=n.toString(16).padStart(2,"0");ctMsg("shard "+h+"…");const r=await ctPut("shard",await ctGet("shard-"+h+".cbor"),{shard:n});ctMsg("shard "+h+": "+(r.definitions.join(", ")||"nothing new"))}}
+async function ctFetch(){const s=await call("catalog/status");await ctShards([...new Set((s.missing||[]).flatMap(x=>x.shards))])}
+$("#ctu").onclick=async()=>{try{const s=await call("catalog/status");ct=s;ctMsg("manifest…");const m=await ctPut("manifest",await ctGet("manifest.cose"));
+ for(const t of["bank","web"]){const a=m.wants&&m.wants[t];if(!a)continue;ctMsg(a.name+"…");await ctPut(t,await ctGet(a.name),{},s.upload&&s.upload.target==t?s.upload.written:0)}
+ await ctFetch();ctMsg("catalog "+m.catalog_date+"."+m.catalog_serial+" installed")}catch(e){ctMsg(e.message)}onTab.catalog()};
+$("#ctf").onclick=()=>ctFetch().then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(onTab.catalog);
+$("#ctfi").onchange=async e=>{const fs=[...e.target.files].sort((a,b)=>(b.name=="manifest.cose")-(a.name=="manifest.cose"));
+ try{for(const f of fs){const n=f.name,sh=/^shard-([0-9a-f]{2})\.cbor$/.exec(n),t=n=="manifest.cose"?"manifest":/\.zdb$/.test(n)?"bank":/\.zwb$/.test(n)?"web":sh&&"shard";
+  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";onTab.catalog()};
+$("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r=>{const ul=$("#ctr");ul.textContent="";
+ for(const d of r.items)ul.append(el("li",{},el("span",{class:"n"},d.vendor+" "+d.model),el("span",{class:"mut"},d.id+" · "+d.source)));
+ if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
+function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctShards(e.shards).catch(()=>{});if($("#ctl").offsetParent)onTab.catalog()}
+// ---- end of converters and catalog tabs ----
 connect();
 </script>
 </body>

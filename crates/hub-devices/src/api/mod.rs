@@ -65,6 +65,44 @@ fn def_summary(d: &Definition) -> J {
     })
 }
 
+/// A binding as one line: `zcl ep 2 0x0402/0x0000`, `tuya dp 2`, ….
+fn binding_text(b: &Binding, ep: u8) -> String {
+    let mfr = |m: &Option<u16>| m.map(|m| format!(" mfr 0x{m:04X}")).unwrap_or_default();
+    match b {
+        Binding::None => "none".into(),
+        Binding::Zcl(z) => format!(
+            "zcl ep {ep} 0x{:04X}/0x{:04X}{}",
+            z.cluster,
+            z.attr,
+            mfr(&z.mfr)
+        ),
+        Binding::Tuya { dp, .. } => format!("tuya dp {dp}"),
+        Binding::Struct {
+            cluster,
+            attr,
+            mfr: m,
+            tag,
+            ..
+        } => format!(
+            "struct ep {ep} 0x{cluster:04X}/0x{attr:04X}{} tag {tag}",
+            mfr(m)
+        ),
+        Binding::Gp(crate::model::GpBinding::Report { cluster, attr, .. }) => {
+            format!("gp report 0x{cluster:04X}/0x{attr:04X}")
+        }
+        Binding::Gp(crate::model::GpBinding::Cmd(c)) => format!("gp command 0x{c:02X}"),
+        Binding::Hub { .. } => "hub option".into(),
+        Binding::IasWarning => format!("ias warning ep {ep}"),
+        Binding::DeviceField(f) => format!(
+            "device {}",
+            serde_json::to_value(f)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        ),
+    }
+}
+
 fn uids_of<T: ZigbeeTransport>(hub: &Hub<T>, dev: &str) -> Vec<String> {
     hub.device(dev)
         .map(|x| {
@@ -381,8 +419,17 @@ impl ApiServer {
                     "layers": d.resolution.layers,
                     "fingerprint_hash": d.fp_hash,
                     "configure_hash": d.configure.hash,
-                    "entities": d.entities.iter().filter(|e| !e.orphaned).count(),
+                                        "entities": d.entities.iter().filter(|e| !e.orphaned).count(),
                     "orphaned": d.entities.iter().filter(|e| e.orphaned).map(|e| e.uid.clone()).collect::<Vec<_>>(),
+                    "pinned": d.pinned,
+                    // Where each entity's value comes from (converters view).
+                    "mappings": d.entities.iter().filter(|e| !e.orphaned).map(|e| {
+                        let mut m = serde_json::Map::new();
+                        m.insert("uid".into(), e.uid.clone().into());
+                        m.insert("source".into(), serde_json::to_value(e.r.source).unwrap_or_default());
+                        m.insert("binding".into(), binding_text(&e.r.def.value.binding, e.r.ep).into());
+                        J::Object(m)
+                    }).collect::<Vec<_>>(),
                 });
                 r
             }
@@ -442,7 +489,17 @@ impl ApiServer {
                 J::Null
             }
             R::DefinitionsValidate { cbor } => Self::validate(hub, &b64(&cbor)?),
-            R::DefinitionsUpload { cbor, replace } => {
+            R::DefinitionsUpload {
+                cbor,
+                replace,
+                source,
+                source_format,
+            } => {
+                // With the compiled definition the request must still fit
+                // the hub's 16 KiB WebSocket frame.
+                if source.as_ref().is_some_and(|t| t.len() > 8 * 1024) {
+                    return Err(ApiError::new("no_space", "source text above 8 KiB"));
+                }
                 let bytes = b64(&cbor)?;
                 let d = crate::zdef_adapter::load_cbor(&bytes, LayerSource::User)
                     .map_err(|e| ApiError::new("verification_failed", e.0))?;
@@ -461,6 +518,15 @@ impl ApiServer {
                     .collect();
                 let id = d.id.clone();
                 let matched = hub.upload_user_definition(d, now)?;
+                match source {
+                    Some(t) => {
+                        let f = source_format.unwrap_or_else(|| "yaml".into());
+                        hub.user_sources.insert(id.clone(), (f, t));
+                    }
+                    None => {
+                        hub.user_sources.remove(&id);
+                    }
+                }
                 let diffs: Vec<J> = matched
                     .iter()
                     .map(|dev| {
@@ -561,6 +627,14 @@ impl ApiServer {
                     .or_else(|| id.as_deref().and_then(|i| hub.catalog().get(i)))
                     .ok_or_else(|| ApiError::new("not_found", "no such definition"))?;
                 let mut r = def_summary(&d);
+                if let Some((f, t)) = hub
+                    .user_sources
+                    .get(&d.id)
+                    .filter(|_| d.source == LayerSource::User)
+                {
+                    r["source_format"] = f.clone().into();
+                    r["source_text"] = t.clone().into();
+                }
                 if format.as_deref() == Some("json") {
                     r["entities"] = d
                         .entities

@@ -62,7 +62,11 @@ fn http_page(app: &App, stream: &mut TcpStream) -> io::Result<bool> {
     } else {
         write!(resp, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
     }
+    // Consume the peeked request: closing a socket with unread input
+    // resets it, which cuts large responses (the web tools) short.
+    let _ = io::Read::read(stream, &mut buf[..n]);
     stream.write_all(&resp)?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
     Ok(true)
 }
 

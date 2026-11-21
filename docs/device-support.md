@@ -2206,7 +2206,7 @@ size, content_hash, requires}`, `decompile(cbor, format)`,
 | Type | Parameters | Result |
 |---|---|---|
 | `definitions/validate` | `cbor` (base64) | `{ok, errors: [{path, line?, message}], warnings, requires, content_hash, size, matches: [device ids]}` — nothing stored |
-| `definitions/upload` | same + `replace` (id) | stored in `defs/local/`, user source; devices it matches re-resolve; returns their resolution diffs |
+| `definitions/upload` | same + `replace` (id), optional `source` (≤ 8 KiB, kept for editing) and `source_format` | stored in `defs/local/`, user source; devices it matches re-resolve; returns their resolution diffs |
 | `definitions/delete` | `id` | user definitions only; affected devices re-resolve |
 | `definitions/list` | `source` (catalog, fetched, user, self_description), `device` (only those matching it) | `{id, revision, vendor, model, source, content_hash, size, requires}` |
 | `definitions/get` | `id` or `content_hash`, `format` (`cbor` base64, or `json`: the decoded CBOR with symbolic keys) | the definition |

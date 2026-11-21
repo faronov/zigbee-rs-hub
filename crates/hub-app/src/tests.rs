@@ -130,6 +130,12 @@ fn registry_survives_an_app_restart() {
     let (sid, rx) = session(&app);
     let upd = call(&app, sid, &rx, 1, json!({"type": "devices/update", "device": "zb:00158d0001a2b3c4", "name": "Kitchen"}));
     assert_eq!(upd["success"], true, "{upd}");
+    // A user definition with its source text for the editor.
+    let golden = format!("{}/../zdefc/tests/golden/philips-sml001-motion.cbor", env!("CARGO_MANIFEST_DIR"));
+    let cbor = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, std::fs::read(golden).unwrap());
+    let text = "zdef: 1\nid: philips/sml001\n# my comment\n";
+    let up = call(&app, sid, &rx, 2, json!({"type": "definitions/upload", "cbor": cbor, "source": text, "source_format": "yaml"}));
+    assert_eq!(up["success"], true, "{up}");
     app.shutdown();
     let stored = r.ncp.with_store(|s| s.kv_get("dev/zb:00158d0001a2b3c4").map(<[u8]>::to_vec));
     let snap = crate::registry::decode(&stored.expect("device persisted")).unwrap();
@@ -141,6 +147,8 @@ fn registry_survives_an_app_restart() {
     let (sid, rx) = session(&app);
     let dev = call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": "zb:00158d0001a2b3c4"}));
     assert_eq!(dev["result"]["name"], "Kitchen", "{dev}");
+    let g = call(&app, sid, &rx, 3, json!({"type": "definitions/get", "definition": "philips/sml001"}));
+    assert_eq!((g["result"]["source_text"].as_str(), g["result"]["source_format"].as_str()), (Some(text), Some("yaml")), "{g}");
     // Removal deletes the record.
     let rm = call(&app, sid, &rx, 2, json!({"type": "devices/remove", "device": "zb:00158d0001a2b3c4", "force": true}));
     assert_eq!(rm["success"], true, "{rm}");
