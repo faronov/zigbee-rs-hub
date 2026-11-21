@@ -92,6 +92,8 @@ pub struct SimState {
     pub children: Option<Vec<([u8; 8], u16, u8)>>,
     /// `DIAG_GET_NEIGHBORS`: `(ieee, nwk, device type, relationship)`.
     pub neighbors: Option<Vec<SimNeighbor>>,
+    /// No `EVT_PERMIT_JOIN_STATE` (as the zigbee-rs NCP image).
+    pub silent_permit_join: bool,
 }
 
 /// `(ieee, nwk, device type, relationship)` of a simulated neighbor.
@@ -140,6 +142,7 @@ impl SimNcp {
             table_devices: Vec::new(),
             children: None,
             neighbors: None,
+            silent_permit_join: false,
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
@@ -426,7 +429,9 @@ impl SimNcp {
             })),
             ids::NWK_PERMIT_JOIN => {
                 let p: NwkPermitJoin = m.decode().unwrap();
-                actions.push((Duration::from_millis(5), event(&EvtPermitJoinState { remaining_s: p.duration_s })));
+                if !s.silent_permit_join {
+                    actions.push((Duration::from_millis(5), event(&EvtPermitJoinState { remaining_s: p.duration_s })));
+                }
                 status(Status::Success)
             }
             ids::NWK_ADD_ENDPOINT => {

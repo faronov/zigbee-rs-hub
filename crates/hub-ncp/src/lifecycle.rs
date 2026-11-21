@@ -973,7 +973,8 @@ impl Hub {
     /// else the NCP's last `EVT_PERMIT_JOIN_STATE`.
     pub fn permit_join_remaining(&self) -> u32 {
         match *self.inner.permit_until.lock().unwrap() {
-            Some(t) => t.saturating_duration_since(Instant::now()).as_secs() as u32,
+            // Rounded up: 60 right after opening for 60 s, 0 only once over.
+            Some(t) => t.saturating_duration_since(Instant::now()).as_millis().div_ceil(1000) as u32,
             None => u32::from(self.status().permit_join_s),
         }
     }

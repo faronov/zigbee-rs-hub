@@ -29,6 +29,75 @@ fn sensor() -> SimDevice {
 }
 
 #[test]
+fn restored_mains_device_reads_unknown_states() {
+    let ieee = 0x6055f90000f69688;
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(ieee, 0x93B2, LogicalType::Router, true, 0x1037)
+            .endpoint(1, 0x0104, 0x0302, &[0x0000, 0x0003, 0x0402, 0x0405], &[])
+            .basic("Zigbee-RS", "ESP32-C6-Sensor", 0x01)
+            .attr(1, 0x0402, 0x0000, TypedValue::int(ZclType::I16, 2904))
+            .attr(1, 0x0405, 0x0000, TypedValue::uint(ZclType::U16, 5600)),
+    );
+    sim.devices.push(sensor());
+    let mut hub = hub_with(&[]);
+    sim.join(&mut hub, ieee, T0);
+    sim.join(&mut hub, SENSOR, T0);
+    let mut restored = hub_with(&[]);
+    for id in ["zb:6055f90000f69688", "zb:00158d0001a2b3c4"] {
+        let snap = hub.snapshot_device(id).unwrap();
+        restored.restore_device(snap, None, T0 + 60_000).unwrap();
+    }
+    let uid = "zb:6055f90000f69688:1:temperature";
+    assert_eq!(state(&restored, uid), J::Null);
+    // Measured entities of both devices are read (battery, voltage,
+    // temperature and humidity of the sleepy one); the sleepy device's
+    // reads wait until it is next heard from.
+    assert_eq!(restored.refresh_unknown(T0 + 60_000), 6);
+    sim.log.clear();
+    sim.run(&mut restored, T0 + 60_000);
+    let reads: Vec<(u16, u16)> = sim
+        .aps()
+        .iter()
+        .filter(|a| a.payload[2] == 0x00)
+        .map(|a| {
+            (
+                a.cluster,
+                match a.dst {
+                    crate::transport::ApsDst::Nwk(n) => n,
+                    _ => 0,
+                },
+            )
+        })
+        .collect();
+    assert_eq!(reads, [(0x0402, 0x93B2), (0x0405, 0x93B2)]);
+    assert_eq!(state(&restored, uid), json!(29.04));
+    assert_eq!(
+        state(&restored, "zb:6055f90000f69688:1:humidity"),
+        json!(56.0)
+    );
+    // The sleepy sensor reports humidity: the queued reads go out.
+    sim.log.clear();
+    let s = sim.dev(SENSOR).clone();
+    restored.on_aps_indication(
+        s.report(
+            1,
+            0x0405,
+            None,
+            &[(0, TypedValue::uint(ZclType::U16, 4600))],
+        ),
+        T0 + 120_000,
+    );
+    sim.run(&mut restored, T0 + 120_000);
+    assert_eq!(
+        state(&restored, "zb:00158d0001a2b3c4:1:temperature"),
+        json!(21.37)
+    );
+    // Known now: nothing left to read.
+    assert_eq!(restored.refresh_unknown(T0 + 121_000), 0);
+}
+
+#[test]
 fn temperature_sensor_interview_configure_and_reports() {
     let mut hub = hub_with(&[]);
     let mut sim = Sim::default();

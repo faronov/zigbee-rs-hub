@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value as J, json};
 
-use crate::device::{Device, Millis};
+use crate::device::{Device, InterviewStep, Millis};
 use crate::expr::{ExprCtx, Value};
 use crate::hub::{ApiError, DevEnv, Hub, HubEvent, Purpose, device_of_uid, set_value};
 use crate::model::*;
@@ -840,17 +840,27 @@ impl<T: ZigbeeTransport> Hub<T> {
             .devices
             .get(&did)
             .ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
-        let e = d
-            .entities
-            .iter()
-            .find(|e| e.uid == uid)
-            .ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
+        if !d.entities.iter().any(|e| e.uid == uid) {
+            return Err(ApiError::new("not_found", uid.to_string()));
+        }
         if d.sleepy() || d.gp.is_some() {
             return Err(ApiError::new(
                 "unsupported",
                 "sleepy and GP devices cannot be polled",
             ));
         }
+        self.read_entity(&did, uid, now)
+    }
+
+    /// Reads the bound attributes of entity `uid` of device `did` (queued
+    /// for a sleepy device until it is next heard from).
+    fn read_entity(&mut self, did: &str, uid: &str, now: Millis) -> Result<(), ApiError> {
+        let did = did.to_string();
+        let e = self
+            .devices
+            .get(&did)
+            .and_then(|d| d.entities.iter().find(|e| e.uid == uid))
+            .ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
         let mut reads: BTreeMap<(u8, u16, Option<u16>), Vec<u16>> = BTreeMap::new();
         let mut tuya = false;
         for (_, v) in e.r.def.values() {
@@ -881,6 +891,25 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.tuya_query(&did, now);
         }
         Ok(())
+    }
+
+    /// Reads the never-reported states of interviewed Zigbee devices, e.g.
+    /// after a restart restored them without states: a device reporting on
+    /// change only (or every max interval) leaves them unknown for minutes.
+    /// A sleepy device gets the reads when it is next heard from. Returns
+    /// the number of entities read.
+    pub fn refresh_unknown(&mut self, now: Millis) -> usize {
+        let uids: Vec<(String, String)> = self
+            .devices
+            .iter()
+            .filter(|(_, d)| d.interview == InterviewStep::Done && d.gp.is_none())
+            .flat_map(|(id, d)| d.entities.iter().map(move |e| (id, e)))
+            .filter(|(_, e)| e.state.last_reported.is_none() && !e.orphaned)
+            .map(|(id, e)| (id.clone(), e.uid.clone()))
+            .collect();
+        uids.iter()
+            .filter(|(id, uid)| self.read_entity(id, uid, now).is_ok())
+            .count()
     }
 
     /// `entities/update`: name, enabled, value of a hub binding.
