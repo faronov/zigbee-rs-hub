@@ -362,13 +362,14 @@ pub fn scan(
         progress(asked, queue.len());
     }
 
-    let by_ieee: BTreeMap<[u8; 8], &Known> = known.iter().map(|k| (k.ieee.to_le_bytes(), k)).collect();
-    let by_nwk: BTreeMap<u16, &Known> = known.iter().filter_map(|k| Some((k.nwk?, k))).collect();
+    // Linear lookups: a collected map would pull a sort into the firmware.
+    let by_ieee = |i: &[u8; 8]| known.iter().find(|k| k.ieee.to_le_bytes() == *i);
+    let by_nwk = |n: u16| known.iter().find(|k| k.nwk == Some(n));
     let mut w = Jw::result(id, 256 + 150 * nodes.len() + 90 * links.len() + 70 * routes.len())?;
     w.obj().key("time").num(now_s).key("duration_ms").num(started.elapsed().as_millis() as u64);
     w.key("nodes").arr();
     for (nwk, n) in &nodes {
-        let k = n.ieee.and_then(|i| by_ieee.get(&i)).or_else(|| by_nwk.get(nwk)).copied();
+        let k = n.ieee.as_ref().and_then(by_ieee).or_else(|| by_nwk(*nwk));
         w.obj().key("nwk").num(nwk);
         w.opt_str("ieee", n.ieee.as_ref().map(be).as_deref());
         w.key("type").str(TYPES[usize::from(n.device_type.unwrap_or(3).min(3))]);

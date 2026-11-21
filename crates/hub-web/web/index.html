@@ -297,12 +297,12 @@ function drawScan(r){
 }
 $("#bkb").onclick=e=>busy(e.target,act("network/backup",{}).then(b=>{saveBackup(b);$("#bks").textContent="Backup of PAN "+b.pan_id+": "+b.devices.length+" devices"+(b.network_key?"":" — incomplete (no keys), cannot be restored")})).catch(()=>{});
 $("#bkl").onclick=()=>act("network/backup/last").then(r=>r.backup?saveBackup(r.backup):toast("No backup yet")).catch(()=>{});
-async function upload(t,force){t=t.replace(/[^\x00-\x7f]/g,c=>"\\u"+c.charCodeAt(0).toString(16).padStart(4,"0"));let r;for(let o=0;o<t.length;o+=6000)r=await call("network/restore",{chunk:t.slice(o,o+6000),offset:o,total:t.length,force});return r}
+async function upload(b,force){const d=b.devices||[],n=8;let r=await call("network/restore",{backup:Object.assign({},b,{devices:d.slice(0,n)}),force,more:d.length>n});for(let o=n;o<d.length;o+=n)r=await call("network/restore",{devices:d.slice(o,o+n),more:o+n<d.length});return r}
 $("#rsf").onchange=async e=>{
  const f=e.target.files[0];e.target.value="";if(!f)return;const t=await f.text();let b;try{b=JSON.parse(t)}catch{return toast("Not a JSON file")}
  if(!confirm("Restore network PAN "+b.pan_id+", channel "+b.channel+" with "+(b.devices||[]).length+" devices onto this hub's radio? Never run the old coordinator at the same time."))return;
  $("#bks").textContent="restoring…";
- try{let r=await upload(t,false).catch(err=>{if(/force/.test(err.message)&&confirm("The radio runs a network now. Replace it? It is backed up first."))return upload(t,true);throw err});
+ try{let r=await upload(b,false).catch(err=>{if(/force/.test(err.message)&&confirm("The radio runs a network now. Replace it? It is backed up first."))return upload(b,true);throw err});
   if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
  catch(err){$("#bks").textContent="";toast("restore: "+err.message)}};
 $("#nrb").onclick=e=>{

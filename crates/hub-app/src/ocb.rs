@@ -14,12 +14,11 @@
 
 use std::fmt::Write as _;
 
-use serde::Deserialize;
 use serde_json::Value as J;
-use zigbee_zrhp::codec::{Reader, Writer};
+use zigbee_zrhp::codec::{Reader, Wire, Writer};
 use zigbee_zrhp::records::{
     ChildInfo, DeviceRecord, LinkBlock, NetworkKeyRecord, NetworkRecord, NodeRecord, RawRecords, Record, RsParamsRecord,
-    StreamCrc, TcLinkKeyRecord, device_flags, record_type,
+    TcLinkKeyRecord, device_flags, record_type,
 };
 use zigbee_zrhp::types::Ieee;
 
@@ -29,103 +28,6 @@ pub const FORMAT: &str = "zigpy/open-coordinator-backup";
 pub const ZIGBEE_ALLIANCE_09: [u8; 16] = *b"ZigBeeAlliance09";
 /// APS margin when the backup has no TCLK frame counter (spec 9.4 rule 6).
 pub const UNKNOWN_APS_MARGIN: u32 = 1 << 20;
-
-/// A backup file (fields the hub uses; others are ignored).
-#[derive(Debug, Clone, Deserialize)]
-pub struct Ocb {
-    /// `format`, `version`, `source`, `internal`.
-    pub metadata: Metadata,
-    /// Coordinator IEEE (big-endian hex).
-    pub coordinator_ieee: String,
-    /// PAN ID (big-endian hex, maybe unpadded).
-    pub pan_id: String,
-    /// Extended PAN ID (big-endian hex).
-    pub extended_pan_id: String,
-    /// NWK update ID.
-    #[serde(default)]
-    pub nwk_update_id: u8,
-    /// Must be 5.
-    #[serde(default = "five")]
-    pub security_level: u8,
-    /// Channel.
-    pub channel: u8,
-    /// Channel numbers.
-    #[serde(default)]
-    pub channel_mask: Vec<u8>,
-    /// Network key.
-    pub network_key: Option<NetworkKey>,
-    /// Devices.
-    #[serde(default)]
-    pub devices: Vec<Device>,
-    /// Stack-specific sections (`zigbee_rs`, `ezsp`, …).
-    #[serde(default)]
-    pub stack_specific: Option<J>,
-}
-
-fn five() -> u8 {
-    5
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// `metadata`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Metadata {
-    /// [`FORMAT`].
-    pub format: String,
-    /// 1.
-    pub version: u32,
-    /// Producer.
-    #[serde(default)]
-    pub source: Option<String>,
-    /// Producer-specific facts (zigpy: `network.tc_link_key`, `tx_power`).
-    #[serde(default)]
-    pub internal: Option<J>,
-}
-
-/// `network_key`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct NetworkKey {
-    /// Hex, key-byte order.
-    pub key: String,
-    /// Key sequence number.
-    #[serde(default)]
-    pub sequence_number: u8,
-    /// Outgoing NWK frame counter.
-    #[serde(default)]
-    pub frame_counter: u32,
-}
-
-/// `devices[]`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Device {
-    /// Big-endian hex.
-    pub ieee_address: String,
-    /// Big-endian hex or null.
-    #[serde(default)]
-    pub nwk_address: Option<String>,
-    /// Defaults to true (spec).
-    #[serde(default = "yes")]
-    pub is_child: bool,
-    /// Unique TCLK.
-    #[serde(default)]
-    pub link_key: Option<LinkKey>,
-}
-
-/// `devices[].link_key`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct LinkKey {
-    /// Hex, key-byte order.
-    pub key: String,
-    /// Outgoing APS counter.
-    #[serde(default)]
-    pub tx_counter: u32,
-    /// Incoming APS counter.
-    #[serde(default)]
-    pub rx_counter: u32,
-}
 
 /// A backup converted for `BKP_RESTORE_*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,32 +78,68 @@ fn path<'a>(v: Option<&'a J>, keys: &[&str]) -> Option<&'a J> {
     keys.iter().try_fold(v?, |v, k| v.get(k))
 }
 
-/// Validate a backup and convert it into restore records (spec 9.2/9.3).
-pub fn to_records(o: &Ocb) -> Result<Restore, String> {
-    if o.metadata.format != FORMAT || o.metadata.version != 1 {
-        return Err(format!("not an open coordinator backup v1 ({} v{})", o.metadata.format, o.metadata.version));
+/// A required string field.
+fn text<'a>(o: &'a J, k: &str) -> Result<&'a str, String> {
+    o.get(k).and_then(J::as_str).ok_or_else(|| format!("{k}: missing or not a string"))
+}
+
+/// An optional unsigned field (`default` when absent or null).
+fn uint(o: &J, k: &str, default: u64) -> Result<u64, String> {
+    match o.get(k) {
+        None | Some(J::Null) => Ok(default),
+        Some(v) => v.as_u64().ok_or_else(|| format!("{k}: not a non-negative integer")),
     }
-    if o.security_level != 5 {
-        return Err(format!("security level {} (only 5 is supported)", o.security_level));
+}
+
+fn u32_of(o: &J, k: &str) -> Result<u32, String> {
+    Ok(uint(o, k, 0)?.min(u64::from(u32::MAX)) as u32)
+}
+
+/// Append one record (TLV) to a stream.
+fn push(stream: &mut Vec<u8>, r: &Record<'_>) -> Result<(), String> {
+    let mut buf = [0u8; 64];
+    let mut w = Writer::new(&mut buf);
+    r.write(&mut w).map_err(|e| format!("encoding: {e:?}"))?;
+    let n = w.len();
+    stream.try_reserve(n).map_err(|_| "out of memory".to_string())?;
+    stream.extend_from_slice(&buf[..n]);
+    Ok(())
+}
+
+/// Validate a backup (OCB JSON value, spec 9.1/9.2) and convert it into
+/// restore records (9.3). `devices` may be absent: a large backup's devices
+/// can follow in batches ([`add_devices`]), so no request needs the whole
+/// file in RAM.
+pub fn to_records(o: &J) -> Result<Restore, String> {
+    let meta = o.get("metadata").ok_or("not an open coordinator backup (no metadata)")?;
+    let (format, version) = (meta.get("format").and_then(J::as_str).unwrap_or(""), uint(meta, "version", 0)?);
+    if format != FORMAT || version != 1 {
+        return Err(format!("not an open coordinator backup v1 ({format} v{version})"));
     }
-    if !(11..=26).contains(&o.channel) {
-        return Err(format!("channel {} outside 11–26", o.channel));
+    let security_level = uint(o, "security_level", 5)?;
+    if security_level != 5 {
+        return Err(format!("security level {security_level} (only 5 is supported)"));
     }
-    let ieee: [u8; 8] = be_wire(&o.coordinator_ieee, "coordinator_ieee")?;
-    let pan_id = u16::from_le_bytes(be_wire(&o.pan_id, "pan_id")?);
+    let channel = uint(o, "channel", 0)?;
+    if !(11..=26).contains(&channel) {
+        return Err(format!("channel {channel} outside 11–26"));
+    }
+    let channel = channel as u8;
+    let ieee: [u8; 8] = be_wire(text(o, "coordinator_ieee")?, "coordinator_ieee")?;
+    let pan_id = u16::from_le_bytes(be_wire(text(o, "pan_id")?, "pan_id")?);
     if pan_id == 0 || pan_id == 0xFFFF {
         return Err(format!("PAN ID 0x{pan_id:04X}"));
     }
-    let epid: [u8; 8] = be_wire(&o.extended_pan_id, "extended_pan_id")?;
+    let epid: [u8; 8] = be_wire(text(o, "extended_pan_id")?, "extended_pan_id")?;
     if epid == [0; 8] || epid == [0xFF; 8] {
         return Err("extended PAN ID all zero or all ones".into());
     }
-    let nk = o.network_key.as_ref().ok_or("the backup has no network key (incomplete backup)")?;
-    let key: [u8; 16] = key_bytes(&nk.key, "network_key")?;
+    let nk = o.get("network_key").filter(|k| k.is_object()).ok_or("the backup has no network key (incomplete backup)")?;
+    let key: [u8; 16] = key_bytes(text(nk, "key")?, "network_key")?;
     if key == [0; 16] {
         return Err("all-zero network key (incomplete backup)".into());
     }
-    let internal = o.metadata.internal.as_ref();
+    let internal = meta.get("internal");
     let tclk = path(internal, &["network", "tc_link_key"]);
     let tclk_key = match tclk.and_then(|t| t.get("key")).and_then(J::as_str) {
         Some(k) => key_bytes(k, "tc_link_key")?,
@@ -213,90 +151,102 @@ pub fn to_records(o: &Ocb) -> Result<Restore, String> {
         None => ieee,
     };
     let tx_power = path(internal, &["tx_power"]).and_then(J::as_i64).map_or(0x7F, |p| p.clamp(-128, 127) as i8);
-    let mask = o.channel_mask.iter().filter(|c| (11..=26).contains(*c)).fold(0u32, |m, c| m | 1 << c);
-
-    let mut records = vec![
-        Record::Node(NodeRecord { ieee: Ieee(ieee), nwk: 0, logical_type: 0, flags: 1 }),
-        Record::Network(NetworkRecord {
+    let mask = o
+        .get("channel_mask")
+        .and_then(J::as_array)
+        .map_or(0, |a| a.iter().filter_map(J::as_u64).filter(|c| (11..=26).contains(c)).fold(0u32, |m, c| m | 1 << c));
+    let mut r = Restore { stream: Vec::new(), tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, channel, devices: Vec::new() };
+    push(&mut r.stream, &Record::Node(NodeRecord { ieee: Ieee(ieee), nwk: 0, logical_type: 0, flags: 1 }))?;
+    push(
+        &mut r.stream,
+        &Record::Network(NetworkRecord {
             pan_id,
             ext_pan_id: epid,
-            channel: o.channel,
-            channel_mask: if mask == 0 { 1 << o.channel } else { mask },
-            nwk_update_id: o.nwk_update_id,
+            channel,
+            channel_mask: if mask == 0 { 1 << channel } else { mask },
+            nwk_update_id: uint(o, "nwk_update_id", 0)? as u8,
             nwk_manager: 0,
             security_level: 5,
             tx_power,
         }),
-        Record::NetworkKey(NetworkKeyRecord { key, seq: nk.sequence_number, tx_counter: nk.frame_counter, flags: 1 }),
-        Record::TcLinkKey(TcLinkKeyRecord {
+    )?;
+    let seq = uint(nk, "sequence_number", 0)? as u8;
+    push(&mut r.stream, &Record::NetworkKey(NetworkKeyRecord { key, seq, tx_counter: u32_of(nk, "frame_counter")?, flags: 1 }))?;
+    push(
+        &mut r.stream,
+        &Record::TcLinkKey(TcLinkKeyRecord {
             key: tclk_key,
             tc_ieee: Ieee(tc_ieee),
             tx_counter: tclk_counter.map_or(0, |c| c.min(u64::from(u32::MAX)) as u32),
             flags: 0,
         }),
-    ];
-    let ss = o.stack_specific.as_ref();
-    let seed = path(ss, &["ezsp", "hashed_tclk"]).and_then(J::as_str).map(|s| key_bytes::<16>(s, "hashed_tclk")).transpose()?;
-    if let Some(seed) = seed {
-        records.push(Record::EzspHashedTclk(seed));
+    )?;
+    let ss = o.get("stack_specific");
+    if let Some(seed) = path(ss, &["ezsp", "hashed_tclk"]).and_then(J::as_str) {
+        push(&mut r.stream, &Record::EzspHashedTclk(key_bytes::<16>(seed, "hashed_tclk")?))?;
     }
-    let mut devices = Vec::new();
-    for d in &o.devices {
-        let dev_ieee: [u8; 8] = be_wire(&d.ieee_address, "ieee_address")?;
-        let nwk = d.nwk_address.as_deref().map(|a| be_wire::<2>(a, "nwk_address").map(u16::from_le_bytes)).transpose()?;
-        let link = d
-            .link_key
-            .as_ref()
-            .map(|l| {
-                key_bytes::<16>(&l.key, "link_key").map(|key| LinkBlock {
-                    key,
-                    key_seq: 0,
-                    attrs: 2,
-                    origin: 3,
-                    tx_counter: l.tx_counter,
-                    rx_floor: l.rx_counter,
-                })
-            })
-            .transpose()?;
+    if let Some(rs) = path(ss, &["zigbee_rs"]) {
+        push(
+            &mut r.stream,
+            &Record::RsParams(RsParamsRecord {
+                fc_stride: u32_of(rs, "frame_counter_stride")?,
+                table_epoch: u32_of(rs, "table_epoch")?,
+                nwk_fc_limit: u32_of(rs, "nwk_frame_counter_limit")?,
+                aps_fc_limit: u32_of(rs, "aps_frame_counter_limit")?,
+                flags: u8::from(rs.get("host_backed_tables").and_then(J::as_bool).unwrap_or(false)),
+            }),
+        )?;
+    }
+    if let Some(devices) = o.get("devices").filter(|d| !d.is_null()) {
+        add_devices(&mut r, devices)?;
+    }
+    Ok(r)
+}
+
+/// Append a batch of `devices[]` entries (spec 9.1: `nwk_address` may be
+/// null, `is_child` defaults to true).
+pub fn add_devices(r: &mut Restore, devices: &J) -> Result<(), String> {
+    let list = devices.as_array().ok_or("devices: not a list")?;
+    for d in list {
+        let dev_ieee: [u8; 8] = be_wire(text(d, "ieee_address")?, "ieee_address")?;
+        let nwk = d.get("nwk_address").and_then(J::as_str).map(|a| be_wire::<2>(a, "nwk_address").map(u16::from_le_bytes)).transpose()?;
+        let is_child = d.get("is_child").and_then(J::as_bool).unwrap_or(true);
+        let link = match d.get("link_key").filter(|l| l.is_object()) {
+            Some(l) => Some(LinkBlock {
+                key: key_bytes::<16>(text(l, "key")?, "link_key")?,
+                key_seq: 0,
+                attrs: 2,
+                origin: 3,
+                tx_counter: u32_of(l, "tx_counter")?,
+                rx_floor: u32_of(l, "rx_counter")?,
+            }),
+            None => None,
+        };
         let mut flags = 0;
         if nwk.is_some() {
             flags |= device_flags::NWK_VALID;
         }
-        if d.is_child {
+        if is_child {
             flags |= device_flags::IS_CHILD | device_flags::CHILD_INFO;
         }
         if link.is_some() {
             flags |= device_flags::LINK;
         }
-        records.push(Record::Device(DeviceRecord {
-            ieee: Ieee(dev_ieee),
-            nwk: nwk.unwrap_or(0xFFFF),
-            flags,
-            // OCB has no capability: rx-off end device, 256 min (spec 9.3).
-            child: d.is_child.then_some(ChildInfo { capability: 0x80, timeout_exp: 8 }),
-            link,
-        }));
-        devices.push((dev_ieee, nwk));
+        push(
+            &mut r.stream,
+            &Record::Device(DeviceRecord {
+                ieee: Ieee(dev_ieee),
+                nwk: nwk.unwrap_or(0xFFFF),
+                flags,
+                // OCB has no capability: rx-off end device, 256 min (spec 9.3).
+                child: is_child.then_some(ChildInfo { capability: 0x80, timeout_exp: 8 }),
+                link,
+            }),
+        )?;
+        r.devices.try_reserve(1).map_err(|_| "out of memory".to_string())?;
+        r.devices.push((dev_ieee, nwk));
     }
-    if let Some(rs) = path(ss, &["zigbee_rs"]) {
-        let num = |k: &str| rs.get(k).and_then(J::as_u64).map_or(0, |v| v.min(u64::from(u32::MAX)) as u32);
-        records.push(Record::RsParams(RsParamsRecord {
-            fc_stride: num("frame_counter_stride"),
-            table_epoch: num("table_epoch"),
-            nwk_fc_limit: num("nwk_frame_counter_limit"),
-            aps_fc_limit: num("aps_frame_counter_limit"),
-            flags: u8::from(rs.get("host_backed_tables").and_then(J::as_bool).unwrap_or(false)),
-        }));
-    }
-    let mut buf = vec![0u8; 64 + 48 * records.len()];
-    let mut w = Writer::new(&mut buf);
-    let mut crc = StreamCrc::new();
-    for r in &records {
-        crc.write_record(r, &mut w).map_err(|e| format!("encoding: {e:?}"))?;
-    }
-    let n = w.len();
-    buf.truncate(n);
-    Ok(Restore { stream: buf, tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, channel: o.channel, devices })
+    Ok(())
 }
 
 /// Facts the export adds besides the NCP's records.
@@ -570,7 +520,7 @@ mod tests {
 
     #[test]
     fn zigpy_backup_becomes_records_with_wire_byte_order() {
-        let o: Ocb = serde_json::from_str(ZIGPY).unwrap();
+        let o: J = serde_json::from_str(ZIGPY).unwrap();
         let r = to_records(&o).unwrap();
         assert!(r.tclk_counter_known);
         assert_eq!(r.coordinator_ieee, [0x78, 0x56, 0x34, 0x12, 0x00, 0x4b, 0x12, 0x00]);
@@ -593,7 +543,7 @@ mod tests {
 
     #[test]
     fn z2m_backup_without_tclk_uses_the_default_and_the_large_margin() {
-        let o: Ocb = serde_json::from_str(Z2M).unwrap();
+        let o: J = serde_json::from_str(Z2M).unwrap();
         let r = to_records(&o).unwrap();
         assert!(!r.tclk_counter_known);
         assert_eq!(r.pan_id, 0x0A62, "left-padded PAN ID");
@@ -611,14 +561,14 @@ mod tests {
             ("\"37668fd64e35e03342e5ef9f35ccf4ab\"", "\"3766\""),
             ("zigpy/open-coordinator-backup", "something/else"),
         ] {
-            let o: Ocb = serde_json::from_str(&ZIGPY.replace(from, to)).unwrap();
+            let o: J = serde_json::from_str(&ZIGPY.replace(from, to)).unwrap();
             assert!(to_records(&o).is_err(), "{to}");
         }
     }
 
     #[test]
     fn export_round_trips_through_import() {
-        let o: Ocb = serde_json::from_str(ZIGPY).unwrap();
+        let o: J = serde_json::from_str(ZIGPY).unwrap();
         let r = to_records(&o).unwrap();
         let info = ExportInfo {
             source: "zigbee-rs-hub 0.1.1".into(),
@@ -638,7 +588,7 @@ mod tests {
         assert_eq!(v["channel_mask"], serde_json::json!([15, 20, 25]));
         assert_eq!(v["devices"][1]["nwk_address"], J::Null);
         assert_eq!(v["devices"][3]["ieee_address"], "0909090909090909");
-        let back: Ocb = serde_json::from_str(&text).unwrap();
+        let back: J = serde_json::from_str(&text).unwrap();
         let r2 = to_records(&back).unwrap();
         // Same records apart from the host-only device.
         let a = records(&r.stream);
@@ -649,7 +599,7 @@ mod tests {
 
     #[test]
     fn export_without_keys_is_marked_incomplete() {
-        let o: Ocb = serde_json::from_str(ZIGPY).unwrap();
+        let o: J = serde_json::from_str(ZIGPY).unwrap();
         let r = to_records(&o).unwrap();
         let stream: Vec<u8> = RawRecords::new(&r.stream)
             .flatten()
@@ -662,6 +612,6 @@ mod tests {
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["network_key"], J::Null);
         assert_eq!(v["metadata"]["internal"]["incomplete"], true);
-        assert!(to_records(&serde_json::from_str(&text).unwrap()).is_err());
+        assert!(to_records(&serde_json::from_str::<J>(&text).unwrap()).is_err());
     }
 }

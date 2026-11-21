@@ -560,7 +560,7 @@ fn network_map_from_coordinator_tables_and_router_answers() {
 }
 
 #[test]
-fn backup_then_restore_onto_a_fresh_ncp_in_chunks() {
+fn backup_then_restore_onto_a_fresh_ncp_in_batches() {
     let r = rig(Store::volatile());
     let app = admin_app(&r, None);
     let (sid, rx) = session(&app);
@@ -588,17 +588,13 @@ fn backup_then_restore_onto_a_fresh_ncp_in_chunks() {
     let r2 = rig(Store::volatile());
     let app2 = admin_app(&r2, None);
     let (sid2, rx2) = session(&app2);
-    let text = backup.to_string();
-    let parts: Vec<&str> = text.as_bytes().chunks(300).map(|c| std::str::from_utf8(c).unwrap()).collect();
-    let mut offset = 0;
-    let mut last = J::Null;
-    for (i, p) in parts.iter().enumerate() {
-        last = call(&app2, sid2, &rx2, 10 + i as u64, json!({"type": "network/restore", "chunk": p, "offset": offset, "total": text.len()}));
-        offset += p.len();
-        if i + 1 < parts.len() {
-            assert_eq!(ok(&last)["received"], offset);
-        }
-    }
+    // The backup, then its devices in batches (one here).
+    let mut head = backup.clone();
+    let devices = head["devices"].take();
+    head["devices"] = json!([]);
+    let staged = call(&app2, sid2, &rx2, 10, json!({"type": "network/restore", "backup": head, "more": true}));
+    assert_eq!(ok(&staged)["staged_devices"], 0);
+    let last = call(&app2, sid2, &rx2, 11, json!({"type": "network/restore", "devices": devices}));
     let rep = ok(&last);
     assert_eq!(rep["channel"], 17);
     assert_eq!(rep["children"], 1);
@@ -612,8 +608,8 @@ fn backup_then_restore_onto_a_fresh_ncp_in_chunks() {
     assert_eq!(ok(&net)["ownership"], "owned");
     // The restored device is imported and interviewed.
     assert!(app2.wait(T, |s| s.imported == 1), "{:?}", app2.status());
-    // A chunk out of order is refused.
-    let oo = call(&app2, sid2, &rx2, 60, json!({"type": "network/restore", "chunk": "{}", "offset": 5, "total": 10}));
+    // A batch without a staged backup is refused.
+    let oo = call(&app2, sid2, &rx2, 60, json!({"type": "network/restore", "devices": []}));
     assert_eq!(err_code(&oo), "invalid_value");
     app2.shutdown();
 }
@@ -743,5 +739,32 @@ fn large_network_map_and_full_diagnostics_are_valid_frames() {
     let d = ok(&d);
     assert_eq!(d["counters"].as_array().unwrap().len(), 38);
     assert!(d["counters"].as_array().unwrap().iter().any(|c| c["name"] == "mac_tx_no_ack" && c["group"] == "mac"));
+    app.shutdown();
+}
+
+#[test]
+fn restore_of_many_devices_in_batches() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let devices: Vec<J> = (0..45u16)
+        .map(|i| json!({"ieee_address": format!("00158d00{:08x}", 0x1000 + u32::from(i)), "nwk_address": format!("{:04x}", 0x2000 + i), "is_child": i % 3 == 0}))
+        .collect();
+    let backup = json!({
+        "metadata": {"format": "zigpy/open-coordinator-backup", "version": 1},
+        "coordinator_ieee": "020100000000515a", "pan_id": "1234", "extended_pan_id": "00112233aabbccdd",
+        "channel": 20, "channel_mask": [20], "security_level": 5,
+        "network_key": {"key": "0102030405060708090a0b0c0d0e0f10", "sequence_number": 0, "frame_counter": 5000},
+        "devices": devices[..20],
+    });
+    let f = call(&app, sid, &rx, 1, json!({"type": "network/restore", "backup": backup, "more": true}));
+    assert_eq!(ok(&f)["staged_devices"], 20);
+    let f = call(&app, sid, &rx, 2, json!({"type": "network/restore", "devices": devices[20..40], "more": true}));
+    assert_eq!(ok(&f)["staged_devices"], 40);
+    let f = call(&app, sid, &rx, 3, json!({"type": "network/restore", "devices": devices[40..]}));
+    assert_eq!(ok(&f)["devices"], 45);
+    assert_eq!(ok(&f)["children"], 15);
+    let st = r.sim.state();
+    assert_eq!((st.pan_id, st.channel, st.table_devices.len()), (0x1234, 20, 45));
     app.shutdown();
 }

@@ -743,7 +743,7 @@ restart), `network/diagnostics` (NCP status incl. PTA, DIAG counters, frame
 counters, host link counters), `network/topology` (map from the
 coordinator's tables and Mgmt_Lqi/Mgmt_Rtg over the air),
 `network/backup` / `network/backup/last` / `network/restore` (Open ZigBee
-Coordinator Backup, as zigpy/ZHA and Z2M write it; restore in chunks to a
+Coordinator Backup, as zigpy/ZHA and Z2M write it; restore in device batches to a
 fresh NCP), `network/reset` (confirm `RESET`: automatic backup, leave,
 form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
 `hub/system`, `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
@@ -757,7 +757,7 @@ coordinator in the middle, rings by hop count, end devices next to their
 parent, links coloured by LQI, a table with the best LQI per node) and a
 **Settings** tab (network facts, channel change, TX power, an energy-scan
 chart with the hub's Wi-Fi overlap and the recommendation, backup download,
-the last automatic backup, restore from a file in chunks, a new-network form
+the last automatic backup, restore from a file in device batches, a new-network form
 that needs `RESET` typed, hub facts, Wi-Fi, token rotation, reboot, bridge
 mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
 are hidden (`maintenance` in `hub/info`). The page is 11.8 KB gzipped (6.1 KB

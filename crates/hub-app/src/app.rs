@@ -406,7 +406,7 @@ impl Runner {
                 if self.api.is_authed(sid)
                     && let Some(head) = admin::head(&text)
                 {
-                    for frame in self.admin_request(sid, &head, &text, now) {
+                    for frame in self.admin_request(sid, &head, now) {
                         self.send(sid, &frame);
                     }
                     return;
@@ -440,7 +440,7 @@ impl Runner {
     }
 
     /// A maintenance request (`admin`), with what it may need from here.
-    fn admin_request(&mut self, sid: SessionId, head: &admin::Head, text: &str, now: Millis) -> Vec<String> {
+    fn admin_request(&mut self, sid: SessionId, head: &admin::Head, now: Millis) -> Vec<String> {
         let engine = &self.engine;
         let known = || {
             engine
@@ -481,7 +481,7 @@ impl Runner {
             }),
             now_s: now as f64 / 1000.0,
         };
-        self.admin.handle(ctx, sid, head, text)
+        self.admin.handle(ctx, sid, head)
     }
 
     fn send(&mut self, sid: SessionId, frame: &str) {
