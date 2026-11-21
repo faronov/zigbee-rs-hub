@@ -122,6 +122,11 @@ impl Plan {
                 catalog_date: date,
                 catalog_serial: serial,
                 max_size: 0,
+                format: root
+                    .get("bank_format")
+                    .map(|n| uint(n, "bank_format"))
+                    .transpose()?
+                    .map_or(zdef::bank::FORMAT, |f| f as u16),
             },
             requires,
             source,

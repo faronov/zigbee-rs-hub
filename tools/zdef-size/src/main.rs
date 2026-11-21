@@ -148,7 +148,7 @@ pub extern "C" fn probe_main() -> usize {
             let keys = [zdef::sign::TrustedKey::new_with::<H>([7; 32])];
             if b.verify_with::<H>(&keys).is_ok() {
                 let mut inf = inflater();
-                if let Ok(st) = b.load_strings(&mut inf) {
+                if let Ok(st) = b.strings(&mut inf) {
                     let mut buf = [0u8; zdef::bank::BLOCK_MAX];
                     for e in b.lookup(black_box(5)) {
                         n += b

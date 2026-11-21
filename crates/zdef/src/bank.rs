@@ -9,7 +9,11 @@
 //!  32  SHA-256 of the body (everything after the signature)
 //! Signature: COSE_Sign1, EdDSA (alg -8), detached payload = the 64-byte header
 //! Body:
-//!   string section: u32 inflated length + raw deflate of a CBOR array of text strings
+//!   string section, format 1: u32 inflated length + raw deflate of a CBOR array
+//!     of text strings (inflated into RAM before the first lookup)
+//!   string section, format 2: u32 count, (count + 1) x u32 offsets into the
+//!     text area (the last = its length), the text area (UTF-8, concatenated);
+//!     read in place from memory-mapped flash, no RAM (hubs without PSRAM)
 //!   index: keys x 12 B {u64 key hash, u16 block, u8 slot, u8 flags}, sorted by (hash, block, slot)
 //!   block table: (blocks + 1) x u32 offsets into the block area (last = its length)
 //!   block area: raw deflate blocks, each <= 4 KiB inflated:
@@ -27,7 +31,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub const MAGIC: &[u8; 4] = b"ZDB1";
-pub const FORMAT: u16 = 1;
+/// Format with a deflated string table (inflated into RAM).
+pub const FORMAT_V1: u16 = 1;
+/// Format with an uncompressed, offset-indexed string table read in place.
+pub const FORMAT_V2: u16 = 2;
+/// The format bank builders write.
+pub const FORMAT: u16 = FORMAT_V2;
 pub const HEADER_LEN: usize = 64;
 /// Largest inflated block.
 pub const BLOCK_MAX: usize = 4096;
@@ -92,7 +101,7 @@ impl Header {
             return Err(BankError::Magic);
         }
         let format = le16(b, 4);
-        if format != FORMAT {
+        if format != FORMAT_V1 && format != FORMAT_V2 {
             return Err(BankError::Format(format));
         }
         let mut body_sha256 = [0u8; 32];
@@ -255,6 +264,122 @@ impl StringTable for BankStrings {
     }
 }
 
+/// Format 2 string table, read in place: `u32 count`, `(count + 1) x u32`
+/// offsets into the text area, the text area.
+#[derive(Clone, Copy)]
+pub struct FlashStrings<'a> {
+    offsets: &'a [u8],
+    text: &'a [u8],
+}
+
+impl<'a> FlashStrings<'a> {
+    /// Checks the layout (count, monotonic offsets, UTF-8 of every string).
+    pub fn parse(section: &'a [u8], count: u16) -> Result<Self, BankError> {
+        if section.len() < 8 || le32(section, 0) != u32::from(count) {
+            return Err(BankError::Strings);
+        }
+        let n = count as usize;
+        let ol = (n + 1) * 4;
+        if section.len() < 4 + ol {
+            return Err(BankError::Strings);
+        }
+        let offsets = &section[4..4 + ol];
+        let text = &section[4 + ol..];
+        if le32(offsets, n * 4) as usize != text.len() || le32(offsets, 0) != 0 {
+            return Err(BankError::Strings);
+        }
+        let t = FlashStrings { offsets, text };
+        for i in 0..n {
+            let (a, b) = t.span(i);
+            if a > b || b > text.len() || core::str::from_utf8(&text[a..b]).is_err() {
+                return Err(BankError::Strings);
+            }
+        }
+        Ok(t)
+    }
+
+    fn span(&self, i: usize) -> (usize, usize) {
+        (
+            le32(self.offsets, i * 4) as usize,
+            le32(self.offsets, i * 4 + 4) as usize,
+        )
+    }
+
+    pub fn len(&self) -> usize {
+        self.offsets.len() / 4 - 1
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// String `i`, borrowed from the bank.
+    pub fn str(&self, i: usize) -> Option<&'a str> {
+        if i >= self.len() {
+            return None;
+        }
+        let (a, b) = self.span(i);
+        core::str::from_utf8(self.text.get(a..b)?).ok()
+    }
+
+    /// Encodes a format 2 string section.
+    pub fn encode<S: AsRef<str>>(strings: &[S]) -> Vec<u8> {
+        let mut out = (strings.len() as u32).to_le_bytes().to_vec();
+        let mut o = 0u32;
+        for s in strings {
+            out.extend_from_slice(&o.to_le_bytes());
+            o += s.as_ref().len() as u32;
+        }
+        out.extend_from_slice(&o.to_le_bytes());
+        for s in strings {
+            out.extend_from_slice(s.as_ref().as_bytes());
+        }
+        out
+    }
+}
+
+impl StringTable for FlashStrings<'_> {
+    fn get(&self, i: u64) -> Option<&str> {
+        self.str(usize::try_from(i).ok()?)
+    }
+}
+
+/// A bank's string table: in place (format 2) or inflated (format 1).
+pub enum Strings<'a> {
+    Flash(FlashStrings<'a>),
+    Ram(BankStrings),
+}
+
+impl Strings<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            Strings::Flash(f) => f.len(),
+            Strings::Ram(r) => r.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Heap bytes held (0 in place).
+    pub fn ram_bytes(&self) -> usize {
+        match self {
+            Strings::Flash(_) => 0,
+            Strings::Ram(r) => r.ram_bytes(),
+        }
+    }
+}
+
+impl StringTable for Strings<'_> {
+    fn get(&self, i: u64) -> Option<&str> {
+        match self {
+            Strings::Flash(f) => f.get(i),
+            Strings::Ram(r) => r.get(i),
+        }
+    }
+}
+
 /// A bank held in memory (memory-mapped flash, PSRAM or a host file).
 pub struct Bank<'a> {
     pub header: Header,
@@ -285,6 +410,9 @@ impl<'a> Bank<'a> {
             return Err(BankError::Layout);
         }
         let strings = &body[..sl];
+        if header.format == FORMAT_V2 {
+            FlashStrings::parse(strings, header.strings)?;
+        }
         let index = &body[sl..sl + il];
         let block_table = &body[sl + il..sl + il + tl];
         let blocks = &body[sl + il + tl..];
@@ -367,8 +495,24 @@ impl<'a> Bank<'a> {
         Ok(&self.blocks[a..b])
     }
 
-    /// Inflates the string table.
+    /// The string table: read in place (format 2) or inflated into RAM
+    /// (format 1).
+    pub fn strings(&self, inf: &mut dyn Inflate) -> Result<Strings<'a>, BankError> {
+        if self.header.format == FORMAT_V2 {
+            return Ok(Strings::Flash(FlashStrings::parse(
+                self.strings,
+                self.header.strings,
+            )?));
+        }
+        Ok(Strings::Ram(self.load_strings(inf)?))
+    }
+
+    /// Inflates the string table of a format 1 bank (format 2: see
+    /// [`Bank::strings`]).
     pub fn load_strings(&self, inf: &mut dyn Inflate) -> Result<BankStrings, BankError> {
+        if self.header.format != FORMAT_V1 {
+            return Err(BankError::Strings);
+        }
         let raw_len = le32(self.strings, 0) as usize;
         if raw_len > 1 << 20 {
             return Err(BankError::Strings);
@@ -399,7 +543,7 @@ impl<'a> Bank<'a> {
     pub fn load(
         &self,
         inf: &mut dyn Inflate,
-        strings: &BankStrings,
+        strings: &dyn StringTable,
         e: &IndexEntry,
         buf: &mut [u8; BLOCK_MAX],
     ) -> Result<Definition, BankError> {

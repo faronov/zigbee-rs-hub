@@ -75,6 +75,20 @@ pub struct BankParams {
     pub catalog_date: u32,
     pub catalog_serial: u16,
     pub max_size: usize,
+    /// Bank format: 2 (string table read in place; default) or 1 (deflated).
+    pub format: u16,
+}
+
+impl Default for BankParams {
+    fn default() -> Self {
+        BankParams {
+            generation: 0,
+            catalog_date: 0,
+            catalog_serial: 0,
+            max_size: usize::MAX,
+            format: FORMAT,
+        }
+    }
 }
 
 /// Size table of a built bank.
@@ -343,14 +357,23 @@ pub fn build_bank(items: &[&Item], params: &BankParams) -> Result<BuiltBank, Str
         .enumerate()
         .map(|(i, (s, _))| (s.clone(), i))
         .collect();
-    let mut sw = Writer::new();
-    sw.array(strings.len());
-    for (s, _) in &strings {
-        sw.text(s);
-    }
-    let strings_raw = sw.into_vec();
-    let mut strings_sec = (strings_raw.len() as u32).to_le_bytes().to_vec();
-    strings_sec.extend(deflate(&strings_raw));
+    let strings_sec = match params.format {
+        zb::FORMAT_V1 => {
+            let mut sw = Writer::new();
+            sw.array(strings.len());
+            for (s, _) in &strings {
+                sw.text(s);
+            }
+            let strings_raw = sw.into_vec();
+            let mut sec = (strings_raw.len() as u32).to_le_bytes().to_vec();
+            sec.extend(deflate(&strings_raw));
+            sec
+        }
+        zb::FORMAT_V2 => {
+            zb::FlashStrings::encode(&strings.iter().map(|s| s.0.as_str()).collect::<Vec<_>>())
+        }
+        f => return Err(format!("unknown bank format {f}")),
+    };
 
     // Catalog form, packed into blocks of at most 4 KiB.
     let mut blocks: Vec<Vec<u8>> = Vec::new();
@@ -414,7 +437,7 @@ pub fn build_bank(items: &[&Item], params: &BankParams) -> Result<BuiltBank, Str
     }
 
     let header = Header {
-        format: FORMAT,
+        format: params.format,
         sig_len: 0,
         generation: params.generation,
         catalog_date: params.catalog_date,
@@ -444,7 +467,7 @@ pub fn build_bank(items: &[&Item], params: &BankParams) -> Result<BuiltBank, Str
     }
     let mut inf = zb::MinizInflate::new();
     let st = bank
-        .load_strings(&mut inf)
+        .strings(&mut inf)
         .map_err(|e| format!("self-check: {e:?}"))?;
     let mut buf = [0u8; BLOCK_MAX];
     for (it, (block, slot)) in items.iter().zip(&placed) {

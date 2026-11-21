@@ -21,7 +21,7 @@ usage:
   zdefc measure <dir>                   size table of every definition in <dir>
   zdefc schema                          print the JSON Schema
   zdefc bank build -o <dir> [--key <file>] [--date YYYYMMDD] [--serial n] [--generation n]
-                   [--max-size bytes] [--name bank.zdb] <file|dir>...
+                   [--max-size bytes] [--format 2|1] [--name bank.zdb] <file|dir>...
                                         one bank + shards + manifest (unsigned without a key)
   zdefc catalog build --plan plan.json -o <dir> [--key <file>]
                                         banks (largest priority prefix that fits), 256 shards,
@@ -438,6 +438,7 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
                 catalog_date: num("--date", 20261120)? as u32,
                 catalog_serial: num("--serial", 0)? as u16,
                 max_size: num("--max-size", 256 * 1024)? as usize,
+                format: num("--format", u64::from(zdef::bank::FORMAT))? as u16,
             };
             let mut items = Vec::new();
             for f in sources(&a.pos[1..])? {
@@ -524,7 +525,7 @@ fn bank_cmd(a: &Args) -> Result<(), String> {
             }
             println!("{}", zdef::bank::describe(&bank.header));
             let mut inf = zdef::bank::MinizInflate::new();
-            let st = bank.load_strings(&mut inf).map_err(|e| format!("{e:?}"))?;
+            let st = bank.strings(&mut inf).map_err(|e| format!("{e:?}"))?;
             let mut buf = [0u8; zdef::bank::BLOCK_MAX];
             for b in 0..bank.header.blocks {
                 let n = bank
