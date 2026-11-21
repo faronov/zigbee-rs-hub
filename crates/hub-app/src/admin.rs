@@ -17,7 +17,6 @@ use hub_devices::hub::ApiError;
 use hub_ncp::lifecycle::{EnergyChannel, FormRequest, RestoreOptions};
 use hub_ncp::{Error, Hub as Ncp};
 use log::{info, warn};
-use serde::Deserialize;
 use serde_json::{Value as J, json};
 use zigbee_zrhp::msg::system::caps;
 use zigbee_zrhp::types::Status;
@@ -48,30 +47,31 @@ pub const TYPES: &[&str] = &[
 
 /// Host store key of the last complete backup (OCB text).
 pub const LAST_BACKUP_KEY: &str = "bkp/last";
-/// Largest backup accepted by `network/restore` (chunked; the buffer is
-/// reserved fallibly, a hub without PSRAM may refuse less).
-pub const MAX_RESTORE_BYTES: usize = 128 * 1024;
+/// Devices a staged restore accepts.
+pub const MAX_RESTORE_DEVICES: usize = 2000;
 /// Network maps up to this size are kept for `refresh: false`.
 const MAX_CACHED_MAP: usize = 8 * 1024;
 
-/// `id` and `type` of a request this module handles.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// A request this module handles: `id`, `type` and the whole frame.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Head {
     /// Request ID.
     pub id: u64,
     /// Request type.
-    #[serde(rename = "type")]
     pub ty: String,
+    /// The frame (parameters are read from it; no serde derives, which
+    /// cost kilobytes of firmware each).
+    pub v: J,
 }
 
-/// The request's head if its type is one of [`TYPES`] (the rest of the
-/// frame is parsed by the handler, typed).
+/// The request if its type is one of [`TYPES`].
 pub fn head(text: &str) -> Option<Head> {
     if !TYPES.iter().any(|t| text.contains(t)) {
         return None;
     }
-    let h: Head = serde_json::from_str(text).ok()?;
-    TYPES.contains(&h.ty.as_str()).then_some(h)
+    let v: J = serde_json::from_str(text).ok()?;
+    let ty = v.get("type")?.as_str().filter(|t| TYPES.contains(t))?.to_string();
+    Some(Head { id: v.get("id")?.as_u64()?, ty, v })
 }
 
 /// What a job sends back to the app thread.
@@ -115,32 +115,28 @@ pub struct Admin {
     /// Stack of the job thread.
     pub job_stack: usize,
     busy: Arc<Mutex<Option<&'static str>>>,
-    restore_buf: Option<(usize, String)>,
+    staged: Option<Staged>,
     /// Last network map.
     pub topology: Option<String>,
 }
 
 fn ncp_error(what: &str, e: Error) -> ApiError {
-    let (code, msg) = match &e {
-        Error::Status(Status::UnsupportedCommand) => ("unsupported", format!("{what}: the NCP firmware does not implement it")),
-        Error::Status(Status::InvalidParameter) => ("invalid_value", format!("{what}: the NCP refused a parameter")),
-        Error::Status(Status::InvalidState) => ("invalid_value", format!("{what}: the network is not in a state for this (not up?)")),
-        Error::Status(Status::Busy | Status::InProgress) => ("busy", format!("{what}: the NCP is busy")),
-        Error::Status(Status::AccessDenied) => ("unauthorized", format!("{what}: the NCP refused (key export locked?)")),
-        Error::Status(Status::NotFound) => ("not_found", format!("{what}: not found on the NCP")),
-        Error::Timeout => ("timeout", format!("{what}: no answer from the NCP")),
-        Error::LinkReset | Error::Closed => ("device_unavailable", format!("{what}: NCP link lost ({e})")),
-        _ => ("failed", format!("{what}: {e}")),
+    let (code, why) = match &e {
+        Error::Status(Status::UnsupportedCommand) => ("unsupported", "the NCP firmware does not implement it"),
+        Error::Status(Status::InvalidParameter) => ("invalid_value", "the NCP refused a parameter"),
+        Error::Status(Status::InvalidState) => ("invalid_value", "the network is not in a state for this (not up?)"),
+        Error::Status(Status::Busy | Status::InProgress) => ("busy", "the NCP is busy"),
+        Error::Status(Status::AccessDenied) => ("unauthorized", "the NCP refused (key export locked?)"),
+        Error::Status(Status::NotFound) => ("not_found", "not found on the NCP"),
+        Error::Timeout => ("timeout", "no answer from the NCP"),
+        Error::LinkReset | Error::Closed => ("device_unavailable", "NCP link lost"),
+        _ => ("failed", ""),
     };
-    ApiError::new(code, msg)
+    if why.is_empty() { ApiError::new(code, format!("{what}: {e}")) } else { ApiError::new(code, format!("{what}: {why}")) }
 }
 
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError::new("invalid_value", msg)
-}
-
-fn params<'a, T: Deserialize<'a>>(text: &'a str) -> Result<T, ApiError> {
-    serde_json::from_str(text).map_err(|e| ApiError::new("invalid_format", e.to_string()))
 }
 
 fn frame(id: u64, r: Result<J, ApiError>) -> String {
@@ -317,21 +313,12 @@ struct BackupReq {
     keys: bool,
 }
 
-#[derive(Deserialize)]
-struct RestoreReq {
-    #[serde(default)]
-    backup: Option<ocb::Ocb>,
-    #[serde(default)]
-    chunk: Option<String>,
-    #[serde(default)]
-    offset: Option<usize>,
-    #[serde(default)]
-    total: Option<usize>,
-    #[serde(default = "yes")]
+/// A restore being staged: the network's records and the device batches
+/// received so far, with the first request's options.
+struct Staged {
+    restore: ocb::Restore,
     allow_ieee_change: bool,
-    #[serde(default)]
     force: bool,
-    #[serde(default)]
     skip_backup: bool,
 }
 
@@ -464,10 +451,6 @@ impl LogsReq {
     }
 }
 
-fn yes() -> bool {
-    true
-}
-
 fn mask_of(channels: &[u8]) -> Result<u32, ApiError> {
     channels.iter().try_fold(0u32, |m, c| {
         if (11..=26).contains(c) { Ok(m | 1 << c) } else { Err(bad(format!("channel {c} outside 11–26"))) }
@@ -524,7 +507,7 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
-        Self { platform, source, job_stack: 16 * 1024, busy: Arc::default(), restore_buf: None, topology: None }
+        Self { platform, source, job_stack: 16 * 1024, busy: Arc::default(), staged: None, topology: None }
     }
 
     /// `hub/info` `maintenance`: what this hub and its NCP support.
@@ -546,22 +529,16 @@ impl Admin {
 
     /// Handle one request; returns frames to send now (a job's frame
     /// follows through [`Ctx::out`]).
-    pub fn handle(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, text: &str) -> Vec<String> {
+    pub fn handle(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head) -> Vec<String> {
         let id = head.id;
-        if head.ty == "network/restore" {
-            return self.restore(ctx, sid, id, text);
-        }
-        let v: J = match serde_json::from_str(text) {
-            Ok(v) => v,
-            Err(e) => return vec![frame(id, Err(ApiError::new("invalid_format", e.to_string())))],
-        };
+        let v = &head.v;
         let r = match head.ty.as_str() {
             "hub/system" => Ok(self.system(&ctx)),
-            "hub/logs" => self.logs(&v),
-            "hub/wifi/set" => self.wifi(&v),
+            "hub/logs" => self.logs(v),
+            "hub/wifi/set" => self.wifi(v),
             "hub/token/rotate" => self.rotate_token(ctx.api),
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
-            "hub/mode/set" => self.mode(&v),
+            "hub/mode/set" => self.mode(v),
             "network/backup/last" => {
                 let r = ctx.ncp.with_store(|s| {
                     let last = s.kv_get(LAST_BACKUP_KEY).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
@@ -571,7 +548,7 @@ impl Admin {
                 });
                 return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
             }
-            "network/topology" => match TopologyReq::from(&v) {
+            "network/topology" => match TopologyReq::from(v) {
                 Ok(q) if !q.refresh => {
                     let r = raw_frame(id, self.topology.as_deref().map_or("null", result_part));
                     return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
@@ -579,7 +556,8 @@ impl Admin {
                 Ok(q) => return self.job_topology(ctx, sid, id, q),
                 Err(e) => Err(e),
             },
-            _ => return self.ncp_job(ctx, sid, head, &v),
+            "network/restore" => return self.restore(ctx, sid, id, v),
+            _ => return self.ncp_job(ctx, sid, head, v),
         };
         vec![frame(id, r)]
     }
@@ -831,59 +809,54 @@ impl Admin {
         })
     }
 
-    fn restore(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, text: &str) -> Vec<String> {
+    /// `network/restore`: `backup` (OCB, its `devices` optional), then any
+    /// number of `devices` batches while `more` is true; the last request
+    /// starts the restore. Each request is one small JSON value: a large
+    /// backup never has to be in RAM at once.
+    fn restore(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, v: &J) -> Vec<String> {
         let fail = |e: ApiError| vec![frame(id, Err(e))];
-        let q: RestoreReq = match params(text) {
-            Ok(q) => q,
+        let more = match flag(v, "more", false) {
+            Ok(m) => m,
             Err(e) => return fail(e),
         };
-        let backup = match (q.backup, q.chunk) {
-            (Some(b), _) => b,
-            (None, Some(chunk)) => {
-                let (offset, total) = (q.offset.unwrap_or(0), q.total.unwrap_or(0));
-                if total == 0 || total > MAX_RESTORE_BYTES {
-                    self.restore_buf = None;
-                    return fail(bad(format!("total: 1–{MAX_RESTORE_BYTES} bytes")));
-                }
-                if offset == 0 {
-                    self.restore_buf = None;
-                    let mut b = String::new();
-                    if b.try_reserve_exact(total).is_err() {
-                        return fail(oom());
-                    }
-                    self.restore_buf = Some((total, b));
-                }
-                let Some((want, buf)) = self.restore_buf.as_mut().filter(|(t, b)| *t == total && b.len() == offset) else {
-                    self.restore_buf = None;
-                    return fail(bad("chunk out of order; start again at offset 0"));
-                };
-                buf.push_str(&chunk);
-                if buf.len() > *want {
-                    self.restore_buf = None;
-                    return fail(bad("more bytes than total"));
-                }
-                if buf.len() < *want {
-                    return vec![frame(id, Ok(json!({"received": buf.len(), "total": total})))];
-                }
-                let (_, buf) = self.restore_buf.take().unwrap();
-                match serde_json::from_str::<ocb::Ocb>(&buf) {
-                    Ok(b) => b,
-                    Err(e) => return fail(ApiError::new("invalid_format", format!("backup: {e}"))),
-                }
+        if let Some(b) = field(v, "backup") {
+            let opts = (flag(v, "allow_ieee_change", true), flag(v, "force", false), flag(v, "skip_backup", false));
+            let (Ok(allow_ieee_change), Ok(force), Ok(skip_backup)) = opts else {
+                return fail(bad("allow_ieee_change, force, skip_backup: true or false"));
+            };
+            self.staged = None;
+            match ocb::to_records(b) {
+                Ok(restore) => self.staged = Some(Staged { restore, allow_ieee_change, force, skip_backup }),
+                Err(e) => return fail(bad(e)),
             }
-            (None, None) => return fail(bad("backup (object) or chunk/offset/total")),
+        } else if let Some(devices) = field(v, "devices") {
+            let Some(st) = self.staged.as_mut() else {
+                return fail(bad("no restore staged: send the backup first"));
+            };
+            if let Err(e) = ocb::add_devices(&mut st.restore, devices) {
+                self.staged = None;
+                return fail(bad(e));
+            }
+        } else {
+            return fail(bad("backup (OCB object) or devices (a batch after the backup)"));
+        }
+        let staged = self.staged.as_ref().map_or(0, |s| s.restore.devices.len());
+        if staged > MAX_RESTORE_DEVICES {
+            self.staged = None;
+            return fail(bad(format!("more than {MAX_RESTORE_DEVICES} devices")));
+        }
+        if more {
+            return vec![frame(id, Ok(json!({"staged_devices": staged})))];
+        }
+        let Some(Staged { restore, allow_ieee_change, force, skip_backup }) = self.staged.take() else {
+            return fail(bad("no restore staged"));
         };
-        let restore = match ocb::to_records(&backup) {
-            Ok(r) => r,
-            Err(e) => return fail(bad(e)),
-        };
-        drop(backup);
         let ncp = ctx.ncp.clone();
         if !ncp.ncp_has(caps::BACKUP_RESTORE) {
             return fail(ApiError::new("unsupported", "the NCP has no BACKUP_RESTORE"));
         }
         let st = ncp.status();
-        if st.network_state != 0 && !q.force {
+        if st.network_state != 0 && !force {
             let pan = st.network.map_or(String::from("?"), |n| format!("0x{:04X}", n.pan_id));
             return fail(bad(format!(
                 "the NCP runs a network (PAN {pan}); set force to replace it (it is backed up first unless skip_backup)"
@@ -893,11 +866,10 @@ impl Admin {
         let source = self.source.clone();
         let now_s = ctx.now_s;
         let opts = RestoreOptions {
-            allow_ieee_change: q.allow_ieee_change,
+            allow_ieee_change,
             nwk_margin: 10_000,
             aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN },
         };
-        let skip_backup = q.skip_backup;
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
             let mut previous = false;
             if ncp.status().network_state == 2 && !skip_backup {

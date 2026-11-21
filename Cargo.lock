@@ -1100,7 +1100,6 @@ dependencies = [
  "hub-ncp",
  "log",
  "miniz_oxide",
- "serde",
  "serde_json",
  "zdef",
  "zigbee-zrhp",
