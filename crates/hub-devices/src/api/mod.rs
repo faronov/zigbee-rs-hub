@@ -39,6 +39,8 @@ pub struct ApiServer {
     sessions: BTreeMap<SessionId, Session>,
     next_session: SessionId,
     seq: u64,
+    /// Fields the application adds to `hub/info` (coordinator IEEE, NCP).
+    info: serde_json::Map<String, J>,
 }
 
 fn b64(s: &str) -> Result<Vec<u8>, ApiError> {
@@ -85,6 +87,7 @@ impl ApiServer {
             sessions: BTreeMap::new(),
             next_session: 1,
             seq: 0,
+            info: serde_json::Map::new(),
         }
     }
 
@@ -106,6 +109,15 @@ impl ApiServer {
     /// A closed connection.
     pub fn disconnect(&mut self, s: SessionId) {
         self.sessions.remove(&s);
+    }
+
+    /// Sets a field of the `hub/info` result (`null` removes it).
+    pub fn set_info(&mut self, key: &str, value: J) {
+        if value.is_null() {
+            self.info.remove(key);
+        } else {
+            self.info.insert(key.into(), value);
+        }
     }
 
     /// The current event sequence number.
@@ -272,6 +284,20 @@ impl ApiServer {
         use Request as R;
         Ok(match req {
             R::Subscribe { .. } | R::Unsubscribe { .. } | R::EntitiesCommand { .. } => J::Null,
+            R::HubInfo => {
+                let mut r = json!({
+                    "name": self.hub_name,
+                    "api_version": API_VERSION,
+                    "features": hub.features,
+                    "seq": self.seq,
+                    "devices": hub.devices().count(),
+                    "entities": hub.devices().map(|d| d.entities.iter().filter(|e| !e.orphaned).count()).sum::<usize>(),
+                });
+                if let Some(o) = r.as_object_mut() {
+                    o.extend(self.info.clone());
+                }
+                r
+            }
             R::PermitJoin {
                 duration_s,
                 target,

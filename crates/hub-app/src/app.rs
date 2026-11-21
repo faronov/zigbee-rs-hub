@@ -378,6 +378,9 @@ impl Runner {
     fn register(&mut self) {
         if let Some(info) = self.ncp.client().session().and_then(|s| s.info.clone()) {
             self.engine.cfg.coordinator_ieee = u64::from_le_bytes(info.ieee_active);
+            self.api.set_info("coordinator_ieee", format!("{:016x}", self.engine.cfg.coordinator_ieee).into());
+            self.api.set_info("ncp_board", info.board.clone().into());
+            self.api.set_info("ncp_product", info.product.clone().into());
         }
         let known = self.ncp.store_state().endpoints.get(&self.cfg.endpoint.ep) == Some(&self.cfg.endpoint);
         let result = if known { Ok(()) } else { self.ncp.add_endpoint(self.cfg.endpoint.clone()) };

@@ -2077,6 +2077,7 @@ code feels familiar:
 
 | Type | Parameters | Result |
 |---|---|---|
+| `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`; once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
 | `devices/list` | — | device records (4.1) |
 | `devices/get` | `id` | device record + endpoints + resolution summary |
