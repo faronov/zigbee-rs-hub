@@ -13,7 +13,6 @@ use base64::Engine as _;
 use serde_json::{Value as J, json};
 
 use crate::device::{DeviceKind, Millis};
-use crate::gp::types::GpRequest;
 use crate::hub::{ApiError, Hub, HubEvent};
 use crate::model::{Binding, Definition, LayerSource};
 use crate::resolve::{Catalog, MemoryCatalog, ResolveInput, resolve};
@@ -291,6 +290,7 @@ impl ApiServer {
         }
         if topics.iter().any(|t| t == "gp") {
             snap["bindings"] = J::Array(hub.list_bindings(None, None));
+            snap["gp_commissioning"] = hub.gp_commissioning_status(now);
         }
         if topics.iter().any(|t| t == "network") {
             snap["network"] = network_info(hub, now).unwrap_or(J::Null);
@@ -340,7 +340,7 @@ impl ApiServer {
                     .permit_join(duration_s, nwk)
                     .map_err(|e| ApiError::new("busy", e.to_string()))?;
                 if include_gp {
-                    hub.gp_commissioning_open(u16::from(duration_s), true, false)?;
+                    hub.gp_commissioning_open(u16::from(duration_s), true, false, now)?;
                 }
                 J::Null
             }
@@ -534,18 +534,31 @@ impl ApiServer {
                 involve_proxies,
                 exit_on_first_pairing,
             } => {
-                hub.gp_commissioning_open(duration_s, involve_proxies, exit_on_first_pairing)?;
+                hub.gp_commissioning_open(duration_s, involve_proxies, exit_on_first_pairing, now)?;
                 J::Null
             }
             R::GpCommissioningClose => {
-                hub.gp_commissioning_close()?;
+                hub.gp_commissioning_close(now)?;
                 J::Null
             }
+            R::GpCommissioningStatus => hub.gp_commissioning_status(now),
             R::GpDevicesList => hub
                 .devices()
                 .filter(|d| d.gp.is_some())
                 .map(|d| {
                     let mut r = d.record();
+                    if let Some(g) = &d.fp.gp {
+                        let mut cmds = g.commands.clone();
+                        cmds.extend(d.attrs.map.keys().filter_map(|(ep, c, a, _)| {
+                            (*ep == crate::gp::GP_ENDPOINT
+                                && *c == crate::gp::generic::SEEN_COMMANDS)
+                                .then_some(*a as u8)
+                        }));
+                        cmds.sort_unstable();
+                        cmds.dedup();
+                        r["device_id"] = g.device_id.into();
+                        r["commands"] = cmds.into();
+                    }
                     if let Some(g) = &d.gp {
                         r["security_level"] = g.security_level.into();
                         r["frame_counter"] = g.frame_counter.into();
@@ -566,21 +579,8 @@ impl ApiServer {
             R::GpConfig {
                 security_level,
                 communication_mode,
-            } => {
-                let req = GpRequest::SinkConfig {
-                    mode: 1,
-                    communication_mode,
-                    group: hub.cfg.gp_group,
-                    exit_mode: 0x02,
-                    window_s: 180,
-                    security_level,
-                    groupcast_radius: 0,
-                };
-                hub.transport
-                    .gp_request(req)
-                    .map_err(|e| ApiError::new("busy", e.to_string()))?;
-                json!({"security_level": security_level, "warning": (security_level > 0).then_some("GPDs below this level (e.g. FlowerX GP) are rejected")})
-            }
+            } => hub.gp_set_config(security_level, communication_mode)?,
+            R::GpConfigGet => hub.gp_config(),
             R::GpBindingsList { gpd, target } => {
                 J::Array(hub.list_bindings(gpd.as_deref(), target.as_deref()))
             }

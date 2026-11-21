@@ -6,11 +6,11 @@ pub mod bindings;
 pub mod generic;
 pub mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
-use serde_json::json;
+use serde_json::{Value as J, json};
 
-use crate::device::{Device, DeviceKind, GpState, Millis};
+use crate::device::{Device, DeviceKind, GpState, Millis, ts};
 use crate::expr::Value;
 use crate::fingerprint::{EndpointFp, GpFingerprint};
 use crate::hub::{ApiError, DKey, DevEnv, Hub, HubEvent, eval_trigger, set_value};
@@ -42,6 +42,97 @@ pub fn sink_drop_reason(r: u8) -> &'static str {
     }
 }
 
+/// GPDs in bidirectional commissioning kept for `gp/commissioning/status`.
+pub const MAX_PENDING: usize = 8;
+/// Recent commissioning failures kept for `gp/commissioning/status`.
+pub const MAX_FAILED: usize = 8;
+/// A pending GPD without a commissioning frame for this long is dropped.
+pub const PENDING_TTL_MS: Millis = 60_000;
+
+/// A GPD in bidirectional commissioning (`gp/pending`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpPending {
+    /// GPD.
+    pub gpd: GpdId,
+    /// Last commissioning command (0xE0 / 0xE3).
+    pub command_id: u8,
+    /// Last `EVT_GP_FRAME` result.
+    pub result: u8,
+    /// First commissioning frame.
+    pub since: Millis,
+    /// Last commissioning frame.
+    pub last: Millis,
+}
+
+/// A commissioning failure (`gp/failed`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpFailure {
+    /// GPD.
+    pub gpd: GpdId,
+    /// `SinkDrop` reason code.
+    pub reason: u8,
+    /// When.
+    pub at: Millis,
+}
+
+/// The sink's commissioning window as the hub knows it (its own requests
+/// and `EVT_GP_COMMISSIONING`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpWindow {
+    /// Open.
+    pub open: bool,
+    /// Closes at (none: until closed).
+    pub deadline: Option<Millis>,
+    /// Proxies involved (last request).
+    pub involve_proxies: bool,
+    /// Exit on the first pairing (last request).
+    pub exit_on_first_pairing: bool,
+    /// Last exit reason: 0 none, 1 explicit, 2 first pairing, 3 timeout.
+    pub exit_reason: u8,
+}
+
+impl Default for GpWindow {
+    fn default() -> Self {
+        Self {
+            open: false,
+            deadline: None,
+            involve_proxies: true,
+            exit_on_first_pairing: false,
+            exit_reason: 0,
+        }
+    }
+}
+
+/// Sink configuration last written with `GP_SINK_CONFIG` (`gp/config`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpSinkSettings {
+    /// `gpsSecurityLevel`.
+    pub security_level: u8,
+    /// Communication mode.
+    pub communication_mode: u8,
+    /// Written through the API since the hub started (else the default).
+    pub from_api: bool,
+}
+
+impl Default for GpSinkSettings {
+    fn default() -> Self {
+        Self {
+            security_level: 0,
+            communication_mode: 2,
+            from_api: false,
+        }
+    }
+}
+
+fn exit_reason_name(r: u8) -> &'static str {
+    match r {
+        1 => "explicit",
+        2 => "first_pairing",
+        3 => "timeout",
+        _ => "none",
+    }
+}
+
 /// GP state of the hub.
 #[derive(Debug, Default)]
 pub struct GpHubState {
@@ -55,8 +146,14 @@ pub struct GpHubState {
     pub remote: BTreeMap<u8, bindings::RemoteWait>,
     /// Next binding ID.
     pub next_id: u32,
-    /// Commissioning window open.
-    pub commissioning: bool,
+    /// Commissioning window.
+    pub window: GpWindow,
+    /// GPDs in bidirectional commissioning (≤ [`MAX_PENDING`]).
+    pub pending: VecDeque<GpPending>,
+    /// Recent failures, oldest first (≤ [`MAX_FAILED`]).
+    pub failed: VecDeque<GpFailure>,
+    /// Sink configuration.
+    pub sink: GpSinkSettings,
 }
 
 fn fp_from_payload(
@@ -110,28 +207,45 @@ impl<T: ZigbeeTransport> Hub<T> {
                 window_s,
                 exit_reason,
             } => {
-                self.gp.commissioning = state == 1;
-                let reason = match exit_reason {
-                    1 => "explicit",
-                    2 => "first_pairing",
-                    3 => "timeout",
-                    _ => "none",
-                };
-                self.emit(HubEvent::Gp {
-                    kind: "gp/commissioning".into(),
-                    body: json!({"state": if state == 1 { "open" } else { "closed" }, "remaining_s": window_s, "exit_reason": reason}),
-                });
+                let w = &mut self.gp.window;
+                w.open = state == 1;
+                if w.open {
+                    w.deadline = (window_s != 0 && window_s != 0xFFFF)
+                        .then(|| now + Millis::from(window_s) * 1000);
+                    w.exit_reason = 0;
+                } else {
+                    w.deadline = None;
+                    w.exit_reason = exit_reason;
+                }
+                self.gp_window_event(now);
             }
             GpEvent::Commissioned {
                 gpd_id,
                 device_id,
                 flags,
                 record,
-            } => self.gp_commissioned(gpd_id, device_id, flags, record, now),
+            } => {
+                self.gp.pending.retain(|p| p.gpd != gpd_id);
+                self.gp_commissioned(gpd_id, device_id, flags, record, now);
+                if self.gp.window.open && self.gp.window.exit_on_first_pairing {
+                    // The sink leaves on the first pairing (an NCP need not
+                    // report it).
+                    self.gp_window_closed(2, now);
+                }
+            }
             GpEvent::CommissioningFailed { gpd_id, reason } => {
+                self.gp.pending.retain(|p| p.gpd != gpd_id);
+                if self.gp.failed.len() >= MAX_FAILED {
+                    self.gp.failed.pop_front();
+                }
+                self.gp.failed.push_back(GpFailure {
+                    gpd: gpd_id,
+                    reason,
+                    at: now,
+                });
                 self.emit(HubEvent::Gp {
                     kind: "gp/failed".into(),
-                    body: json!({"gpd": gpd_id.device_id(), "reason": sink_drop_reason(reason)}),
+                    body: json!({"gpd": gpd_id.device_id(), "reason": sink_drop_reason(reason), "reason_code": reason, "time": ts(now)}),
                 });
             }
             GpEvent::Decommissioned { gpd_id } => {
@@ -283,9 +397,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 f.result,
                 frame_result::COMMISSIONING_REPLY_SENT | frame_result::COMMISSIONING_STEP
             ) {
+                self.gp_pending(&f, now);
                 self.emit(HubEvent::Gp {
                     kind: "gp/pending".into(),
-                    body: json!({"gpd": f.gpd_id.device_id(), "command_id": f.command_id, "result": f.result}),
+                    body: json!({"gpd": f.gpd_id.device_id(), "command_id": f.command_id, "result": f.result, "time": ts(now)}),
                 });
             }
             return;
@@ -562,6 +677,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         duration_s: u16,
         involve_proxies: bool,
         exit_on_first_pairing: bool,
+        now: Millis,
     ) -> Result<(), ApiError> {
         if duration_s > 600 {
             return Err(ApiError::new("invalid_value", "duration_s must be ≤ 600"));
@@ -574,11 +690,21 @@ impl<T: ZigbeeTransport> Hub<T> {
                 window_s: duration_s,
             })
             .map_err(|e| ApiError::new("busy", e.to_string()))?;
+        // The hub keeps its own deadline: an NCP image need not report
+        // `EVT_GP_COMMISSIONING` (as for permit join, 14.2).
+        self.gp.window = GpWindow {
+            open: true,
+            deadline: (duration_s > 0).then(|| now + Millis::from(duration_s) * 1000),
+            involve_proxies,
+            exit_on_first_pairing,
+            exit_reason: 0,
+        };
+        self.gp_window_event(now);
         Ok(())
     }
 
     /// `gp/commissioning/close`.
-    pub fn gp_commissioning_close(&mut self) -> Result<(), ApiError> {
+    pub fn gp_commissioning_close(&mut self, now: Millis) -> Result<(), ApiError> {
         self.transport
             .gp_request(GpRequest::SinkCommissioning {
                 action: 0,
@@ -586,6 +712,150 @@ impl<T: ZigbeeTransport> Hub<T> {
                 window_s: 0,
             })
             .map_err(|e| ApiError::new("busy", e.to_string()))?;
+        self.gp_window_closed(1, now);
         Ok(())
+    }
+
+    fn gp_window_closed(&mut self, reason: u8, now: Millis) {
+        let w = &mut self.gp.window;
+        w.open = false;
+        w.deadline = None;
+        w.exit_reason = reason;
+        self.gp_window_event(now);
+    }
+
+    fn gp_window_json(&self, now: Millis) -> J {
+        let w = &self.gp.window;
+        let remaining = match (w.open, w.deadline) {
+            (false, _) => json!(0),
+            (true, Some(d)) => json!(d.saturating_sub(now).div_ceil(1000)),
+            (true, None) => J::Null,
+        };
+        json!({
+            "open": w.open,
+            "state": if w.open { "open" } else { "closed" },
+            "remaining_s": remaining,
+            "involve_proxies": w.involve_proxies,
+            "exit_on_first_pairing": w.exit_on_first_pairing,
+            "exit_reason": exit_reason_name(w.exit_reason),
+        })
+    }
+
+    fn gp_window_event(&mut self, now: Millis) {
+        let body = self.gp_window_json(now);
+        self.emit(HubEvent::Gp {
+            kind: "gp/commissioning".into(),
+            body,
+        });
+    }
+
+    fn gp_pending(&mut self, f: &GpFrame, now: Millis) {
+        let p = &mut self.gp.pending;
+        p.retain(|x| now.saturating_sub(x.last) <= PENDING_TTL_MS);
+        if let Some(x) = p.iter_mut().find(|x| x.gpd == f.gpd_id) {
+            x.command_id = f.command_id;
+            x.result = f.result;
+            x.last = now;
+            return;
+        }
+        if p.len() >= MAX_PENDING {
+            p.pop_front();
+        }
+        p.push_back(GpPending {
+            gpd: f.gpd_id,
+            command_id: f.command_id,
+            result: f.result,
+            since: now,
+            last: now,
+        });
+    }
+
+    /// Window expiry and pending clean-up (called from `tick`).
+    pub(crate) fn gp_window_tick(&mut self, now: Millis) {
+        if self.gp.window.open && self.gp.window.deadline.is_some_and(|d| now >= d) {
+            self.gp_window_closed(3, now);
+        }
+        self.gp
+            .pending
+            .retain(|x| now.saturating_sub(x.last) <= PENDING_TTL_MS);
+    }
+
+    /// `gp/commissioning/status`: the window, the GPDs in bidirectional
+    /// commissioning and the recent failures (newest first).
+    pub fn gp_commissioning_status(&self, now: Millis) -> J {
+        let mut r = self.gp_window_json(now);
+        r["pending"] = self
+            .gp
+            .pending
+            .iter()
+            .filter(|x| now.saturating_sub(x.last) <= PENDING_TTL_MS)
+            .map(|x| {
+                json!({"gpd": x.gpd.device_id(), "command_id": x.command_id, "result": x.result, "since": ts(x.since), "time": ts(x.last)})
+            })
+            .collect();
+        r["failed"] = self
+            .gp
+            .failed
+            .iter()
+            .rev()
+            .map(|x| {
+                json!({"gpd": x.gpd.device_id(), "reason": sink_drop_reason(x.reason), "reason_code": x.reason, "time": ts(x.at)})
+            })
+            .collect();
+        r
+    }
+
+    /// `gp/config/get` (and the result of `gp/config`).
+    pub fn gp_config(&self) -> J {
+        let s = &self.gp.sink;
+        json!({
+            "security_level": s.security_level,
+            "communication_mode": s.communication_mode,
+            "group": self.cfg.gp_group,
+            "source": if s.from_api { "api" } else { "default" },
+            "warning": (s.security_level > 0).then_some("GPDs below this level (e.g. FlowerX GP) are rejected"),
+        })
+    }
+
+    /// `gp/config`: writes `GP_SINK_CONFIG`; an absent field keeps its
+    /// current value.
+    pub fn gp_set_config(
+        &mut self,
+        security_level: Option<u8>,
+        communication_mode: Option<u8>,
+    ) -> Result<J, ApiError> {
+        let level = security_level.unwrap_or(self.gp.sink.security_level);
+        let mode = communication_mode.unwrap_or(self.gp.sink.communication_mode);
+        if level > 3 {
+            return Err(ApiError::new("invalid_value", "security_level must be 0–3"));
+        }
+        if mode > 3 {
+            return Err(ApiError::new(
+                "invalid_value",
+                "communication_mode must be 0–3",
+            ));
+        }
+        self.transport
+            .gp_request(GpRequest::SinkConfig {
+                mode: 1,
+                communication_mode: mode,
+                group: self.cfg.gp_group,
+                exit_mode: 0x02,
+                window_s: 180,
+                security_level: level,
+                groupcast_radius: 0,
+            })
+            .map_err(|e| ApiError::new("busy", e.to_string()))?;
+        self.gp.sink = GpSinkSettings {
+            security_level: level,
+            communication_mode: mode,
+            from_api: true,
+        };
+        let body = self.gp_config();
+        self.emit(HubEvent::Gp {
+            kind: "gp/config".into(),
+            body: body.clone(),
+        });
+        Ok(body)
     }
 }

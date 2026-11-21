@@ -4,6 +4,7 @@
 use serde_json::{Value as J, json};
 
 use super::*;
+use crate::gp::types::GpRequest;
 use crate::scenarios::{T0, golden_cbor, hub_with};
 use crate::testutil::sim::{Sim, SimDevice};
 use crate::transport::MockTransport;
@@ -417,6 +418,17 @@ fn gp_api_bindings_and_config() {
         json!({"type": "gp/bindings/list", "target": "zb:0017880100aabbcc"}),
     );
     assert_eq!(r["result"].as_array().unwrap().len(), 1);
+    // The web UI's update: a derived payload carries no bytes.
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        31,
+        json!({"type": "gp/bindings/update", "binding": 1, "executor": "hub", "trigger": {"command_id": 0x69, "contact_mask": 1},
+               "action": {"cluster": 8, "command": 6, "payload": {"mode": "derived"}}}),
+    );
+    assert_eq!(r["result"]["action"]["payload"], json!({"mode": "derived"}));
+    assert_eq!(r["result"]["trigger"]["contact_mask"], 1);
     let r = call(
         &mut api,
         &mut hub,
@@ -460,6 +472,258 @@ fn gp_api_bindings_and_config() {
     assert_eq!(r["error"]["code"], "invalid_value");
 }
 
+fn gp_frame(gpd: u32, cmd: u8, result: u8) -> crate::gp::types::GpEvent {
+    crate::gp::types::GpEvent::Frame(crate::gp::types::GpFrame {
+        origin: 1,
+        result,
+        gpd_id: crate::gp::types::GpdId::SrcId(gpd),
+        device_id: 0x02,
+        command_id: cmd,
+        frame_counter: 1,
+        security_level: 0,
+        key_type: 0,
+        flags: 0,
+        proxy_nwk: 0,
+        gpp_gpd_link: 0,
+        rssi: -50,
+        lqi: 200,
+        payload: Vec::new(),
+    })
+}
+
+fn gp_topics(api: &mut ApiServer, hub: &mut Hub<MockTransport>) -> Vec<J> {
+    api.pump(hub)
+        .iter()
+        .map(|(_, t)| serde_json::from_str::<J>(t).unwrap()["event"].clone())
+        .collect()
+}
+
+#[test]
+fn gp_api_commissioning_status_and_config() {
+    use crate::gp::types::{GpEvent, GpSinkRecord, GpdId, frame_result};
+    let mut hub = hub_with(&["gp-zigbee-rs-switch"]);
+    let mut api = ApiServer::new("hub", "t");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type": "auth", "token": "t"}"#, T0);
+    let out = parse(&api.handle_text(
+        &mut hub,
+        s,
+        r#"{"id": 1, "type": "subscribe", "topics": ["gp"]}"#,
+        T0,
+    ));
+    assert_eq!(out[1]["event"]["gp_commissioning"]["open"], false);
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        2,
+        json!({"type": "gp/commissioning/status"}),
+    );
+    assert_eq!(
+        r["result"],
+        json!({"open": false, "state": "closed", "remaining_s": 0, "involve_proxies": true,
+               "exit_on_first_pairing": false, "exit_reason": "none", "pending": [], "failed": []})
+    );
+
+    // Open (at T0 + 10 s): the hub keeps the window itself and reports it.
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        3,
+        json!({"type": "gp/commissioning/open", "duration_s": 120, "involve_proxies": false, "exit_on_first_pairing": true}),
+    );
+    assert_eq!(r["success"], true);
+    let ev = gp_topics(&mut api, &mut hub);
+    assert_eq!(ev[0]["topic"], "gp/commissioning");
+    assert_eq!(
+        (&ev[0]["state"], &ev[0]["remaining_s"]),
+        (&json!("open"), &json!(120))
+    );
+    let now = T0 + 10_000;
+
+    // A bidirectional GPD, then failures (bounded, newest first).
+    hub.on_gp_event(
+        gp_frame(0x0000_00A1, 0xE0, frame_result::COMMISSIONING_REPLY_SENT),
+        now + 1_000,
+    );
+    hub.on_gp_event(
+        gp_frame(0x0000_00A1, 0xE3, frame_result::COMMISSIONING_STEP),
+        now + 2_000,
+    );
+    for i in 0..10u32 {
+        hub.on_gp_event(
+            GpEvent::CommissioningFailed {
+                gpd_id: GpdId::SrcId(0xB0 + i),
+                reason: 2,
+            },
+            now + 3_000 + u64::from(i),
+        );
+    }
+    let ev = gp_topics(&mut api, &mut hub);
+    assert!(
+        ev.iter()
+            .any(|e| e["topic"] == "gp/pending" && e["gpd"] == "gp:000000a1" && e["time"].is_f64())
+    );
+    let failed = ev.iter().find(|e| e["topic"] == "gp/failed").unwrap();
+    assert_eq!(
+        (&failed["reason"], &failed["reason_code"]),
+        (&json!("SecurityPolicy"), &json!(2))
+    );
+    let st = hub.gp_commissioning_status(now + 20_000);
+    assert_eq!(st["open"], true);
+    assert_eq!(st["remaining_s"], 100);
+    assert_eq!(
+        (
+            st["involve_proxies"].clone(),
+            st["exit_on_first_pairing"].clone()
+        ),
+        (json!(false), json!(true))
+    );
+    assert_eq!(st["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(st["pending"][0]["command_id"], 0xE3);
+    assert_eq!(st["pending"][0]["since"], crate::device::ts(now + 1_000));
+    let f = st["failed"].as_array().unwrap();
+    assert_eq!(f.len(), crate::gp::MAX_FAILED);
+    assert_eq!(f[0]["gpd"], "gp:000000b9");
+    assert_eq!(f[7]["gpd"], "gp:000000b2");
+
+    // The pending GPD pairs: it leaves `pending`, and the window closes on
+    // the first pairing.
+    let gpd = GpdId::SrcId(0xA1);
+    hub.on_gp_event(
+        GpEvent::Commissioned {
+            gpd_id: gpd,
+            device_id: 2,
+            flags: 1,
+            record: GpSinkRecord {
+                gpd_id: gpd,
+                device_id: 2,
+                communication_mode: 2,
+                group: 0x0B84,
+                assigned_alias: 0xFFFF,
+                flags: 0,
+                security_level: 0,
+                key_type: 0,
+                key: None,
+                frame_counter: 1,
+                groupcast_radius: 0,
+            },
+        },
+        now + 30_000,
+    );
+    let st = hub.gp_commissioning_status(now + 30_000);
+    assert_eq!(
+        (
+            &st["open"],
+            &st["exit_reason"],
+            st["pending"].as_array().unwrap().len()
+        ),
+        (&json!(false), &json!("first_pairing"), 0)
+    );
+    let r = call(&mut api, &mut hub, s, 4, json!({"type": "gp/devices/list"}));
+    assert_eq!(r["result"][0]["device_id"], 2);
+    assert!(r["result"][0]["commands"].is_array());
+
+    // The window expires on the hub's deadline; stale pending GPDs go.
+    hub.gp_commissioning_open(60, true, false, now + 40_000)
+        .unwrap();
+    hub.on_gp_event(
+        gp_frame(0x0000_00C1, 0xE0, frame_result::COMMISSIONING_REPLY_SENT),
+        now + 41_000,
+    );
+    gp_topics(&mut api, &mut hub);
+    hub.tick(now + 100_000);
+    let ev = gp_topics(&mut api, &mut hub);
+    let closed = ev
+        .iter()
+        .find(|e| e["topic"] == "gp/commissioning")
+        .unwrap();
+    assert_eq!(
+        (&closed["state"], &closed["exit_reason"]),
+        (&json!("closed"), &json!("timeout"))
+    );
+    hub.tick(now + 102_000);
+    assert_eq!(
+        hub.gp_commissioning_status(now + 102_000)["pending"],
+        json!([])
+    );
+
+    // An NCP-reported window without a deadline.
+    hub.on_gp_event(
+        GpEvent::Commissioning {
+            state: 1,
+            window_s: 0xFFFF,
+            exit_reason: 0,
+        },
+        now + 110_000,
+    );
+    assert_eq!(
+        hub.gp_commissioning_status(now + 110_000)["remaining_s"],
+        J::Null
+    );
+
+    // gp/config: readable, absent fields keep their values, validated.
+    let r = call(&mut api, &mut hub, s, 5, json!({"type": "gp/config/get"}));
+    assert_eq!(
+        r["result"],
+        json!({"security_level": 0, "communication_mode": 2, "group": 0x0B84, "source": "default", "warning": null})
+    );
+    hub.transport.take();
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        6,
+        json!({"type": "gp/config", "security_level": 1}),
+    );
+    assert_eq!(
+        (&r["result"]["communication_mode"], &r["result"]["source"]),
+        (&json!(2), &json!("api"))
+    );
+    assert!(r["result"]["warning"].is_string());
+    assert!(hub.transport.take().iter().any(|x| matches!(
+        x,
+        crate::transport::Sent::Gp(
+            GpRequest::SinkConfig {
+                security_level: 1,
+                communication_mode: 2,
+                ..
+            },
+            _
+        )
+    )));
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        7,
+        json!({"type": "gp/config", "communication_mode": 1}),
+    );
+    assert_eq!(r["result"]["security_level"], 1);
+    let r = call(&mut api, &mut hub, s, 8, json!({"type": "gp/config/get"}));
+    assert_eq!(
+        (
+            &r["result"]["security_level"],
+            &r["result"]["communication_mode"]
+        ),
+        (&json!(1), &json!(1))
+    );
+    assert!(
+        gp_topics(&mut api, &mut hub)
+            .iter()
+            .any(|e| e["topic"] == "gp/config" && e["communication_mode"] == 1)
+    );
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        9,
+        json!({"type": "gp/config", "security_level": 4}),
+    );
+    assert_eq!(r["error"]["code"], "invalid_value");
+}
+
 #[test]
 fn request_model_round_trips() {
     for text in [
@@ -468,6 +732,9 @@ fn request_model_round_trips() {
         r#"{"id":3,"type":"gp/commissioning/open","duration_s":180,"involve_proxies":true,"exit_on_first_pairing":false}"#,
         r#"{"id":4,"type":"subscribe","topics":["devices","entities","events","gp"]}"#,
         r#"{"id":5,"type":"devices/remove","device":"zb:00158d0001a2b3c4","force":true}"#,
+        r#"{"id":7,"type":"gp/commissioning/status"}"#,
+        r#"{"id":8,"type":"gp/config/get"}"#,
+        r#"{"id":9,"type":"gp/config","security_level":1}"#,
         r#"{"id":6,"type":"devices/remove"}"#,
     ] {
         let parsed: Result<Envelope, _> = serde_json::from_str(text);

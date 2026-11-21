@@ -1945,6 +1945,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.tick_device(&id, now);
         }
         self.gp_tick(now);
+        self.gp_window_tick(now);
     }
 
     fn fail_purpose(&mut self, id: &str, purpose: &Purpose, err: ApiError, now: Millis) {
