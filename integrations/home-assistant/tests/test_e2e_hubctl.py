@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 import os
+from pathlib import Path
 import socket
 
 import pytest
@@ -20,7 +21,12 @@ from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, STATE_OFF, STA
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
+from .fake_hub import ReleaseServer
+
 HUBCTL = os.environ.get("HUBCTL")
+# zdefc builds the test catalog release (next to hubctl by default).
+ZDEFC = os.environ.get("ZDEFC") or (str(Path(HUBCTL).with_name("zdefc")) if HUBCTL else None)
+REPO = Path(__file__).resolve().parents[3]
 SIM_COORDINATOR_IEEE = "020100000000515a"
 
 pytestmark = pytest.mark.skipif(not HUBCTL, reason="HUBCTL is not set")
@@ -35,8 +41,9 @@ def _free_port() -> int:
 class Hubctl:
     """`hubctl --sim serve` as a subprocess."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, *extra: str) -> None:
         self.port = port
+        self.extra = extra
         self.proc: asyncio.subprocess.Process | None = None
 
     async def start(self) -> None:
@@ -49,6 +56,7 @@ class Hubctl:
             f"127.0.0.1:{self.port}",
             "--token",
             "e2e",
+            *self.extra,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -124,3 +132,83 @@ async def test_hubctl_sim(hass: HomeAssistant, hubctl: Hubctl) -> None:
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def _run(*args: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+    )
+    out, _ = await proc.communicate()
+    assert proc.returncode == 0, out.decode()
+    return out.decode()
+
+
+@pytest.mark.skipif(not ZDEFC or not Path(ZDEFC).exists(), reason="no zdefc binary")
+async def test_hubctl_catalog_update(hass: HomeAssistant, tmp_path: Path) -> None:
+    """A signed release built by zdefc, served over HTTP, installed through HA."""
+    assert ZDEFC
+    key = tmp_path / "test.key"
+    await _run(ZDEFC, "bank", "keygen", "-o", str(key))
+    out = await _run(ZDEFC, "bank", "pubkey", "--key", str(key))
+    pubkey = next(line.split()[-1] for line in out.splitlines() if line.startswith("public key"))
+    rel = tmp_path / "release"
+    await _run(
+        ZDEFC,
+        "bank",
+        "build",
+        "-o",
+        str(rel),
+        "--key",
+        str(key),
+        "--date",
+        "20261121",
+        "--serial",
+        "3",
+        "--name",
+        "bank-4m.zdb",
+        str(REPO / "definitions" / "examples"),
+    )
+    release = ReleaseServer({p.name: p.read_bytes() for p in rel.iterdir() if p.is_file()})
+    await release.start()
+    hub = Hubctl(_free_port(), "--catalog-key", pubkey)
+    await hub.start()
+    try:
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="hubctl",
+            data={
+                CONF_HOST: "127.0.0.1",
+                CONF_PORT: hub.port,
+                CONF_TOKEN: "e2e",
+                CONF_PATH: "/api",
+            },
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        sensor = er.async_get(hass).async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_catalog_version"
+        )
+        assert sensor is not None
+        assert hass.states.get(sensor).state == "none"
+
+        await entry.runtime_data.async_request("catalog/config", base_url=release.base_url)
+        await hass.services.async_call(
+            DOMAIN, "update_catalog", {"config_entry_id": entry.entry_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+        assert release.requests[:2] == ["manifest.cose", "bank-4m.zdb"]
+        assert hass.states.get(sensor).state == "20261121.3"
+        status = await entry.runtime_data.async_request("catalog/status")
+        assert status["installed"]["definitions"] > 0
+        assert status["wants"] == {"bank": None, "web": None}
+
+        # A second run: the same manifest, nothing to install.
+        await hass.services.async_call(DOMAIN, "update_catalog", {}, blocking=True)
+        assert release.requests.count("bank-4m.zdb") == 1
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+    finally:
+        await hub.stop()
+        await release.stop()

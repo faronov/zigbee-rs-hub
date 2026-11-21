@@ -28,6 +28,7 @@ async def async_get_config_entry_diagnostics(
             "devices": list(hub.devices.values()),
             "entities": list(hub.entities.values()),
             "states": list(hub.states.values()),
+            "catalog": hub.catalog.as_dict(),
         },
         TO_REDACT,
     )

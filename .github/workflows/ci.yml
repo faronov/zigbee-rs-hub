@@ -38,9 +38,9 @@ jobs:
       - run: pip install -r requirements-test.txt
       - run: ruff check .
       - run: ruff format --check .
-      - name: Build hubctl (the end-to-end test runs its simulated hub)
+      - name: Build hubctl and zdefc (the end-to-end tests run its simulated hub and sign a test catalog)
         working-directory: .
-        run: cargo build -p hubctl
+        run: cargo build -p hubctl -p zdefc
       - name: pytest
         run: HUBCTL="$GITHUB_WORKSPACE/target/debug/hubctl" python -m pytest -v
 

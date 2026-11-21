@@ -145,6 +145,38 @@
       },
       "permit_join_until": {
         "name": "Permit join ends"
+      },
+      "catalog_version": {
+        "name": "Catalog version",
+        "state_attributes": {
+          "generation": {
+            "name": "Generation"
+          },
+          "definitions": {
+            "name": "Definitions"
+          },
+          "manifest_version": {
+            "name": "Manifest version"
+          },
+          "fetched_definitions": {
+            "name": "Fetched definitions"
+          },
+          "missing_definitions": {
+            "name": "Devices without a definition"
+          },
+          "auto_update": {
+            "name": "Automatic updates"
+          },
+          "auto_fetch": {
+            "name": "Automatic definition fetch"
+          },
+          "last_check": {
+            "name": "Last check"
+          },
+          "last_error": {
+            "name": "Last error"
+          }
+        }
       }
     }
   },
@@ -154,6 +186,9 @@
     },
     "no_hub": {
       "message": "No zigbee-rs hub is loaded."
+    },
+    "no_catalog": {
+      "message": "No loaded zigbee-rs hub has a definitions catalog."
     }
   },
   "services": {
@@ -196,6 +231,24 @@
         "device_id": {
           "name": "Device",
           "description": "The device."
+        }
+      }
+    },
+    "update_catalog": {
+      "name": "Update definitions catalog",
+      "description": "Downloads the signed definitions catalog from the hub's mirror, uploads a newer bank and web tools to the hub, and fetches definitions for devices that resolve to generic entities only.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Hub",
+          "description": "The hub; all hubs when empty."
+        },
+        "force": {
+          "name": "Force",
+          "description": "Install the bank even if the hub's anti-rollback check refuses it."
+        },
+        "base_url": {
+          "name": "Mirror URL",
+          "description": "The catalog mirror for this run instead of the one set on the hub (base URL of a release, e.g. …/latest)."
         }
       }
     }

@@ -942,6 +942,16 @@ device-support) с живым состоянием, которое присыл�
 API: [integrations/home-assistant/README.md](integrations/home-assistant/README.md)
 (на английском).
 
+Интеграция также клиент каталога: хаб сам ничего не скачивает, поэтому Home
+Assistant берёт подписанные файлы релиза с зеркала, заданного на хабе
+(`catalog/config` `base_url`, по умолчанию GitHub Pages), и загружает их
+через API частями по 4 КиБ с продолжением после обрыва соединения. Сервис
+`zigbee_rs_hub.update_catalog` (необязательные `config_entry_id`, `force`,
+`base_url`) запускает это по требованию; иначе — раз в 24 ч (первый раз через
+две минуты после настройки), насколько разрешают `auto_update` / `auto_fetch`
+хаба, и по событиям `definition_needed`, если включён `auto_fetch`. Сенсор
+**Версия каталога** показывает установленный банк.
+
 ## Лицензия
 
 MIT OR Apache-2.0, как у zigbee-rs.
