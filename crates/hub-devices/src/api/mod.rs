@@ -129,6 +129,22 @@ impl ApiServer {
         self.seq
     }
 
+    /// Whether session `s` has authenticated (requests the application
+    /// answers itself, e.g. network maintenance, need it too).
+    pub fn is_authed(&self, s: SessionId) -> bool {
+        self.sessions.get(&s).is_some_and(|x| x.authed)
+    }
+
+    /// The API token new connections must present.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Replaces the token (rotation); sessions already authenticated stay.
+    pub fn set_token(&mut self, token: impl Into<String>) {
+        self.token = token.into();
+    }
+
     /// Handles one text frame; returns the frames to send back.
     pub fn handle_text<T: ZigbeeTransport>(
         &mut self,

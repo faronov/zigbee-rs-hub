@@ -58,7 +58,7 @@ fn auth_subscribe_snapshot_deltas_and_commands() {
     assert_eq!(bad[0]["type"], "auth_invalid");
     let ok = parse(&api.handle_text(&mut hub, s, r#"{"type": "auth", "token": "secret"}"#, T0));
     assert_eq!(ok[0]["type"], "auth_ok");
-    assert_eq!(ok[0]["api_version"], "1.1");
+    assert_eq!(ok[0]["api_version"], "1.2");
     assert_eq!(ok[0]["zdef_versions"], json!([1]));
     assert!(ok[0]["features"].as_array().unwrap().contains(&json!("gp")));
 
@@ -541,4 +541,23 @@ fn network_info_and_network_events() {
     assert_eq!(ev[0]["id"], 3);
     assert_eq!(ev[0]["event"]["topic"], "permit_join");
     assert_eq!(ev[0]["event"]["remaining_s"], 120);
+}
+
+#[test]
+fn token_rotation_keeps_authenticated_sessions() {
+    let mut hub = hub_with(&[]);
+    let mut api = ApiServer::new("hub", "old");
+    let (a, _) = api.connect();
+    assert!(!api.is_authed(a));
+    api.handle_text(&mut hub, a, r#"{"type": "auth", "token": "old"}"#, T0);
+    assert!(api.is_authed(a));
+    api.set_token("new");
+    assert_eq!(api.token(), "new");
+    assert!(api.is_authed(a), "an open session stays");
+    let (b, _) = api.connect();
+    let bad = parse(&api.handle_text(&mut hub, b, r#"{"type": "auth", "token": "old"}"#, T0));
+    assert_eq!(bad[0]["type"], "auth_invalid");
+    let ok = parse(&api.handle_text(&mut hub, b, r#"{"type": "auth", "token": "new"}"#, T0));
+    assert_eq!(ok[0]["type"], "auth_ok");
+    assert!(!api.is_authed(99));
 }

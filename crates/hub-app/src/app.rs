@@ -24,7 +24,9 @@ use hub_ncp::store::EndpointRecord;
 use hub_ncp::{Hub as Ncp, Message, SessionState};
 use log::{info, warn};
 
+use crate::admin::{self, Admin, JobOut};
 use crate::convert::{EngineInput, engine_input};
+use crate::platform::Platform;
 use crate::registry::Registry;
 use crate::transport::{ApsCounters, NcpTransport};
 
@@ -79,6 +81,12 @@ pub struct AppConfig {
     /// before the hub adopted the network) in every new NCP session, and
     /// interview them.
     pub import_ncp_devices: bool,
+    /// Hub settings, system facts and the log tail (`hub/*` maintenance
+    /// requests); `None` answers them `unsupported`.
+    pub platform: Option<Arc<dyn Platform>>,
+    /// Stack of the maintenance job thread (network map, backup, …),
+    /// started per job.
+    pub admin_stack: usize,
 }
 
 impl Default for AppConfig {
@@ -101,6 +109,8 @@ impl Default for AppConfig {
             builtin_catalog: true,
             stack_size: 96 * 1024,
             import_ncp_devices: true,
+            platform: None,
+            admin_stack: 16 * 1024,
         }
     }
 }
@@ -163,6 +173,7 @@ enum Input {
     Connect(SessionId, Box<dyn SessionSink>),
     Text(SessionId, String),
     Disconnect(SessionId),
+    Admin(JobOut),
     Shutdown,
 }
 
@@ -201,10 +212,11 @@ impl App {
             .expect("hub-app forwarder");
         let st = status.clone();
         let stop = stopped.clone();
+        let jobs = tx.clone();
         thread::Builder::new()
             .name("hub-app".into())
             .stack_size(cfg.stack_size)
-            .spawn(move || Runner::new(ncp, cfg, st).run(rx, stop))
+            .spawn(move || Runner::new(ncp, cfg, st, jobs).run(rx, stop))
             .expect("hub-app thread");
         App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)) }
     }
@@ -276,6 +288,12 @@ struct Runner {
     refreshed: bool,
     /// Permit-join seconds left at the last look.
     permit_left: u32,
+    /// Maintenance requests and their jobs.
+    admin: Admin,
+    /// Job results come back on the app's own channel.
+    jobs: Sender<Input>,
+    /// NCP cookie `hub/info` `maintenance` was computed for.
+    maintenance_for: Option<u32>,
 }
 
 /// Opened, closed (or expired), or re-opened since the last look; the
@@ -285,13 +303,15 @@ fn permit_changed(before: u32, now: u32) -> bool {
 }
 
 impl Runner {
-    fn new(ncp: Ncp, cfg: AppConfig, status: Arc<Mutex<AppStatus>>) -> Self {
+    fn new(ncp: Ncp, cfg: AppConfig, status: Arc<Mutex<AppStatus>>, jobs: Sender<Input>) -> Self {
         let catalog: Box<dyn Catalog> =
             Box::new(if cfg.builtin_catalog { builtin_catalog() } else { MemoryCatalog::default() });
         let hub_cfg = HubConfig { tz_offset_s: cfg.tz_offset_s, ..HubConfig::default() };
         let mut engine = Engine::new(NcpTransport::new(ncp.clone()), hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
         let api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
+        admin.job_stack = cfg.admin_stack;
         let mut r = Self {
             ncp,
             cfg,
@@ -308,6 +328,9 @@ impl Runner {
             imported: 0,
             refreshed: false,
             permit_left: 0,
+            admin,
+            jobs,
+            maintenance_for: None,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -374,6 +397,14 @@ impl Runner {
                 }
             }
             Input::Text(sid, text) => {
+                if self.api.is_authed(sid)
+                    && let Some(head) = admin::head(&text)
+                {
+                    for frame in self.admin_request(sid, &head, &text, now) {
+                        self.send(sid, &frame);
+                    }
+                    return;
+                }
                 for frame in self.api.handle_text(&mut self.engine, sid, &text, now) {
                     self.send(sid, &frame);
                 }
@@ -382,8 +413,62 @@ impl Runner {
                 self.sinks.remove(&sid);
                 self.api.disconnect(sid);
             }
+            Input::Admin(out) => match out {
+                JobOut::Reply(sid, frame) => self.send(sid, &frame),
+                JobOut::Event(body) => self.engine.network_event(body),
+                JobOut::Topology(map) => self.admin.topology = Some(map),
+                JobOut::Reimport => {
+                    self.imported_in = None;
+                    self.import_retry = None;
+                }
+            },
             Input::Shutdown => {}
         }
+    }
+
+    /// A maintenance request (`admin`), with what it may need from here.
+    fn admin_request(&mut self, sid: SessionId, head: &admin::Head, text: &str, now: Millis) -> Vec<String> {
+        let engine = &self.engine;
+        let known = || {
+            engine
+                .devices()
+                .filter_map(|d| {
+                    Some(crate::topology::Known {
+                        ieee: d.ieee()?,
+                        nwk: d.nwk(),
+                        id: d.id.clone(),
+                        name: d.user_name.clone().or_else(|| d.model()),
+                        router: d.fp.logical_type == Some(hub_devices::zdo::LogicalType::Router),
+                    })
+                })
+                .collect()
+        };
+        let status = self.status.clone();
+        let sessions = self.sinks.len();
+        let app_facts = || {
+            let a = status.lock().unwrap().clone();
+            serde_json::json!({
+                "devices": a.devices,
+                "sessions": sessions,
+                "restored": a.restored,
+                "imported": a.imported,
+                "registry_writes": a.registry_writes,
+                "registry_errors": a.registry_errors,
+                "aps": {"accepted": a.aps.accepted, "busy": a.aps.busy, "failed": a.aps.failed},
+            })
+        };
+        let jobs = Mutex::new(self.jobs.clone());
+        let ctx = admin::Ctx {
+            ncp: &self.ncp,
+            api: &mut self.api,
+            known: &known,
+            app_facts: &app_facts,
+            out: Arc::new(move |o| {
+                let _ = jobs.lock().unwrap().send(Input::Admin(o));
+            }),
+            now_s: now as f64 / 1000.0,
+        };
+        self.admin.handle(ctx, sid, head, text)
     }
 
     fn send(&mut self, sid: SessionId, frame: &str) {
@@ -409,6 +494,11 @@ impl Runner {
         }
         if !self.registered && self.ncp.client().state() == SessionState::Ready {
             self.register();
+        }
+        let cookie = self.ncp.client().session().map(|s| s.link.peer_cookie);
+        if self.ncp.client().state() == SessionState::Ready && self.maintenance_for != cookie {
+            self.maintenance_for = cookie;
+            self.api.set_info("maintenance", self.admin.features(&self.ncp).into());
         }
         if self.registered && self.cfg.import_ncp_devices {
             self.import_ncp_devices(now);

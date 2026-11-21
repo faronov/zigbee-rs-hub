@@ -2041,8 +2041,8 @@ and Translation Table (zigbee-rs `gp-translation`, GP doc §3.8, ZRHP
 
 ## 14. WebSocket API surface
 
-Only the device, entity and definition parts of the hub API; transport,
-network settings, backups and firmware updates are specified elsewhere.
+The device, entity and definition parts of the hub API, and (14.6) network
+and hub maintenance; transport and firmware updates are specified elsewhere.
 
 ### 14.1 Envelope
 
@@ -2066,7 +2066,9 @@ code feels familiar:
 - `id` is chosen by the client, unique per connection.
 - `api_version` is `major.minor`; minor versions only add fields and message
   types. Clients ignore unknown fields. 1.1 added `network/info`, the
-  `network` topic and the device record's `nwk`.
+  `network` topic and the device record's `nwk`; 1.2 added the maintenance
+  requests of 14.6, `maintenance` in `hub/info` and the `network_updated`
+  and `topology_progress` events.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2153,6 +2155,40 @@ See 13.7 (`gp/commissioning/open|close`, `gp/devices/list|remove`,
 `gp/commissioned`, `gp/failed`, `gp/binding`) and 13.8 for bindings. GP
 devices also appear in `devices/*` and `entities/*` like Zigbee devices;
 binding management is admin only.
+
+### 14.6 Network and hub maintenance (API 1.2)
+
+Authenticated sessions only, like every request. Requests that talk to the
+NCP run as **one job at a time** off the application thread: a second one
+while a job runs fails with `busy` (`"<job> is running"`). `hub/info` gains
+`maintenance`: the requests this hub and its NCP support (`diagnostics`,
+`topology`, `change_channel`, `reset` always; `energy_scan`, `tx_power`,
+`backup`, `restore` by NCP capability bits; `wifi`, `reboot`, `mode`,
+`logs`, `token_rotate` by platform). An NCP image that lacks a command
+answers it `UNSUPPORTED_COMMAND`, reported as `unsupported`. Further error
+codes: `failed` (anything else), `device_unavailable` (NCP link lost).
+
+| Type | Parameters | Result |
+|---|---|---|
+| `network/energy_scan` | `channels` (list, default 11–26), `duration_exp` (0–8, default 4: ≈ 0.25 s per channel), `count` (1–4) | `channels`: [{`channel`, `energy` (0–255), `max_rssi_dbm`, `wifi_overlap`, `score`}], `current`, `wifi_channel` (the hub's own Wi-Fi channel, when known), `recommended`, `duration_ms`. `score` (lower is better) = 4 × energy, +1000 under the hub's 20 MHz Wi-Fi channel (Wi-Fi 1 → 11–14, 6 → 16–19, 11 → 21–24), +120 next to it, +160 for 26, +30 off the Light Link primaries 11/15/20/25 |
+| `network/change_channel` | `channel` (11–26) | `channel`, `nwk_update_id` once the NCP tuned (ZRHP `NWK_CHANGE_CHANNEL`: `Mgmt_NWK_Update_req` broadcast, switch ≈ 9 s later); the store follows. Sleepy devices find the network by their rejoin scan |
+| `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps); persisted in the host store and re-applied after every NCP restart |
+| `network/diagnostics` | `reset` (bool), `groups` (`DIAG` group mask, default all) | `ncp` (`SYS_GET_STATUS`: `uptime_s`, `free_aps_slots`, `pta_coex`, `key_export_locked`, `permit_join`, …), `counters` [{`id`, `group`, `name`, `value`}] (`DIAG_GET_COUNTERS`), `frame_counters`, `host_link` (the hub's link counters), `pta` {`capable`, `enabled`}, `tx_power_set`, `unsupported` (commands the NCP lacks), `errors` |
+| `network/topology` | `refresh` (default true; false returns the last map), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); progress events `topology_progress` {`scanned`, `queued`} |
+| `network/backup` | `keys` (default true) | the backup file, Open ZigBee Coordinator Backup v1 (`zigpy/open-coordinator-backup`; ZRHP 9.1/9.2): the NCP's export (`BKP_EXPORT_*`) plus the hub's devices without keys, `metadata.internal.zigbee_rs`, `stack_specific.zigbee_rs` with the durable counter limits. With keys it is kept as the last backup in the host store; without keys (or when the NCP's key export is locked) it is marked `metadata.internal.incomplete` and cannot be restored. Keys need a non-empty API token |
+| `network/backup/last` | — | `backup`: the last complete backup (taken by `network/backup`, `network/reset` or `network/restore`), or null |
+| `network/restore` | `backup` (object), or the file's text in pieces: `chunk`, `offset`, `total` (≤ 256 KiB; each piece answered `received`), plus `allow_ieee_change` (default true), `force`, `skip_backup` | `pan_id`, `channel`, `coordinator_ieee`, `devices`, `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` [{`index`, `note`}], `previous_network_backed_up`. ZRHP `BKP_RESTORE_*` with margins 10 000 / 10 000 (APS 2²⁰ when the file has no TCLK counter, Z2M); the restored network is adopted (store, counters as floors) and its devices imported. An NCP that runs a network needs `force`; it is backed up first unless `skip_backup` |
+| `network/reset` | `confirm` = `"RESET"`, `channel` or `channels` (default 11–26), `pan_id`, `ext_pan_id` (big-endian hex), `tx_power`, `skip_backup` | `network` {`pan_id`, `ext_pan_id`, `channel`}, `backup` (the automatic backup of the previous network, or null). Backup first (a failed backup changes nothing unless `skip_backup`), `NWK_LEAVE_RESET` (IEEE override and host endpoints kept), then forming with hub-chosen key and the given parameters. Also forms a network on an empty NCP. Devices stay in the registry and must join again |
+| `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason`), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time` |
+| `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged) |
+| `hub/wifi/set` | `ssid` (1–32 bytes), `password` (empty or 8–63) | `stored`, `reconnecting`: kept in NVS, the station reconnects with them (the connection to the hub drops) |
+| `hub/token/rotate` | — | `token`: the new API token (persisted); sessions already authenticated stay, new ones need it |
+| `hub/reboot` | — | `rebooting` |
+| `hub/mode/set` | `mode` (`hub`, `bridge`) | `mode`, `rebooting`: persisted boot mode, then a reboot |
+
+Events (topic `network`, API 1.2): `network_updated` {`reason`:
+`channel_changed` (with `channel`, `nwk_update_id`), `tx_power`, `restored`,
+`formed`} — clients read `network/info` again; `topology_progress`.
 
 ## 15. Boundary to a Home Assistant integration
 
