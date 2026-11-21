@@ -38,7 +38,9 @@ use std::time::{Duration, Instant};
 use log::{debug, info, trace, warn};
 use zigbee_zrhp::codec::{Bytes8, Reader, Wire};
 use zigbee_zrhp::frame::{ResetReason, TX_BUFFER_LEN};
-use zigbee_zrhp::link::{Link, LinkConfig, LinkCounters, LinkEvent, LinkState, PeerChange, SessionInfo, TxFailure};
+use zigbee_zrhp::link::{
+    Link, LinkConfig, LinkCounters, LinkEvent, LinkState, PeerChange, SessionInfo, TxFailure,
+};
 use zigbee_zrhp::msg::system::{EvtNcpReady, SysGetInfoRsp, SysNegotiateReq, SysNegotiateRsp};
 use zigbee_zrhp::msg::{self, Batch, BatchWriter, Kind, MessageDef, TidAllocator, ids};
 use zigbee_zrhp::queue::TxSource;
@@ -200,11 +202,19 @@ pub struct Confirm {
 impl Confirm {
     /// `EVT_APS_DATA_CONFIRM` (`req_tid` first).
     pub const fn aps(timeout: Duration) -> Self {
-        Self { event_id: ids::EVT_APS_DATA_CONFIRM, tid_offset: 0, timeout }
+        Self {
+            event_id: ids::EVT_APS_DATA_CONFIRM,
+            tid_offset: 0,
+            timeout,
+        }
     }
     /// `EVT_NETWORK_STATE` (`req_tid` at offset 3).
     pub const fn network_state(timeout: Duration) -> Self {
-        Self { event_id: ids::EVT_NETWORK_STATE, tid_offset: 3, timeout }
+        Self {
+            event_id: ids::EVT_NETWORK_STATE,
+            tid_offset: 3,
+            timeout,
+        }
     }
 }
 
@@ -221,14 +231,21 @@ pub struct CallOpts {
 
 impl Default for CallOpts {
     fn default() -> Self {
-        Self { timeout: Duration::from_secs(10), during_resume: false, confirm: None }
+        Self {
+            timeout: Duration::from_secs(10),
+            during_resume: false,
+            confirm: None,
+        }
     }
 }
 
 impl CallOpts {
     /// Default options with another timeout.
     pub fn timeout(timeout: Duration) -> Self {
-        Self { timeout, ..Self::default() }
+        Self {
+            timeout,
+            ..Self::default()
+        }
     }
 }
 
@@ -258,7 +275,10 @@ impl Negotiated {
     }
     /// One capacity.
     pub fn capacity(&self, id: u8) -> Option<u32> {
-        self.capacities.iter().find(|(i, _)| *i == id).map(|(_, v)| *v)
+        self.capacities
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, v)| *v)
     }
 }
 
@@ -355,7 +375,11 @@ enum Input {
     Rx(Vec<u8>),
     RxError(String),
     Call(Call),
-    Respond { msg_id: u16, tid: u16, payload: Vec<u8> },
+    Respond {
+        msg_id: u16,
+        tid: u16,
+        payload: Vec<u8>,
+    },
     ResumeDone,
     SetLine(Line),
     Reopen,
@@ -373,6 +397,7 @@ struct Call {
 struct Shared {
     session: Mutex<Option<Arc<NcpSession>>>,
     counters: Mutex<LinkCounters>,
+    latency: Mutex<CallLatency>,
     state: Mutex<SessionState>,
     cv: Condvar,
     stop: AtomicBool,
@@ -414,7 +439,13 @@ impl Client {
         let (reply, rx) = mpsc::sync_channel(1);
         let (tid_tx, tid_rx) = mpsc::sync_channel(1);
         self.input
-            .send(Input::Call(Call { msg_id, payload, opts, reply, tid: tid_tx }))
+            .send(Input::Call(Call {
+                msg_id,
+                payload,
+                opts,
+                reply,
+                tid: tid_tx,
+            }))
             .map_err(|_| Error::Closed)?;
         let tid = tid_rx.recv().map_err(|_| Error::Closed)?;
         Ok(Ticket { tid, rx })
@@ -430,7 +461,11 @@ impl Client {
     }
 
     /// Typed request; returns the response message (status `SUCCESS`).
-    pub fn call<'a, T: Wire<'a> + MessageDef>(&self, body: &T, opts: CallOpts) -> Result<Message, Error> {
+    pub fn call<'a, T: Wire<'a> + MessageDef>(
+        &self,
+        body: &T,
+        opts: CallOpts,
+    ) -> Result<Message, Error> {
         let payload = encode_body(body)?;
         Ok(self.call_raw(T::ID, &payload, opts)?.reply)
     }
@@ -442,7 +477,11 @@ impl Client {
 
     /// Answer an NCP → host request. `payload` starts with the status.
     pub fn respond(&self, msg_id: u16, tid: u16, payload: Vec<u8>) {
-        let _ = self.input.send(Input::Respond { msg_id, tid, payload });
+        let _ = self.input.send(Input::Respond {
+            msg_id,
+            tid,
+            payload,
+        });
     }
 
     /// The lifecycle finished resuming: open the request gate.
@@ -477,7 +516,11 @@ impl Client {
     }
 
     /// Wait until the state satisfies `pred`.
-    pub fn wait_state(&self, timeout: Duration, pred: impl Fn(SessionState) -> bool) -> Option<SessionState> {
+    pub fn wait_state(
+        &self,
+        timeout: Duration,
+        pred: impl Fn(SessionState) -> bool,
+    ) -> Option<SessionState> {
         let deadline = Instant::now() + timeout;
         let mut g = self.shared.state.lock().unwrap();
         loop {
@@ -496,6 +539,55 @@ impl Client {
     pub fn counters(&self) -> LinkCounters {
         *self.shared.counters.lock().unwrap()
     }
+
+    /// Where answered requests spent their time (since the start or the
+    /// last [`Client::take_latency`]).
+    pub fn take_latency(&self) -> CallLatency {
+        std::mem::take(&mut *self.shared.latency.lock().unwrap())
+    }
+}
+
+/// Time of answered requests, split by stage (µs sums; divide by `calls`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallLatency {
+    pub calls: u32,
+    /// Submitted → written to the port (credits, window, driver wake-up).
+    pub queued_us: u64,
+    /// Written → response decoded (port, NCP, port back, reader thread).
+    pub wire_us: u64,
+    /// Longest `wire_us` of one request.
+    pub wire_max_us: u64,
+    /// Driver loop passes and the time they took (µs): handling inputs,
+    /// timers, and building and writing frames.
+    pub passes: u32,
+    pub handle_us: u64,
+    pub timers_us: u64,
+    pub transmit_us: u64,
+    pub pass_max_us: u64,
+}
+
+impl std::fmt::Display for CallLatency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = u64::from(self.calls.max(1));
+        write!(
+            f,
+            "{} answered: queued {} us, on the wire {} us (max {} us) on average",
+            self.calls,
+            self.queued_us / n,
+            self.wire_us / n,
+            self.wire_max_us
+        )?;
+        let p = u64::from(self.passes.max(1));
+        write!(
+            f,
+            "; driver {} passes: handle {} us, timers {} us, transmit {} us (longest pass {} us) on average",
+            self.passes,
+            self.handle_us / p,
+            self.timers_us / p,
+            self.transmit_us / p,
+            self.pass_max_us
+        )
+    }
 }
 
 /// Encode a typed body.
@@ -508,7 +600,12 @@ pub fn encode_body<'a, T: Wire<'a>>(body: &T) -> Result<Vec<u8>, Error> {
 
 /// Start the reader and driver threads. `cookie` must be random, non-zero
 /// and new for every start (spec 5.5).
-pub fn start<R, T>(cfg: DriverConfig, mut rx: R, tx: T, cookie: u32) -> (Client, Receiver<DriverEvent>)
+pub fn start<R, T>(
+    cfg: DriverConfig,
+    mut rx: R,
+    tx: T,
+    cookie: u32,
+) -> (Client, Receiver<DriverEvent>)
 where
     R: PortRx + 'static,
     T: PortTx + 'static,
@@ -518,11 +615,15 @@ where
     let shared = Arc::new(Shared {
         session: Mutex::new(None),
         counters: Mutex::new(LinkCounters::default()),
+        latency: Mutex::default(),
         state: Mutex::new(SessionState::Down),
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
     });
-    let client = Client { input: input.clone(), shared: shared.clone() };
+    let client = Client {
+        input: input.clone(),
+        shared: shared.clone(),
+    };
 
     let reader_shared = shared.clone();
     thread::Builder::new()
@@ -643,10 +744,17 @@ impl TxSource for OutQueues {
     }
 }
 
-fn encode_message(kind: Kind, retry: bool, msg_id: u16, tid: u16, payload: &[u8]) -> Result<Vec<u8>, Error> {
+fn encode_message(
+    kind: Kind,
+    retry: bool,
+    msg_id: u16,
+    tid: u16,
+    payload: &[u8],
+) -> Result<Vec<u8>, Error> {
     let mut buf = vec![0u8; msg::HEADER_LEN + payload.len()];
     let mut w = BatchWriter::new(&mut buf);
-    w.push_raw(kind, retry, msg_id, tid, payload).map_err(|_| Error::Codec)?;
+    w.push_raw(kind, retry, msg_id, tid, payload)
+        .map_err(|_| Error::Codec)?;
     let n = w.len();
     buf.truncate(n);
     Ok(buf)
@@ -698,7 +806,13 @@ struct Driver<T: PortTx> {
 }
 
 impl<T: PortTx> Driver<T> {
-    fn new(cfg: DriverConfig, tx: T, cookie: u32, events: Sender<DriverEvent>, shared: Arc<Shared>) -> Self {
+    fn new(
+        cfg: DriverConfig,
+        tx: T,
+        cookie: u32,
+        events: Sender<DriverEvent>,
+        shared: Arc<Shared>,
+    ) -> Self {
         let now = Instant::now();
         let link = boxed_link(cfg.link, cookie);
         Self {
@@ -732,7 +846,11 @@ impl<T: PortTx> Driver<T> {
     }
 
     fn line(&self) -> Line {
-        self.cfg.lines.get(self.line_idx).copied().unwrap_or(Line::BR_DEFAULT)
+        self.cfg
+            .lines
+            .get(self.line_idx)
+            .copied()
+            .unwrap_or(Line::BR_DEFAULT)
     }
 
     fn emit(&self, ev: DriverEvent) {
@@ -758,14 +876,18 @@ impl<T: PortTx> Driver<T> {
         }
         let now = self.now_us();
         self.link.reopen(now, self.cookie, ResetReason::HostOpen);
+        let mut transmit_us = 0;
         'outer: loop {
+            let t = Instant::now();
             self.transmit();
+            transmit_us += t.elapsed().as_micros() as u64;
             let wait = self.next_wait();
             let mut next = match inputs.recv_timeout(wait) {
                 Ok(i) => Some(i),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
             };
+            let woke = Instant::now();
             let mut handled = 0;
             while let Some(input) = next.take() {
                 if !self.handle(input) {
@@ -776,8 +898,17 @@ impl<T: PortTx> Driver<T> {
                     next = inputs.try_recv().ok();
                 }
             }
+            let handled_at = Instant::now();
             self.timers();
             *self.shared.counters.lock().unwrap() = *self.link.counters();
+            let mut l = self.shared.latency.lock().unwrap();
+            let timers = handled_at.elapsed().as_micros() as u64;
+            let handle = handled_at.duration_since(woke).as_micros() as u64;
+            l.passes += 1;
+            l.handle_us += handle;
+            l.timers_us += timers;
+            l.transmit_us += std::mem::take(&mut transmit_us);
+            l.pass_max_us = l.pass_max_us.max(handle + timers);
         }
         let ids: Vec<u16> = self.pending.keys().copied().collect();
         for tid in ids {
@@ -795,10 +926,15 @@ impl<T: PortTx> Driver<T> {
             Input::Rx(bytes) => self.feed(&bytes),
             Input::RxError(e) => warn!("zrhp: read error: {e}"),
             Input::Call(call) => self.submit(call),
-            Input::Respond { msg_id, tid, payload } => {
-                if let (Some(ep), Ok(bytes)) =
-                    (msg::home_endpoint(msg_id), encode_message(Kind::Response, false, msg_id, tid, &payload))
-                {
+            Input::Respond {
+                msg_id,
+                tid,
+                payload,
+            } => {
+                if let (Some(ep), Ok(bytes)) = (
+                    msg::home_endpoint(msg_id),
+                    encode_message(Kind::Response, false, msg_id, tid, &payload),
+                ) {
                     self.out.push(ep, Outgoing { tid: None, bytes });
                 }
             }
@@ -865,7 +1001,9 @@ impl<T: PortTx> Driver<T> {
                 LinkEvent::LinkFailed => Owned::Failed,
                 LinkEvent::Established(info) => Owned::Established(info),
                 LinkEvent::Data { payload, .. } => Owned::Data(payload.to_vec()),
-                LinkEvent::TxFailed { payload, reason, .. } => Owned::TxFailed(payload.to_vec(), reason),
+                LinkEvent::TxFailed {
+                    payload, reason, ..
+                } => Owned::TxFailed(payload.to_vec(), reason),
             });
         }
         for ev in evs {
@@ -906,8 +1044,11 @@ impl<T: PortTx> Driver<T> {
             },
             Owned::TxFailed(payload, TxFailure::Rejected(reason)) => {
                 if let Ok(batch) = Batch::parse(&payload) {
-                    let tids: Vec<u16> =
-                        batch.iter().filter(|m| m.header.kind == Kind::Request).map(|m| m.header.tid).collect();
+                    let tids: Vec<u16> = batch
+                        .iter()
+                        .filter(|m| m.header.kind == Kind::Request)
+                        .map(|m| m.header.tid)
+                        .collect();
                     for tid in tids {
                         self.fail(tid, Error::Rejected(reason));
                     }
@@ -975,7 +1116,12 @@ impl<T: PortTx> Driver<T> {
         self.session = Some(info);
         self.resync = same;
         self.established_at = Instant::now();
-        let doubtful: Vec<u16> = self.pending.iter().filter(|(_, p)| p.in_doubt).map(|(t, _)| *t).collect();
+        let doubtful: Vec<u16> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.in_doubt)
+            .map(|(t, _)| *t)
+            .collect();
         for tid in doubtful {
             if same {
                 let p = self.pending.get_mut(&tid).unwrap();
@@ -1016,11 +1162,17 @@ impl<T: PortTx> Driver<T> {
 
     fn on_response(&mut self, m: Message) {
         let Some(p) = self.pending.get(&m.tid) else {
-            debug!("zrhp: response 0x{:04X} tid {} without request", m.msg_id, m.tid);
+            debug!(
+                "zrhp: response 0x{:04X} tid {} without request",
+                m.msg_id, m.tid
+            );
             return;
         };
         if p.msg_id != m.msg_id || matches!(p.state, PState::AwaitConfirm(_)) {
-            warn!("zrhp: response 0x{:04X} tid {} does not match 0x{:04X}", m.msg_id, m.tid, p.msg_id);
+            warn!(
+                "zrhp: response 0x{:04X} tid {} does not match 0x{:04X}",
+                m.msg_id, m.tid, p.msg_id
+            );
             return;
         }
         if let Some(kind) = p.internal {
@@ -1035,8 +1187,19 @@ impl<T: PortTx> Driver<T> {
             return;
         }
         let p = self.pending.remove(&m.tid).unwrap();
+        if let PState::Sent(at) = p.state {
+            let mut l = self.shared.latency.lock().unwrap();
+            let wire = at.elapsed().as_micros() as u64;
+            l.calls += 1;
+            l.queued_us += at.saturating_duration_since(p.created).as_micros() as u64;
+            l.wire_us += wire;
+            l.wire_max_us = l.wire_max_us.max(wire);
+        }
         if let Some(reply) = p.reply {
-            let _ = reply.send(Ok(Outcome { reply: m, confirm: None }));
+            let _ = reply.send(Ok(Outcome {
+                reply: m,
+                confirm: None,
+            }));
         }
     }
 
@@ -1051,7 +1214,10 @@ impl<T: PortTx> Driver<T> {
         if let Some(tid) = hit {
             let p = self.pending.remove(&tid).unwrap();
             if let (Some(reply), Some(msg)) = (p.reply, p.reply_msg) {
-                let _ = reply.send(Ok(Outcome { reply: msg, confirm: Some(m.clone()) }));
+                let _ = reply.send(Ok(Outcome {
+                    reply: msg,
+                    confirm: Some(m.clone()),
+                }));
             }
         }
     }
@@ -1098,7 +1264,13 @@ impl<T: PortTx> Driver<T> {
                 reply: None,
             },
         );
-        self.out.push(Endpoint::System, Outgoing { tid: Some(tid), bytes });
+        self.out.push(
+            Endpoint::System,
+            Outgoing {
+                tid: Some(tid),
+                bytes,
+            },
+        );
     }
 
     fn on_internal(&mut self, kind: Internal, m: Message) {
@@ -1113,7 +1285,9 @@ impl<T: PortTx> Driver<T> {
                 }
                 let Ok(rsp) = m.body::<SysNegotiateRsp>() else {
                     self.set_phase(Phase::Incompatible);
-                    self.emit(DriverEvent::Incompatible("malformed SYS_NEGOTIATE response".into()));
+                    self.emit(DriverEvent::Incompatible(
+                        "malformed SYS_NEGOTIATE response".into(),
+                    ));
                     return;
                 };
                 let negotiated = Negotiated {
@@ -1127,7 +1301,10 @@ impl<T: PortTx> Driver<T> {
                 };
                 if negotiated.major != zigbee_zrhp::PROTOCOL_MAJOR {
                     self.set_phase(Phase::Incompatible);
-                    self.emit(DriverEvent::Incompatible(format!("NCP major {}", negotiated.major)));
+                    self.emit(DriverEvent::Incompatible(format!(
+                        "NCP major {}",
+                        negotiated.major
+                    )));
                     return;
                 }
                 self.negotiated = Some(negotiated);
@@ -1164,7 +1341,11 @@ impl<T: PortTx> Driver<T> {
                     resync: self.resync,
                 });
                 *self.shared.session.lock().unwrap() = Some(session.clone());
-                self.set_phase(if self.cfg.auto_ready { Phase::Ready } else { Phase::Resuming });
+                self.set_phase(if self.cfg.auto_ready {
+                    Phase::Ready
+                } else {
+                    Phase::Resuming
+                });
                 self.release_held();
                 self.emit(DriverEvent::SessionUp(session));
             }
@@ -1183,7 +1364,9 @@ impl<T: PortTx> Driver<T> {
     fn submit(&mut self, call: Call) {
         let Some(endpoint) = msg::home_endpoint(call.msg_id) else {
             let _ = call.tid.send(0);
-            let _ = call.reply.send(Err(Error::Status(Status::UnsupportedCommand)));
+            let _ = call
+                .reply
+                .send(Err(Error::Status(Status::UnsupportedCommand)));
             return;
         };
         if call.payload.len() > msg::MAX_MESSAGE_PAYLOAD {
@@ -1201,7 +1384,11 @@ impl<T: PortTx> Driver<T> {
                 msg_id: call.msg_id,
                 endpoint,
                 payload: call.payload,
-                gate: if call.opts.during_resume { Gate::Resume } else { Gate::Normal },
+                gate: if call.opts.during_resume {
+                    Gate::Resume
+                } else {
+                    Gate::Normal
+                },
                 internal: None,
                 state: PState::Held,
                 created: Instant::now(),
@@ -1231,7 +1418,9 @@ impl<T: PortTx> Driver<T> {
         let now = Instant::now();
         let held = std::mem::take(&mut self.held);
         for tid in held {
-            let Some(p) = self.pending.get(&tid) else { continue };
+            let Some(p) = self.pending.get(&tid) else {
+                continue;
+            };
             if !self.gate_open(p.gate) {
                 self.held.push(tid);
                 continue;
@@ -1239,7 +1428,13 @@ impl<T: PortTx> Driver<T> {
             match encode_message(Kind::Request, p.retry, p.msg_id, tid, &p.payload) {
                 Ok(bytes) => {
                     let ep = p.endpoint;
-                    self.out.push(ep, Outgoing { tid: Some(tid), bytes });
+                    self.out.push(
+                        ep,
+                        Outgoing {
+                            tid: Some(tid),
+                            bytes,
+                        },
+                    );
                     self.pending.get_mut(&tid).unwrap().state = PState::Queued(now);
                 }
                 Err(e) => self.fail(tid, e),
@@ -1249,9 +1444,10 @@ impl<T: PortTx> Driver<T> {
 
     fn fail(&mut self, tid: u16, error: Error) {
         if let Some(p) = self.pending.remove(&tid)
-            && let Some(reply) = p.reply {
-                let _ = reply.send(Err(error));
-            }
+            && let Some(reply) = p.reply
+        {
+            let _ = reply.send(Err(error));
+        }
         self.held.retain(|t| *t != tid);
     }
 

@@ -15,6 +15,7 @@
 //! USB recovery (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode)
 //! works the same in both modes.
 
+mod cpu;
 mod esp;
 mod mode;
 #[cfg(feature = "app")]
@@ -62,6 +63,7 @@ hub firmware:\r
   hub rom              reboot into the bridge with the H2 in its ROM loader\r
                        (manual recovery: esptool on CDC 0)\r
   hub crash            panic on purpose (tests the restart after a crash)\r
+  hub cpu [ms]         CPU use per task over a window (default 2000 ms)\r
   wifi                 Wi-Fi state and the API address (hub mode, app build)\r
   wifi set <ssid> [pw] store Wi-Fi credentials (hub mode: connect with them now)\r
   wifi clear           forget them\r
@@ -223,10 +225,16 @@ fn extension(words: &[&str]) -> Option<String> {
         ["hub"] | ["hub", "status"] => status_text(hub?),
         ["hub", "stacks"] => format!("{}\r\n", tasks_snapshot()),
         ["hub", "crash"] => panic!("console: hub crash"),
+        ["hub", "bench"] => cpu::bench(),
+        ["hub", "cpu", rest @ ..] => {
+            let ms = rest.first().and_then(|s| s.parse().ok()).unwrap_or(2000u64).clamp(100, 30_000);
+            cpu::report(Duration::from_millis(ms))
+        }
         ["hub", "echo", rest @ ..] => {
             let n: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 200);
             let t = std::time::Instant::now();
             let mut worst = Duration::ZERO;
+            hub?.client().take_latency();
             for i in 0..n {
                 let data = [i as u8; 32];
                 let s = std::time::Instant::now();
@@ -237,7 +245,7 @@ fn extension(words: &[&str]) -> Option<String> {
                     Err(e) => return Some(format!("echo: {e}\r\n")),
                 }
             }
-            format!("echo x{n}: mean {:?} worst {worst:?}\r\n", t.elapsed() / n)
+            format!("echo x{n}: mean {:?} worst {worst:?}; {}\r\n", t.elapsed() / n, hub?.client().take_latency())
         }
         ["hub", "form", rest @ ..] => {
             let mut req = FormRequest::default();
@@ -338,7 +346,7 @@ fn start_hub() {
     let mut cfg = HubConfig::default();
     cfg.driver.host_name = format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION"));
     stage(3);
-    let hub = Hub::start(cfg, esp::UartRx, esp::UartTx, Some(Box::new(esp::H2Lines)), store, esp::rng());
+    let hub = cpu::named(c"zrhp", || Hub::start(cfg, esp::UartRx, esp::UartTx, Some(Box::new(esp::H2Lines)), store, esp::rng()));
     let _ = HUB.set(hub.clone());
     stage(4);
     #[cfg(feature = "app")]
@@ -385,7 +393,7 @@ fn start_app(hub: Hub) {
         ..Default::default()
     };
     stage(5);
-    let app = hub_app::App::start(hub.clone(), app_cfg);
+    let app = cpu::named(c"app", || hub_app::App::start(hub.clone(), app_cfg));
     let _ = APP.set(app.clone());
     stage(6);
     usbapi::start(app.clone());

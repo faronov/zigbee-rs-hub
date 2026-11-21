@@ -17,12 +17,15 @@ case $layout in
   4mb-dev|8mb) layout=$here/../../firmware/hub/partitions-$layout.csv ;;
 esac
 dev=espusbjtag/303a:1001:7C_DF_A1_FE_67_F0
+# Without the console port (safe mode, boot loop) the USJ is already there.
 python3 - <<'PY'
-import serial, time
-c = serial.Serial('/dev/cu.usbmodem7CDFA1FE67F03', 115200, timeout=0.3)
-c.write(b's3 usj\r'); time.sleep(0.3)
-try: c.close()
-except Exception: pass
+import os, serial, time
+port = '/dev/cu.usbmodem7CDFA1FE67F03'
+if os.path.exists(port):
+    c = serial.Serial(port, 115200, timeout=0.3)
+    c.write(b's3 usj\r'); time.sleep(0.3)
+    try: c.close()
+    except Exception: pass
 PY
 for i in $(seq 1 15); do sleep 1; ioreg -p IOUSB -w0 | grep -q "JTAG/serial debug unit@14743" && break; done
 dir=$HOME/.hwlab/artifacts/zigbee-rs-hub/s3-backup-$tag; mkdir -p "$dir"
