@@ -171,6 +171,10 @@ jobs:
         run: |
           tools/make-partition-table.sh firmware/hub/partitions-8mb.csv target/partitions-8mb.bin 8MB
           tools/make-partition-table.sh firmware/hub/partitions-4mb-dev.csv target/partitions-4mb-dev.bin 4MB
+      - name: Release images (dry run of hub-release.yml's assembly and version checks)
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' firmware/hub/Cargo.toml | head -1)
+          python3 tools/release-images.py --version "$version" --tag "hub-v$version" --commit "$GITHUB_SHA" --out target/release-dryrun
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
@@ -180,5 +184,6 @@ jobs:
             target/tbr-hub-4mb-dev-app.bin
             target/partitions-8mb.bin
             target/partitions-4mb-dev.bin
+            target/release-dryrun/
             target/xtensa-esp32s3-espidf/release/tbr-bridge
             target/xtensa-esp32s3-espidf/release/tbr-hub
