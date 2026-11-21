@@ -92,6 +92,11 @@ fn api_session_endpoint_and_interview_start() {
     let list = call(&app, sid, &rx, 1, json!({"type": "devices/list"}));
     assert_eq!(list["success"], true, "{list}");
     assert_eq!(list["result"].as_array().map(Vec::len), Some(0), "{list}");
+    // The hub identity for clients (the HA integration's unique ID).
+    let info = call(&app, sid, &rx, 9, json!({"type": "hub/info"}));
+    assert_eq!(info["result"]["coordinator_ieee"], "020100000000515a", "{info}");
+    assert_eq!(info["result"]["api_version"], "1.0");
+    assert_eq!(info["result"]["devices"], 0);
     // A join reaches the engine, which starts the interview through the NCP.
     let sub = call(&app, sid, &rx, 2, json!({"type": "subscribe", "topics": ["devices"]}));
     assert_eq!(sub["success"], true);

@@ -484,3 +484,21 @@ fn request_model_round_trips() {
         json!({"type": "result", "id": 17, "success": false, "error": {"code": "zcl_status", "message": "device answered UNSUPPORTED_ATTRIBUTE", "zcl_status": "UNSUPPORTED_ATTRIBUTE"}})
     );
 }
+
+#[test]
+fn hub_info_carries_the_application_fields() {
+    let mut hub = hub_with(&["innr-sp120"]);
+    let mut api = ApiServer::new("zigbee-rs-hub 0.1.0", "t");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type": "auth", "token": "t"}"#, T0);
+    let r = call(&mut api, &mut hub, s, 1, json!({"type": "hub/info"}));
+    assert_eq!(r["result"]["name"], "zigbee-rs-hub 0.1.0");
+    assert_eq!(r["result"]["api_version"], API_VERSION);
+    assert!(r["result"].get("coordinator_ieee").is_none());
+    api.set_info("coordinator_ieee", json!("00124b0000000001"));
+    let r = call(&mut api, &mut hub, s, 2, json!({"type": "hub/info"}));
+    assert_eq!(r["result"]["coordinator_ieee"], "00124b0000000001");
+    api.set_info("coordinator_ieee", J::Null);
+    let r = call(&mut api, &mut hub, s, 3, json!({"type": "hub/info"}));
+    assert!(r["result"].get("coordinator_ieee").is_none());
+}

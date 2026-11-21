@@ -51,6 +51,9 @@ pub enum Request {
     #[serde(rename = "unsubscribe")]
     Unsubscribe { subscription: u64 },
 
+    #[serde(rename = "hub/info")]
+    HubInfo,
+
     #[serde(rename = "network/permit_join")]
     PermitJoin {
         duration_s: u8,

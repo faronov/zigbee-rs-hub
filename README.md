@@ -95,6 +95,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `definitions/examples/` | Example device definitions (YAML source form) |
 | `tools/herdsman-coverage/` | Coverage and size measurement of zigbee-herdsman-converters definitions (Node + Python) |
 | `tools/zdefc-proto/` | Python prototype of the definition compiler (YAML → CBOR, expression bytecode) |
+| `integrations/home-assistant/` | Home Assistant custom integration `zigbee_rs_hub` over the WebSocket API (config flow, push updates, all entity platforms), its tests and install guide |
 
 ## Framework choice: esp-idf-svc (`std`), not esp-hal
 
@@ -626,6 +627,9 @@ pushes through detached senders) once Wi-Fi credentials are stored
 (console `wifi set <ssid> <password>`, `wifi`, `token`, `catalog`), and the
 same API as JSON lines on CDC 0 while a host holds the port (a test path
 without network).
+`hub/info` returns the hub name, API version, features, current `seq`,
+device/entity counts and, once the NCP session is up, `coordinator_ieee`,
+`ncp_board` and `ncp_product` (the Home Assistant integration's unique ID).
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
 application lives in ~295 KB of internal heap. On the first hardware run
@@ -686,6 +690,18 @@ override restored, removal deletes the record), the catalog key slots
 `hub-devices`: snapshot round trip, measured values excluded, restore of a
 self-describing device without traffic. `hub-ncp`: multi-part values
 across compaction and a torn put.
+
+## Home Assistant integration
+
+`integrations/home-assistant/custom_components/zigbee_rs_hub` is a custom
+integration for Home Assistant: one persistent WebSocket connection to
+`ws://<hub>/api` (token from the hub console `token`), a HA device per
+Zigbee/GP device, entities created from the hub's entity model (device-support
+section 4) with live state pushed by the hub, commands through
+`entities/command`, permit join (button and service), device removal,
+diagnostics. It identifies the hub by `hub/info` (`coordinator_ieee`, added for
+it; minor API addition). Installation, tests and the API mapping:
+[integrations/home-assistant/README.md](integrations/home-assistant/README.md).
 
 ## License
 

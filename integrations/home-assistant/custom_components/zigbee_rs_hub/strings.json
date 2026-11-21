@@ -1,0 +1,129 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "zigbee-rs hub",
+        "description": "Address of the hub's WebSocket API (`ws://<host>:<port>/api`). The API token is shown by the hub console command `token`.",
+        "data": {
+          "host": "[%key:common::config_flow::data::host%]",
+          "port": "[%key:common::config_flow::data::port%]",
+          "token": "[%key:common::config_flow::data::api_token%]"
+        },
+        "data_description": {
+          "host": "IP address or host name of the hub.",
+          "port": "HTTP port of the hub (80 on the ESP32-S3 hub, 8099 for `hubctl serve`).",
+          "token": "API token of the hub."
+        }
+      },
+      "reauth_confirm": {
+        "title": "[%key:common::config_flow::title::reauth%]",
+        "description": "The hub at {host} refused the API token. Enter the current token (hub console: `token`).",
+        "data": {
+          "token": "[%key:common::config_flow::data::api_token%]"
+        }
+      },
+      "reconfigure": {
+        "title": "zigbee-rs hub",
+        "description": "New address or token of the hub.",
+        "data": {
+          "host": "[%key:common::config_flow::data::host%]",
+          "port": "[%key:common::config_flow::data::port%]",
+          "token": "[%key:common::config_flow::data::api_token%]"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    },
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+      "wrong_hub": "This address belongs to a different hub (another coordinator IEEE)."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "hub_connected": { "name": "Connection" }
+    },
+    "button": {
+      "permit_join": { "name": "Permit join" },
+      "identify": { "name": "Identify" }
+    },
+    "event": {
+      "action": { "name": "Action" },
+      "lock_event": { "name": "Lock event" }
+    },
+    "number": {
+      "local_temperature_calibration": { "name": "Temperature calibration" },
+      "occupancy_timeout": { "name": "Occupancy timeout" },
+      "on_level": { "name": "On level" },
+      "transition": { "name": "Transition time" }
+    },
+    "select": {
+      "keypad_lockout": { "name": "Keypad lockout" },
+      "power_on_behavior": { "name": "Power-on behavior" },
+      "temperature_display_mode": { "name": "Temperature display mode" }
+    },
+    "sensor": {
+      "last_seen": { "name": "Last seen" },
+      "linkquality": { "name": "Link quality" },
+      "pi_heating_demand": { "name": "Heating demand" },
+      "rssi": { "name": "RSSI" }
+    }
+  },
+  "exceptions": {
+    "unknown_device": {
+      "message": "Device {device_id} is not a device of a loaded zigbee-rs hub."
+    },
+    "no_hub": {
+      "message": "No zigbee-rs hub is loaded."
+    }
+  },
+  "services": {
+    "permit_join": {
+      "name": "Permit join",
+      "description": "Opens the Zigbee network for new devices.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Hub",
+          "description": "The hub; all hubs when empty."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds the network stays open (0 closes it)."
+        },
+        "include_gp": {
+          "name": "Green Power",
+          "description": "Also open the Green Power commissioning window."
+        },
+        "device_id": {
+          "name": "Router",
+          "description": "Only this router accepts joins; the whole network when empty."
+        }
+      }
+    },
+    "reinterview_device": {
+      "name": "Re-interview device",
+      "description": "Reads the device's descriptors and Basic attributes again and re-resolves its entities.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "The device."
+        }
+      }
+    },
+    "reconfigure_device": {
+      "name": "Reconfigure device",
+      "description": "Repeats binds and reporting configuration of the device.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "The device."
+        }
+      }
+    }
+  }
+}

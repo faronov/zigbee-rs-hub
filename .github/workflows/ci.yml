@@ -18,6 +18,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hubctl
 
+  home-assistant:
+    name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/home-assistant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # pytest-homeassistant-custom-component follows HA's Python.
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: integrations/home-assistant/requirements-test.txt
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install -r requirements-test.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - name: Build hubctl (the end-to-end test runs its simulated hub)
+        working-directory: .
+        run: cargo build -p hubctl
+      - name: pytest
+        run: HUBCTL="$GITHUB_WORKSPACE/target/debug/hubctl" python -m pytest -v
+
   hub-devices:
     name: hub-devices (engine host tests, clippy, fmt)
     runs-on: ubuntu-latest
