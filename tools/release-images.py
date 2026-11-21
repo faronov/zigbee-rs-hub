@@ -34,10 +34,8 @@ APP_DESC_MAGIC = 0xABCD5432
 CONNECT = ("Connect the S3's USB port: USB2 on the board (USB1 is the H2's). "
            "A board running Espressif's firmware shows the S3's USB-Serial-JTAG port directly.")
 CONNECT_STEPS = [
-    "If the S3 runs tbr-hub or tbr-bridge, switch it to USB-Serial-JTAG first (button below, "
-    "or the console command `s3 usj`), then click Install and pick the new port.",
     "After the install the S3 boots tbr-hub in bridge mode (the default without a stored mode); "
-    "`mode hub` and `wifi set <ssid> <password>` on the console (second serial port) make it a hub.",
+    "the console commands mode hub and wifi set <ssid> <password> (second serial port) make it a hub.",
 ]
 BOARDS = [
     {
