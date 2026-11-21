@@ -81,6 +81,10 @@ impl hub_app::Platform for S3 {
             "reset_reason": unsafe { sys::esp_reset_reason() },
         })
     }
+    fn heap(&self) -> Option<(usize, usize)> {
+        let caps = sys::MALLOC_CAP_INTERNAL;
+        Some(unsafe { (sys::heap_caps_get_free_size(caps), sys::heap_caps_get_largest_free_block(caps)) })
+    }
     fn wifi_channel(&self) -> Option<u8> {
         net::ap().map(|(channel, _)| channel)
     }

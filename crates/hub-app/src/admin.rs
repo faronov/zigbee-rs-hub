@@ -677,6 +677,15 @@ impl Admin {
     fn launch(&mut self, kind: &'static str, background: bool, passes: u32, estimate: Duration, out: Out, sid: SessionId, id: u64, body: jobs::BgBody) -> Vec<String> {
         // Reads and settings do not wait for a scan.
         let lane = if !background && matches!(kind, "diagnostics" | "TX power") { Lane::Light } else { Lane::Heavy };
+        // A job thread needs its stack in one block plus room for its
+        // result and the frames in flight: without it, refuse instead of
+        // running the heap dry (the S3 has no PSRAM).
+        if let Some((free, largest)) = self.platform.as_ref().and_then(|p| p.heap())
+            && (free < self.job_stack + JOB_HEAP_RESERVE || largest < self.job_stack)
+        {
+            let e = ApiError::new("busy", format!("low memory ({} KB free): try again when the running job ended", free / 1024));
+            return vec![frame(id, Err(e))];
+        }
         let (job, cancel) = match self.board.lock().unwrap().start(lane, kind, background, passes, estimate) {
             Ok(j) => j,
             Err(e) => return vec![frame(id, Err(e))],
@@ -1014,6 +1023,9 @@ impl Admin {
         })
     }
 }
+
+/// Heap a job needs besides its stack (its result, frames in flight).
+const JOB_HEAP_RESERVE: usize = 16 * 1024;
 
 /// `(channel mask, duration_exp, passes)` of a scan request.
 #[inline(never)]

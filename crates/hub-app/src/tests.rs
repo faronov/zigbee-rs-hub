@@ -372,9 +372,14 @@ struct TestPlatform {
     wifi: std::sync::Mutex<Option<(String, String)>>,
     reboots: AtomicU32,
     ring: Option<crate::LogRing>,
+    /// Free heap the platform reports (None: unknown).
+    heap: std::sync::Mutex<Option<(usize, usize)>>,
 }
 
 impl crate::Platform for TestPlatform {
+    fn heap(&self) -> Option<(usize, usize)> {
+        *self.heap.lock().unwrap()
+    }
     fn system(&self) -> J {
         json!({"version": "test", "uptime_s": 12, "heap": {"free": 65000, "min_free": 57000}})
     }
@@ -893,4 +898,28 @@ fn scans_are_background_jobs_that_leave_the_api_usable() {
     });
     let a = self::job(&app, sid, &rx, 8, json!({"type": "network/active_scan"}));
     assert_eq!(err_code(&a), "unsupported");
+}
+
+#[test]
+fn jobs_are_refused_when_the_heap_is_low() {
+    let r = rig(Store::volatile());
+    let p = Arc::new(TestPlatform::default());
+    let app = admin_app(&r, Some(p.clone()));
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 15);
+    // 16 KiB job stack (host default) + 16 KiB reserve.
+    *p.heap.lock().unwrap() = Some((30 * 1024, 30 * 1024));
+    let d = call(&app, sid, &rx, 1, json!({"type": "network/diagnostics"}));
+    assert_eq!(err_code(&d), "busy");
+    assert!(d["error"]["message"].as_str().unwrap().contains("low memory (30 KB free)"), "{d}");
+    let s = call(&app, sid, &rx, 2, json!({"type": "network/energy_scan"}));
+    assert_eq!(err_code(&s), "busy");
+    // Free, but no block for the stack.
+    *p.heap.lock().unwrap() = Some((60 * 1024, 12 * 1024));
+    assert_eq!(err_code(&call(&app, sid, &rx, 3, json!({"type": "network/diagnostics"}))), "busy");
+    *p.heap.lock().unwrap() = Some((60 * 1024, 31 * 1024));
+    ok(&call(&app, sid, &rx, 4, json!({"type": "network/diagnostics"})));
+    // Requests that need no job thread are not affected.
+    *p.heap.lock().unwrap() = Some((4 * 1024, 4 * 1024));
+    ok(&call(&app, sid, &rx, 5, json!({"type": "network/jobs"})));
 }

@@ -705,7 +705,14 @@ booted without any (console `wifi set` does the same in hub mode);
 uptime, Wi-Fi SSID/IP/RSSI/channel, reset reason); `hub/logs` from a 3 KiB
 RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it). The
 energy-scan advice avoids the AP's channel. Maintenance jobs run on 12 KiB
-threads, at most two at a time (a scan and a diagnostics read). On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
+threads, at most two at a time (a scan and a diagnostics read), and only
+while the internal heap has the stack in one block plus 16 KiB (`busy`,
+"low memory", otherwise). On the hwlab board (2026-11-22, #26) a 5-pass
+energy scan ran as a job in 13 s with progress events, while two other
+sessions read diagnostics back to back; the heap minimum fell to 712 B
+then, which is why the check was added (not yet re-measured on hardware). Each job thread also loses about 300 B of heap that is not
+returned (all job kinds, ESP-IDF pthread or Rust std, under investigation);
+a reboot gets it back. On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
 `hub/reboot`, the network map (the C6 as the coordinator's child), backup,
 and channel change 17 → 25 → 17 (about 9 s each; the C6 followed within a
 minute) work; `hub/wifi/set` and `hub/mode/set` were not tried on the shared

@@ -2287,7 +2287,9 @@ NCP run as jobs off the application thread, in two lanes with one job each:
 **heavy** (radio or network-changing work: scans, map, channel change,
 backup, restore, reset) and **light** (`network/diagnostics`,
 `network/set_tx_power`). A second job in a busy lane fails with `busy`
-(`"<job> (job N) is running"`); a light request does not wait for a scan,
+(`"<job> (job N) is running"`), and so does any job while the platform
+reports less free heap than the job's stack plus 16 KiB, or no block for
+the stack (`"low memory (N KB free)"`, S3 without PSRAM); a light request does not wait for a scan,
 and the rest of the API (devices, entities, `network/info`, permit join, …)
 is served meanwhile. `hub/info` gains
 `maintenance`: the requests this hub and its NCP support (`diagnostics`,
