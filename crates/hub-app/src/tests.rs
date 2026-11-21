@@ -186,3 +186,34 @@ fn devices_joined_before_the_hub_are_imported_from_the_ncp() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+/// A sink that, like esp_http_server's detached sender, can only deliver
+/// once the connecting thread is free again.
+struct NeedsCallerFree(Arc<std::sync::atomic::AtomicBool>, mpsc::Sender<bool>);
+
+impl crate::SessionSink for NeedsCallerFree {
+    fn send(&mut self, _text: &str) -> bool {
+        let t = std::time::Instant::now();
+        while !self.0.load(Ordering::SeqCst) && t.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let free = self.0.load(Ordering::SeqCst);
+        let _ = self.1.send(free);
+        free
+    }
+}
+
+#[test]
+fn connect_returns_before_the_hello_is_sent() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    let sid = app.connect(Box::new(NeedsCallerFree(returned.clone(), tx)));
+    returned.store(true, Ordering::SeqCst);
+    assert!(sid.is_some());
+    assert_eq!(rx.recv_timeout(T), Ok(true), "the hello waited for connect() to return");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
