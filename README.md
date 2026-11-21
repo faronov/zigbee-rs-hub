@@ -19,6 +19,49 @@ interface will be a WebSocket JSON API.
 | **1** | ZRHP host on the S3 using `zigbee-zrhp` (`std`): session, ARQ, credits, resume; H2 NCP lifecycle: flash-size detection, `FW_*` updates streamed into the H2's inactive slot with trial boot, confirm and **H2-side rollback** (A/B slots; the S3 stores no NCP images); H2 ROM-loader recovery only as a manual path with an operator-supplied image | **in progress** (branch `phase1`): host core `hub-ncp` tested against a simulated NCP, `hubctl` on macOS, `tbr-hub` firmware (hub mode + the bridge as default mode); on hardware: resets/resume, soak, `FW_*` update with rollback and confirm, `tbr-hub` on the S3 (see "Phase 1 status") |
 | **2** | Standalone hub: host-backed tables (paging, host store journal), WebSocket JSON API, Wi-Fi and W5500 Ethernet, PTA coexistence enabled automatically while Wi-Fi is up | **in progress** (branch `stage2`): engine on the host core, device registry in `hubdata`, WebSocket JSON API on a desktop (`hubctl serve`) and on the S3 over Wi-Fi, catalog verifier, 8 MB production / 4 MB dev layouts; the S3 application build is 2.1 MiB, see "Stage 2" |
 
+## Releases and the web flasher
+
+Firmware for the board comes from tagged GitHub releases (`hub-v*` in this
+repository for the S3, `ncp-v*` in zigbee-rs for the H2) and installs from
+the browser: **<https://faronov.github.io/zigbee-rs/flasher/>** (Chrome or
+Edge on a desktop, Web Serial, [ESP Web Tools](https://esphome.github.io/esp-web-tools/);
+details in the zigbee-rs book, "Web Flasher").
+
+| Flasher entry | Port | Image |
+|---|---|---|
+| Thread Border Router board, S3 (8 MB) | S3, USB2 | `tbr-hub`, production layout (A/B OTA) |
+| Thread Border Router board, S3 (4 MB early sample) | S3, USB2 | `tbr-hub`, dev layout (no OTA) |
+| Thread Border Router board, H2 | H2, USB1 | ZRHP NCP, UART 921 600 with RTS/CTS |
+
+- **Update (default)** writes the bootloader, partition table, blank
+  `otadata` (8 MB) and the app; `nvs` (Wi-Fi credentials, boot mode, API
+  token) and `hubdata` (device registry, ZRHP host store) stay. Leave *Erase
+  device* unticked in the ESP Web Tools dialog.
+- **Erase** (tick it on the page) for the first install over Espressif's
+  firmware or tbr-bridge on the stock layout, or to reset the hub. The H2 and
+  its network are not touched.
+- While tbr-hub or tbr-bridge runs, USB2 shows the bridge's two ports, not
+  the S3's USB-Serial-JTAG: switch first with the page's button (1200 bps
+  touch on the second, console port) or the console command `s3 usj`. After
+  the install the S3 starts in bridge mode; `mode hub` and
+  `wifi set <ssid> <password>` on the console make it a hub.
+- The 8 MB images have not run on an 8 MB board yet (only the 4 MB sample
+  so far).
+
+**Making a release:** set the version in `firmware/hub/Cargo.toml` and
+`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`), update
+`Cargo.lock` (`cargo update -p tbr-hub`), commit, then
+`git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`. `hub-release.yml`
+checks the versions (also the one in the built app), builds with pinned
+tools and attaches per layout the full flash image (`…-merged.bin`, offset
+0, padded to the flash size), bootloader, partition table, blank `otadata`
+(8 MB), app, plus the `tbr-bridge` app, `release-manifest.json` and
+`SHA256SUMS`; the release notes list the esptool commands. A suffix
+(`hub-v0.2.0-rc.1`) makes a pre-release. The flasher picks the release up
+within six hours, or at once when this repository has the secret
+`FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
+faronov/zigbee-rs).
+
 ## Device support
 
 Specification (draft, design only): [`docs/device-support.md`](docs/device-support.md),
