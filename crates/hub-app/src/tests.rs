@@ -469,6 +469,20 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     assert_eq!(overlap, vec![16, 17, 18, 19]);
     // The sim's quietest channel, a Light Link primary away from Wi-Fi 6.
     assert_eq!(scan["recommended"], 25, "{scan}");
+    // Active scan: the beacons around; our own network is marked.
+    let own = r.ncp.status().network.unwrap();
+    r.sim.with(|s| {
+        s.beacons = vec![(20, 0x6A0B, [0xA0; 8], 0, 90, -84, true), (15, own.pan_id, own.ext_pan_id, 0x1234, 200, -50, false), (25, 0x1111, [1; 8], 0, 30, -95, false)];
+    });
+    let a = call(&app, sid, &rx, 30, json!({"type": "network/active_scan", "channels": [15, 20]}));
+    let nets = ok(&a)["networks"].as_array().unwrap().clone();
+    assert_eq!(nets.len(), 2, "channel 25 not scanned");
+    assert_eq!((nets[0]["pan_id"].as_u64(), nets[0]["permit_join"].as_bool(), nets[0]["own"].as_bool()), (Some(0x6A0B), Some(true), Some(false)));
+    assert_eq!(nets[0]["ext_pan_id"], "a0a0a0a0a0a0a0a0");
+    assert_eq!(nets[1]["own"], true);
+    r.sim.with(|s| s.unsupported.push(ids::NWK_ACTIVE_SCAN));
+    let a = call(&app, sid, &rx, 31, json!({"type": "network/active_scan"}));
+    assert_eq!(err_code(&a), "unsupported");
     let bad = call(&app, sid, &rx, 3, json!({"type": "network/energy_scan", "channels": [10]}));
     assert_eq!(err_code(&bad), "invalid_value");
 
@@ -493,6 +507,8 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     let tx = call(&app, sid, &rx, 7, json!({"type": "network/set_tx_power", "dbm": 25}));
     assert_eq!(ok(&tx)["applied_dbm"], 20);
     assert_eq!(r.ncp.stored_tx_power(), Some(25));
+    let net = call(&app, sid, &rx, 70, json!({"type": "network/info"}));
+    assert_eq!((ok(&net)["tx_power"].as_i64(), ok(&net)["tx_power_requested"].as_i64()), (Some(20), Some(25)));
 
     let d = call(&app, sid, &rx, 8, json!({"type": "network/diagnostics"}));
     let d = ok(&d);

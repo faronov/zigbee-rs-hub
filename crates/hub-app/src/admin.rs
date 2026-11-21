@@ -29,6 +29,7 @@ use crate::topology::{self, Known, ScanOpts};
 /// Request types handled here.
 pub const TYPES: &[&str] = &[
     "network/energy_scan",
+    "network/active_scan",
     "network/change_channel",
     "network/set_tx_power",
     "network/diagnostics",
@@ -730,6 +731,32 @@ impl Admin {
                     opt(&mut w, "wifi_channel", wifi);
                     opt(&mut w, "recommended", best);
                     w.key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
+                    Ok(Reply::Frame(w.finish()?))
+                })
+            }
+            "network/active_scan" => {
+                let q = match ScanReq::from(v) {
+                    Ok(q) => q,
+                    Err(e) => return fail(e),
+                };
+                let mask = match q.channels.as_deref().map(mask_of).transpose() {
+                    Ok(m) => m.unwrap_or(0x07FF_F800),
+                    Err(e) => return fail(e),
+                };
+                let duration = q.duration_exp.unwrap_or(3).min(6);
+                self.spawn("active scan", out, sid, id, move |_| {
+                    let t = std::time::Instant::now();
+                    let found = ncp.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
+                    let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
+                    let mut w = Jw::result(id, 100 + 190 * found.len())?;
+                    w.obj().key("networks").arr();
+                    for b in &found {
+                        w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan).key("ext_pan_id").str(&be_hex(&b.epid));
+                        w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit != 0);
+                        w.key("stack_profile").num(b.stack_profile).key("update_id").num(b.update_id);
+                        w.key("own").num(own == Some((b.pan, b.epid))).end_obj();
+                    }
+                    w.end_arr().key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
                     Ok(Reply::Frame(w.finish()?))
                 })
             }

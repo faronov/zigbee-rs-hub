@@ -107,6 +107,13 @@ pub fn sim_demo(hub: &Hub, sim: &SimNcp) -> Result<(), String> {
             },
         ];
     });
-    log::info!("sim demo: network on channel 15, 3 routers, 4 end devices");
+    sim.with(|s| {
+        s.beacons = vec![
+            (15, 0x2F11, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88], 0x0000, 140, -71, false),
+            (20, 0x6A0B, [0xA0, 0xB0, 0xC0, 0xD0, 0x00, 0x8D, 0x15, 0x00], 0x0000, 90, -84, true),
+            (20, 0x6A0B, [0xA0, 0xB0, 0xC0, 0xD0, 0x00, 0x8D, 0x15, 0x00], 0x4F21, 60, -90, true),
+        ];
+    });
+    log::info!("sim demo: network on channel 15, 3 routers, 4 end devices, 2 foreign networks");
     Ok(())
 }

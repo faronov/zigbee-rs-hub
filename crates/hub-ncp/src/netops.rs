@@ -21,8 +21,8 @@ use zigbee_zrhp::msg::diag::{
 };
 use zigbee_zrhp::msg::{MessageDef, ids};
 use zigbee_zrhp::msg::network::{
-    EvtChannelChanged, EvtEnergyScanResult, NwkChangeChannel, NwkEnergyScan, NwkLeaveReset, NwkSetTxPower,
-    NwkSetTxPowerRsp,
+    EvtChannelChanged, EvtEnergyScanResult, NwkActiveScan, NwkActiveScanRsp, NwkChangeChannel, NwkEnergyScan,
+    NwkLeaveReset, NwkSetTxPower, NwkSetTxPowerRsp, ScanResult,
 };
 use zigbee_zrhp::msg::security::SecGetFrameCountersRsp;
 use zigbee_zrhp::msg::system::{SysGetStatusRsp, caps};
@@ -140,6 +140,18 @@ impl Hub {
             .iter()
             .map(|r| EnergyChannel { channel: r.channel, max_rssi_dbm: r.max_rssi_dbm, energy: r.energy })
             .collect())
+    }
+
+    /// `NWK_ACTIVE_SCAN` (spec 7.2): beacons of the networks around, one
+    /// entry per network and channel. The response carries the list, so the
+    /// timeout covers the whole scan.
+    pub fn active_scan(&self, channel_mask: u32, duration_exp: u8) -> Result<Vec<ScanResult>, Error> {
+        let channels = (channel_mask & 0x07FF_F800).count_ones().max(1);
+        let ms = 15.36 * f64::from((1u32 << duration_exp.min(14)) + 1) * f64::from(channels);
+        let opts = CallOpts::timeout(Duration::from_millis(2 * ms as u64) + Duration::from_secs(15));
+        let rsp = self.inner.client.call(&NwkActiveScan { channel_mask, duration_exp }, opts)?;
+        let body: NwkActiveScanRsp = rsp.body()?;
+        Ok(body.results.iter().collect())
     }
 
     /// Move the running network to `channel` (`NWK_CHANGE_CHANNEL`, spec

@@ -162,6 +162,10 @@ pub fn network_info(ncp: &Ncp) -> serde_json::Value {
             o["tx_power"] = n.tx_power.into();
         }
     }
+    // What the operator set (re-applied after every NCP restart).
+    if let Some(p) = ncp.stored_tx_power() {
+        o["tx_power_requested"] = p.into();
+    }
     if let Some(s) = &st.ncp {
         let mut ncp_o = json!({
             "fw": s.negotiated.fw,

@@ -17,7 +17,8 @@ use zigbee_zrhp::msg::firmware::{FwBegin, FwBeginRsp, FwFinishRsp, FwGetSlotsRsp
 use zigbee_zrhp::msg::backup::{BkpExportBegin, BkpExportBeginRsp, BkpExportRead, BkpRestoreBegin, BkpRestoreBeginRsp, BkpRestoreCommitRsp, BkpRestorePutRsp, RestoreNote};
 use zigbee_zrhp::msg::network::{
     EnergyResult, EvtChannelChanged, EvtEnergyScanResult, EvtNetworkState, EvtPermitJoinState, NwkChangeChannel, NwkEnergyScan,
-    NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin, NwkSetTxPower, NwkSetTxPowerRsp,
+    NwkActiveScan, NwkActiveScanRsp, NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin, NwkSetTxPower,
+    NwkSetTxPowerRsp, ScanResult,
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKeyRsp};
 use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysGetStatusRsp, SysNegotiateRsp, caps};
@@ -126,7 +127,13 @@ pub struct SimState {
     pub restore: Option<(u16, u32, u32, Vec<u8>)>,
     /// The last committed restore stream.
     pub restored: Option<Vec<u8>>,
+    /// Beacons `NWK_ACTIVE_SCAN` finds: `(channel, PAN, EPID, src, LQI,
+    /// RSSI, permit join)`.
+    pub beacons: Vec<SimBeacon>,
 }
+
+/// A network the simulated NCP hears in an active scan.
+pub type SimBeacon = (u8, u16, [u8; 8], u16, u8, i8, bool);
 
 /// A router (or any node) of the simulated network answering Mgmt_Lqi_req
 /// and Mgmt_Rtg_req over the air.
@@ -201,6 +208,7 @@ impl SimNcp {
             export: None,
             restore: None,
             restored: None,
+            beacons: Vec::new(),
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
@@ -524,6 +532,26 @@ impl SimNcp {
                     actions.push((s.channel_delay, event(&ev)));
                     status(Status::Success)
                 }
+            }
+            ids::NWK_ACTIVE_SCAN => {
+                let r: NwkActiveScan = m.decode().unwrap();
+                let found: Vec<ScanResult> = s
+                    .beacons
+                    .iter()
+                    .filter(|b| r.channel_mask & (1 << b.0) != 0)
+                    .map(|&(channel, pan, epid, src, lqi, rssi, permit)| ScanResult {
+                        channel,
+                        pan,
+                        epid,
+                        src,
+                        lqi,
+                        rssi,
+                        permit: u8::from(permit),
+                        stack_profile: 2,
+                        update_id: 0,
+                    })
+                    .collect();
+                ok(encode!(NwkActiveScanRsp { results: List::new(&found) }))
             }
             ids::NWK_SET_TX_POWER => {
                 let r: NwkSetTxPower = m.decode().unwrap();
