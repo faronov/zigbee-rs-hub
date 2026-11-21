@@ -73,7 +73,7 @@ input.num{width:6em}
 const $=s=>document.querySelector(s);
 const el=(t,a={},...c)=>{const e=document.createElement(t);for(const k in a){if(a[k]==null)continue;if(k[0]=="o"&&k[1]=="n")e.addEventListener(k.slice(2),a[k]);else if(k=="class")e.className=a[k];else e.setAttribute(k,a[k])}for(const x of c)if(x!=null)e.append(x);return e};
 const hex=(n,w)=>"0x"+n.toString(16).toUpperCase().padStart(w,"0");
-let ws,rid=0,pend={},devs={},ents={},states={},net={},pjEnd=0,retry=1000,authed=false,skew=0;
+let ws,rid=0,pend={},devs={},ents={},states={},net={},hub={},pjEnd=0,retry=1000,authed=false,skew=0;
 function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",4000)}
 function status(s,c){$("#conn").textContent=s;$("#dot").className="dot "+c}
 function call(type,p={}){return new Promise((ok,no)=>{if(!ws||ws.readyState!=1)return no(new Error("not connected"));const id=++rid;pend[id]={ok,no};ws.send(JSON.stringify(Object.assign({id,type},p)))})}
@@ -93,6 +93,7 @@ function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");
+  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet()}).catch(()=>{});
   call("subscribe",{topics:["devices","entities","network"]}).catch(e=>toast(e.message));return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="event")onEvent(m.event);
@@ -121,10 +122,12 @@ function renderNet(){
  const add=(k,v)=>{if(v!=null&&v!==""){kv.append(el("dt",{},k),el("dd",{},String(v)))}};
  add("State",n.state+(n.ownership&&n.ownership!="owned"?" ("+n.ownership+")":""));
  if(n.pan_id!=null)add("PAN ID",hex(n.pan_id,4));
+ add("Coordinator",hub.coordinator_ieee);
  add("Channel",n.channel);add("Extended PAN ID",n.ext_pan_id);
  add("NCP firmware",c.fw&&(c.fw+(c.protocol?" · ZRHP "+c.protocol:"")));
  add("NCP IEEE",c.ieee);add("NCP board",c.board);
  if(c.baud)add("NCP link",c.baud+" baud"+(c.flow_control?", RTS/CTS":""));
+ if(hub.api_version)add("Hub API",hub.api_version+" · "+(hub.devices??0)+" devices, "+(hub.entities??0)+" entities");
 }
 function pjTick(){
  clearTimeout(pjTick.h);const left=Math.max(0,Math.round((pjEnd-Date.now())/1000));

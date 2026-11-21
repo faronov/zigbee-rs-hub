@@ -649,8 +649,9 @@ pure Rust, no node toolchain) and derives a strong ETag; the hub answers
 `If-None-Match`. `hubctl serve` serves the same page on `/` (the WebSocket on
 `/api`), so the UI can be tried on a desktop, also with `--sim`. API 1.1
 added what the page needed: `network/info`, the `network` topic
-(`permit_join`, `network_state`) and `nwk` in device records
-(device-support 14.2).
+(`permit_join`, `network_state`), `time` in it for relative times, and `nwk`
+in device records (device-support 14.2); the header and the hub facts
+(coordinator IEEE, API version, counts) come from `hub/info`.
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
 application lives in ~295 KB of internal heap. On the first hardware run
