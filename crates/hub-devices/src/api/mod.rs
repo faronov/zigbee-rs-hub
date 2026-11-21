@@ -201,7 +201,7 @@ impl ApiServer {
                 sess.subs.insert(id, topics.iter().cloned().collect());
             }
             // Snapshot first, then deltas with increasing seq (14.1).
-            let snap = self.snapshot(hub, topics);
+            let snap = self.snapshot(hub, topics, now);
             return vec![
                 ServerMessage::ok(id, json!({"seq": self.seq})),
                 ServerMessage::Event {
@@ -254,7 +254,7 @@ impl ApiServer {
         }]
     }
 
-    fn snapshot<T: ZigbeeTransport>(&self, hub: &mut Hub<T>, topics: &[String]) -> J {
+    fn snapshot<T: ZigbeeTransport>(&self, hub: &mut Hub<T>, topics: &[String], now: Millis) -> J {
         let mut snap = json!({"topic": "snapshot"});
         if topics.iter().any(|t| t == "devices") {
             snap["devices"] = hub.devices().map(|d| d.record()).collect();
@@ -273,7 +273,7 @@ impl ApiServer {
             snap["bindings"] = J::Array(hub.list_bindings(None, None));
         }
         if topics.iter().any(|t| t == "network") {
-            snap["network"] = hub.transport.network_info().unwrap_or(J::Null);
+            snap["network"] = network_info(hub, now).unwrap_or(J::Null);
         }
         snap
     }
@@ -301,9 +301,7 @@ impl ApiServer {
                 }
                 r
             }
-            R::NetworkInfo => hub
-                .transport
-                .network_info()
+            R::NetworkInfo => network_info(hub, now)
                 .ok_or_else(|| ApiError::new("unsupported", "no network information"))?,
             R::PermitJoin {
                 duration_s,
@@ -830,6 +828,17 @@ impl ApiServer {
         }
         out
     }
+}
+
+/// The host core's facts plus `time`, the hub's clock (s, the time base of
+/// `last_seen` and state timestamps), so a client can show relative times
+/// even before the hub has synchronised its clock.
+fn network_info<T: ZigbeeTransport>(hub: &mut Hub<T>, now: Millis) -> Option<J> {
+    let mut v = hub.transport.network_info()?;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("time".into(), crate::device::ts(now).into());
+    }
+    Some(v)
 }
 
 impl<T: ZigbeeTransport> Hub<T> {

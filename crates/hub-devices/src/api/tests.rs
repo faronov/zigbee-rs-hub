@@ -519,6 +519,7 @@ fn network_info_and_network_events() {
     hub.transport.network = Some(json!({"pan_id": 0x1C06, "channel": 17, "permit_join_s": 0}));
     let r = call(&mut api, &mut hub, s, 2, json!({"type": "network/info"}));
     assert_eq!(r["result"]["channel"], 17);
+    assert_eq!(r["result"]["time"], crate::device::ts(T0 + 10_000));
 
     // The network topic: snapshot carries the same facts, then events.
     let out = parse(&api.handle_text(
