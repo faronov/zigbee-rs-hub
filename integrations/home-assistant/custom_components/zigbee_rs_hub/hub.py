@@ -498,6 +498,31 @@ class ZigbeeRsHub:
         if target:
             params["target"] = target
         await self.async_request("network/permit_join", **params)
+        if not self.supports_network:
+            return
+        # Hubs need not send a `permit_join` event for a window the host
+        # opened: assume the requested one (whole network only), then take
+        # the hub's own count from network/info. Later events still win.
+        if not target:
+            self._set_permit_join(duration)
+            self._notify_hub()
+        await self.async_refresh_network()
+
+    async def async_refresh_network(self) -> None:
+        """Reconcile the network facts with network/info (API 1.1)."""
+        if self.client is None or not self.connected:
+            return
+        try:
+            net = await self.client.request("network/info")
+        except HubError as err:
+            _LOGGER.debug("network/info failed: %s", err)
+            return
+        if not isinstance(net, dict):
+            return
+        self.network.update(net)
+        if "permit_join_s" in net:
+            self._set_permit_join(net.get("permit_join_s"))
+        self._notify_hub()
 
     async def async_remove_device(self, device_id: str) -> None:
         """Remove a device from the network and the hub (HA removes its entry)."""

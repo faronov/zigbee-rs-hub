@@ -183,6 +183,7 @@ class FakeHub:
         self.name = "zigbee-rs-hub 0.2.4"
         self.hub_info = True
         self.api_version = "1.1"
+        self.permit_join_cap = 254
         self.network = {
             "state": "up",
             "session": "ready",
@@ -355,7 +356,13 @@ class FakeHub:
             else:
                 await ok({"status": "ok"})
         elif kind == "network/permit_join":
+            if not req.get("target"):
+                # The hub caps the window; no `permit_join` event (as the
+                # real NCP today).
+                self.network["permit_join_s"] = min(req["duration_s"], self.permit_join_cap)
             await ok(None)
+        elif kind == "network/info" and self.api_version >= "1.1":
+            await ok(copy.deepcopy(self.network))
         elif kind == "devices/remove":
             dev = req.get("device")
             if dev not in self.devices:

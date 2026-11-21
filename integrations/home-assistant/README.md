@@ -78,6 +78,7 @@ delete the entry, then the directory, then restart.
 | `hub/info` `name`, `ncp_product` | hub device firmware version (`zigbee-rs-hub 0.2.4` → `0.2.4`) and model |
 | `subscribe ["devices", "entities", "events"]` (+ `"network"` on API 1.1) snapshot | devices, entities, states and network facts (again after every reconnect) |
 | `network` topic (API 1.1): `permit_join {remaining_s}`, `network_state {state}` | Permit join / Permit join ends, Network state |
+| `network/permit_join` from HA (API 1.1) | Permit join on at once for the requested duration (whole network only), then reconciled with `network/info` `permit_join_s`; hubs need not send a `permit_join` event for a window the host opened |
 | network/info `time` (the hub's clock) | timestamps from a hub whose clock is not synchronised yet (seconds since boot) are converted with the offset to HA's clock |
 | device record (4.1) | device registry entry; `available: false` → all its entities unavailable; `name` → device name (a name set in HA stays HA-only) |
 | entity record (4.2) | `uid` → `unique_id`; `platform`, `device_class`, `unit`, `state_class`, `category` → entity category, `enabled_default`, `capabilities` → options, limits, colour modes, features, `event_types` |

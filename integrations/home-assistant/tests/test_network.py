@@ -108,3 +108,53 @@ async def test_api_1_0_hub(
     )
     assert reg.async_get_entity_id("binary_sensor", DOMAIN, f"{config_entry.entry_id}_connected")
     await hass.config_entries.async_unload(config_entry.entry_id)
+
+
+async def test_permit_join_without_hub_events(
+    hass: HomeAssistant, fake_hub: FakeHub, setup_entry: MockConfigEntry
+) -> None:
+    """The window HA opened shows up even when the hub sends no event."""
+    open_id = hub_eid(hass, setup_entry, "binary_sensor", "permit_join_open")
+    ends_id = hub_eid(hass, setup_entry, "sensor", "permit_join_until")
+
+    await hass.services.async_call(DOMAIN, "permit_join", {"duration": 120}, blocking=True)
+    assert hass.states.get(open_id).state == STATE_ON
+    left = dt_util.parse_datetime(hass.states.get(ends_id).state) - dt_util.utcnow()
+    assert timedelta(seconds=115) < left <= timedelta(seconds=120)
+    assert fake_hub.calls("network/info")
+
+    # network/info is authoritative: the hub capped the window.
+    fake_hub.permit_join_cap = 60
+    await hass.services.async_call(DOMAIN, "permit_join", {"duration": 200}, blocking=True)
+    left = dt_util.parse_datetime(hass.states.get(ends_id).state) - dt_util.utcnow()
+    assert timedelta(seconds=55) < left <= timedelta(seconds=60)
+
+    # Closing.
+    await hass.services.async_call(DOMAIN, "permit_join", {"duration": 0}, blocking=True)
+    assert hass.states.get(open_id).state == STATE_OFF
+    assert hass.states.get(ends_id).state == STATE_UNKNOWN
+
+    # A router-only window does not claim the whole network is open.
+    from custom_components.zigbee_rs_hub.hub import find_device
+    from homeassistant.helpers import device_registry as dr
+
+    from .fake_hub import LIGHT_DEV
+
+    router = find_device(dr.async_get(hass), (DOMAIN, LIGHT_DEV), setup_entry.entry_id)
+    await hass.services.async_call(
+        DOMAIN, "permit_join", {"duration": 60, "device_id": router.id}, blocking=True
+    )
+    assert hass.states.get(open_id).state == STATE_OFF
+
+    # A later event from the hub still wins.
+    await fake_hub.push("network", {"topic": "permit_join", "remaining_s": 30})
+    await wait_for(hass, lambda: hass.states.get(open_id).state == STATE_ON)
+
+
+async def test_permit_join_button_shows_state(
+    hass: HomeAssistant, fake_hub: FakeHub, setup_entry: MockConfigEntry
+) -> None:
+    open_id = hub_eid(hass, setup_entry, "binary_sensor", "permit_join_open")
+    button = hub_eid(hass, setup_entry, "button", "permit_join")
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    assert hass.states.get(open_id).state == STATE_ON
