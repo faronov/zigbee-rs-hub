@@ -101,8 +101,13 @@ fn run(app: App, modem: Modem<'static>, ssid: &str, pass: &str, on_up: impl Fn(b
 fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
     let mut server =
         EspHttpServer::new(&server::Configuration { stack_size: 8192, ..Default::default() }).map_err(|e| e.0)?;
+    // The web UI: one pre-compressed page that talks to /api (crates/hub-web).
     server.fn_handler("/", Method::Get, |req| {
-        req.into_ok_response()?.write_all(b"zigbee-rs-hub: WebSocket JSON API at /api\n").map(|_| ())
+        if req.header("If-None-Match").is_some_and(hub_web::not_modified) {
+            let headers = [("ETag", hub_web::ETAG), ("Cache-Control", "no-cache")];
+            return req.into_response(304, Some("Not Modified"), &headers).map(|_| ());
+        }
+        req.into_response(200, None, &hub_web::HEADERS)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
     })?;
     let sessions: Arc<Mutex<BTreeMap<i32, u64>>> = Arc::default();
     server.ws_handler("/api", None, move |ws| {

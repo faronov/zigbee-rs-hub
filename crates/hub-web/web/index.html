@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>zigbee-rs-hub</title>
+<style>
+:root{--bg:#f4f5f7;--fg:#1d2228;--card:#fff;--mut:#6b7380;--line:#dde1e6;--acc:#2563eb;--ok:#16a34a;--bad:#dc2626;--warn:#d97706}
+@media (prefers-color-scheme:dark){:root{--bg:#121417;--fg:#e6e8eb;--card:#1c1f24;--mut:#9aa3ae;--line:#2d3239;--acc:#60a5fa;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;align-items:center;gap:.6em;padding:.7em 1em;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:1}
+header h1{font-size:1.1em;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+main{max-width:1100px;margin:0 auto;padding:1em;display:grid;gap:1em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.9em 1em}
+.card h2{font-size:1em;margin:0 0 .6em}
+.dot{width:.7em;height:.7em;border-radius:50%;background:var(--bad);display:inline-block}
+.dot.on{background:var(--ok)}.dot.wait{background:var(--warn)}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:.2em .9em;margin:0}
+.kv dt{color:var(--mut)}.kv dd{margin:0;word-break:break-all}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:.5em}
+.devs{display:grid;gap:1em;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.dev .top{display:flex;gap:.5em;align-items:baseline}
+.dev .top b{flex:1;font-size:1.05em}
+.mut{color:var(--mut);font-size:.88em}
+.badge{font-size:.78em;padding:.1em .5em;border-radius:1em;border:1px solid var(--line);color:var(--mut)}
+.badge.ok{color:var(--ok);border-color:var(--ok)}.badge.bad{color:var(--bad);border-color:var(--bad)}
+.ents{margin:.6em 0 0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.ents li{display:flex;align-items:center;gap:.5em;padding:.4em 0;border-bottom:1px solid var(--line)}
+.ents li .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ents li .v{font-variant-numeric:tabular-nums;text-align:right}
+.ents li.na{opacity:.55}
+button,select,input{font:inherit;color:inherit}
+button{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:.3em .8em;cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+button.d{color:var(--bad);border-color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+select,input{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:.25em .4em}
+input[type=range]{padding:0;width:7em}
+input.num{width:6em}
+.tg{width:2.6em;height:1.5em;border-radius:1em;padding:0;position:relative;background:var(--line)}
+.tg::after{content:"";position:absolute;top:.15em;left:.15em;width:1.2em;height:1.2em;border-radius:50%;background:#fff;transition:left .15s}
+.tg.on{background:var(--ok)}.tg.on::after{left:1.25em}
+.acts{margin-top:.6em}
+#login{max-width:420px;margin:3em auto}
+#login input{width:100%;margin:.5em 0}
+#toast{position:fixed;bottom:1em;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5em 1em;border-radius:8px;display:none;max-width:90vw}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<header><span id="dot" class="dot" title="disconnected"></span><h1 id="hub">zigbee-rs-hub</h1><span id="conn" class="mut">connecting…</span></header>
+<div id="login" class="card hide">
+<h2>API token</h2>
+<p class="mut">The hub's console prints it with <code>token</code>; a link ending in <code>#token=…</code> also works.</p>
+<form id="lf"><input id="tok" type="password" autocomplete="current-password" placeholder="token" required><button class="p">Connect</button></form>
+</div>
+<main id="app" class="hide">
+<section class="card"><h2>Network</h2>
+<dl class="kv" id="net"></dl>
+<div class="row acts">
+<select id="pjd"><option value="60">1 min</option><option value="180" selected>3 min</option><option value="254">254 s</option></select>
+<button class="p" id="pj">Permit join</button><button id="pjc" class="hide">Close</button><span id="pjt" class="mut"></span>
+</div>
+</section>
+<section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
+<section class="devs" id="devs"></section>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const el=(t,a={},...c)=>{const e=document.createElement(t);for(const k in a){if(a[k]==null)continue;if(k[0]=="o"&&k[1]=="n")e.addEventListener(k.slice(2),a[k]);else if(k=="class")e.className=a[k];else e.setAttribute(k,a[k])}for(const x of c)if(x!=null)e.append(x);return e};
+const hex=(n,w)=>"0x"+n.toString(16).toUpperCase().padStart(w,"0");
+let ws,rid=0,pend={},devs={},ents={},states={},net={},pjEnd=0,retry=1000,authed=false;
+function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",4000)}
+function status(s,c){$("#conn").textContent=s;$("#dot").className="dot "+c}
+function call(type,p={}){return new Promise((ok,no)=>{if(!ws||ws.readyState!=1)return no(new Error("not connected"));const id=++rid;pend[id]={ok,no};ws.send(JSON.stringify(Object.assign({id,type},p)))})}
+function act(type,p){return call(type,p).catch(e=>{toast(type+": "+e.message);throw e})}
+{const m=/[#&]token=([^&]+)/.exec(location.hash);if(m){localStorage.setItem("zrhToken",decodeURIComponent(m[1]));history.replaceState(null,"",location.pathname)}}
+function connect(){
+ const tok=localStorage.getItem("zrhToken");
+ if(!tok){showLogin();return}
+ status("connecting…","wait");
+ ws=new WebSocket((location.protocol=="https:"?"wss://":"ws://")+location.host+"/api");
+ ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch{return}onMsg(m,tok)};
+ ws.onclose=()=>{for(const k in pend)pend[k].no(new Error("connection closed"));pend={};authed=false;status("disconnected, retrying…","");setTimeout(connect,retry);retry=Math.min(retry*2,15000)};
+}
+function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");status("no token","")}
+$("#lf").onsubmit=e=>{e.preventDefault();localStorage.setItem("zrhToken",$("#tok").value.trim());$("#login").classList.add("hide");connect()};
+function onMsg(m,tok){
+ if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
+ if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
+ if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");
+  call("subscribe",{topics:["devices","entities","network"]}).catch(e=>toast(e.message));return}
+ if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
+ if(m.type=="event")onEvent(m.event);
+}
+function onEvent(e){
+ switch(e.topic){
+ case"snapshot":
+  if(e.devices){devs={};for(const d of e.devices)devs[d.id]=d}
+  if(e.entities){ents={};for(const x of e.entities)ents[x.uid]=x}
+  if(e.states){states={};for(const s of e.states)states[s.uid]=s}
+  if(e.network)setNet(e.network);
+  renderAll();break;
+ case"device_added":case"device_updated":if(e.device){devs[e.device.id]=e.device;renderDev(e.device.id)}break;
+ case"device_removed":delete devs[e.id];for(const u in ents)if(ents[u].device==e.id)delete ents[u];renderAll();break;
+ case"interview_progress":if(devs[e.device]){devs[e.device].interview="in_progress";devs[e.device].step=e.step;renderDev(e.device)}break;
+ case"entity_added":case"entity_updated":if(e.entity){ents[e.entity.uid]=e.entity;renderDev(e.entity.device)}break;
+ case"entity_removed":{const x=ents[e.uid];delete ents[e.uid];if(x)renderDev(x.device)}break;
+ case"entity_state":states[e.uid]=e;{const x=ents[e.uid];if(x)renderEnt(x)}break;
+ case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
+ case"network_state":call("network/info").then(setNet).catch(()=>{});break;
+ }
+}
+function setNet(n){net=n||{};if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();pjTick()}
+function renderNet(){
+ const n=net,c=n.ncp||{},kv=$("#net");kv.textContent="";
+ const add=(k,v)=>{if(v!=null&&v!==""){kv.append(el("dt",{},k),el("dd",{},String(v)))}};
+ add("State",n.state+(n.ownership&&n.ownership!="owned"?" ("+n.ownership+")":""));
+ if(n.pan_id!=null)add("PAN ID",hex(n.pan_id,4));
+ add("Channel",n.channel);add("Extended PAN ID",n.ext_pan_id);
+ add("NCP firmware",c.fw&&(c.fw+(c.protocol?" · ZRHP "+c.protocol:"")));
+ add("NCP IEEE",c.ieee);add("NCP board",c.board);
+ if(c.baud)add("NCP link",c.baud+" baud"+(c.flow_control?", RTS/CTS":""));
+}
+function pjTick(){
+ clearTimeout(pjTick.h);const left=Math.max(0,Math.round((pjEnd-Date.now())/1000));
+ $("#pjt").textContent=left?"open, "+left+" s left":"closed";$("#pjc").classList.toggle("hide",!left);
+ if(left)pjTick.h=setTimeout(pjTick,1000);
+}
+$("#pj").onclick=()=>{const d=+$("#pjd").value;act("network/permit_join",{duration_s:d}).then(()=>{pjEnd=Date.now()+d*1000;pjTick()}).catch(()=>{})};
+$("#pjc").onclick=()=>act("network/permit_join",{duration_s:0}).then(()=>{pjEnd=0;pjTick()}).catch(()=>{});
+function ago(t){if(!t)return"never";const s=Math.max(0,Date.now()/1000-t);return s<60?Math.round(s)+" s ago":s<3600?Math.round(s/60)+" min ago":s<86400?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"}
+function renderAll(){const box=$("#devs");box.textContent="";const ids=Object.keys(devs).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));for(const id of ids)box.append(devCard(id));$("#nd").textContent="("+ids.length+")";if(!ids.length)box.append(el("p",{class:"mut"},"No devices yet. Permit join and pair a device."))}
+function renderDev(id){const old=document.getElementById("d-"+id);if(!devs[id]){if(old)old.remove();return}const c=devCard(id);if(old)old.replaceWith(c);else renderAll()}
+function devCard(id){
+ const d=devs[id];
+ const iv=d.interview=="complete"?null:el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:""));
+ const av=el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline");
+ const info=el("div",{class:"mut"},[d.manufacturer,d.model].filter(Boolean).join(" · ")||"unknown model");
+ const ids=el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):""));
+ const q=el("div",{class:"mut"},"LQI "+(d.lqi??"–")+(d.rssi!=null?" · RSSI "+d.rssi+" dBm":"")+" · seen "+ago(d.last_seen)+" · "+d.power);
+ const ul=el("ul",{class:"ents"});
+ for(const u of Object.keys(ents).filter(u=>ents[u].device==id&&!ents[u].orphaned).sort())ul.append(entRow(ents[u]));
+ const acts=el("div",{class:"row acts"},
+  el("button",{onclick:()=>{const n=prompt("Device name",d.name||"");if(n!=null)act("devices/update",{device:id,name:n.trim()}).catch(()=>{})}},"Rename"),
+  el("button",{onclick:()=>act("devices/reinterview",{device:id}).catch(()=>{})},"Re-interview"),
+  el("button",{class:"d",onclick:()=>{if(confirm("Remove "+(d.name||id)+" from the network?"))act("devices/remove",{device:id}).catch(()=>{})}},"Remove"));
+ return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},el("b",{},d.name||id),iv,av),info,ids,q,ul,acts);
+}
+function fmt(e,s){
+ if(!s||s.state==null)return"–";let v=s.state;
+ if(typeof v=="number"){const p=e.precision??(e.capabilities&&e.capabilities.suggested_display_precision);if(p!=null)v=v.toFixed(p)}
+ return v+(e.unit&&typeof s.state=="number"?" "+e.unit:"");
+}
+function cmd(e,command,params){return act("entities/command",{uid:e.uid,command,params:params||{}}).catch(()=>{})}
+function entRow(e){
+ const s=states[e.uid],li=el("li",{id:"e-"+e.uid});if(s&&s.available===false)li.className="na";
+ const name=e.name||(e.key||"").replace(/_/g," ");
+ li.append(el("span",{class:"n",title:e.uid},name));
+ const caps=e.capabilities||{},st=s&&s.state;
+ switch(e.platform){
+ case"switch":case"light":case"fan":case"siren":{
+  if(e.platform=="light"&&!(caps.supported_color_modes||[]).every(m=>m=="onoff")){
+   const b=s&&s.attributes&&s.attributes.brightness;
+   const r=el("input",{type:"range",min:1,max:100,value:b!=null?Math.max(1,Math.round(b/2.55)):100,title:"brightness"});
+   r.onchange=()=>cmd(e,"turn_on",{brightness_pct:+r.value});li.append(r)}
+  const t=el("button",{class:"tg"+(st=="on"?" on":""),title:st||"unknown","aria-pressed":st=="on"});
+  t.onclick=()=>cmd(e,st=="on"?"turn_off":"turn_on");li.append(t);break}
+ case"number":{
+  const i=el("input",{type:"number",class:"num",min:caps.native_min_value,max:caps.native_max_value,step:caps.native_step||"any"});
+  if(st!=null)i.value=st;i.onchange=()=>cmd(e,"set_value",{value:+i.value});li.append(i);if(e.unit)li.append(el("span",{class:"mut"},e.unit));break}
+ case"select":{
+  const sel=el("select",{});for(const o of caps.options||[])sel.append(el("option",{value:o},o));
+  if(st!=null)sel.value=st;sel.onchange=()=>cmd(e,"select_option",{option:sel.value});li.append(sel);break}
+ case"button":li.append(el("button",{onclick:()=>cmd(e,"press")},"Press"));break;
+ default:li.append(el("span",{class:"v"},fmt(e,s)));
+ }
+ return li;
+}
+function renderEnt(e){const o=document.getElementById("e-"+e.uid);if(o)o.replaceWith(entRow(e));else renderDev(e.device)}
+setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById("d-"+id);if(c&&!c.contains(document.activeElement))renderDev(id)}},30000);
+connect();
+</script>
+</body>
+</html>
