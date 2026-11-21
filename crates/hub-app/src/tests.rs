@@ -71,14 +71,7 @@ fn cfg() -> AppConfig {
 }
 
 fn join(sim: &SimNcp) {
-    let ev = EvtDeviceJoined {
-        nwk: 0x1234,
-        ieee: Ieee::from_u64(DEV),
-        parent_nwk: 0x0000,
-        join_type: 0,
-        capability: 0x80,
-        decision: 0,
-    };
+    let ev = EvtDeviceJoined { nwk: 0x1234, ieee: Ieee::from_u64(DEV), parent_nwk: 0x0000, join_type: 0, capability: 0x80, decision: 0 };
     sim.inject_event(ids::EVT_DEVICE_JOINED, hub_ncp::driver::encode_body(&ev).unwrap());
 }
 
@@ -263,7 +256,9 @@ fn permit_events(rx: &Receiver<String>, until: impl Fn(&[u64]) -> bool) -> Vec<u
     let mut seen = Vec::new();
     let t = std::time::Instant::now();
     while !until(&seen) && t.elapsed() < T {
-        let Ok(f) = rx.recv_timeout(Duration::from_millis(100)) else { continue };
+        let Ok(f) = rx.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
         let f: J = serde_json::from_str(&f).unwrap();
         if f["type"] == "event" && f["event"]["topic"] == "permit_join" {
             seen.push(f["event"]["remaining_s"].as_u64().unwrap());
@@ -411,6 +406,36 @@ fn admin_app(r: &Rig, platform: Option<Arc<TestPlatform>>) -> App {
     app
 }
 
+/// A background job: the start answer, then its final `job_result`
+/// (shaped like a result frame for `ok`/`err_code`); `progress` collects
+/// the `job_progress` events and partial results seen meanwhile.
+fn job_with(app: &App, sid: u64, rx: &Receiver<String>, id: u64, body: J, progress: &mut Vec<J>) -> J {
+    let start = call(app, sid, rx, id, body);
+    let Some(job) = start["result"]["job"].as_u64() else {
+        return start;
+    };
+    loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "job_result" && f["job"] == job {
+            if f["partial"] == true {
+                progress.push(f);
+                continue;
+            }
+            return match f.get("error") {
+                Some(e) => json!({"success": false, "error": e}),
+                None => json!({"success": true, "result": f["result"]}),
+            };
+        }
+        if f["type"] == "event" && f["event"]["job"] == job {
+            progress.push(f["event"].clone());
+        }
+    }
+}
+
+fn job(app: &App, sid: u64, rx: &Receiver<String>, id: u64, body: J) -> J {
+    job_with(app, sid, rx, id, body, &mut Vec::new())
+}
+
 fn ok(f: &J) -> &J {
     assert_eq!(f["success"], true, "{f}");
     &f["result"]
@@ -454,7 +479,7 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
         assert!(maint.contains(&json!(f)), "{f} in {maint:?}");
     }
 
-    let scan = call(&app, sid, &rx, 2, json!({"type": "network/energy_scan", "duration_exp": 2}));
+    let scan = job(&app, sid, &rx, 2, json!({"type": "network/energy_scan", "duration_exp": 2}));
     let scan = ok(&scan);
     assert_eq!(scan["channels"].as_array().unwrap().len(), 16);
     assert_eq!(scan["wifi_channel"], 6);
@@ -474,16 +499,16 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     r.sim.with(|s| {
         s.beacons = vec![(20, 0x6A0B, [0xA0; 8], 0, 90, -84, true), (15, own.pan_id, own.ext_pan_id, 0x1234, 200, -50, false), (25, 0x1111, [1; 8], 0, 30, -95, false)];
     });
-    let a = call(&app, sid, &rx, 30, json!({"type": "network/active_scan", "channels": [15, 20]}));
+    let a = job(&app, sid, &rx, 30, json!({"type": "network/active_scan", "channels": [15, 20]}));
     let nets = ok(&a)["networks"].as_array().unwrap().clone();
     assert_eq!(nets.len(), 2, "channel 25 not scanned");
     assert_eq!((nets[0]["pan_id"].as_u64(), nets[0]["permit_join"].as_bool(), nets[0]["own"].as_bool()), (Some(0x6A0B), Some(true), Some(false)));
     assert_eq!(nets[0]["ext_pan_id"], "a0a0a0a0a0a0a0a0");
     assert_eq!(nets[1]["own"], true);
     r.sim.with(|s| s.unsupported.push(ids::NWK_ACTIVE_SCAN));
-    let a = call(&app, sid, &rx, 31, json!({"type": "network/active_scan"}));
+    let a = job(&app, sid, &rx, 31, json!({"type": "network/active_scan"}));
     assert_eq!(err_code(&a), "unsupported");
-    let bad = call(&app, sid, &rx, 3, json!({"type": "network/energy_scan", "channels": [10]}));
+    let bad = job(&app, sid, &rx, 3, json!({"type": "network/energy_scan", "channels": [10]}));
     assert_eq!(err_code(&bad), "invalid_value");
 
     let sub = call(&app, sid, &rx, 4, json!({"type": "subscribe", "topics": ["network"]}));
@@ -551,7 +576,7 @@ fn network_map_from_coordinator_tables_and_router_answers() {
     });
     let sub = call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]}));
     ok(&sub);
-    let map = call(&app, sid, &rx, 2, json!({"type": "network/topology"}));
+    let map = job(&app, sid, &rx, 2, json!({"type": "network/topology"}));
     let map = ok(&map).clone();
     let nodes = map["nodes"].as_array().unwrap();
     let nwks: Vec<u64> = nodes.iter().map(|n| n["nwk"].as_u64().unwrap()).collect();
@@ -747,7 +772,7 @@ fn large_network_map_and_full_diagnostics_are_valid_frames() {
             .collect();
         s.counters = (0x0101u16..0x0119).chain(0x0201..0x0209).chain(0x0301..0x0307).map(|i| (i, 7)).collect();
     });
-    let map = call(&app, sid, &rx, 1, json!({"type": "network/topology"}));
+    let map = job(&app, sid, &rx, 1, json!({"type": "network/topology"}));
     let map = ok(&map);
     assert_eq!(map["nodes"].as_array().unwrap().len(), 1 + 8 + 48);
     assert!(map["nodes"].as_array().unwrap().iter().filter(|n| n["type"] == "router").all(|n| n["scanned"] == true));
@@ -764,7 +789,9 @@ fn restore_of_many_devices_in_batches() {
     let app = admin_app(&r, None);
     let (sid, rx) = session(&app);
     let devices: Vec<J> = (0..45u16)
-        .map(|i| json!({"ieee_address": format!("00158d00{:08x}", 0x1000 + u32::from(i)), "nwk_address": format!("{:04x}", 0x2000 + i), "is_child": i % 3 == 0}))
+        .map(
+            |i| json!({"ieee_address": format!("00158d00{:08x}", 0x1000 + u32::from(i)), "nwk_address": format!("{:04x}", 0x2000 + i), "is_child": i % 3 == 0}),
+        )
         .collect();
     let backup = json!({
         "metadata": {"format": "zigpy/open-coordinator-backup", "version": 1},
@@ -783,4 +810,79 @@ fn restore_of_many_devices_in_batches() {
     let st = r.sim.state();
     assert_eq!((st.pan_id, st.channel, st.table_devices.len()), (0x1234, 20, 45));
     app.shutdown();
+}
+
+#[test]
+fn scans_are_background_jobs_that_leave_the_api_usable() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, Some(Arc::new(TestPlatform::default())));
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 15);
+    ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]})));
+    // Each pass takes 0.8 s: long enough to look at the job meanwhile.
+    r.sim.with(|s| s.scan_time = Duration::from_millis(800));
+    let start = call(&app, sid, &rx, 2, json!({"type": "network/energy_scan", "passes": 3}));
+    let job = ok(&start)["job"].as_u64().unwrap();
+    assert_eq!(ok(&start)["passes"], 3);
+
+    // The rest of the API answers; only another radio job is busy.
+    let info = call(&app, sid, &rx, 3, json!({"type": "network/info"}));
+    ok(&info);
+    let d = call(&app, sid, &rx, 4, json!({"type": "network/diagnostics"}));
+    ok(&d);
+    let again = call(&app, sid, &rx, 5, json!({"type": "network/active_scan"}));
+    assert_eq!(err_code(&again), "busy");
+    // A second client (a reconnecting UI) finds the running job.
+    let (sid2, rx2) = session(&app);
+    let jobs = call(&app, sid2, &rx2, 1, json!({"type": "network/jobs"}));
+    let running = ok(&jobs)["running"].as_array().unwrap().clone();
+    assert_eq!((running.len(), running[0]["job"].as_u64(), running[0]["kind"].as_str()), (1, Some(job), Some("energy_scan")));
+    assert_eq!(running[0]["passes"], 3);
+
+    // Progress events (once a second) and a partial result after pass 1;
+    // then cancel: the scan stops after the current pass.
+    let mut progress = Vec::new();
+    let mut partial = None;
+    while partial.is_none() {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "job_result" && f["partial"] == true {
+            partial = Some(f);
+        } else if f["type"] == "event" && f["event"]["topic"] == "job_progress" {
+            progress.push(f["event"].clone());
+        }
+    }
+    let partial = partial.unwrap();
+    assert_eq!((partial["job"].as_u64(), partial["result"]["passes"].as_u64()), (Some(job), Some(1)));
+    assert!(progress.iter().all(|p| p["job"] == job && p["progress"].as_f64().unwrap() <= 1.0), "{progress:?}");
+    let c = call(&app, sid, &rx, 6, json!({"type": "network/job/cancel", "job": job}));
+    assert_eq!(ok(&c)["cancelling"], true);
+    let (mut result, mut done) = (None, None);
+    while result.is_none() || done.is_none() {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "job_result" && f["partial"] == false {
+            result = Some(f);
+        } else if f["type"] == "event" && f["event"]["topic"] == "job_done" {
+            done = Some(f["event"].clone());
+        }
+    }
+    let (result, done) = (result.unwrap(), done.unwrap());
+    assert_eq!(done["cancelled"], true);
+    assert_eq!(result["result"]["cancelled"], true);
+    assert!(result["result"]["passes"].as_u64().unwrap() < 3, "{result}");
+    assert_eq!(result["result"]["channels"].as_array().unwrap().len(), 16);
+    // Kept for clients that come later; the job is gone from the board.
+    let kept = call(&app, sid2, &rx2, 2, json!({"type": "network/job/result", "kind": "energy_scan"}));
+    assert_eq!((ok(&kept)["job"].as_u64(), ok(&kept)["result"]["cancelled"].as_bool()), (Some(job), Some(true)));
+    let jobs = call(&app, sid2, &rx2, 3, json!({"type": "network/jobs"}));
+    assert_eq!(ok(&jobs)["running"], json!([]));
+    let gone = call(&app, sid, &rx, 7, json!({"type": "network/job/cancel", "job": job}));
+    assert_eq!(err_code(&gone), "not_found");
+
+    // A failing job reports to its session and as `job_failed`.
+    r.sim.with(|s| {
+        s.scan_time = Duration::from_millis(20);
+        s.unsupported.push(ids::NWK_ACTIVE_SCAN);
+    });
+    let a = self::job(&app, sid, &rx, 8, json!({"type": "network/active_scan"}));
+    assert_eq!(err_code(&a), "unsupported");
 }

@@ -31,6 +31,18 @@ impl Jw {
         Ok(Self { s, comma: false, after_key: true, oom: false })
     }
 
+    /// A bare JSON value (no frame around it), `capacity` bytes reserved.
+    pub fn value(capacity: usize) -> Result<Self, ApiError> {
+        let mut s = String::new();
+        s.try_reserve_exact(capacity.max(64)).map_err(|_| oom())?;
+        Ok(Self { s, comma: false, after_key: true, oom: false })
+    }
+
+    /// The value's text (see [`value`](Self::value)).
+    pub fn finish_value(self) -> Result<String, ApiError> {
+        if self.oom { Err(oom()) } else { Ok(self.s) }
+    }
+
     fn push(&mut self, t: &str) {
         if self.s.capacity() - self.s.len() < t.len() && self.s.try_reserve(t.len().max(self.s.len() / 2)).is_err() {
             self.oom = true;

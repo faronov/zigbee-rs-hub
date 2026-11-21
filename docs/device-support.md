@@ -2222,8 +2222,13 @@ Known gaps, left open:
 ### 14.6 Network and hub maintenance (API 1.2)
 
 Authenticated sessions only, like every request. Requests that talk to the
-NCP run as **one job at a time** off the application thread: a second one
-while a job runs fails with `busy` (`"<job> is running"`). `hub/info` gains
+NCP run as jobs off the application thread, in two lanes with one job each:
+**heavy** (radio or network-changing work: scans, map, channel change,
+backup, restore, reset) and **light** (`network/diagnostics`,
+`network/set_tx_power`). A second job in a busy lane fails with `busy`
+(`"<job> (job N) is running"`); a light request does not wait for a scan,
+and the rest of the API (devices, entities, `network/info`, permit join, …)
+is served meanwhile. `hub/info` gains
 `maintenance`: the requests this hub and its NCP support (`diagnostics`,
 `topology`, `change_channel`, `reset` always; `energy_scan`, `tx_power`,
 `backup`, `restore` by NCP capability bits; `wifi`, `reboot`, `mode`,
@@ -2235,12 +2240,15 @@ written as text with fallible allocation, never as a JSON tree).
 
 | Type | Parameters | Result |
 |---|---|---|
-| `network/energy_scan` | `channels` (list, default 11–26), `duration_exp` (0–8, default 4: ≈ 0.25 s per channel), `count` (1–4) | `channels`: [{`channel`, `energy` (0–255), `max_rssi_dbm`, `wifi_overlap`, `score`}], `current`, `wifi_channel` (the hub's own Wi-Fi channel, when known), `recommended`, `duration_ms`. `score` (lower is better) = 4 × energy, +1000 under the hub's 20 MHz Wi-Fi channel (Wi-Fi 1 → 11–14, 6 → 16–19, 11 → 21–24), +120 next to it, +160 for 26, +30 off the Light Link primaries 11/15/20/25 |
-| `network/active_scan` | `channels` (list, default 11–26), `duration_exp` (0–6, default 3) | `networks`: [{`channel`, `pan_id`, `ext_pan_id` (big-endian hex), `src` (the beacon's sender), `lqi`, `rssi`, `permit_join`, `stack_profile`, `update_id`, `own` (this hub's network)}] — one entry per beacon heard (ZRHP `NWK_ACTIVE_SCAN` 0x010A); `duration_ms`. `unsupported` on NCP images without it |
+| `network/energy_scan` | `channels` (list, default 11–26), `duration_exp` (0–8, default 3: ≈ 0.14 s per channel), `passes` (1–10, default 1; `count` is the old name) | **background job** (below). Result: `passes` (done), `passes_requested`, `cancelled`, `channels`: [{`channel`, `energy` (average over the passes, 0–255), `energy_max` (peak), `max_rssi_dbm` (peak), `wifi_overlap`, `score`}], `current`, `wifi_channel` (the hub's own Wi-Fi channel, when known), `recommended`, `duration_ms`; a partial result after every pass but the last. `score` (lower is better) = 4 × energy, +1000 under the hub's 20 MHz Wi-Fi channel (Wi-Fi 1 → 11–14, 6 → 16–19, 11 → 21–24), +120 next to it, +160 for 26, +30 off the Light Link primaries 11/15/20/25 |
+| `network/active_scan` | `channels` (list, default 11–26), `duration_exp` (0–6, default 3) | **background job**. Result: `networks`: [{`channel`, `pan_id`, `ext_pan_id` (big-endian hex), `src` (the beacon's sender), `lqi`, `rssi`, `permit_join`, `stack_profile`, `update_id`, `own` (this hub's network)}] — one entry per beacon heard (ZRHP `NWK_ACTIVE_SCAN` 0x010A); `duration_ms`. `unsupported` on NCP images without it |
 | `network/change_channel` | `channel` (11–26) | `channel`, `nwk_update_id` once the NCP tuned (ZRHP `NWK_CHANGE_CHANNEL`: `Mgmt_NWK_Update_req` broadcast, switch ≈ 9 s later); the store follows. Sleepy devices find the network by their rejoin scan |
 | `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps and rounds down to its radio's steps: ESP32-H2 −24…+20, ESP32-C6 −15…+20 dBm, 3 dB); persisted in the host store and re-applied after every NCP restart. `network/info` reports `tx_power` (applied, absent while the NCP reports 0x7F, unknown) and `tx_power_requested` |
 | `network/diagnostics` | `reset` (bool), `groups` (`DIAG` group mask, default all) | `ncp` (`SYS_GET_STATUS`: `uptime_s`, `free_aps_slots`, `pta_coex`, `key_export_locked`, `permit_join`, …), `counters` [{`id`, `group`, `name`, `value`}] (`DIAG_GET_COUNTERS`), `frame_counters`, `host_link` (the hub's link counters), `pta` {`capable`, `enabled`}, `tx_power_set`, `unsupported` (commands the NCP lacks), `errors` |
-| `network/topology` | `refresh` (default true; false returns the last map, null before the first scan), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); progress events `topology_progress` {`scanned`, `queued`} |
+| `network/topology` | `refresh` (default true: a **background job**; false answers at once with the last map, null before the first scan or when it was larger than 16 KB), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); cancelling stops before the next router |
+| `network/jobs` | — | `running` [{`job`, `kind`, `progress`, `pass`, `passes`, `elapsed_ms`, `eta_ms`, `cancelling`}] (every job, request/response ones included), `results` [{`job`, `kind`}]: the kept results |
+| `network/job/result` | `job` or `kind` (or neither: the newest) | `{job, kind, partial: false, result}` of a kept result: the last one of each kind, up to 16 KB; `not_found` otherwise |
+| `network/job/cancel` | `job` | `cancelling`: an energy scan stops after the current pass (its result is then marked `cancelled`), the map before the next router; an active scan runs to its end (one NCP command). `not_found` for a job that is not running |
 | `network/backup` | `keys` (default true) | the backup file, Open ZigBee Coordinator Backup v1 (`zigpy/open-coordinator-backup`; ZRHP 9.1/9.2): the NCP's export (`BKP_EXPORT_*`) plus the hub's devices without keys, `metadata.internal.zigbee_rs`, `stack_specific.zigbee_rs` with the durable counter limits. With keys it is kept as the last backup in the host store; without keys (or when the NCP's key export is locked) it is marked `metadata.internal.incomplete` and cannot be restored. Keys need a non-empty API token |
 | `network/backup/last` | — | `backup`: the last complete backup (taken by `network/backup`, `network/reset` or `network/restore`), or null |
 | `network/restore` | `backup` (the OCB object; its `devices` may be left out or partial), then any number of requests with `devices` (a batch of `devices[]` entries), each with `more` (bool) while more follow; the first request also takes `allow_ieee_change` (default true), `force`, `skip_backup`. A request with `more` is answered `staged_devices`; the last one starts the restore. Every request is a small JSON value, so a large backup never has to be in the hub's RAM at once (the web UI sends 8 devices per request) | `pan_id`, `channel`, `coordinator_ieee`, `devices`, `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` [{`index`, `note`}], `previous_network_backed_up`. ZRHP `BKP_RESTORE_*` with margins 10 000 / 10 000 (APS 2²⁰ when the file has no TCLK counter, Z2M); the restored network is adopted (store, counters as floors) and its devices imported. An NCP that runs a network needs `force`; it is backed up first unless `skip_backup` |
@@ -2254,7 +2262,36 @@ written as text with fallible allocation, never as a JSON tree).
 
 Events (topic `network`, API 1.2): `network_updated` {`reason`:
 `channel_changed` (with `channel`, `nwk_update_id`), `tx_power`, `restored`,
-`formed`} — clients read `network/info` again; `topology_progress`.
+`formed`} — clients read `network/info` again; `job_progress`, `job_done`,
+`job_failed` (below).
+
+**Background jobs.** `network/energy_scan`, `network/active_scan` and
+`network/topology` (with `refresh`) answer at once with `{job, kind,
+passes}` and run on their own thread. Then:
+
+- `job_progress` events (topic `network`) once a second and after every
+  pass: `{job, kind, progress (0–1), pass (passes done), passes,
+  elapsed_ms, eta_ms, cancelling}`. Within a pass the progress is estimated
+  from the radio time (channels × 15.36 ms × (2^`duration_exp` + 1), × 1.5
+  for the NCP interleaving the scan with the stack), from the measured time
+  of the previous pass, or, for the map, from the routers asked vs queued.
+  When the NCP sends the optional `EVT_SCAN_PROGRESS` (proposed ZRHP 0x018B,
+  NETWORK event: `u16 req_tid, u8 scan (0 energy, 1 active), u8 channel,
+  u8 channels_done, u8 channels_total, u8 networks_found`, after each
+  channel) the pass fraction is `channels_done / channels_total`; images
+  without it are estimated by time;
+- a `job_result` frame `{"type": "job_result", job, kind, partial, result}`
+  (or `error` {`code`, `message`} instead of `result`) to the session that
+  started the job, subscribed or not: `partial: true` after each energy-scan
+  pass, `false` at the end;
+- `job_done` {`job`, `kind`, `cancelled`} or `job_failed` {`job`, `kind`,
+  `error`} to every `network` subscriber; other clients fetch the result
+  with `network/job/result`.
+
+A client that connects while a job runs finds it in `network/jobs` and
+follows its `job_progress` events; the job does not depend on the session
+that started it. The application thread never waits for the NCP here: it
+only reads the job board once a second.
 
 ## 15. Boundary to a Home Assistant integration
 

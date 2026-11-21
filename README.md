@@ -654,7 +654,8 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 | `registry` | Device registry in the host store journal (device-support 16.1): `dev/<id>` = deflated JSON `DeviceSnapshot` (identity, fingerprint, descriptors, attribute support and the values resolution reads, self-description fragment as zdef CBOR, user settings and entity overrides, configure hash/results, GP sink record), `udef/<id>` = user definitions. Written on device changes (2 s coalescing) and in a 30 s sweep; identical values are skipped and snapshots hold no measured values, so reports never write flash. The journal stores values > 2000 B as parts, applied only when complete |
 | `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist; once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them; after a start, reads the still-unknown states of restored devices once (`refresh_unknown`; a sleepy device gets the reads right after its next frame), since snapshots hold no measured values and a device may report only on change (the C6 sensor: temperature only after a 0.5 °C change or 15 min) |
 | `catalog` | Trusted keys of the definitions catalog: **slot 0** = `keys/zdef-catalog-ed25519.pub.pem` (`ff931767…63c6a2`, kid `66f64ac1cbfc9e27`), **slot 1** reserved for a rotation (add the successor in a firmware release, sign with it, retire slot 0 later); `verify_manifest` / `verify_bank` (COSE_Sign1 Ed25519, `zdef`) |
-| `admin` | Network and hub maintenance (API 1.2, device-support 14.6): energy scan with a channel recommendation that avoids the hub's own Wi-Fi channel, channel change, TX power, NCP diagnostics, the network map, Open Coordinator Backup export/restore, reset + form; Wi-Fi credentials, API token rotation, reboot, boot mode, system facts and a log tail through the platform. NCP work runs on one job thread at a time (`busy` otherwise), so the app thread keeps serving |
+| `admin` | Network and hub maintenance (API 1.2, device-support 14.6): energy scan with a channel recommendation that avoids the hub's own Wi-Fi channel, channel change, TX power, NCP diagnostics, the network map, Open Coordinator Backup export/restore, reset + form; Wi-Fi credentials, API token rotation, reboot, boot mode, system facts and a log tail through the platform. NCP work runs on job threads in two lanes, one job each (heavy: scans, map, channel change, backup/restore/reset; light: diagnostics, TX power; `busy` otherwise), so the app thread keeps serving |
+| `jobs` | The job board: running jobs per lane, progress (time estimate, measured passes, the NCP's optional `EVT_SCAN_PROGRESS`), cancellation, the last result of each kind for clients that connect later |
 | `ocb` | `zigpy/open-coordinator-backup` v1 ⇄ ZRHP record streams (byte orders and Z2M/zigpy quirks of ZRHP 9.1); the export is written as text, not a JSON tree (RAM) |
 | `topology` | Network map: the coordinator's `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN`, then Mgmt_Lqi_req/Mgmt_Rtg_req to every router found, breadth first |
 | `platform` | `Platform` (what the app needs from the S3 or the desktop) and `LogRing` (a fixed-size ring of recent log lines) |
@@ -688,8 +689,8 @@ booted without any (console `wifi set` does the same in hub mode);
 `hub/mode/set`; `hub/system` (internal heap free, minimum and largest block,
 uptime, Wi-Fi SSID/IP/RSSI/channel, reset reason); `hub/logs` from a 3 KiB
 RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it). The
-energy-scan advice avoids the AP's channel. Maintenance jobs run on a 12 KiB
-thread. On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
+energy-scan advice avoids the AP's channel. Maintenance jobs run on 12 KiB
+threads, at most two at a time (a scan and a diagnostics read). On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
 `hub/reboot`, the network map (the C6 as the coordinator's child), backup,
 and channel change 17 → 25 → 17 (about 9 s each; the C6 followed within a
 minute) work; `hub/wifi/set` and `hub/mode/set` were not tried on the shared
@@ -739,7 +740,9 @@ in device records (device-support 14.2); the header and the hub facts
 WebSocket (device-support 14.6): `network/energy_scan` (per-channel energy,
 the channels under the hub's own Wi-Fi channel marked, a recommendation),
 `network/active_scan` (the Zigbee networks around: PAN ID, EPID, LQI, permit
-join), `network/change_channel`, `network/set_tx_power` (re-applied after every NCP
+join; the scans and the map run as background jobs: the request answers
+with a job ID, progress and results come as events, `network/jobs` lists
+the running ones, `network/job/cancel` stops them), `network/change_channel`, `network/set_tx_power` (re-applied after every NCP
 restart), `network/diagnostics` (NCP status incl. PTA, DIAG counters, frame
 counters, host link counters), `network/topology` (map from the
 coordinator's tables and Mgmt_Lqi/Mgmt_Rtg over the air),
@@ -758,13 +761,15 @@ coordinator in the middle, rings by hop count, end devices next to their
 parent, links coloured by LQI, a table with the best LQI per node) and a
 **Settings** tab (network facts, channel change, TX power with the applied
 and requested value, the chip's range and a regulatory note, a channel scan:
-utilization in % per channel over 1–10 rounds, averaged or peak, the hub's
+utilization in % per channel over 1–10 rounds with a progress bar
+(pass k of N, elapsed, time left) and a Stop button, averaged or peak, the hub's
 Wi-Fi channel and any others the user lists marked, a recommendation with
 its reasons and the Zigbee networks heard per channel, backup download,
 the last automatic backup, restore from a file in device batches, a new-network form
 that needs `RESET` typed, hub facts, Wi-Fi, token rotation, reboot, bridge
 mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
-are hidden (`maintenance` in `hub/info`). The page is 17.3 KB gzipped with the
+are hidden (`maintenance` in `hub/info`); the page stays usable while a
+scan runs, and a page opened meanwhile follows it. The page is 18.3 KB gzipped with the
 other tabs (Green Power included).
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
