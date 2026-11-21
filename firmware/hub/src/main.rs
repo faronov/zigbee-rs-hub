@@ -20,6 +20,8 @@ mod mode;
 #[cfg(feature = "app")]
 mod net;
 #[cfg(feature = "app")]
+mod platform;
+#[cfg(feature = "app")]
 mod ws;
 #[cfg(feature = "app")]
 mod usbapi;
@@ -61,7 +63,7 @@ hub firmware:\r
                        (manual recovery: esptool on CDC 0)\r
   hub crash            panic on purpose (tests the restart after a crash)\r
   wifi                 Wi-Fi state and the API address (hub mode, app build)\r
-  wifi set <ssid> [pw] store Wi-Fi credentials (used from the next hub boot)\r
+  wifi set <ssid> [pw] store Wi-Fi credentials (hub mode: connect with them now)\r
   wifi clear           forget them\r
   token                the API token (generated at the first hub boot)\r
   catalog              trusted definitions-catalog keys (app build)\r
@@ -277,6 +279,11 @@ fn extension(words: &[&str]) -> Option<String> {
         ["wifi"] => format!("wifi: {}\r\n", net::STATE.lock().unwrap()),
         #[cfg(feature = "app")]
         ["catalog"] => catalog_keys(),
+        #[cfg(feature = "app")]
+        ["wifi", "set", ssid, rest @ ..] if hub_mode && APP.get().is_some() => match net::configure(ssid, &rest.join(" ")) {
+            Ok(()) => "stored; connecting with them now\r\n".into(),
+            Err(e) => format!("error: {e}\r\n"),
+        },
         ["wifi", "set", ssid, rest @ ..] => {
             let pass = rest.join(" ");
             match mode::set_str("wifi_ssid", Some(ssid)).and_then(|_| mode::set_str("wifi_pass", Some(&pass))) {
@@ -373,6 +380,8 @@ fn start_app(hub: Hub) {
         api_token: token,
         stack_size: APP_STACK,
         builtin_catalog: psram > 0,
+        platform: Some(std::sync::Arc::new(platform::S3)),
+        admin_stack: ADMIN_STACK,
         ..Default::default()
     };
     stage(5);
@@ -394,6 +403,11 @@ fn start_app(hub: Hub) {
 /// Stack of the application thread (engine handlers, serde_json).
 #[cfg(feature = "app")]
 const APP_STACK: usize = 40 * 1024;
+
+/// Stack of the maintenance job thread (network map, backup), allocated per
+/// job from internal RAM.
+#[cfg(feature = "app")]
+const ADMIN_STACK: usize = 12 * 1024;
 
 /// The last Rust panic message, kept in RTC memory across the panic reset
 /// (hub-mode logs go to UART0, which the hwlab host cannot see).
@@ -561,6 +575,9 @@ fn prev_stage() -> String {
 
 fn main() {
     esp_idf_svc::sys::link_patches();
+    #[cfg(feature = "app")]
+    platform::init_logger();
+    #[cfg(not(feature = "app"))]
     esp_idf_svc::log::EspLogger::initialize_default();
     let _ = PREV_STAGE.set(unsafe { (&raw const STAGE).read_volatile() });
     let _ = PREV_STAGE_HEAP.set(unsafe { (&raw const STAGE_HEAP).read_volatile() });

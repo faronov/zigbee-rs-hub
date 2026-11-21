@@ -2266,6 +2266,7 @@ dependencies = [
  "hub-ncp",
  "hub-web",
  "log",
+ "serde_json",
  "tbr-bridge",
 ]
 

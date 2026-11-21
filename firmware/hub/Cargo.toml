@@ -20,6 +20,7 @@ hub-ncp = { workspace = true }
 hub-app = { workspace = true, optional = true }
 hub-web = { workspace = true, optional = true }
 embedded-svc = { version = "0.29", optional = true }
+serde_json = { version = "1", optional = true }
 log = "0.4"
 tbr-bridge = { path = "../bridge" }
 
@@ -28,7 +29,7 @@ default = ["app"]
 # The application (device engine, registry) with its WebSocket JSON API over
 # Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
 # phase-1 hub (ZRHP host core only).
-app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc"]
+app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json"]
 
 [build-dependencies]
 embuild = "0.33"
