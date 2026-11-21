@@ -16,7 +16,12 @@ has, and the integration maps them 1:1 onto HA platforms.
 - A HA device per Zigbee/GP device (`identifiers` = hub device id,
   manufacturer, model, model ID, software/hardware version, IEEE or GPD
   source ID as serial number, `via_device` = the hub), plus a hub device with
-  a **Connection** sensor and a **Permit join** button.
+  a **Connection** sensor and a **Permit join** button. With API 1.1 hubs the
+  hub device also has **Permit join** (on while the network accepts joins,
+  closing on time even if the closing event is missed), **Permit join ends**
+  (a timestamp HA shows as a countdown), **Network state** (with PAN ID,
+  extended PAN ID, update ID, ownership and NCP session as attributes) and
+  **Channel**; its hardware version shows the NCP board and firmware.
 - Entities for all platforms the hub serves: `sensor`, `binary_sensor`,
   `switch`, `light`, `number`, `select`, `button`, `text`, `event`, `cover`,
   `climate`, `lock`, `fan`, `siren`, `valve` (`update` is not served by the
@@ -71,7 +76,9 @@ delete the entry, then the directory, then restart.
 | `auth_required` → `auth {token}` → `auth_ok` | config entry data (`host`, `port`, `token`); `auth_invalid` → reauth flow |
 | `hub/info` `coordinator_ieee` | config entry unique ID (hubs without `hub/info`: `host:port`, moved to the IEEE once the hub reports it); hub device serial number |
 | `hub/info` `name`, `ncp_product` | hub device firmware version (`zigbee-rs-hub 0.2.4` → `0.2.4`) and model |
-| `subscribe ["devices", "entities", "events"]` snapshot | devices, entities and states (again after every reconnect) |
+| `subscribe ["devices", "entities", "events"]` (+ `"network"` on API 1.1) snapshot | devices, entities, states and network facts (again after every reconnect) |
+| `network` topic (API 1.1): `permit_join {remaining_s}`, `network_state {state}` | Permit join / Permit join ends, Network state |
+| network/info `time` (the hub's clock) | timestamps from a hub whose clock is not synchronised yet (seconds since boot) are converted with the offset to HA's clock |
 | device record (4.1) | device registry entry; `available: false` → all its entities unavailable; `name` → device name (a name set in HA stays HA-only) |
 | entity record (4.2) | `uid` → `unique_id`; `platform`, `device_class`, `unit`, `state_class`, `category` → entity category, `enabled_default`, `capabilities` → options, limits, colour modes, features, `event_types` |
 | entity name | record `name`, else the device name for the main entity (`light`, `switch`, `cover`, …), else the translation key, else HA's device-class name, else the key |

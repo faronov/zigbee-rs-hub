@@ -28,6 +28,10 @@ _FEATURES = {
 }
 
 
+# HA 2026.11 renamed the temperatures to native_* (the old names warn).
+_NATIVE = hasattr(ClimateEntity, "native_current_temperature")
+
+
 def _num(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
@@ -55,8 +59,10 @@ class ZigbeeRsClimate(ZigbeeRsEntity, ClimateEntity):
             capability(record, "target_temperature_step", 0.5)
         )
         unit = capability(record, "temperature_unit", "°C")
-        self._attr_temperature_unit = (
-            UnitOfTemperature.FAHRENHEIT if unit == "°F" else UnitOfTemperature.CELSIUS
+        setattr(
+            self,
+            "_attr_native_temperature_unit" if _NATIVE else "_attr_temperature_unit",
+            UnitOfTemperature.FAHRENHEIT if unit == "°F" else UnitOfTemperature.CELSIUS,
         )
         features = ClimateEntityFeature(0)
         for name in capability(record, "supported_features", []):
@@ -77,15 +83,35 @@ class ZigbeeRsClimate(ZigbeeRsEntity, ClimateEntity):
         """What the device is doing."""
         return enum_or_none(HVACAction, self.hub_attributes.get("hvac_action"))
 
-    @property
-    def current_temperature(self) -> float | None:
-        """Measured temperature."""
+    def _current(self) -> float | None:
         return _num(self.hub_attributes.get("current_temperature"))
 
-    @property
-    def target_temperature(self) -> float | None:
-        """Setpoint."""
+    def _target(self) -> float | None:
         return _num(self.hub_attributes.get("target_temperature"))
+
+    if _NATIVE:
+
+        @property
+        def native_current_temperature(self) -> float | None:
+            """Measured temperature."""
+            return self._current()
+
+        @property
+        def native_target_temperature(self) -> float | None:
+            """Setpoint."""
+            return self._target()
+
+    else:
+
+        @property
+        def current_temperature(self) -> float | None:
+            """Measured temperature."""
+            return self._current()
+
+        @property
+        def target_temperature(self) -> float | None:
+            """Setpoint."""
+            return self._target()
 
     @property
     def preset_mode(self) -> str | None:

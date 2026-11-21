@@ -106,7 +106,13 @@ async def test_hubctl_sim(hass: HomeAssistant, hubctl: Hubctl) -> None:
     )
     assert hass.states.get(connected).state == STATE_ON
 
-    await hass.services.async_call(DOMAIN, "permit_join", {"duration": 5}, blocking=True)
+    await hass.services.async_call(DOMAIN, "permit_join", {"duration": 30}, blocking=True)
+    # API 1.1: the network topic reports the open window.
+    reg = er.async_get(hass)
+    permit = reg.async_get_entity_id("binary_sensor", DOMAIN, f"{entry.entry_id}_permit_join_open")
+    assert permit is not None
+    await _wait(hass, lambda: hass.states.get(permit).state == STATE_ON)
+    assert reg.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_network_state")
 
     # The hub process restarts: unavailable, then reconnected.
     await hubctl.stop()
@@ -114,6 +120,7 @@ async def test_hubctl_sim(hass: HomeAssistant, hubctl: Hubctl) -> None:
     await hubctl.start()
     await _wait(hass, lambda: hass.states.get(connected).state == STATE_ON)
     await hass.services.async_call(DOMAIN, "permit_join", {"duration": 0}, blocking=True)
+    await _wait(hass, lambda: hass.states.get(permit).state == STATE_OFF)
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

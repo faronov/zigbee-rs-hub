@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import contextlib
+from datetime import UTC, datetime, timedelta
 import inspect
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -60,6 +62,20 @@ async def async_fetch_info(client: HubClient) -> dict[str, Any]:
     return info
 
 
+def api_at_least(version: Any, major: int, minor: int) -> bool:
+    """Whether an `api_version` (`major.minor`) is at least `major.minor`."""
+    try:
+        got = tuple(int(x) for x in str(version).split(".")[:2])
+    except ValueError:
+        return False
+    return got >= (major, minor)
+
+
+# Hub timestamps below this (2001-09-09) count seconds since the hub's boot:
+# its clock is not synchronised yet (network/info `time`, API 1.1).
+_EPOCH_FLOOR = 1e9
+
+
 def hub_version(name: str | None) -> str | None:
     """Firmware version from a hub name such as `zigbee-rs-hub 0.2.4`."""
     if not name:
@@ -90,6 +106,10 @@ class ZigbeeRsHub:
         self.entities: dict[str, dict[str, Any]] = {}
         self.states: dict[str, dict[str, Any]] = {}
         self.seq = 0
+        # network/info and the `network` topic (API 1.1); empty before.
+        self.network: dict[str, Any] = {}
+        self.permit_join_until: datetime | None = None
+        self._clock_offset: float | None = None
         self._snapshot = asyncio.Event()
         self._listeners: dict[str, list[Listener]] = {}
         self._event_listeners: dict[str, list[EventListener]] = {}
@@ -109,6 +129,11 @@ class ZigbeeRsHub:
         return (DOMAIN, f"hub_{self.entry.entry_id}")
 
     @property
+    def supports_network(self) -> bool:
+        """API 1.1: network/info and the `network` topic."""
+        return api_at_least(self.info.get("api_version"), 1, 1)
+
+    @property
     def coordinator_ieee(self) -> str | None:
         """Coordinator IEEE (hub/info), if the hub tells it."""
         ieee = self.info.get("coordinator_ieee")
@@ -124,7 +149,10 @@ class ZigbeeRsHub:
             self.info = await async_fetch_info(client)
             self._snapshot = asyncio.Event()
             self.client = client
-            await client.subscribe(TOPICS, self._on_event)
+            topics = list(TOPICS)
+            if self.supports_network:
+                topics.append("network")
+            await client.subscribe(topics, self._on_event)
             async with asyncio.timeout(SNAPSHOT_TIMEOUT):
                 waits = {
                     asyncio.ensure_future(self._snapshot.wait()),
@@ -231,6 +259,12 @@ class ZigbeeRsHub:
             if isinstance(uid, str):
                 self.states[uid] = event
                 self._notify(uid)
+        elif topic == "permit_join":
+            self._set_permit_join(event.get("remaining_s"))
+            self._notify_hub()
+        elif topic == "network_state":
+            self.network["state"] = event.get("state")
+            self._notify_hub()
         elif topic == "entity_event":
             uid = event.get("uid")
             for cb in list(self._event_listeners.get(uid, [])):
@@ -252,6 +286,11 @@ class ZigbeeRsHub:
         # only explicit removal events delete them.
         self.entities = entities
         self.states = states
+        if isinstance(net := snap.get("network"), dict):
+            self.network = net
+            self._set_permit_join(net.get("permit_join_s"))
+            if isinstance(t := net.get("time"), (int, float)):
+                self._clock_offset = time.time() - t
         self._update_hub_device()
         for dev in devices.values():
             self._sync_device(dev)
@@ -262,6 +301,10 @@ class ZigbeeRsHub:
     @callback
     def _update_hub_device(self) -> None:
         name = self.info.get("name") or "zigbee-rs hub"
+        ncp = self.network.get("ncp") if isinstance(self.network.get("ncp"), dict) else {}
+        hw = " ".join(
+            x for x in (ncp.get("board"), f"(NCP {ncp['fw']})" if ncp.get("fw") else None) if x
+        )
         self._hub_device_id = (
             dr.async_get(self.hass)
             .async_get_or_create(
@@ -271,6 +314,7 @@ class ZigbeeRsHub:
                 model=self.info.get("ncp_product") or "zigbee-rs-hub",
                 name=self.entry.title,
                 sw_version=hub_version(name),
+                hw_version=hw or None,
                 serial_number=self.coordinator_ieee,
                 configuration_url=self.url.replace("ws://", "http://", 1).rsplit("/", 1)[0] + "/",
             )
@@ -377,11 +421,34 @@ class ZigbeeRsHub:
                 self._notify(uid)
 
     @callback
+    def _notify_hub(self) -> None:
+        for cb in list(self._hub_listeners):
+            cb()
+
+    @callback
     def _notify_all(self) -> None:
         for uid in list(self._listeners):
             self._notify(uid)
-        for cb in list(self._hub_listeners):
-            cb()
+        self._notify_hub()
+
+    @callback
+    def _set_permit_join(self, remaining: Any) -> None:
+        if isinstance(remaining, (int, float)) and remaining > 0:
+            self.network["permit_join_s"] = remaining
+            self.permit_join_until = datetime.now(UTC) + timedelta(seconds=remaining)
+        else:
+            self.network["permit_join_s"] = 0
+            self.permit_join_until = None
+
+    def hub_time(self, value: Any) -> datetime | None:
+        """A hub timestamp (s) as a datetime, also before the hub's clock is set."""
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        if value < _EPOCH_FLOOR:
+            if self._clock_offset is None:
+                return None
+            value += self._clock_offset
+        return datetime.fromtimestamp(value, UTC)
 
     def entity_available(self, uid: str) -> bool:
         """Connected, the device is available and the entity is not orphaned."""

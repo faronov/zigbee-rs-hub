@@ -182,6 +182,21 @@ class FakeHub:
         self.token = TOKEN
         self.name = "zigbee-rs-hub 0.2.4"
         self.hub_info = True
+        self.api_version = "1.1"
+        self.network = {
+            "state": "up",
+            "session": "ready",
+            "ownership": "owned",
+            "permit_join_s": 0,
+            "pan_id": 7174,
+            "ext_pan_id": "744dbdfffe641ece",
+            "channel": 17,
+            "nwk_update_id": 2,
+            "tx_power": 127,
+            "ncp": {"fw": "0.1.0", "board": "esp-thread-br-zigbee-gw", "product": "zigbee-rs-ncp"},
+            # The hub's clock: seconds since boot (not synchronised).
+            "time": 4098.5,
+        }
         # Answer only the first hub/info of a connection (a hung hub).
         self.hang_after_connect = False
         self.devices, self.entities, self.states = default_model()
@@ -252,7 +267,9 @@ class FakeHub:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self.connections += 1
-        await ws.send_json({"type": "auth_required", "hub": self.name, "api_version": "1.0"})
+        await ws.send_json(
+            {"type": "auth_required", "hub": self.name, "api_version": self.api_version}
+        )
         msg = await ws.receive()
         auth = json.loads(msg.data) if msg.type == WSMsgType.TEXT else {}
         if auth.get("token") != self.token:
@@ -263,7 +280,7 @@ class FakeHub:
             {
                 "type": "auth_ok",
                 "hub": self.name,
-                "api_version": "1.0",
+                "api_version": self.api_version,
                 "zdef_versions": [1],
                 "features": ["expr-v1", "gp"],
             }
@@ -308,7 +325,7 @@ class FakeHub:
             await ok(
                 {
                     "name": self.name,
-                    "api_version": "1.0",
+                    "api_version": self.api_version,
                     "features": ["expr-v1", "gp"],
                     "seq": self.seq,
                     "devices": len(self.devices),
@@ -319,11 +336,19 @@ class FakeHub:
                 }
             )
         elif kind == "subscribe":
-            subs[rid] = set(req.get("topics", []))
+            topics = set(req.get("topics", []))
+            known = {"devices", "entities", "events", "gp"}
+            if self.api_version >= "1.1":
+                known.add("network")
+            if topics - known:
+                await err("invalid_value", f"unknown topics {sorted(topics - known)}")
+                return
+            subs[rid] = topics
             await ok({"seq": self.seq})
-            await ws.send_json(
-                {"type": "event", "id": rid, "seq": self.seq, "event": self.snapshot()}
-            )
+            snap = self.snapshot()
+            if "network" in topics:
+                snap["network"] = copy.deepcopy(self.network)
+            await ws.send_json({"type": "event", "id": rid, "seq": self.seq, "event": snap})
         elif kind == "entities/command":
             if error := self.command_errors.get(req["uid"]):
                 await err(error["code"], error["message"])
