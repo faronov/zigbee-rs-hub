@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | [`transport`] | byte-stream halves, line settings, EN/BOOT control, in-memory pipe | 4, 11.5 |
 //! | [`driver`] | link thread: `zigbee-zrhp` [`Link`](zigbee_zrhp::link::Link) (embedded profile), credits, sessions, negotiation, request gate, `RETRY` after a resync, line hunting | 5, 6 |
-//! | [`lifecycle`] | [`Hub`]: seamless resume, network ownership, `NWK_INIT` floors, replay, events → store, form, permit join, APS data, NCP update/confirm, reset, ROM-loader hand-off | 7, 8.4, 8.7, 12.1, 12.4 |
+//! | [`lifecycle`] | [`Hub`]: seamless resume, network ownership, `NWK_INIT` floors, replay, events → store, form, permit join, APS data, NCP update/confirm, reset, ROM-loader hand-off; maintenance (`netops`): energy scan, channel change, TX power, diagnostics, coordinator tables, backup export/restore, leave/reset | 7, 8.4, 8.7, 9, 12.1, 12.4 |
 //! | [`fw`] | `FW_*` streaming into the NCP's inactive slot | 7.9 |
 //! | [`inventory`] | devices the NCP knows (`TBL_READ`, `DIAG_GET_CHILDREN`/`NEIGHBORS`) for import | 8.5, 10 |
 //! | [`store`] | host store: log-structured journal on raw flash (`hubdata`), file or RAM | 3.4, 8.8 |
@@ -25,7 +25,10 @@ pub mod store;
 pub mod transport;
 
 pub use driver::{CallOpts, Client, DriverConfig, DriverEvent, Error, Message, NcpSession, SessionState};
-pub use lifecycle::{FormRequest, FwState, Hub, HubConfig, HubStatus, Ownership, ResumePolicy, Rng};
+pub use lifecycle::{
+    ChannelChange, EnergyChannel, FormRequest, FwState, Hub, HubConfig, HubStatus, Ownership, ResumePolicy, RestoreOptions,
+    RestoreReport, Rng,
+};
 pub use zigbee_zrhp as zrhp;
 
 #[cfg(test)]

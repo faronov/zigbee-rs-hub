@@ -337,3 +337,158 @@ fn inventory_merges_ncp_table_children_and_neighbors() {
     hub.shutdown();
     sim.stop();
 }
+
+fn formed(channel: u8) -> (Hub, SimNcp) {
+    let (hub, sim) = start(Store::volatile());
+    assert!(hub.wait_ready(T));
+    hub.form(FormRequest { channel_mask: 1 << channel, ..FormRequest::default() }).unwrap();
+    (hub, sim)
+}
+
+#[test]
+fn energy_scan_reports_every_channel_of_the_mask() {
+    let (hub, sim) = formed(15);
+    let scan = hub.energy_scan(0x07FF_F800, 3, 1).unwrap();
+    assert_eq!(scan.iter().map(|c| c.channel).collect::<Vec<_>>(), (11..=26).collect::<Vec<_>>());
+    assert_eq!(scan[5].energy, sim.state().energy[5]);
+    let two = hub.energy_scan((1 << 15) | (1 << 25), 2, 1).unwrap();
+    assert_eq!(two.iter().map(|c| c.channel).collect::<Vec<_>>(), vec![15, 25]);
+    // An NCP image without it answers UNSUPPORTED_COMMAND.
+    sim.with(|s| s.unsupported.push(ids::NWK_ENERGY_SCAN));
+    assert_eq!(hub.energy_scan(0x07FF_F800, 3, 1), Err(Error::Status(Status::UnsupportedCommand)));
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
+fn channel_change_moves_the_network_and_the_store() {
+    let (hub, sim) = formed(15);
+    let done = hub.change_channel(20).unwrap();
+    assert_eq!((done.channel, done.nwk_update_id), (20, 1));
+    assert_eq!(sim.state().channel, 20);
+    let stored = hub.store_state().network.unwrap();
+    assert_eq!((stored.channel, stored.nwk_update_id), (20, 1));
+    let st = hub.status().network.unwrap();
+    assert_eq!((st.channel, st.nwk_update_id), (20, 1));
+    assert_eq!(hub.change_channel(27), Err(Error::Status(Status::InvalidParameter)));
+    // The current channel completes without a new update ID.
+    assert_eq!(hub.change_channel(20).unwrap().nwk_update_id, 1);
+    // A resume after an NCP reboot keeps it.
+    let resumes = hub.status().resumes;
+    reboot(&hub, &sim);
+    assert!(hub.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(hub.status().ownership, Ownership::Owned);
+    assert_eq!(hub.store_state().network.unwrap().channel, 20);
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
+fn tx_power_is_applied_persisted_and_replayed() {
+    let (hub, sim) = formed(15);
+    assert_eq!(hub.stored_tx_power(), None);
+    assert_eq!(hub.set_tx_power(30).unwrap(), 20, "the NCP clamps to its limit");
+    assert_eq!(hub.set_tx_power(-4).unwrap(), -4);
+    assert_eq!(hub.stored_tx_power(), Some(-4));
+    assert_eq!(hub.status().network.unwrap().tx_power, -4);
+    sim.with(|s| s.tx_power = 8);
+    let resumes = hub.status().resumes;
+    reboot(&hub, &sim);
+    assert!(hub.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(sim.state().tx_power, -4, "replayed in the resume");
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
+fn diagnostics_counters_status_and_tables() {
+    let (hub, sim) = formed(15);
+    let link = hub.diag_counters(0x01).unwrap();
+    assert!(link.iter().all(|(id, _)| id >> 8 == 1) && link.contains(&(0x0101, 120)));
+    let all = hub.diag_counters(0xFF).unwrap();
+    assert!(all.iter().any(|(id, _)| *id == 0x0701));
+    hub.diag_reset_counters(0x01).unwrap();
+    assert!(hub.diag_counters(0x01).unwrap().iter().all(|(_, v)| *v == 0));
+    let st = hub.ncp_status().unwrap();
+    assert_eq!((st.network_state, st.uptime_s), (2, 3600));
+    let fc = hub.frame_counters().unwrap();
+    assert_eq!(fc.stride, STRIDE);
+    let (a, b, c, d, e) = ([0xA1; 8], [0xB2; 8], [0xC3; 8], [0xD4; 8], [0xE5; 8]);
+    sim.with(|s| {
+        s.neighbors = Some(vec![(a, 0x1111, 1, 2), (b, 0x2222, 1, 2), (c, 0x3333, 2, 1), (d, 0x4444, 2, 1), (e, 0x5555, 1, 4)]);
+        s.routes = vec![(0x1111, 0x1111, 0), (0x6666, 0x2222, 0), (0x7777, 0x1111, 1)];
+        s.children = Some(vec![(c, 0x3333, 0x80), (d, 0x4444, 0x80)]);
+    });
+    let n = hub.coordinator_neighbors().unwrap();
+    assert_eq!(n.iter().map(|x| x.nwk).collect::<Vec<_>>(), vec![0x1111, 0x2222, 0x3333, 0x4444, 0x5555], "all pages");
+    let r = hub.coordinator_routes().unwrap();
+    assert_eq!(r.iter().map(|x| (x.dst, x.next_hop)).collect::<Vec<_>>(), vec![(0x1111, 0x1111), (0x6666, 0x2222), (0x7777, 0x1111)]);
+    assert_eq!(hub.coordinator_children().unwrap().len(), 2);
+    assert!(hub.maintenance_caps().contains(&"energy_scan"));
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
+fn backup_exports_and_restores_onto_a_fresh_ncp() {
+    use zigbee_zrhp::records::{RawRecords, Record, verify_stream};
+    let (hub, sim) = formed(17);
+    let (a, b) = ([0xA1; 8], [0xB2; 8]);
+    sim.with(|s| {
+        s.table_devices = vec![(a, 0x1111, Some(0x80)), (b, 0x2222, None)];
+        s.link_keys = vec![(a, [0x42; 16])];
+    });
+    let net = hub.store_state().network.unwrap();
+    let stream = hub.backup_export(true).unwrap();
+    assert_eq!(verify_stream(&stream).unwrap(), 7, "node, network, key, TCLK, 2 devices, RS_PARAMS");
+    let has_key = RawRecords::new(&stream)
+        .flatten()
+        .any(|(_, tlv)| matches!(zigbee_zrhp::codec::Reader::new(tlv).read::<Record>(), Ok(Record::NetworkKey(k)) if k.key == net.network_key));
+    assert!(has_key);
+    let without = hub.backup_export(false).unwrap();
+    assert_eq!(verify_stream(&without).unwrap(), 5, "no key records");
+    let limit = sim.state().nwk_limit;
+    hub.shutdown();
+    sim.stop();
+
+    // A fresh NCP and an empty store.
+    let (hub2, sim2) = start(Store::volatile());
+    assert!(hub2.wait_ready(T));
+    assert!(hub2.wait_status(T, |s| s.ownership == Ownership::NoNetwork));
+    let report = hub2.backup_restore(&stream, crate::lifecycle::RestoreOptions::default()).unwrap();
+    let st = sim2.state();
+    assert_eq!((st.network_state, st.pan_id, st.channel, st.key), (2, net.pan_id, 17, net.network_key));
+    assert_eq!(st.table_devices.len(), 2);
+    assert!(report.nwk_fc_start >= limit + 10_000, "start above the exported limit plus the margin");
+    assert_eq!((report.children, report.link_keys_on_ncp), (1, 1));
+    let stored = hub2.store_state().network.unwrap();
+    assert_eq!((stored.pan_id, stored.ext_pan_id, stored.network_key), (net.pan_id, net.ext_pan_id, net.network_key));
+    assert!(hub2.store_state().fc[0].unwrap().limit >= report.nwk_fc_start);
+    assert_eq!(hub2.status().ownership, Ownership::Owned);
+    // Survives an NCP reboot as the owned network.
+    let resumes = hub2.status().resumes;
+    reboot(&hub2, &sim2);
+    assert!(hub2.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(hub2.status().ownership, Ownership::Owned);
+    hub2.shutdown();
+    sim2.stop();
+}
+
+#[test]
+fn leave_reset_then_form_a_new_network() {
+    let (hub, sim) = formed(15);
+    let old = hub.store_state().network.unwrap();
+    assert_eq!(hub.form(FormRequest::default()).unwrap_err(), Error::Status(Status::AlreadyExists));
+    hub.leave_reset().unwrap();
+    assert!(hub.store_state().network.is_none());
+    assert_eq!(hub.status().ownership, Ownership::NoNetwork);
+    assert_eq!(sim.state().network_state, 0);
+    let flags = sim.state().log.iter().find(|(id, _)| *id == ids::NWK_LEAVE_RESET).map(|(_, p)| p.clone());
+    assert_eq!(flags, Some(vec![0x03]), "keep the IEEE override and the host endpoints");
+    let new = hub.form(FormRequest { channel_mask: 1 << 25, pan_id: Some(0x1A2B), ..FormRequest::default() }).unwrap();
+    assert_eq!((new.pan_id, new.channel), (0x1A2B, 25));
+    assert_ne!(new.network_key, old.network_key);
+    assert_eq!(hub.status().ownership, Ownership::Owned);
+    hub.shutdown();
+    sim.stop();
+}

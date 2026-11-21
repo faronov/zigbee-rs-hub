@@ -45,6 +45,10 @@ use crate::store::{Change, DeviceRecord, EndpointRecord, FcRecord, FwPending, Jo
 use crate::store::state::device_flags;
 use crate::transport::{Line, NcpControl, PortRx, PortTx};
 
+#[path = "netops.rs"]
+mod netops;
+pub use netops::{ChannelChange, EnergyChannel, RestoreOptions, RestoreReport, TX_POWER_KEY, end_record};
+
 /// Fallback `fc_stride` (spec 8.4: `0x400`).
 pub const DEFAULT_FC_STRIDE: u32 = 0x400;
 
@@ -590,6 +594,9 @@ impl Hub {
                 self.apply_coex(on, true)?;
             }
         }
+        if policy.replay && ownership == Ownership::Owned {
+            self.replay_tx_power()?;
+        }
         if let Some(level) = policy.log_level {
             let body = zigbee_zrhp::msg::log::LogConfig { level, module_mask: u32::MAX };
             if let Err(e) = c.call(&body, self.opts(Duration::from_secs(5))) {
@@ -774,6 +781,12 @@ impl Hub {
                         _ => return,
                     };
                     self.update(|s| s.network_state = state);
+                }
+            }
+            ids::EVT_CHANNEL_CHANGED => {
+                if let Ok(e) = m.decode::<zigbee_zrhp::msg::network::EvtChannelChanged>() {
+                    info!("hub: NCP on channel {} (update ID {})", e.channel, e.nwk_update_id);
+                    self.on_channel_changed(e.channel, e.nwk_update_id);
                 }
             }
             ids::EVT_FC_CHECKPOINT => {
