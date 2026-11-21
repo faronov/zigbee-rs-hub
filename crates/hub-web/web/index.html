@@ -47,6 +47,10 @@ input.num{width:6em}
 #login input{width:100%;margin:.5em 0}
 #toast{position:fixed;bottom:1em;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5em 1em;border-radius:8px;display:none;max-width:90vw}
 .hide{display:none!important}
+nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
+.tab{display:grid;gap:1em;min-width:0}
+nav#tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:.5em .8em;color:var(--mut);white-space:nowrap}
+nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 </style>
 </head>
 <body>
@@ -56,7 +60,9 @@ input.num{width:6em}
 <p class="mut">The hub's console prints it with <code>token</code>; a link ending in <code>#token=…</code> also works.</p>
 <form id="lf"><input id="tok" type="password" autocomplete="current-password" placeholder="token" required><button class="p">Connect</button></form>
 </div>
+<nav id="tabs" class="hide"></nav>
 <main id="app" class="hide">
+<div data-tab="devices" data-title="Devices" class="tab">
 <section class="card"><h2>Network</h2>
 <dl class="kv" id="net"></dl>
 <div class="row acts">
@@ -66,6 +72,7 @@ input.num{width:6em}
 </section>
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
 <section class="devs" id="devs"></section>
+</div>
 </main>
 <div id="toast"></div>
 <script>
@@ -74,6 +81,18 @@ const $=s=>document.querySelector(s);
 const el=(t,a={},...c)=>{const e=document.createElement(t);for(const k in a){if(a[k]==null)continue;if(k[0]=="o"&&k[1]=="n")e.addEventListener(k.slice(2),a[k]);else if(k=="class")e.className=a[k];else e.setAttribute(k,a[k])}for(const x of c)if(x!=null)e.append(x);return e};
 const hex=(n,w)=>"0x"+n.toString(16).toUpperCase().padStart(w,"0");
 let ws,rid=0,pend={},devs={},ents={},states={},net={},hub={},pjEnd=0,retry=1000,authed=false,skew=0;
+// Tabs: every `<div class="tab" data-tab="id" data-title="Title">` in
+// <main> is a tab (in document order); `onTab[id]` runs when it is shown.
+const onTab={};
+function tabs(){
+ const nav=$("#tabs");nav.textContent="";
+ const want=(/^#\/(\w+)/.exec(location.hash)||[])[1];
+ const all=[...document.querySelectorAll("main>.tab")];
+ const cur=all.find(t=>t.dataset.tab==want)||all[0];
+ for(const t of all){t.classList.toggle("hide",t!=cur);nav.append(el("button",{class:t==cur?"on":null,onclick:()=>{location.hash="#/"+t.dataset.tab}},t.dataset.title))}
+ if(onTab[cur.dataset.tab])onTab[cur.dataset.tab]();
+}
+addEventListener("hashchange",tabs);
 function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",4000)}
 function status(s,c){$("#conn").textContent=s;$("#dot").className="dot "+c}
 function call(type,p={}){return new Promise((ok,no)=>{if(!ws||ws.readyState!=1)return no(new Error("not connected"));const id=++rid;pend[id]={ok,no};ws.send(JSON.stringify(Object.assign({id,type},p)))})}
@@ -87,12 +106,12 @@ function connect(){
  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch{return}onMsg(m,tok)};
  ws.onclose=()=>{for(const k in pend)pend[k].no(new Error("connection closed"));pend={};authed=false;status("disconnected, retrying…","");setTimeout(connect,retry);retry=Math.min(retry*2,15000)};
 }
-function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");status("no token","")}
+function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");$("#tabs").classList.add("hide");status("no token","")}
 $("#lf").onsubmit=e=>{e.preventDefault();localStorage.setItem("zrhToken",$("#tok").value.trim());$("#login").classList.add("hide");connect()};
 function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
- if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");
+ if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet()}).catch(()=>{});
   call("subscribe",{topics:["devices","entities","network"]}).catch(e=>toast(e.message));return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
