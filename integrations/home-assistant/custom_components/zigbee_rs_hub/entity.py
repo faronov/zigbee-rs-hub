@@ -82,8 +82,9 @@ class ZigbeeRsEntity(Entity):
             self._attr_name = name[:1].upper() + name[1:]
         elif key in PRIMARY_KEYS:
             self._attr_name = None
-        elif tkey and (platform, tkey) in TRANSLATED_KEYS:
-            self._attr_translation_key = tkey
+        elif (platform, tkey or key) in TRANSLATED_KEYS:
+            # Also keys with a device class (`last_seen` is a timestamp).
+            self._attr_translation_key = tkey or key
         elif record.get("device_class") and platform in _DEVICE_CLASS_NAMED:
             pass  # HA names it after the device class
         else:
@@ -138,3 +139,30 @@ class ZigbeeRsEntity(Entity):
 def hub_device_info(hub: ZigbeeRsHub) -> DeviceInfo:
     """Device info of the hub itself."""
     return DeviceInfo(identifiers={hub.hub_identifier})
+
+
+class HubEntity(Entity):
+    """An entity of the hub itself (connection, network, permit join)."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, hub: ZigbeeRsHub, key: str) -> None:
+        """Entity `key` of `hub`; `key` is also the translation key."""
+        self.hub = hub
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{hub.entry.entry_id}_{key}"
+        self._attr_device_info = hub_device_info(hub)
+
+    @property
+    def available(self) -> bool:
+        """Only while connected."""
+        return self.hub.connected
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the hub's connection and network state."""
+        self.async_on_remove(self.hub.add_hub_listener(self._hub_update))
+
+    @callback
+    def _hub_update(self) -> None:
+        self.async_write_ha_state()

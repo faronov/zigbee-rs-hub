@@ -46,32 +46,106 @@
   },
   "entity": {
     "binary_sensor": {
-      "hub_connected": { "name": "Connection" }
+      "hub_connected": {
+        "name": "Connection"
+      },
+      "permit_join_open": {
+        "name": "Permit join",
+        "state_attributes": {
+          "until": {
+            "name": "Until"
+          }
+        }
+      }
     },
     "button": {
-      "permit_join": { "name": "Permit join" },
-      "identify": { "name": "Identify" }
+      "permit_join": {
+        "name": "Permit join"
+      },
+      "identify": {
+        "name": "Identify"
+      }
     },
     "event": {
-      "action": { "name": "Action" },
-      "lock_event": { "name": "Lock event" }
+      "action": {
+        "name": "Action"
+      },
+      "lock_event": {
+        "name": "Lock event"
+      }
     },
     "number": {
-      "local_temperature_calibration": { "name": "Temperature calibration" },
-      "occupancy_timeout": { "name": "Occupancy timeout" },
-      "on_level": { "name": "On level" },
-      "transition": { "name": "Transition time" }
+      "local_temperature_calibration": {
+        "name": "Temperature calibration"
+      },
+      "occupancy_timeout": {
+        "name": "Occupancy timeout"
+      },
+      "on_level": {
+        "name": "On level"
+      },
+      "transition": {
+        "name": "Transition time"
+      }
     },
     "select": {
-      "keypad_lockout": { "name": "Keypad lockout" },
-      "power_on_behavior": { "name": "Power-on behavior" },
-      "temperature_display_mode": { "name": "Temperature display mode" }
+      "keypad_lockout": {
+        "name": "Keypad lockout"
+      },
+      "power_on_behavior": {
+        "name": "Power-on behavior"
+      },
+      "temperature_display_mode": {
+        "name": "Temperature display mode"
+      }
     },
     "sensor": {
-      "last_seen": { "name": "Last seen" },
-      "linkquality": { "name": "Link quality" },
-      "pi_heating_demand": { "name": "Heating demand" },
-      "rssi": { "name": "RSSI" }
+      "last_seen": {
+        "name": "Last seen"
+      },
+      "linkquality": {
+        "name": "Link quality"
+      },
+      "pi_heating_demand": {
+        "name": "Heating demand"
+      },
+      "rssi": {
+        "name": "RSSI"
+      },
+      "network_state": {
+        "name": "Network state",
+        "state": {
+          "up": "Up",
+          "formed_down": "Formed, down",
+          "none": "No network",
+          "down": "Down",
+          "forming": "Forming",
+          "leaving": "Leaving"
+        },
+        "state_attributes": {
+          "pan_id": {
+            "name": "PAN ID"
+          },
+          "extended_pan_id": {
+            "name": "Extended PAN ID"
+          },
+          "nwk_update_id": {
+            "name": "Network update ID"
+          },
+          "ownership": {
+            "name": "Ownership"
+          },
+          "session": {
+            "name": "NCP session"
+          }
+        }
+      },
+      "channel": {
+        "name": "Channel"
+      },
+      "permit_join_until": {
+        "name": "Permit join ends"
+      }
     }
   },
   "exceptions": {

@@ -48,6 +48,14 @@
     "binary_sensor": {
       "hub_connected": {
         "name": "Connection"
+      },
+      "permit_join_open": {
+        "name": "Permit join",
+        "state_attributes": {
+          "until": {
+            "name": "Until"
+          }
+        }
       }
     },
     "button": {
@@ -103,6 +111,40 @@
       },
       "rssi": {
         "name": "RSSI"
+      },
+      "network_state": {
+        "name": "Network state",
+        "state": {
+          "up": "Up",
+          "formed_down": "Formed, down",
+          "none": "No network",
+          "down": "Down",
+          "forming": "Forming",
+          "leaving": "Leaving"
+        },
+        "state_attributes": {
+          "pan_id": {
+            "name": "PAN ID"
+          },
+          "extended_pan_id": {
+            "name": "Extended PAN ID"
+          },
+          "nwk_update_id": {
+            "name": "Network update ID"
+          },
+          "ownership": {
+            "name": "Ownership"
+          },
+          "session": {
+            "name": "NCP session"
+          }
+        }
+      },
+      "channel": {
+        "name": "Channel"
+      },
+      "permit_join_until": {
+        "name": "Permit join ends"
       }
     }
   },

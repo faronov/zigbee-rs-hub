@@ -46,32 +46,106 @@
   },
   "entity": {
     "binary_sensor": {
-      "hub_connected": { "name": "Подключение" }
+      "hub_connected": {
+        "name": "Подключение"
+      },
+      "permit_join_open": {
+        "name": "Подключение разрешено",
+        "state_attributes": {
+          "until": {
+            "name": "До"
+          }
+        }
+      }
     },
     "button": {
-      "permit_join": { "name": "Разрешить подключение" },
-      "identify": { "name": "Идентификация" }
+      "permit_join": {
+        "name": "Разрешить подключение"
+      },
+      "identify": {
+        "name": "Идентификация"
+      }
     },
     "event": {
-      "action": { "name": "Действие" },
-      "lock_event": { "name": "Событие замка" }
+      "action": {
+        "name": "Действие"
+      },
+      "lock_event": {
+        "name": "Событие замка"
+      }
     },
     "number": {
-      "local_temperature_calibration": { "name": "Калибровка температуры" },
-      "occupancy_timeout": { "name": "Тайм-аут присутствия" },
-      "on_level": { "name": "Уровень при включении" },
-      "transition": { "name": "Время перехода" }
+      "local_temperature_calibration": {
+        "name": "Калибровка температуры"
+      },
+      "occupancy_timeout": {
+        "name": "Тайм-аут присутствия"
+      },
+      "on_level": {
+        "name": "Уровень при включении"
+      },
+      "transition": {
+        "name": "Время перехода"
+      }
     },
     "select": {
-      "keypad_lockout": { "name": "Блокировка кнопок" },
-      "power_on_behavior": { "name": "Поведение при подаче питания" },
-      "temperature_display_mode": { "name": "Единицы отображения температуры" }
+      "keypad_lockout": {
+        "name": "Блокировка кнопок"
+      },
+      "power_on_behavior": {
+        "name": "Поведение при подаче питания"
+      },
+      "temperature_display_mode": {
+        "name": "Единицы отображения температуры"
+      }
     },
     "sensor": {
-      "last_seen": { "name": "Последняя активность" },
-      "linkquality": { "name": "Качество связи" },
-      "pi_heating_demand": { "name": "Потребность в нагреве" },
-      "rssi": { "name": "RSSI" }
+      "last_seen": {
+        "name": "Последняя активность"
+      },
+      "linkquality": {
+        "name": "Качество связи"
+      },
+      "pi_heating_demand": {
+        "name": "Потребность в нагреве"
+      },
+      "rssi": {
+        "name": "RSSI"
+      },
+      "network_state": {
+        "name": "Состояние сети",
+        "state": {
+          "up": "Работает",
+          "formed_down": "Создана, не работает",
+          "none": "Нет сети",
+          "down": "Остановлена",
+          "forming": "Создаётся",
+          "leaving": "Выход из сети"
+        },
+        "state_attributes": {
+          "pan_id": {
+            "name": "PAN ID"
+          },
+          "extended_pan_id": {
+            "name": "Расширенный PAN ID"
+          },
+          "nwk_update_id": {
+            "name": "ID обновления сети"
+          },
+          "ownership": {
+            "name": "Владение"
+          },
+          "session": {
+            "name": "Сессия NCP"
+          }
+        }
+      },
+      "channel": {
+        "name": "Канал"
+      },
+      "permit_join_until": {
+        "name": "Подключение разрешено до"
+      }
     }
   },
   "exceptions": {
