@@ -689,7 +689,11 @@ booted without any (console `wifi set` does the same in hub mode);
 uptime, Wi-Fi SSID/IP/RSSI/channel, reset reason); `hub/logs` from a 3 KiB
 RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it). The
 energy-scan advice avoids the AP's channel. Maintenance jobs run on a 12 KiB
-thread. Not run on hardware yet.
+thread. On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
+`hub/reboot`, the network map (the C6 as the coordinator's child), backup,
+and channel change 17 → 25 → 17 (about 9 s each; the C6 followed within a
+minute) work; `hub/wifi/set` and `hub/mode/set` were not tried on the shared
+board.
 
 **Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
