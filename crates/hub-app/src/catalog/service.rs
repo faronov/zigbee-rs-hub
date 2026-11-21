@@ -31,7 +31,7 @@ use hub_devices::transport::ZigbeeTransport;
 use log::{info, warn};
 use serde_json::Value as J;
 use sha2::{Digest, Sha256};
-use zdef::sign::{Manifest, ManifestAsset};
+use zdef::sign::ManifestAsset;
 
 use super::data::{AreaWriter, SharedFlash};
 use super::store::{CatalogStore, Install, bank_asset};
@@ -41,8 +41,11 @@ use super::web::{self, SharedWeb, WebInstall};
 pub const DEFAULT_BASE: &str = "https://faronov.github.io/zigbee-rs-definitions/latest";
 /// Journal key of the settings.
 pub const CONFIG_KEY: &str = "cfg/catalog";
-/// Largest chunk of `catalog/upload_chunk` (decoded).
-pub const UPLOAD_CHUNK_MAX: usize = 16 * 1024;
+/// Largest chunk of `catalog/upload_chunk` (decoded). A hub without PSRAM
+/// holds the WebSocket frame, the parsed request and the decoded bytes at
+/// once (BR board: an 8 KiB chunk after a manifest install ran it out of
+/// heap).
+pub const UPLOAD_CHUNK_MAX: usize = 4 * 1024;
 
 /// Settings the clients follow (stored on the hub so the web UI and the
 /// Home Assistant integration agree).
@@ -159,11 +162,11 @@ fn generic_only<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &hub_d
 
 /// Shards holding a device's keys (only those the manifest lists),
 /// ascending (insertion: a sort or a collected set costs kilobytes).
-fn shards_of(m: &Manifest, keys: &[u64]) -> Vec<u8> {
+fn shards_of(store: &CatalogStore, keys: &[u64]) -> Vec<u8> {
     let mut v: Vec<u8> = Vec::new();
     for n in keys.iter().map(|k| zdef::bank::shard_of(*k)) {
-        if m.shards.get(n as usize).is_some_and(|s| s.is_some())
-            && let Err(i) = v.binary_search(&n)
+        if let Err(i) = v.binary_search(&n)
+            && store.manifest_shard(n).is_some()
         {
             v.insert(i, n);
         }
@@ -215,9 +218,11 @@ impl CatalogService {
     /// `[{device, shards}]` for devices that resolve to generic only.
     #[inline(never)]
     fn missing<T: ZigbeeTransport>(&self, hub: &Hub<T>) -> J {
-        let Some(m) = &self.store.manifest else { return J::Array(Vec::new()) };
+        if self.store.manifest.is_none() {
+            return J::Array(Vec::new());
+        }
         generic_only(hub)
-            .map(|d| obj!({"device": d.id.clone(), "shards": shards_of(m, &fingerprint_keys(&d.fp))}))
+            .map(|d| obj!({"device": d.id.clone(), "shards": shards_of(&self.store, &fingerprint_keys(&d.fp))}))
             .collect()
     }
 
@@ -225,10 +230,12 @@ impl CatalogService {
     /// `definition_needed`), once per device and start.
     #[inline(never)]
     pub fn tick<T: ZigbeeTransport>(&mut self, hub: &Hub<T>) {
-        let Some(m) = &self.store.manifest else { return };
+        if self.store.manifest.is_none() {
+            return;
+        }
         let new: Vec<(String, Vec<u8>)> = generic_only(hub)
             .filter(|d| !self.announced.contains(&d.id))
-            .map(|d| (d.id.clone(), shards_of(m, &fingerprint_keys(&d.fp))))
+            .map(|d| (d.id.clone(), shards_of(&self.store, &fingerprint_keys(&d.fp))))
             .collect();
         for (id, shards) in new {
             self.announced.insert(id.clone());
@@ -381,7 +388,7 @@ impl CatalogService {
             Upload::Scratch { writer, hash, .. } => {
                 let n =
                     req["shard"].as_u64().filter(|n| *n < 256).ok_or_else(|| err("invalid_format", "shard: 0..255"))?;
-                let want = self.store.manifest.as_ref().and_then(|m| m.shards.get(n as usize).copied().flatten());
+                let want = self.store.manifest_shard(n as u8);
                 if want != Some(hash.finalize().into()) {
                     return Err(vf(format!("shard {n:02x}: SHA-256 differs from the installed manifest")));
                 }
@@ -554,7 +561,9 @@ impl<T: ZigbeeTransport> ApiExtension<T> for CatalogService {
                 match (hub.device(id), &self.store.manifest) {
                     (None, _) => Err(err("not_found", format!("no device {id}"))),
                     (Some(_), None) => Err(err("not_found", "no catalog manifest installed")),
-                    (Some(d), Some(m)) => Ok(obj!({"device": id, "shards": shards_of(m, &fingerprint_keys(&d.fp))})),
+                    (Some(d), Some(_)) => {
+                        Ok(obj!({"device": id, "shards": shards_of(&self.store, &fingerprint_keys(&d.fp))}))
+                    }
                 }
             }
             _ => return None,

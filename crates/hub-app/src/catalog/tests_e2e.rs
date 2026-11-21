@@ -14,6 +14,8 @@ use hub_ncp::store::{MemFlash, Store};
 use serde_json::{Value as J, json};
 use zdefc::bank::{BankFile, BankParams, Item, SigningKey};
 
+use super::service::UPLOAD_CHUNK_MAX;
+
 use super::data::{DataFlash, MemData, SharedFlash};
 use crate::tests::{T, call, cfg, rig, session};
 use crate::{App, CatalogSetup};
@@ -154,8 +156,8 @@ type Rx = std::sync::mpsc::Receiver<String>;
 
 /// Uploads `bytes` to `target` in 8 KiB chunks from `from`, then commits.
 fn upload(app: &App, sid: u64, rx: &Rx, id: &mut u64, target: &str, bytes: &[u8], from: usize, commit: J) -> J {
-    for (i, c) in bytes[from..].chunks(8 * 1024).enumerate() {
-        let off = from + i * 8 * 1024;
+    for (i, c) in bytes[from..].chunks(UPLOAD_CHUNK_MAX).enumerate() {
+        let off = from + i * UPLOAD_CHUNK_MAX;
         let mut req = json!({"type": "catalog/upload_chunk", "target": target, "offset": off,
             "data": base64::engine::general_purpose::STANDARD.encode(c)});
         if off == 0 {
@@ -197,6 +199,11 @@ fn uploads_install_fetch_restart_resume_and_corruption() {
     let no =
         call(&app, sid, &rx, 2, json!({"type": "catalog/upload_chunk", "target": "web", "offset": 0, "data": "AA=="}));
     assert_eq!(no["success"], false, "{no}");
+    // Chunks above 4 KiB are refused (a hub without PSRAM holds a request
+    // three times while handling it).
+    let big = base64::engine::general_purpose::STANDARD.encode(vec![0u8; UPLOAD_CHUNK_MAX + 1]);
+    let no = call(&app, sid, &rx, 3, json!({"type": "catalog/upload_chunk", "target": "manifest", "offset": 0, "data": big}));
+    assert_eq!(no["error"]["code"], "invalid_value", "{no}");
 
     // 1. The manifest: what the hub wants.
     let m = upload(&app, sid, &rx, &mut id, "manifest", &file("manifest.cose"), 0, json!({}));
@@ -216,6 +223,12 @@ fn uploads_install_fetch_restart_resume_and_corruption() {
     assert!(app.web().serve("zdefc_wasm_bg.wasm", |f| f.is_some_and(|f| f.content_type == "application/wasm")));
     let st = call(&app, sid, &rx, 901, json!({"type": "catalog/status"}));
     assert_eq!(st["result"]["wants"], json!({"bank": null, "web": null}), "{st}");
+    // The same manifest again (a client's periodic check): nothing in
+    // hubdata changes (the staging area gets the same bytes).
+    let before = flash.lock().unwrap().map(0, 1 << 20).to_vec();
+    let again = upload(&app, sid, &rx, &mut id, "manifest", &file("manifest.cose"), 0, json!({}));
+    assert_eq!(again["success"], true, "{again}");
+    assert!(flash.lock().unwrap().map(0, 1 << 20) == &before[..], "manifest or record rewritten");
     // 4. The motion sensor is not in the bank: the hub names its shards,
     // the client uploads them.
     assert!(layers(&app, sid, &rx, 902).as_array().unwrap().iter().all(|x| x["source"] == "generic"));

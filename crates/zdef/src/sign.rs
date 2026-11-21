@@ -185,9 +185,50 @@ pub fn verify_cose_sign1<'a>(
     let sig =
         ed25519_compact::Signature::from_slice(s.signature).map_err(|_| SignError::Malformed)?;
     let pk = ed25519_compact::PublicKey::new(key.public);
-    pk.verify(to_be_signed(s.protected, payload), &sig)
+    // Streamed: the Sig_structure head, then the payload in place (no copy
+    // of a manifest or shard on the hub's heap).
+    let mut head = Writer::new();
+    head.array(4);
+    head.text("Signature1");
+    head.bytes(s.protected);
+    head.bytes(&[]);
+    head.head(2, payload.len() as u64);
+    let mut st = pk
+        .verify_incremental(&sig)
         .map_err(|_| SignError::BadSignature)?;
+    st.absorb(head.into_vec());
+    st.absorb(payload);
+    st.verify().map_err(|_| SignError::BadSignature)?;
     Ok(payload)
+}
+
+/// Shard `n`'s hash from a manifest payload, read in place: `None` for an
+/// empty shard or one past the end.
+pub fn manifest_shard(payload: &[u8], n: usize) -> Result<Option<[u8; 32]>, DecodeError> {
+    let mut r = Reader::new(payload);
+    for _ in 0..r.map()? {
+        if r.uint()? != 5 {
+            r.skip()?;
+            continue;
+        }
+        let len = r.array()?;
+        if n >= len {
+            return Ok(None);
+        }
+        for _ in 0..n {
+            r.skip()?;
+        }
+        if matches!(r.peek()?, Head::Null) {
+            return Ok(None);
+        }
+        let at = r.position();
+        let b = r.bytes()?;
+        return <[u8; 32]>::try_from(b).map(Some).map_err(|_| DecodeError {
+            offset: at,
+            kind: DecodeErrorKind::Invalid("manifest shard hash"),
+        });
+    }
+    Ok(None)
 }
 
 /// Bank asset entry of the manifest: `{0: name, 1: SHA-256 of the file as
@@ -283,6 +324,17 @@ impl Manifest {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Manifest, DecodeError> {
+        Self::decode_inner(bytes, true)
+    }
+
+    /// [`Manifest::decode`] without the shard hashes (`shards` stays empty,
+    /// 8 KiB less): what a hub keeps in RAM; [`manifest_shard`] reads one
+    /// hash from the payload in place.
+    pub fn decode_summary(bytes: &[u8]) -> Result<Manifest, DecodeError> {
+        Self::decode_inner(bytes, false)
+    }
+
+    fn decode_inner(bytes: &[u8], shards: bool) -> Result<Manifest, DecodeError> {
         let inv = |r: &Reader<'_>, w: &'static str| DecodeError {
             offset: r.position(),
             kind: DecodeErrorKind::Invalid(w),
@@ -346,6 +398,9 @@ impl Manifest {
                         }
                     }
                 }
+                5 if !shards => {
+                    r.skip()?;
+                }
                 5 => {
                     for _ in 0..r.array()? {
                         if matches!(r.peek()?, Head::Null) {
@@ -377,6 +432,19 @@ impl Manifest {
     pub fn verify(cose: &[u8], keys: &[TrustedKey]) -> Result<Manifest, ManifestError> {
         let payload = verify_cose_sign1(cose, None, keys).map_err(ManifestError::Signature)?;
         Manifest::decode(payload).map_err(ManifestError::Decode)
+    }
+
+    /// [`Manifest::verify`] keeping only the summary
+    /// ([`Manifest::decode_summary`]); also returns the payload (in `cose`)
+    /// for [`manifest_shard`].
+    #[cfg(feature = "sign")]
+    pub fn verify_summary<'a>(
+        cose: &'a [u8],
+        keys: &[TrustedKey],
+    ) -> Result<(Manifest, &'a [u8]), ManifestError> {
+        let payload = verify_cose_sign1(cose, None, keys).map_err(ManifestError::Signature)?;
+        let m = Manifest::decode_summary(payload).map_err(ManifestError::Decode)?;
+        Ok((m, payload))
     }
 }
 

@@ -196,8 +196,9 @@ fn extension(words: &[&str]) -> Option<String> {
                 s += &format!("previous boot, last stack watch (free bytes): {t}\r\n");
             }
             if let Some(p) = last_panic() {
-                s += &format!("last recorded panic: {p}\r\n");
+                s += &format!("previous boot panicked: {p}\r\n");
             }
+            s += &alloc_failures();
             if let Some(hub) = hub {
                 s += &status_text(hub);
             }
@@ -455,7 +456,10 @@ fn last_panic() -> Option<String> {
             return None;
         }
         let n = (buf[4] as usize).min(250);
-        Some(String::from_utf8_lossy(&buf[5..5 + n]).into_owned())
+        let text = String::from_utf8_lossy(&buf[5..5 + n]).into_owned();
+        // Reported for the boot after the panic only.
+        unsafe { (&mut *p)[..4].fill(0) };
+        Some(text)
     })
     .clone()
 }
@@ -568,6 +572,43 @@ fn stage(n: u32) {
     }
 }
 
+/// Failed heap allocations (also ones the caller survives) in RTC memory:
+/// magic, count, last size, last caps, time (ms) of the last one. Without
+/// PSRAM a crash is often an exhausted heap, and an `abort()` from Rust's
+/// allocation error handler leaves no panic message.
+#[unsafe(link_section = ".rtc_noinit")]
+static mut ALLOC_FAIL: [u32; 5] = [0; 5];
+const ALLOC_MAGIC: u32 = 0x414C_4331;
+static PREV_ALLOC_FAIL: OnceLock<[u32; 5]> = OnceLock::new();
+
+unsafe extern "C" fn alloc_failed(size: usize, caps: u32, _function: *const core::ffi::c_char) {
+    // SAFETY: plain word stores; a lost update between threads only miscounts.
+    let a = unsafe { &mut *(&raw mut ALLOC_FAIL) };
+    a[1] = a[1].wrapping_add(1);
+    a[2] = size as u32;
+    a[3] = caps;
+    a[4] = (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000) as u32;
+}
+
+fn record_alloc_failures() {
+    let a = unsafe { &mut *(&raw mut ALLOC_FAIL) };
+    let _ = PREV_ALLOC_FAIL.set(if a[0] == ALLOC_MAGIC { *a } else { [0; 5] });
+    *a = [ALLOC_MAGIC, 0, 0, 0, 0];
+    unsafe { esp_idf_svc::sys::heap_caps_register_failed_alloc_callback(Some(alloc_failed)) };
+}
+
+fn alloc_failures() -> String {
+    let line = |what: &str, a: [u32; 5]| {
+        if a[1] == 0 {
+            String::new()
+        } else {
+            format!("{what}: {} failed allocations, last {} bytes (caps 0x{:x}) at t={}ms\r\n", a[1], a[2], a[3], a[4])
+        }
+    };
+    let now = unsafe { (&raw const ALLOC_FAIL).read_volatile() };
+    line("previous boot", PREV_ALLOC_FAIL.get().copied().unwrap_or_default()) + &line("this boot", now)
+}
+
 fn prev_stage() -> String {
     let s = *PREV_STAGE.get().unwrap_or(&0);
     let reason = unsafe { esp_idf_svc::sys::esp_reset_reason() };
@@ -599,6 +640,7 @@ fn main() {
     load_prev_tasks();
     let _ = last_panic();
     record_panics();
+    record_alloc_failures();
     info!("tbr-hub {} starting", env!("CARGO_PKG_VERSION"));
     let crashed = tbr_bridge::recovery::crashed_last_boot();
     if crashed {

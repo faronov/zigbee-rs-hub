@@ -14,10 +14,11 @@
 //!
 //! A bank is written into the inactive slot (download or chunked upload),
 //! checked (SHA-256 of the file against the manifest, COSE signature of the
-//! header with the built-in keys, body hash, every definition decoded and
-//! validated), then the record flips. At boot the active bank is checked
-//! again; a bank that fails is not used ("no catalog": generic, user and
-//! fetched definitions still work).
+//! header with the built-in keys, body hash), then the record flips. At boot
+//! the active bank is checked again (signature, body hash); a bank that
+//! fails is not used ("no catalog": generic, user and fetched definitions
+//! still work). Definitions are decoded and verified when a lookup loads
+//! them.
 
 use std::io;
 
@@ -26,7 +27,6 @@ use hub_devices::bankcat::BankCatalog;
 use serde_json::Value as J;
 use sha2::{Digest, Sha256};
 use zdef::bank::{Bank, Inflate, MinizInflate};
-use zdef::codec::DecodeOptions;
 use zdef::sign::{Manifest, TrustedKey};
 use zigbee_zrhp::crc::crc32c;
 
@@ -123,35 +123,6 @@ pub fn verify_bank(bytes: &[u8], keys: &[TrustedKey]) -> Result<Checked, String>
     })
 }
 
-/// Full check of a bank file in place: [`verify_bank`], then every
-/// definition decoded and validated (at install).
-#[inline(never)]
-pub fn check_bank(bytes: &[u8], keys: &[TrustedKey]) -> Result<Checked, String> {
-    let checked = verify_bank(bytes, keys)?;
-    let bank = Bank::parse(bytes).map_err(|e| format!("bank: {e:?}"))?;
-    let mut inf = MinizInflate::new();
-    let strings = bank.strings(&mut inf).map_err(|e| format!("strings: {e:?}"))?;
-    let mut buf = Box::new([0u8; zdef::bank::BLOCK_MAX]);
-    let mut n = 0usize;
-    for b in 0..bank.header.blocks {
-        let len = bank.inflate_block(&mut inf, b, &mut buf).map_err(|e| format!("block {b}: {e:?}"))?;
-        let slots = zdef::bank::block_slots(&buf[..len]).map_err(|e| format!("block {b}: {e:?}"))?;
-        for s in 0..slots {
-            let item = zdef::bank::block_slot(&buf[..len], s as u8).map_err(|e| format!("block {b}: {e:?}"))?;
-            let d = zdef::codec::decode_with(item, &DecodeOptions { strings: Some(&strings) })
-                .map_err(|e| format!("block {b} slot {s}: {e}"))?;
-            if let Err(v) = d.validate() {
-                return Err(format!("block {b} slot {s} ({}): {}", d.id.unwrap_or_default(), v[0]));
-            }
-            n += 1;
-        }
-    }
-    if n != bank.header.definitions as usize {
-        return Err(format!("{n} definitions, the header says {}", bank.header.definitions));
-    }
-    Ok(checked)
-}
-
 /// A bank being written into the inactive slot.
 pub struct Install {
     /// Target slot.
@@ -195,7 +166,11 @@ impl Install {
         if self.expect_sha.is_some_and(|h| h != sha) {
             return Err("SHA-256 differs from the manifest".into());
         }
-        let checked = check_bank(f.map(self.area.offset, size), &keys)?;
+        // Signed, so the generator's validation stands: decoding all of
+        // its thousands of definitions here took more than 30 s and more
+        // heap than a hub without PSRAM has (BR board); every lookup
+        // decodes and verifies the definitions it loads anyway.
+        let checked = verify_bank(f.map(self.area.offset, size), &keys)?;
         Ok(Installed { slot: self.slot, size, sha256: sha, checked })
     }
 }
@@ -230,8 +205,11 @@ pub struct CatalogStore {
     pub local: LocalDefs,
     /// Facts of the active bank (from its check).
     pub active: Option<Checked>,
-    /// The installed manifest, decoded.
+    /// The installed manifest without its shard hashes (8 KiB); those are
+    /// read in place from `manifest_payload` ([`CatalogStore::manifest_shard`]).
     pub manifest: Option<Manifest>,
+    /// Payload of the installed manifest in the mapped partition.
+    manifest_payload: &'static [u8],
     /// Problems found at boot.
     pub warnings: Vec<String>,
     /// Inflater factory.
@@ -262,14 +240,18 @@ impl CatalogStore {
             local,
             active: None,
             manifest: None,
+            manifest_payload: &[],
             warnings: Vec::new(),
             inflater: miniz,
             busy: false,
             keys,
         };
         if record.manifest_len > 0 && record.manifest_len <= map.manifest.size {
-            match Manifest::verify(f.map(map.manifest.offset, record.manifest_len), &s.keys) {
-                Ok(m) => s.manifest = Some(m),
+            match Manifest::verify_summary(f.map(map.manifest.offset, record.manifest_len), &s.keys) {
+                Ok((m, p)) => {
+                    s.manifest = Some(m);
+                    s.manifest_payload = p;
+                }
                 Err(e) => s.warnings.push(format!("installed manifest: {e:?}")),
             }
         }
@@ -387,14 +369,23 @@ impl CatalogStore {
         if len > self.map.manifest.size || len > self.map.scratch.size {
             return Err(format!("manifest of {len} bytes is too large"));
         }
-        let m = Manifest::verify(f.map(self.map.scratch.offset, len), &self.keys)
-            .map_err(|e| format!("manifest: {e:?}"))?;
+        let staged = f.map(self.map.scratch.offset, len);
+        let (m, p) = Manifest::verify_summary(staged, &self.keys).map_err(|e| format!("manifest: {e:?}"))?;
+        // Where the payload sits in the file, for the copy in its own area.
+        let (poff, plen) = ((p.as_ptr() as usize - staged.as_ptr() as usize) as u32, p.len() as u32);
         if m.version() < self.record.min_manifest {
             return Err(format!(
                 "manifest version {} is older than the installed {}",
                 m.version(),
                 self.record.min_manifest
             ));
+        }
+        // The installed one again (a client's periodic check): no flash wear.
+        if self.manifest.is_some()
+            && self.record.manifest_len == len
+            && f.map(self.map.manifest.offset, len) == f.map(self.map.scratch.offset, len)
+        {
+            return Ok(m);
         }
         let mut w = AreaWriter::new(self.map.manifest.offset, self.map.manifest.size);
         let mut buf = [0u8; 512];
@@ -408,7 +399,14 @@ impl CatalogStore {
         let r = Record { manifest_len: len, min_manifest: self.record.min_manifest.max(m.version()), ..self.record };
         self.write_record(f, r).map_err(|e| format!("record: {e}"))?;
         self.manifest = Some(m.clone());
+        self.manifest_payload = f.map(self.map.manifest.offset + poff, plen);
         Ok(m)
+    }
+
+    /// Hash of shard `n` in the installed manifest (`None`: no manifest, an
+    /// empty shard).
+    pub fn manifest_shard(&self, n: u8) -> Option<[u8; 32]> {
+        zdef::sign::manifest_shard(self.manifest_payload, n as usize).ok().flatten()
     }
 
     /// `catalog/status` facts of the store.

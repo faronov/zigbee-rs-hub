@@ -428,6 +428,15 @@ Phase 0 keeps the stock partition table and bootloader and replaces only
    The USJ port disappears and the bridge ports come back. (hwlab refuses a
    SoC reset on the S3, so this is the only button-free reset.)
 
+Through the hwlab **MCP** server a hub image (2.4–2.5 MB) does not fit one
+call: programming runs at about 11 KB/s and the MCP request times out after
+about 110 s, leaving a half-written slot (verified 2026-11-21). Program it
+in parts instead: the image from offset 0x1000 on in raw parts of at most
+640 KiB (`raw: true`, at 0x11000, 0xB0000, …), then take a fresh backup and
+program the whole image at 0x10000; hwlab skips identical sectors, so only
+the header sector is written (about 40 s). Do not `halt` the running app
+first: a halted core trips the watchdog and the S3 resets.
+
 **Do not reboot the S3 into ROM download mode from firmware.**
 `RTC_CNTL_FORCE_DOWNLOAD_BOOT` (0x6000812C bit 0) survives USJ chip resets
 (`rst:0x15`) and the S3 ROM does not clear it. Bridge 0.1.0–0.1.2 used it for
@@ -718,8 +727,8 @@ catalog-push` — fetch the files and upload them in resumable chunks
 `web`, `shard`). The hub streams each upload into flash (one chunk in RAM),
 checks it in place (Ed25519 COSE signature of the manifest with the
 built-in key and its version; the SHA-256 the manifest lists for every
-other file; a bank also by its own signature and a full decode) and
-switches banks A/B atomically (`hub_core::layout::HubdataMap`,
+other file; a bank also by its own signature and body hash, its
+definitions when a lookup loads them) and switches banks A/B atomically (`hub_core::layout::HubdataMap`,
 device-support 9 and 16). `catalog/status` tells clients what to fetch:
 `wants` (a newer bank for this slot size, the web tools) and `missing`
 (devices that resolve to generic only, with the shards holding their
@@ -730,9 +739,14 @@ buffer and the decoded candidates (7.3 KB median, 33.7 KB for the largest
 of 2 289 definitions). Tested on the host end to end (all upload targets,
 an interrupted upload resumed, restart, anti-rollback, a corrupted bank;
 `hubctl catalog-push` installed the real signed `catalog-2026.11.21` on the
-simulated hub); on the S3 it is built but not yet run on hardware. Cost on
-the S3: app image +119.8 KB (Ed25519/COSE verification ~32 KB, bank reader
-~15 KB, store and upload service ~50 KB), static RAM unchanged.
+simulated hub). On the BR board (S3 without PSRAM, 2026-11-21) `hubctl
+catalog-push` installed the same release in 4 KiB chunks (the 218 KB bank in
+about 10 s, commit 0.6 s; lowest free heap 24 KB with Wi-Fi, the NCP and a
+joined device running); manifest and bank survive a reboot and
+`definitions/get` reads the bank in place. Not yet run on hardware: the web
+tools upload and a device resolved from the bank. Cost on the S3: app image
++119.5 KB (Ed25519/COSE verification ~32 KB, bank reader ~15 KB, store and
+upload service ~50 KB), static RAM +32 B.
 
 **Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API

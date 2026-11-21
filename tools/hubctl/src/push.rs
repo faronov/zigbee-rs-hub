@@ -10,8 +10,10 @@
 //! 3. `catalog/status` `missing`: devices that resolve to generic only and
 //!    the shards holding their keys → each `shard-hh.cbor` → target `shard`.
 //!
-//! Uploads go in 12 KiB chunks; after a dropped connection the next run
-//! continues where `catalog/status` `upload.written` says.
+//! Uploads go in 4 KiB chunks (the most the hub accepts: a hub without PSRAM
+//! holds a request three times while handling it); after a dropped
+//! connection the next run continues where `catalog/status` `upload.written`
+//! says.
 
 use std::io::Read;
 use std::time::Duration;
@@ -22,7 +24,7 @@ use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
 type Ws = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 
-const CHUNK: usize = 12 * 1024;
+const CHUNK: usize = 4 * 1024;
 
 struct Hub {
     ws: Ws,

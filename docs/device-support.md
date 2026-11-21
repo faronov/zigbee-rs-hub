@@ -1307,11 +1307,14 @@ definitions enter the table, the largest saving first.
   u64 lowest accepted manifest version, SHA-256 of the bank file, CRC-32C.
   A new bank is written into the inactive slot (sector by sector, one chunk
   in RAM), checked in place (SHA-256 against the manifest, COSE signature of
-  the header against the trusted keys, body hash, every definition decoded
-  and validated), then the record flips and the engine's catalog is
-  swapped; every device re-resolves and the per-device changes are
-  reported. At boot the active bank is checked again (SHA-256 against the
-  record, signature, full decode); a bank that fails is not used and the hub
+  the header against the trusted keys, body hash), then the record flips
+  and the engine's catalog is swapped; every device re-resolves and the
+  per-device changes are reported. The hub does not decode every
+  definition at install (the generator validated them before signing; on
+  the BR board a full decode took more than 30 s and ran the heap out):
+  each lookup decodes and verifies the definitions it loads and skips one
+  that fails. At boot the active bank is checked again (signature, body
+  hash); a bank that fails is not used and the hub
   runs with "no catalog" (generic, user and fetched definitions still work)
   until the next update. A bank whose generation is below the last accepted
   one is refused (anti-rollback; `force` overrides for uploads).
@@ -1404,7 +1407,10 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   inactive slot, the web tools into their area), one chunk in RAM, and
   checks it in place: the manifest by its signature and version, every
   other file by the SHA-256 the installed manifest lists (a bank also by its
-  own signature and a full decode). `catalog/status` tells clients what to
+  own signature and body hash). Uploads go in chunks of at most 4 KiB: a
+  hub without PSRAM holds the frame, the parsed request and the decoded
+  bytes at once, and the hub keeps the installed manifest without its 256
+  shard hashes (read in place when needed). `catalog/status` tells clients what to
   fetch: `wants` (the bank for this hub's slot size if newer, the web tools
   if different) and `missing` (devices whose interview is done and that
   resolve to generic only, with the shards holding their index keys; also
@@ -2208,7 +2214,7 @@ size, content_hash, requires}`, `decompile(cbor, format)`,
 | `definitions/scaffold` | `device` | the material for a starter definition (JSON): identity, a match clause, every attribute and Tuya DP seen with its type and last value, the generic entities; the UI renders it as YAML |
 | `definitions/fetch` | `device` | `{device, shards}`: the shards (numbers) a client fetches from the mirror and uploads (target `shard`) for this device (9.3) |
 | `catalog/status` | — | `installed` (generation, date, serial, definitions, signing kid, size), `active_slot`, `manifest` (version, date, serial, zhc), `wants` {`bank`, `web`: {name, size, sha256} or null}, `missing` [{`device`, `shards`}], `upload` {`target`, `written`}, `web_tools`, `local` (fetched definitions, bytes used/size), `slot_size`, `config`, `warnings`, `engine` |
-| `catalog/upload_chunk` | `target` (`manifest`, `bank`, `web`, `shard`), `offset`, `data` (base64, ≤ 16 KiB); at offset 0 optionally `size`, `sha256` | `{written}`; offset 0 starts a new upload (and drops an unfinished one) |
+| `catalog/upload_chunk` | `target` (`manifest`, `bank`, `web`, `shard`), `offset`, `data` (base64 of ≤ 4 KiB: without PSRAM the hub holds the frame, the parsed request and the decoded bytes at once); at offset 0 optionally `size`, `sha256` | `{written}`; offset 0 starts a new upload (and drops an unfinished one) |
 | `catalog/commit` | `target`; `shard` (0–255) for shards, `device` (optional) ; `force` (bank anti-rollback) | manifest: `{version, catalog_date, catalog_serial, wants}`; bank: `{sha256, generation, definitions, devices: [{device, from, to, added, orphaned}]}`; web: `{size, files}`; shard: `{definitions, skipped, devices}`. `verification_failed` for a wrong signature, hash, version or decode |
 | `catalog/abort` | — | drops an upload |
 | `catalog/config` | `base_url` (the mirror), `auto_update`, `auto_fetch` (each optional) | the settings clients follow (stored in the journal, `cfg/catalog`) |
