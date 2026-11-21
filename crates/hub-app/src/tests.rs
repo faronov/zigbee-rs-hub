@@ -16,7 +16,7 @@ use zigbee_zrhp::types::Ieee;
 
 use crate::{App, AppConfig};
 
-const T: Duration = Duration::from_secs(10);
+pub(crate) const T: Duration = Duration::from_secs(10);
 const DEV: u64 = 0x00158d0001a2b3c4;
 
 fn rng() -> Rng {
@@ -28,12 +28,12 @@ fn rng() -> Rng {
     })
 }
 
-struct Rig {
-    ncp: Ncp,
-    sim: SimNcp,
+pub(crate) struct Rig {
+    pub ncp: Ncp,
+    pub sim: SimNcp,
 }
 
-fn rig(store: Store) -> Rig {
+pub(crate) fn rig(store: Store) -> Rig {
     let (host, ncp_end) = pipe::pair();
     let sim = SimNcp::start(ncp_end);
     let (rx, tx) = host.split();
@@ -44,7 +44,7 @@ fn rig(store: Store) -> Rig {
     Rig { ncp, sim }
 }
 
-fn session(app: &App) -> (u64, Receiver<String>) {
+pub(crate) fn session(app: &App) -> (u64, Receiver<String>) {
     let (tx, rx) = mpsc::channel();
     let sid = app.connect(Box::new(tx)).unwrap();
     let hello: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
@@ -55,7 +55,7 @@ fn session(app: &App) -> (u64, Receiver<String>) {
     (sid, rx)
 }
 
-fn call(app: &App, sid: u64, rx: &Receiver<String>, id: u64, mut body: J) -> J {
+pub(crate) fn call(app: &App, sid: u64, rx: &Receiver<String>, id: u64, mut body: J) -> J {
     body["id"] = id.into();
     app.text(sid, body.to_string());
     loop {
@@ -66,7 +66,7 @@ fn call(app: &App, sid: u64, rx: &Receiver<String>, id: u64, mut body: J) -> J {
     }
 }
 
-fn cfg() -> AppConfig {
+pub(crate) fn cfg() -> AppConfig {
     AppConfig { api_token: "secret".into(), ..AppConfig::default() }
 }
 

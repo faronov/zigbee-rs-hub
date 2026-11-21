@@ -17,7 +17,7 @@ fn timed_out(e: &tungstenite::Error) -> bool {
 
 /// A plain HTTP request (no WebSocket upgrade): the web UI on `/`.
 /// Returns `false` if the connection is a WebSocket upgrade.
-fn http_page(stream: &mut TcpStream) -> io::Result<bool> {
+fn http_page(app: &App, stream: &mut TcpStream) -> io::Result<bool> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut buf = [0u8; 4096];
     let mut n = 0;
@@ -47,6 +47,18 @@ fn http_page(stream: &mut TcpStream) -> io::Result<bool> {
             write!(resp, "Content-Length: {}\r\n\r\n", hub_web::INDEX_HTML_GZ.len())?;
             resp.extend_from_slice(hub_web::INDEX_HTML_GZ);
         }
+    } else if let Some(name) = path.strip_prefix("/zdefc/") {
+        // Web tools from hubdata (the definition compiler of the web UI).
+        app.web().serve(name, |f| -> io::Result<()> {
+            match f {
+                Some(f) => {
+                    write!(resp, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: {}\r\nContent-Encoding: gzip\r\nCache-Control: no-cache\r\nETag: {}\r\nContent-Length: {}\r\n\r\n", f.content_type, f.etag, f.data.len())?;
+                    resp.extend_from_slice(f.data);
+                }
+                None => write!(resp, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?,
+            }
+            Ok(())
+        })?;
     } else {
         write!(resp, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
     }
@@ -59,7 +71,7 @@ fn http_page(stream: &mut TcpStream) -> io::Result<bool> {
 fn connection(app: App, mut stream: TcpStream) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     let _ = stream.set_nodelay(true);
-    match http_page(&mut stream) {
+    match http_page(&app, &mut stream) {
         Ok(true) => return,
         Ok(false) => {}
         Err(e) => {

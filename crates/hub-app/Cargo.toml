@@ -17,8 +17,12 @@ miniz_oxide = "0.8"
 # Catalog banks, manifest and COSE_Sign1 verification (catalog::).
 zdef = { path = "../zdef", features = ["std"] }
 serde_json = "1"
+hub-core = { workspace = true }
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
+zdefc = { path = "../zdefc" }
 base64 = "0.22"
 ed25519-compact = { version = "2.1", default-features = false }
 hub-ncp = { workspace = true, features = ["sim"] }

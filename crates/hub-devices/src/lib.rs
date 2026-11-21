@@ -18,6 +18,7 @@
 )]
 
 pub mod api;
+pub mod bankcat;
 pub mod codec;
 pub mod commands;
 pub mod configure;

@@ -10,6 +10,26 @@
 //! release. A signature verifies against any filled slot (the COSE `kid` —
 //! the first 8 bytes of SHA-256 of the public key — selects it).
 
+/// A JSON object from `{"key": expression, …}` through `Value::from`:
+/// much less code than `serde_json::json!`, which serializes every value
+/// through serde (kilobytes of flash on the S3).
+macro_rules! obj {
+    ({ $($k:literal : $v:expr),* $(,)? }) => {{
+        #[allow(unused_mut)]
+        let mut m = serde_json::Map::new();
+        $( m.insert(String::from($k), serde_json::Value::from($v)); )*
+        serde_json::Value::Object(m)
+    }};
+}
+
+pub mod data;
+pub mod local;
+pub mod service;
+pub mod store;
+#[cfg(test)]
+mod tests_e2e;
+pub mod web;
+
 use zdef::bank::{Bank, BankError};
 use zdef::sign::{Manifest, ManifestError, TrustedKey, key_id};
 
@@ -53,7 +73,7 @@ mod tests {
 
     #[test]
     fn slot_0_is_the_committed_public_key() {
-        let pem = include_str!("../../../keys/zdef-catalog-ed25519.pub.pem");
+        let pem = include_str!("../../../../keys/zdef-catalog-ed25519.pub.pem");
         let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
         let der = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
         // SubjectPublicKeyInfo for Ed25519: 12-byte prefix, then the key.
@@ -67,7 +87,14 @@ mod tests {
     fn manifests_from_other_keys_are_refused_by_kid() {
         let kp = ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new([9; 32]));
         let public: [u8; 32] = *kp.pk;
-        let manifest = Manifest { catalog_date: 20261120, catalog_serial: 1, requires: vec![], banks: vec![], shards: vec![None; 256], ..Default::default() };
+        let manifest = Manifest {
+            catalog_date: 20261120,
+            catalog_serial: 1,
+            requires: vec![],
+            banks: vec![],
+            shards: vec![None; 256],
+            ..Default::default()
+        };
         let payload = manifest.encode();
         let sig = kp.sk.sign(to_be_signed(&protected_header(), &payload), None);
         let cose = cose_sign1(&key_id(&public), Some(&payload), &sig);

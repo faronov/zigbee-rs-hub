@@ -96,6 +96,23 @@ pub fn cose_sign1(kid: &[u8; 8], embedded: Option<&[u8]>, signature: &[u8; 64]) 
     w.into_vec()
 }
 
+fn write_assets(w: &mut Writer, assets: &[ManifestAsset]) {
+    w.array(assets.len());
+    for b in assets {
+        w.map(5);
+        w.uint(0);
+        w.text(&b.name);
+        w.uint(1);
+        w.bytes(&b.sha256);
+        w.uint(2);
+        w.uint(b.size);
+        w.uint(3);
+        w.uint(b.definitions as u64);
+        w.uint(4);
+        w.uint(b.generation as u64);
+    }
+}
+
 /// Parsed COSE_Sign1.
 pub struct Sign1<'a> {
     pub protected: &'a [u8],
@@ -202,6 +219,11 @@ pub struct Manifest {
     pub shards: Vec<Option<[u8; 32]>>,
     pub content: Option<[u8; 32]>,
     pub source: Vec<(String, String)>,
+    /// Key 64 (optional extension, ignored by older hubs): other assets of
+    /// the release the hub may install, e.g. `zdefc-web.zwb` (the definition
+    /// compiler for the web UI); same map as a bank entry, definitions and
+    /// generation 0.
+    pub tools: Vec<ManifestAsset>,
 }
 
 impl Manifest {
@@ -212,7 +234,11 @@ impl Manifest {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.map(6 + self.content.is_some() as usize + !self.source.is_empty() as usize);
+        w.map(
+            6 + self.content.is_some() as usize
+                + !self.source.is_empty() as usize
+                + !self.tools.is_empty() as usize,
+        );
         w.uint(0);
         w.uint(1);
         w.uint(1);
@@ -225,20 +251,7 @@ impl Manifest {
             w.uint(*f as u64);
         }
         w.uint(4);
-        w.array(self.banks.len());
-        for b in &self.banks {
-            w.map(5);
-            w.uint(0);
-            w.text(&b.name);
-            w.uint(1);
-            w.bytes(&b.sha256);
-            w.uint(2);
-            w.uint(b.size);
-            w.uint(3);
-            w.uint(b.definitions as u64);
-            w.uint(4);
-            w.uint(b.generation as u64);
-        }
+        write_assets(&mut w, &self.banks);
         w.uint(5);
         w.array(self.shards.len());
         for s in &self.shards {
@@ -261,6 +274,10 @@ impl Manifest {
                 w.text(k);
                 w.text(v);
             }
+        }
+        if !self.tools.is_empty() {
+            w.uint(64);
+            write_assets(&mut w, &self.tools);
         }
         w.into_vec()
     }
@@ -297,7 +314,8 @@ impl Manifest {
                         m.requires.push(r.uint()? as u16);
                     }
                 }
-                4 => {
+                4 | 64 => {
+                    let top = k;
                     for _ in 0..r.array()? {
                         let mut a = ManifestAsset::default();
                         let mut prev = None;
@@ -321,7 +339,11 @@ impl Manifest {
                         if a.name.is_empty() {
                             return Err(inv(&r, "manifest bank name"));
                         }
-                        m.banks.push(a);
+                        if top == 4 {
+                            m.banks.push(a);
+                        } else {
+                            m.tools.push(a);
+                        }
                     }
                 }
                 5 => {

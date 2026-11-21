@@ -68,6 +68,44 @@ pub struct DecodeOptions<'t> {
     pub strings: Option<&'t dyn StringTable>,
 }
 
+/// Identity fields of a definition, read without decoding the rest
+/// (catalog listings, lookups by `id` in a bank).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub id: Option<String>,
+    pub revision: Option<u64>,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+}
+
+/// Reads `id`, `revision`, `vendor` and `model` of a definition (standalone
+/// or catalog form) and skips everything else.
+pub fn peek_summary(bytes: &[u8], opts: &DecodeOptions<'_>) -> Result<Summary, DecodeError> {
+    let mut d = D {
+        r: Reader::new(bytes),
+        strings: opts.strings,
+        consts: &[],
+        names: Vec::new(),
+    };
+    let mut out = Summary::default();
+    let mut k = d.keys()?;
+    while let Some(key) = d.key(&mut k, "top")? {
+        match key {
+            1 => out.id = Some(d.text()?),
+            2 => out.revision = Some(d.r.uint()?),
+            3 => out.vendor = Some(d.text()?),
+            4 => out.model = Some(d.text()?),
+            _ => {
+                d.r.skip()?;
+            }
+        }
+        if key >= 4 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// Decodes a standalone definition or fragment.
 pub fn decode(bytes: &[u8]) -> Result<Definition, DecodeError> {
     decode_with(bytes, &DecodeOptions::default())

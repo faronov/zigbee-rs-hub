@@ -656,8 +656,8 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 | `convert` | ZRHP events → engine inputs (APS indications with source IEEE and group, admitted joins, `EVT_GP_*` incl. commissioned sink records and remote sink/translation tables); engine APS/GP requests → wire (`APS_DATA_REQUEST`, `GP_*` 0x0A01–0x0A0D) |
 | `transport` | The engine's `ZigbeeTransport` on `hub_ncp`: APS data non-blocking (`Client::start`, held across an NCP resume, outcomes counted), GP/group/remove/permit-join as calls only while the session is ready |
 | `registry` | Device registry in the host store journal (device-support 16.1): `dev/<id>` = deflated JSON `DeviceSnapshot` (identity, fingerprint, descriptors, attribute support and the values resolution reads, self-description fragment as zdef CBOR, user settings and entity overrides, configure hash/results, GP sink record), `udef/<id>` = user definitions. Written on device changes (2 s coalescing) and in a 30 s sweep; identical values are skipped and snapshots hold no measured values, so reports never write flash. The journal stores values > 2000 B as parts, applied only when complete |
-| `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist; once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them; after a start, reads the still-unknown states of restored devices once (`refresh_unknown`; a sleepy device gets the reads right after its next frame), since snapshots hold no measured values and a device may report only on change (the C6 sensor: temperature only after a 0.5 °C change or 15 min) |
-| `catalog` | Trusted keys of the definitions catalog: **slot 0** = `keys/zdef-catalog-ed25519.pub.pem` (`ff931767…63c6a2`, kid `66f64ac1cbfc9e27`), **slot 1** reserved for a rotation (add the successor in a firmware release, sign with it, retire slot 0 later); `verify_manifest` / `verify_bank` (COSE_Sign1 Ed25519, `zdef`) |
+| `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until a bank is installed (the catalog store and service: `catalog`); once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them; after a start, reads the still-unknown states of restored devices once (`refresh_unknown`; a sleepy device gets the reads right after its next frame), since snapshots hold no measured values and a device may report only on change (the C6 sensor: temperature only after a 0.5 °C change or 15 min) |
+| `catalog` | Trusted keys of the definitions catalog: **slot 0** = `keys/zdef-catalog-ed25519.pub.pem` (`ff931767…63c6a2`, kid `66f64ac1cbfc9e27`), **slot 1** reserved for a rotation (add the successor in a firmware release, sign with it, retire slot 0 later); `verify_manifest` / `verify_bank` (COSE_Sign1 Ed25519, `zdef`); the store in `hubdata` (`store`: bank slots A/B, active-bank record, manifest; `local`: fetched definitions; `data`: the partition, memory-mapped) and the service (`service`: chunked uploads of manifest, banks, web tools and shards, what clients should fetch, `catalog/*` API); `web`: the web tools served at `/zdefc/` |
 | `admin` | Network and hub maintenance (API 1.2, device-support 14.6): energy scan with a channel recommendation that avoids the hub's own Wi-Fi channel, channel change, TX power, NCP diagnostics, the network map, Open Coordinator Backup export/restore, reset + form; Wi-Fi credentials, API token rotation, reboot, boot mode, system facts and a log tail through the platform. NCP work runs on job threads in two lanes, one job each (heavy: scans, map, channel change, backup/restore/reset; light: diagnostics, TX power; `busy` otherwise), so the app thread keeps serving |
 | `jobs` | The job board: running jobs per lane, progress (time estimate, measured passes, the NCP's optional `EVT_SCAN_PROGRESS`), cancellation, the last result of each kind for clients that connect later |
 | `ocb` | `zigpy/open-coordinator-backup` v1 ⇄ ZRHP record streams (byte orders and Z2M/zigpy quirks of ZRHP 9.1); the export is written as text, not a JSON tree (RAM) |
@@ -671,8 +671,10 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 are pinned to one revision (master `c18875b`).
 
 **Desktop.** `hubctl --serial … --store hubdata.bin serve [--listen
-127.0.0.1:8099] [--token T]` runs the application with its WebSocket JSON
-API (`ws://…/`); `hubctl ws-call URL --token T JSON…` is a minimal client;
+127.0.0.1:8099] [--token T] [--hubdata FILE]` runs the application with its WebSocket JSON
+API (`ws://…/`) and the catalog store in a 1 MiB `hubdata` image (RAM
+without `--hubdata`); `hubctl catalog-push URL --token T [--from URL | --dir
+DIR]` uploads the signed catalog to a hub; `hubctl ws-call URL --token T JSON…` is a minimal client;
 `hubctl catalog-verify FILE…` checks catalog banks and `manifest.cose` with
 the firmware's keys. `--sim` works for all of them.
 
@@ -705,6 +707,32 @@ now written as text into the result frame with fallible allocation
 (`no_space` instead of an abort). Afterwards: 46 counters in a 4 KB frame in
 170 ms, minimum free heap 27.5 KB, 22 KB with the web UI's map scan and
 three sessions.
+
+**Definitions catalog.** The hub keeps the signed catalog of
+`faronov/zigbee-rs-definitions` in `hubdata` but downloads nothing itself
+(no TLS in the firmware): the release is mirrored to GitHub Pages
+(`faronov.github.io/zigbee-rs-definitions/latest/`), and clients with
+Internet access — the web UI, the Home Assistant integration, `hubctl
+catalog-push` — fetch the files and upload them in resumable chunks
+(`catalog/upload_chunk` + `catalog/commit`, targets `manifest`, `bank`,
+`web`, `shard`). The hub streams each upload into flash (one chunk in RAM),
+checks it in place (Ed25519 COSE signature of the manifest with the
+built-in key and its version; the SHA-256 the manifest lists for every
+other file; a bank also by its own signature and a full decode) and
+switches banks A/B atomically (`hub_core::layout::HubdataMap`,
+device-support 9 and 16). `catalog/status` tells clients what to fetch:
+`wants` (a newer bank for this slot size, the web tools) and `missing`
+(devices that resolve to generic only, with the shards holding their
+keys; event `definition_needed`). Lookups read the memory-mapped bank:
+format 2 banks (zdefc default since 2026-11-21) keep even their string
+table in flash, so a lookup only allocates the inflater, a 4 KiB block
+buffer and the decoded candidates (7.3 KB median, 33.7 KB for the largest
+of 2 289 definitions). Tested on the host end to end (all upload targets,
+an interrupted upload resumed, restart, anti-rollback, a corrupted bank;
+`hubctl catalog-push` installed the real signed `catalog-2026.11.21` on the
+simulated hub); on the S3 it is built but not yet run on hardware. Cost on
+the S3: app image +119.8 KB (Ed25519/COSE verification ~32 KB, bank reader
+~15 KB, store and upload service ~50 KB), static RAM unchanged.
 
 **Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API

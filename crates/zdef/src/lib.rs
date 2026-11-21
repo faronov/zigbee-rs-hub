@@ -39,6 +39,8 @@ pub mod num;
 pub mod resolve;
 pub mod sign;
 pub mod siphash;
+#[cfg(feature = "bank")]
+pub mod webtools;
 
 /// Insertion sort by key: the lists sorted on the hub are a few entries
 /// long, and `core`'s sorts cost ~9 KiB of flash per element type.

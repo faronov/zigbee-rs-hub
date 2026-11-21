@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hub_devices::api::{ApiServer, SessionId};
+use hub_devices::api::{ApiExtension, ApiServer, SessionId};
+use hub_devices::bankcat::StoreCatalog;
 use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubConfig};
 use hub_devices::resolve::{Catalog, MemoryCatalog};
@@ -25,6 +26,10 @@ use hub_ncp::{Hub as Ncp, Message, SessionState};
 use log::{info, warn};
 
 use crate::admin::{self, Admin, JobOut};
+use crate::catalog::data::SharedFlash;
+use crate::catalog::service::{CONFIG_KEY, CatalogService, load_config};
+use crate::catalog::store::CatalogStore;
+use crate::catalog::web::SharedWeb;
 use crate::convert::{EngineInput, engine_input};
 use crate::platform::Platform;
 use crate::registry::Registry;
@@ -174,6 +179,16 @@ pub struct AppStatus {
     pub imported: usize,
 }
 
+/// The definitions catalog in `hubdata` (device-support 9). The hub never
+/// downloads: clients upload the signed release files.
+pub struct CatalogSetup {
+    /// `hubdata`.
+    pub flash: SharedFlash,
+    /// Signing keys trusted besides the built-in ones (raw Ed25519 public
+    /// keys: private catalogs, tests).
+    pub extra_keys: Vec<[u8; 32]>,
+}
+
 enum Input {
     Ncp(Message),
     Connect(SessionId, Box<dyn SessionSink>),
@@ -191,6 +206,7 @@ pub struct App {
     stopped: Arc<AtomicBool>,
     // 32-bit: the S3 has no 64-bit atomics.
     next_session: Arc<AtomicU32>,
+    web: SharedWeb,
 }
 
 fn wall_ms() -> Millis {
@@ -200,6 +216,11 @@ fn wall_ms() -> Millis {
 impl App {
     /// Start the application on a running host core.
     pub fn start(ncp: Ncp, cfg: AppConfig) -> App {
+        Self::start_with(ncp, cfg, None)
+    }
+
+    /// [`App::start`] with the catalog store in `hubdata`.
+    pub fn start_with(ncp: Ncp, cfg: AppConfig, catalog: Option<CatalogSetup>) -> App {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(AppStatus::default()));
         let stopped = Arc::new(AtomicBool::new(false));
@@ -219,12 +240,15 @@ impl App {
         let st = status.clone();
         let stop = stopped.clone();
         let jobs = tx.clone();
+        
+        let web = SharedWeb::default();
+        let web2 = web.clone();
         thread::Builder::new()
             .name("hub-app".into())
             .stack_size(cfg.stack_size)
-            .spawn(move || Runner::new(ncp, cfg, st, jobs).run(rx, stop))
+            .spawn(move || Runner::new(ncp, cfg, st, jobs, catalog, web2).run(rx, stop))
             .expect("hub-app thread");
-        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)) }
+        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)), web }
     }
 
     /// A new API connection; the `auth_required` frame goes to `sink`.
@@ -246,6 +270,11 @@ impl App {
     /// A closed connection.
     pub fn disconnect(&self, s: SessionId) {
         let _ = self.tx.send(Input::Disconnect(s));
+    }
+
+    /// The web tools (`/zdefc/<file>`, served by the HTTP server).
+    pub fn web(&self) -> &SharedWeb {
+        &self.web
     }
 
     /// Status snapshot.
@@ -300,6 +329,40 @@ struct Runner {
     jobs: Sender<Input>,
     /// NCP cookie `hub/info` `maintenance` was computed for.
     maintenance_for: Option<u32>,
+    /// The catalog store and its downloads.
+    catalog: Option<CatalogService>,
+}
+
+/// Opens the catalog store in `hubdata` and its service.
+#[inline(never)]
+fn open_catalog(ncp: &Ncp, setup: CatalogSetup, web: SharedWeb) -> Option<(StoreCatalog, CatalogService)> {
+    let size = setup.flash.lock().unwrap().size();
+    let Some(map) = hub_core::layout::HubdataMap::for_size(size) else {
+        warn!("catalog: hubdata of {size} B has no catalog areas");
+        return None;
+    };
+    let opened = {
+        let mut f = setup.flash.lock().unwrap();
+        let mut keys = crate::catalog::trusted_keys();
+        keys.extend(setup.extra_keys.iter().map(|k| zdef::sign::TrustedKey::new(*k)));
+        CatalogStore::open(&mut **f, map, keys)
+    };
+    let (store, bank) = match opened {
+        Ok(x) => x,
+        Err(e) => {
+            warn!("catalog: store: {e}");
+            return None;
+        }
+    };
+    for w in &store.warnings {
+        warn!("catalog: {w}");
+    }
+    if let Some(c) = &store.active {
+        info!("catalog: bank generation {} ({} definitions, key {})", c.generation, c.definitions, c.kid);
+    }
+        let cfg = load_config(ncp.with_store(|s| s.kv_get(CONFIG_KEY).map(<[u8]>::to_vec)));
+    let cat = StoreCatalog { bank, fetched: store.local.catalog(), ..Default::default() };
+    Some((cat, CatalogService::new(setup.flash, store, cfg, web)))
 }
 
 /// Opened, closed (or expired), or re-opened since the last look; the
@@ -309,9 +372,26 @@ fn permit_changed(before: u32, now: u32) -> bool {
 }
 
 impl Runner {
-    fn new(ncp: Ncp, cfg: AppConfig, status: Arc<Mutex<AppStatus>>, jobs: Sender<Input>) -> Self {
-        let catalog: Box<dyn Catalog> =
-            Box::new(if cfg.builtin_catalog { builtin_catalog() } else { MemoryCatalog::default() });
+    fn new(
+        ncp: Ncp,
+        cfg: AppConfig,
+        status: Arc<Mutex<AppStatus>>,
+        jobs: Sender<Input>,
+                setup: Option<CatalogSetup>,
+        web: SharedWeb,
+    ) -> Self {
+        let builtin = if cfg.builtin_catalog { builtin_catalog() } else { MemoryCatalog::default() };
+        let (catalog, service): (Box<dyn Catalog>, Option<CatalogService>) =
+            match setup.map(|s| open_catalog(&ncp, s, web)) {
+                Some(Some((mut c, svc))) => {
+                    // The examples stand in until a bank is installed.
+                    if c.bank.is_none() {
+                        c.builtin = builtin;
+                    }
+                    (Box::new(c), Some(svc))
+                }
+                _ => (Box::new(builtin), None),
+            };
         let hub_cfg = HubConfig { tz_offset_s: cfg.tz_offset_s, ..HubConfig::default() };
         let mut engine = Engine::new(NcpTransport::new(ncp.clone()), hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
@@ -337,6 +417,7 @@ impl Runner {
             admin,
             jobs,
             maintenance_for: None,
+            catalog: service,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -412,7 +493,8 @@ impl Runner {
                     }
                     return;
                 }
-                for frame in self.api.handle_text(&mut self.engine, sid, &text, now) {
+                let ext = self.catalog.as_mut().map(|c| c as &mut dyn ApiExtension<NcpTransport>);
+                for frame in self.api.handle_text_ext(&mut self.engine, sid, &text, now, ext) {
                     self.send(sid, &frame);
                 }
             }
@@ -530,6 +612,30 @@ impl Runner {
         }
         self.engine.tick(now);
         self.engine.transport.poll();
+        if let Some(c) = self.catalog.as_mut()
+            && self.registered
+        {
+            c.tick(&self.engine);
+        }
+    }
+
+    /// Catalog events to subscribers, changed catalog settings to the store.
+    #[inline(never)]
+    fn pump_catalog(&mut self) {
+        let Some(c) = self.catalog.as_mut() else { return };
+        let evs = std::mem::take(&mut c.events);
+        if c.config_dirty {
+            c.config_dirty = false;
+            let v = c.cfg.to_json().to_string();
+            if let Err(e) = self.ncp.with_store(|s| s.kv_put(CONFIG_KEY, v.as_bytes())) {
+                warn!("catalog: saving the settings: {e}");
+            }
+        }
+        for e in evs {
+            for (sid, frame) in self.api.publish("catalog", e) {
+                self.send(sid, &frame);
+            }
+        }
     }
 
     /// Hub endpoint and coordinator IEEE, once per process (the endpoint is
@@ -608,6 +714,9 @@ impl Runner {
     fn after_input(&mut self) {
         self.observe_permit();
         let now = self.now();
+        if self.catalog.as_ref().is_some_and(|c| c.config_dirty || !c.events.is_empty()) {
+            self.pump_catalog();
+        }
         let events = self.engine.drain_events();
         self.registry.note(&events, now);
         for (sid, frame) in self.api.pump_events(&mut self.engine, events) {

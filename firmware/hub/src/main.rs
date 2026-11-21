@@ -15,6 +15,8 @@
 //! USB recovery (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode)
 //! works the same in both modes.
 
+#[cfg(feature = "app")]
+mod catalog;
 mod cpu;
 mod esp;
 mod mode;
@@ -392,8 +394,13 @@ fn start_app(hub: Hub) {
         admin_stack: ADMIN_STACK,
         ..Default::default()
     };
+    // The catalog store in hubdata (banks read in place from the mapping).
+    let catalog = catalog::HubData::open().map(|f| hub_app::CatalogSetup {
+        flash: std::sync::Arc::new(std::sync::Mutex::new(Box::new(f) as Box<dyn hub_app::catalog::data::DataFlash>)),
+        extra_keys: Vec::new(),
+    });
     stage(5);
-    let app = cpu::named(c"app", || hub_app::App::start(hub.clone(), app_cfg));
+    let app = cpu::named(c"app", || hub_app::App::start_with(hub.clone(), app_cfg, catalog));
     let _ = APP.set(app.clone());
     stage(6);
     usbapi::start(app.clone());

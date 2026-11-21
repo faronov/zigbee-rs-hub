@@ -15,6 +15,7 @@
 //! RTS, which leaves the H2 running (esptool auto-reset mapping).
 
 mod platform;
+mod push;
 mod serve;
 
 use std::io::{self, Read};
@@ -50,11 +51,14 @@ commands:
   fw-confirm                FW_CONFIRM
   reset [--hard]            SYS_RESET, or an EN pulse through the bridge's DTR/RTS
   serve [--listen ADDR] [--token T] [--for SECS] [--wifi-channel N]
+                [--hubdata FILE] [--catalog-key HEX]
                             the hub application (device engine, registry in the
                             store) with its WebSocket JSON API and the web UI
                             (default 127.0.0.1:8099, token from HUB_TOKEN or
                             random); --wifi-channel: the Wi-Fi channel the
-                            energy-scan advice avoids
+                            energy-scan advice avoids; the catalog store in a
+                            1 MiB hubdata image (FILE, or RAM); an extra
+                            trusted signing key (raw Ed25519, hex)
 simulated NCP:
   --sim-demo                form on channel 15 and add a small mesh (routers
                             answering Mgmt_Lqi/Mgmt_Rtg) for the network map
@@ -64,10 +68,39 @@ simulated NCP:
 also, without a hub:
   hubctl ws-call URL --token T [--listen SECS] JSON...
                             authenticate, send requests, print the frames
+    hubctl catalog-push URL --token T [--from BASE_URL | --dir DIR] [--no-fetch]
+                            upload the signed catalog to the hub: manifest,
+                            then the bank and web tools it wants, then the
+                            shards of devices that resolve to generic only
+                            (from the hub's mirror setting, another URL or a
+                            release directory)
   hubctl catalog-verify FILE...
                             check catalog banks (.zdb) and manifest.cose with
                             the firmware's trusted keys
 ";
+
+/// `serve`'s catalog store: the hubdata image.
+fn catalog_setup(args: &mut Args) -> Result<hub_app::CatalogSetup, String> {
+    use hub_app::catalog::data::{DataFlash, MemData};
+    const HUBDATA: u32 = 1 << 20;
+    let flash: Box<dyn DataFlash> = match args.value("--hubdata") {
+        Some(p) => Box::new(MemData::file(std::path::Path::new(&p), HUBDATA).map_err(|e| format!("{p}: {e}"))?),
+        None => Box::new(MemData::new(HUBDATA)),
+    };
+    
+    let extra_keys = match args.value("--catalog-key") {
+        Some(h) => {
+            let b = unhex(&h).filter(|b| b.len() == 32).ok_or("--catalog-key: 64 hex digits")?;
+            vec![b.try_into().unwrap()]
+        }
+        None => vec![],
+    };
+        Ok(hub_app::CatalogSetup { flash: std::sync::Arc::new(std::sync::Mutex::new(flash)), extra_keys })
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    (0..s.len() / 2).map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()).collect()
+}
 
 struct Logger(Instant, log::LevelFilter);
 
@@ -484,7 +517,8 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                 platform: Some(Arc::new(desktop)),
                 ..Default::default()
             };
-            let app = hub_app::App::start(hub.clone(), cfg);
+            let catalog = catalog_setup(&mut args)?;
+            let app = hub_app::App::start_with(hub.clone(), cfg, Some(catalog));
             println!("token: {token}");
             let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
             let st = app.status();
@@ -565,6 +599,27 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
+        };
+    }
+        if args.0.first().map(String::as_str) == Some("catalog-push") {
+        args.0.remove(0);
+        let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_default();
+        let source = match (args.value("--from"), args.value("--dir")) {
+            (_, Some(d)) => Some(push::Source::Dir(d.into())),
+            (Some(u), None) => Some(push::Source::Url(u)),
+            _ => None,
+        };
+        let fetch = !args.flag("--no-fetch");
+        let Some(url) = (!args.0.is_empty()).then(|| args.0.remove(0)) else {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match push::push(&url, &token, source, fetch) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
         };
     }
     if args.0.first().map(String::as_str) == Some("ws-call") {

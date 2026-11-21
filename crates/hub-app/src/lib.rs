@@ -7,7 +7,7 @@
 //! | [`transport`] | the engine's `ZigbeeTransport` on `hub_ncp::Client` |
 //! | [`registry`] | device registry and user definitions in the host store journal (`hubdata`) |
 //! | [`app`] | the app thread: engine, `ApiServer` sessions, registry, 1 s tick |
-//! | [`catalog`] | the definitions catalog's trusted keys (slot 0, slot 1 for rotation) and bank/manifest verification |
+//! | [`catalog`] | the definitions catalog: trusted keys (slot 0, slot 1 for rotation), bank/manifest verification, the store in `hubdata` (bank slots A/B, active-bank record, manifest, local definitions) and the service (update checks, downloads, on-demand fetch, uploads, `catalog/*` API) |
 //! | [`admin`] | network and hub maintenance API (energy scan, channel, TX power, diagnostics, map, backup/restore, reset; Wi-Fi, token, reboot, mode, logs) |
 //! | [`ocb`] | Open Coordinator Backup JSON ⇄ ZRHP record streams |
 //! | [`topology`] | network map: coordinator tables and Mgmt_Lqi/Mgmt_Rtg over the air |
@@ -29,7 +29,7 @@ pub mod registry;
 pub mod topology;
 pub mod transport;
 
-pub use app::{App, AppConfig, AppStatus, SessionSink, builtin_catalog};
+pub use app::{App, AppConfig, AppStatus, CatalogSetup, SessionSink, builtin_catalog};
 pub use platform::{LogRing, Platform};
 
 #[cfg(test)]

@@ -196,6 +196,34 @@ fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
         let headers = [hub_web::HEADERS.as_slice(), &[("Connection", "close")]].concat();
         req.into_response(200, None, &headers)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
     })?;
+    // Web tools from hubdata (the definition compiler of the web UI).
+    for (uri, name) in [("/zdefc/zdefc_wasm.js", "zdefc_wasm.js"), ("/zdefc/zdefc_wasm_bg.wasm", "zdefc_wasm_bg.wasm")] {
+        let web = app.web().clone();
+        server.fn_handler(uri, Method::Get, move |mut req| {
+            close_after(req.connection().handle());
+            let fresh = req.header("If-None-Match").map(str::to_string);
+            web.serve(name, |f| match f {
+                None => req.into_status_response(404).map(|_| ()),
+                Some(f) if fresh.as_deref() == Some(f.etag) => {
+                    req.into_response(304, None, &[("ETag", f.etag), ("Connection", "close")]).map(|_| ())
+                }
+                Some(f) => {
+                    let headers = [
+                        ("Content-Type", f.content_type),
+                        ("Content-Encoding", "gzip"),
+                        ("Cache-Control", "no-cache"),
+                        ("ETag", f.etag),
+                        ("Connection", "close"),
+                    ];
+                    let mut resp = req.into_response(200, None, &headers)?;
+                    for c in f.data.chunks(4096) {
+                        resp.write_all(c)?;
+                    }
+                    Ok(())
+                }
+            })
+        })?;
+    }
     crate::ws::register(&server, app)?;
     Ok(server)
 }

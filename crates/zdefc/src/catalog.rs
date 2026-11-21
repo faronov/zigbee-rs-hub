@@ -38,6 +38,9 @@ pub struct Plan {
     pub source: Vec<(String, String)>,
     pub definitions: Vec<PathBuf>,
     pub banks: Vec<BankPlan>,
+    /// Other release assets listed in the manifest (key 64), e.g. the web
+    /// tools bundle `zdefc-web.zwb`; copied into the output directory.
+    pub tools: Vec<PathBuf>,
 }
 
 fn text(n: &Node) -> Option<&str> {
@@ -116,7 +119,12 @@ impl Plan {
                 });
             }
         }
+        let tools = match root.get("tools") {
+            Some(n) => paths(n, base, "tools")?,
+            None => Vec::new(),
+        };
         Ok(Plan {
+            tools,
             params: BankParams {
                 generation,
                 catalog_date: date,
@@ -333,7 +341,7 @@ pub fn build(plan: &Plan, out: &Path, key: Option<&SigningKey>) -> Result<Outcom
             generation: plan.params.generation,
         })
         .collect();
-    let m = bank::manifest(
+    let mut m = bank::manifest(
         &plan.params,
         &bank_files,
         &shards,
@@ -341,6 +349,22 @@ pub fn build(plan: &Plan, out: &Path, key: Option<&SigningKey>) -> Result<Outcom
         Some(content),
         plan.source.clone(),
     );
+    for t in &plan.tools {
+        let bytes = fs::read(t).map_err(|e| format!("{}: {e}", t.display()))?;
+        let name = t
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("tools: file name")?
+            .to_string();
+        fs::write(out.join(&name), &bytes).map_err(|e| e.to_string())?;
+        m.tools.push(zdef::sign::ManifestAsset {
+            name,
+            sha256: zdef::hash::sha256(&bytes),
+            size: bytes.len() as u64,
+            definitions: 0,
+            generation: 0,
+        });
+    }
     let payload = m.encode();
     fs::write(out.join("manifest.cbor"), &payload).map_err(|e| e.to_string())?;
     if let Some(k) = key {

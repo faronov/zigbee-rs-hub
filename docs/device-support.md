@@ -1299,25 +1299,45 @@ definitions enter the table, the largest saving first.
   inflated string table for as long as the catalog is open. Format 2 costs
   15 KiB of flash for that release (213.1 KiB instead of 197.8 KiB per bank,
   43 KiB below the 256 KiB 4 MB bank).
-- **Atomic switch**: the active bank is chosen by a 32-byte record in the
-  config area (`active: a|b`, generation, bank SHA-256), written with the
-  same two-slot, CRC, commit-marker scheme as the zigbee-rs settings
-  journal. A new bank is written to the inactive file, verified (signature,
-  hash, a full decode of every block), then the record flips. At boot, a bank
-  that fails verification is not used; the hub falls back to the other bank,
-  then to "no catalog" (generic + local definitions still work).
+- **Atomic switch** (implemented, `hub_app::catalog::store`): the active
+  bank is chosen by a 68-byte record in the catalog state area (16.1), two
+  4 KiB slots written alternately, the valid one with the higher sequence
+  number counts: `"ZCS1"`, u32 sequence, u8 active slot (0, 1, 0xFF none),
+  u32 bank size, u32 lowest accepted bank generation, u32 manifest length,
+  u64 lowest accepted manifest version, SHA-256 of the bank file, CRC-32C.
+  A new bank is written into the inactive slot (sector by sector, one chunk
+  in RAM), checked in place (SHA-256 against the manifest, COSE signature of
+  the header against the trusted keys, body hash, every definition decoded
+  and validated), then the record flips and the engine's catalog is
+  swapped; every device re-resolves and the per-device changes are
+  reported. At boot the active bank is checked again (SHA-256 against the
+  record, signature, full decode); a bank that fails is not used and the hub
+  runs with "no catalog" (generic, user and fetched definitions still work)
+  until the next update. A bank whose generation is below the last accepted
+  one is refused (anti-rollback; `force` overrides for uploads).
 
 ### 9.2 Local definitions
 
-`defs/local/` holds, each as standalone CBOR named by content hash:
+Implemented (2026-11-21):
 
-- user definitions (uploaded, 14.4);
-- definitions fetched on demand (9.3) for paired devices;
-- self-description schemas (12), by schema hash.
+- user definitions (uploaded, 14.4) stay in the host store journal
+  (`udef/<id>`), decoded in RAM (few, small);
+- definitions fetched on demand (9.3) go to the local area of `hubdata`
+  (`hub_app::catalog::local`): two halves written alternately, each a
+  16-byte header (`"ZLD1"`, generation, CRC-32C) and 4-byte aligned records
+  (u16 length, u8 key count, u8 kind, CRC-32C, the index-key hashes, the
+  standalone CBOR). They are read in place from the mapping (no RAM until a
+  fingerprint asks for them). A torn record (power lost while appending)
+  ends the log and the next append compacts into the other half; the new
+  header is written last, so a power cut during compaction keeps the old
+  half;
+- self-description schemas (12): still in the device registry.
 
-Budget: 64 KiB on 4 MB (decided, D10; 16.1), 128 KiB on 8 MB. A fetched definition or schema not referenced
-by any paired device is evicted first (LRU). User definitions are never
-evicted; an upload that does not fit fails with `NO_SPACE`.
+Budget: 64 KiB on 4 MB (two 32 KiB halves; decided, D10; 16.1), 128 KiB on
+8 MB. When a fetched definition does not fit, the definitions no paired
+device resolves to are dropped while compacting; if it still does not fit,
+it is refused (`no_space` in the `definition_fetched` report's `skipped`).
+User definitions are never evicted.
 
 ### 9.3 On-demand fetch
 
@@ -1371,18 +1391,40 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   catalogs.
 - The server learns only the shard (1/256 of the key space), not the exact
   model.
-- A fetched definition goes to `defs/local/`, then resolution reruns. Fetches
-  are rate-limited (one per device per hour on failure).
-- Without Internet: the UI offers "upload a definition" and "update the
-  catalog from a file" (both through the WebSocket API).
+- A fetched definition goes to the local area (9.2), then resolution
+  reruns. Fetches are rate-limited (one per device per hour).
+- **Implementation** (2026-11-21, `hub_app::catalog::service`): **the hub
+  downloads nothing** (no TLS stack in the firmware). The release is
+  mirrored to GitHub Pages (`https://faronov.github.io/zigbee-rs-definitions/latest/`,
+  which, unlike release assets, allows cross-origin reads), and clients
+  with Internet access fetch the files and upload them in chunks through
+  the API: the web UI, the Home Assistant integration (`zigbee_rs_hub.update_catalog`,
+  daily check) and `hubctl catalog-push`. The hub streams each upload into
+  flash (manifest and shards into the scratch area, banks into the
+  inactive slot, the web tools into their area), one chunk in RAM, and
+  checks it in place: the manifest by its signature and version, every
+  other file by the SHA-256 the installed manifest lists (a bank also by its
+  own signature and a full decode). `catalog/status` tells clients what to
+  fetch: `wants` (the bank for this hub's slot size if newer, the web tools
+  if different) and `missing` (devices whose interview is done and that
+  resolve to generic only, with the shards holding their index keys; also
+  the event `definition_needed`). From an uploaded shard the hub keeps the
+  records with those devices' keys that score against their fingerprints
+  and need no feature it lacks, appends them to the local area and
+  re-resolves the devices. Uploads survive a dropped connection
+  (`catalog/status` `upload.written`).
+- Without Internet anywhere: the UI offers "upload a definition" and
+  "update the catalog from files" (the same upload API).
 
 ### 9.4 Catalog OTA
 
 The catalog is versioned and released independently of the hub app:
 
-1. The hub checks `manifest.cose` (daily, or on request), downloads
-   `bank-4m.zdb` / `bank-8m.zdb` of a newer release (9.3), or receives a bank
-   in chunks over the WebSocket API.
+1. A client (web UI, Home Assistant, `hubctl`) checks `manifest.cose` on
+   the mirror (daily when the hub's `auto_update` setting is on), uploads
+   it, and uploads the bank (`bank-4m.zdb` / `bank-8m.zdb`, the one built
+   for the hub's slot size) when `catalog/status` `wants` it, and the web
+   tools (`zdefc-web.zwb`).
 2. It streams it into the inactive bank file, verifies signature and hash,
    decodes every definition, checks that every definition referenced by a
    paired device's resolution still exists or has a successor `id`.
@@ -2164,9 +2206,22 @@ size, content_hash, requires}`, `decompile(cbor, format)`,
 | `definitions/get` | `id` or `content_hash`, `format` (`cbor` base64, or `json`: the decoded CBOR with symbolic keys) | the definition |
 | `definitions/preview` | `device`, `cbor` | the resolution the device *would* get: entities added/changed/orphaned, configure diff; nothing applied |
 | `definitions/scaffold` | `device` | the material for a starter definition (JSON): identity, a match clause, every attribute and Tuya DP seen with its type and last value, the generic entities; the UI renders it as YAML |
-| `definitions/fetch` | `device` | force an on-demand lookup (9.3) |
-| `catalog/status` | — | active/staged bank: version, generation, counts, size, signature key, last check |
-| `catalog/update` | `url` or chunked upload (`catalog/upload_chunk {offset, data}` then `catalog/commit`) | progress events, then the per-device re-resolution report |
+| `definitions/fetch` | `device` | `{device, shards}`: the shards (numbers) a client fetches from the mirror and uploads (target `shard`) for this device (9.3) |
+| `catalog/status` | — | `installed` (generation, date, serial, definitions, signing kid, size), `active_slot`, `manifest` (version, date, serial, zhc), `wants` {`bank`, `web`: {name, size, sha256} or null}, `missing` [{`device`, `shards`}], `upload` {`target`, `written`}, `web_tools`, `local` (fetched definitions, bytes used/size), `slot_size`, `config`, `warnings`, `engine` |
+| `catalog/upload_chunk` | `target` (`manifest`, `bank`, `web`, `shard`), `offset`, `data` (base64, ≤ 16 KiB); at offset 0 optionally `size`, `sha256` | `{written}`; offset 0 starts a new upload (and drops an unfinished one) |
+| `catalog/commit` | `target`; `shard` (0–255) for shards, `device` (optional) ; `force` (bank anti-rollback) | manifest: `{version, catalog_date, catalog_serial, wants}`; bank: `{sha256, generation, definitions, devices: [{device, from, to, added, orphaned}]}`; web: `{size, files}`; shard: `{definitions, skipped, devices}`. `verification_failed` for a wrong signature, hash, version or decode |
+| `catalog/abort` | — | drops an upload |
+| `catalog/config` | `base_url` (the mirror), `auto_update`, `auto_fetch` (each optional) | the settings clients follow (stored in the journal, `cfg/catalog`) |
+
+Topic `catalog` (subscribe): `catalog_manifest`, `catalog_updated`,
+`web_tools_updated`, `definition_fetched` (the commit results) and
+`definition_needed` {`device`, `shards`}. `definitions/list` takes
+`query` (substring of id, vendor or model), `offset` and `limit` (≤ 500);
+with any of them the result is `{total, offset, items}`, without them the
+first 200 summaries as before. With `device` it lists the catalog
+candidates the index keys reach for that device (a bank is never listed
+whole into RAM). `definitions/get` finds a bank definition by `id` (a scan
+of the blocks reading only the identity fields).
 | `catalog/keys` | `list` / `add {public_key, name}` / `remove {kid}` | admin: trusted signing keys besides the built-in ones |
 
 ### 14.5 Green Power
@@ -2326,29 +2381,51 @@ API.
 ### 16.1 Flash: 4 MB S3 (development layout, D24)
 
 4 MB boards are development samples: one 2 944 KiB app slot, no OTA,
-`hubdata` 1 MiB. The areas below take 896 KiB of it; the remaining 128 KiB
-add to the free space.
+`hubdata` 1 MiB. `hubdata` holds raw areas (no file system), defined by
+`hub_core::layout::HubdataMap` (implemented 2026-11-21; every area is whole
+4 KiB sectors, the journal stays where earlier builds put it):
 
-| Area | Size | Content |
-|---|---:|---|
-| Host store journal | 128 KiB | ZRHP host tables, device registry, resolution records (3.4), GP registry and GP bindings (13.8, ≤ 6 KiB), entity states worth persisting |
-| Configuration | 32 KiB | hub settings, active-bank record (9.1), trusted keys, anti-rollback counter |
-| Converter bank A | 256 KiB | catalog (9.1) |
-| Converter bank B | 256 KiB | staged catalog |
-| Local definitions (D10) | 64 KiB | user definitions, fetched definitions, self-description schemas (9.2) |
-| Free | 160 KiB (17.9 %) | LittleFS copy-on-write and wear levelling (224 KiB before the local area) |
+| Area | Offset | Size | Content |
+|---|---:|---:|---|
+| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), GP registry and bindings (13.8) |
+| Catalog state | 0x020000 | 8 KiB | active-bank record, two 4 KiB slots (9.1) |
+| Manifest | 0x022000 | 24 KiB | the installed, verified `manifest.cose` (9.3; 9 KB today) |
+| Converter bank A | 0x028000 | 256 KiB | catalog bank (9.1) |
+| Converter bank B | 0x068000 | 256 KiB | the other bank (staging, previous) |
+| Local definitions | 0x0A8000 | 64 KiB | fetched definitions, two 32 KiB halves (9.2) |
+| Scratch | 0x0B8000 | 32 KiB | one downloaded shard or manifest, checked in place (largest shard 19.8 KiB) |
+| Web tools | 0x0C0000 | 256 KiB | the definition compiler for the web UI (reserved) |
+
+The map fills the 1 MiB exactly.
 
 ### 16.2 Flash: 8 MB S3, the product (`hubdata` 1 920 KiB), approved (D20, D24)
 
-Two 3 MiB app slots with A/B OTA.
+Two 3 MiB app slots with A/B OTA. Same order as 16.1; the journal keeps
+its 128 KiB (a larger journal would move every later area of a board that
+already holds data):
 
-| Area | Size |
-|---|---:|
-| Host store journal | 256 KiB |
-| Configuration | 64 KiB |
-| Converter banks | 2 × 576 KiB |
-| Local definitions | 128 KiB |
-| Free | 320 KiB (16.7 %) |
+| Area | Offset | Size |
+|---|---:|---:|
+| Host store journal | 0x000000 | 128 KiB |
+| Catalog state, manifest | 0x020000 | 8 + 24 KiB |
+| Converter banks A, B | 0x028000, 0x0B8000 | 2 × 576 KiB |
+| Local definitions | 0x148000 | 128 KiB |
+| Scratch | 0x168000 | 32 KiB |
+| Web tools | 0x170000 | 256 KiB |
+| Free | 0x1B0000 | 192 KiB |
+
+**16 MB (Dongle-M class, later):** `HubdataMap::for_size` gives every
+`hubdata` of at least 1 920 KiB the 8 MB map; a larger partition only adds
+free space until a 16 MB map is specified (larger banks for vendor
+templates, 17.4).
+
+**Catalog on 4 MB vs 8 MB.** The release's `bank-4m.zdb` (format 2,
+213.1 KiB, 2 289 definitions) fits the 256 KiB slot with 43 KiB to spare;
+`bank-8m.zdb` is the same today and may grow to 576 KiB (vendor templates).
+A device whose definition is not in the bank (partial translations,
+definitions larger than a 4 KiB block, a 4 MB bank that ran out of room)
+gets it on demand from the shards (9.3) into the local area (64 KiB on
+4 MB, 128 KiB on 8 MB; the largest definition is 8.4 KB).
 
 ### 16.3 What fits in a bank
 

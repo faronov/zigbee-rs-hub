@@ -18,6 +18,7 @@ pub mod lower;
 pub mod raise;
 pub mod schema;
 pub mod tree;
+pub mod web;
 pub mod yaml;
 
 use tree::{Diag, Node};

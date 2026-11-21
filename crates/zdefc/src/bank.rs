@@ -612,5 +612,6 @@ pub fn manifest(
             .collect(),
         content,
         source,
+        tools: Vec::new(),
     }
 }

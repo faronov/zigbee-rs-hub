@@ -624,6 +624,69 @@ impl ShardRecord {
     }
 }
 
+/// A matching shard record: key hashes, requires, standalone definition.
+pub type ShardMatch<'a> = (Vec<u64>, Vec<u16>, &'a [u8]);
+
+/// Shard records that have any of `keys` (ascending or not), borrowed from
+/// the shard (a shard staged in flash is read in place: only the matching
+/// records' key lists are allocated). Validates the whole shard.
+pub fn shard_matches<'a>(
+    bytes: &'a [u8],
+    keys: &[u64],
+) -> Result<Vec<ShardMatch<'a>>, DecodeError> {
+    let mut out = Vec::new();
+    for_each_shard_record(bytes, &mut |k, req, def| {
+        if k.iter().any(|h| keys.contains(h)) {
+            out.push((k.to_vec(), req.to_vec(), def));
+        }
+    })?;
+    Ok(out)
+}
+
+/// Visitor of shard records: key hashes, requires, standalone definition.
+type RecordFn<'f, 'a> = dyn FnMut(&[u64], &[u16], &'a [u8]) + 'f;
+
+/// Calls `f(key hashes, requires, standalone definition)` for every record.
+fn for_each_shard_record<'a>(bytes: &'a [u8], f: &mut RecordFn<'_, 'a>) -> Result<(), DecodeError> {
+    let mut r = crate::cbor::Reader::new(bytes);
+    let inv = |r: &crate::cbor::Reader<'_>| DecodeError {
+        offset: r.position(),
+        kind: codec::DecodeErrorKind::Invalid("shard record"),
+    };
+    let n = r.array()?;
+    let mut key_hashes = Vec::new();
+    let mut requires = Vec::new();
+    for _ in 0..n {
+        if r.array()? != 3 {
+            return Err(inv(&r));
+        }
+        key_hashes.clear();
+        requires.clear();
+        if matches!(r.peek()?, crate::cbor::Head::Array(_)) {
+            let k = r.array()?;
+            if k < 2 {
+                return Err(inv(&r));
+            }
+            for _ in 0..k {
+                let h = r.uint()?;
+                if key_hashes.last().is_some_and(|p| *p >= h) {
+                    return Err(inv(&r));
+                }
+                key_hashes.push(h);
+            }
+        } else {
+            key_hashes.push(r.uint()?);
+        }
+        let k = r.array()?;
+        for _ in 0..k {
+            requires.push(r.uint()? as u16);
+        }
+        f(&key_hashes, &requires, r.bytes()?);
+    }
+    r.finish()?;
+    Ok(())
+}
+
 pub fn decode_shard(bytes: &[u8]) -> Result<Vec<ShardRecord>, DecodeError> {
     let mut r = crate::cbor::Reader::new(bytes);
     let inv = |r: &crate::cbor::Reader<'_>| DecodeError {

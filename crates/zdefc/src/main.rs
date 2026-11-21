@@ -33,6 +33,10 @@ usage:
                                         public key (hex) and key ID as the hub embeds them
   zdefc bank verify <bank.zdb> --pubkey <file|hex>
   zdefc bank list <bank.zdb>
+  zdefc web-bundle -o <out.zwb> <file>...
+                                        web tools bundle for the hub (gzip per file), e.g. the
+                                        wasm-bindgen output of zdefc-wasm; a catalog plan lists
+                                        it under `tools` (manifest key 64)
 
 The signing key is read from --key or the ZDEF_SIGNING_KEY environment variable:
 an Ed25519 PKCS#8 PEM (openssl genpkey -algorithm ed25519) or 64 hex digits
@@ -363,6 +367,36 @@ fn main() -> ExitCode {
         }
         "bank" => bank_cmd(&a),
         "catalog" => catalog_cmd(&a),
+        "web-bundle" => {
+            let out = a.get("-o").ok_or("web-bundle: -o <out.zwb> required")?;
+            let files: Vec<(String, String, Vec<u8>)> = a
+                .pos
+                .iter()
+                .map(|f| -> Result<_, String> {
+                    let data = fs::read(f).map_err(|e| format!("{f}: {e}"))?;
+                    let name = Path::new(f)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .ok_or("file name")?
+                        .to_string();
+                    Ok((
+                        name.clone(),
+                        zdefc::web::content_type(&name).into(),
+                        zdefc::web::gzip(&data),
+                    ))
+                })
+                .collect::<Result<_, _>>()?;
+            if files.is_empty() {
+                return Err("web-bundle: no files".into());
+            }
+            let b = zdef::webtools::build(&files).map_err(|e| format!("{e:?}"))?;
+            fs::write(out, &b).map_err(|e| format!("{out}: {e}"))?;
+            for (n, t, d) in &files {
+                println!("{n}: {t}, {} B gzip", d.len());
+            }
+            println!("{out}: {} B", b.len());
+            Ok(())
+        }
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(())
