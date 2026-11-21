@@ -29,10 +29,14 @@ details in the zigbee-rs book, "Web Flasher").
 
 | Flasher entry | Port | Image |
 |---|---|---|
-| Thread Border Router board, S3 (8 MB) | S3, USB2 | `tbr-hub`, production layout (A/B OTA) |
-| Thread Border Router board, S3 (4 MB early sample) | S3, USB2 | `tbr-hub`, dev layout (no OTA) |
+| Thread Border Router board, S3 (4 MB / 8 MB, detected) | S3, USB2 | `tbr-hub`: production layout (A/B OTA) on 8 MB, dev layout (no OTA) on 4 MB |
 | Thread Border Router board, H2 | H2, USB1 | ZRHP NCP, UART 921 600 with RTS/CTS |
 
+- **Flash size:** the S3 entry first reads the chip's flash ID and partition
+  table (*Connect and read the flash size*) and selects the largest image
+  that fits; an 8 MB image is never offered for a 4 MB chip (it would not
+  boot). A different partition table on the chip (e.g. 4 MB dev → 8 MB)
+  forces erase: back up the network first (web UI or `network/backup`).
 - **Update (default)** writes the bootloader, partition table, blank
   `otadata` (8 MB) and the app; `nvs` (Wi-Fi credentials, boot mode, API
   token) and `hubdata` (device registry, ZRHP host store) stay. Leave *Erase
