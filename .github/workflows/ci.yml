@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hub-web -p hubctl
+      - name: S3 flashing helpers (partition offsets from the device's table)
+        run: python3 -m unittest discover -s tools/flow -p 'test_*.py'
 
   home-assistant:
     name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)

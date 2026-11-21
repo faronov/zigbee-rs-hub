@@ -133,7 +133,7 @@ ZRHP остаётся протоколом для USB/UART (сетевого т�
 | `firmware/bridge` | Прошивка S3 этапа 0 (`tbr-bridge`, esp-idf-svc + esp_tinyusb); заодно библиотека — режим `tbr-hub` по умолчанию |
 | `firmware/hub` | Прошивка S3 этапа 1 (`tbr-hub`): режим моста (по умолчанию) и режим хаба; таблицы разделов 4 МБ / 8 МБ для подготовки плат |
 | `tools/make-app-image.sh` | ELF → образ приложения ESP (те же аргументы `elf2image`, что в ESP-IDF), необязательный предел размера |
-| `tools/flow/` | Проверка резервных линий, тестовая программа UART для H2 (только в RAM) и замеры управления потоком (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`, `s3_reflash.sh`) |
+| `tools/flow/` | Проверка резервных линий, тестовая программа UART для H2 (только в RAM) и замеры управления потоком (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`); перепрошивка S3 без кнопок `s3_reflash.sh IMAGE TAG [4mb-dev или 8mb]` (смещение приложения берётся из таблицы разделов на устройстве через `s3_partition.py`; другая разметка отклоняется) |
 | `docs/device-support.md` | Дизайн поддержки устройств: уровни, формат определений, язык выражений, самоописание, Green Power, модель сущностей, бюджеты |
 | `definitions/examples/` | Примеры определений устройств (исходная форма YAML) |
 | `tools/herdsman-coverage/` | Замер покрытия и размеров определений zigbee-herdsman-converters (Node + Python) |
