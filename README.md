@@ -680,6 +680,20 @@ without network).
 `hub/info` returns the hub name, API version, features, current `seq`,
 device/entity counts and, once the NCP session is up, `coordinator_ieee`,
 `ncp_board` and `ncp_product` (the Home Assistant integration's unique ID).
+The S3 implements the hub side of the maintenance API (1.2,
+`firmware/hub/src/platform.rs`): `hub/wifi/set` stores the credentials in
+NVS and the station reconnects with them at once, or starts if the hub
+booted without any (console `wifi set` does the same in hub mode);
+`hub/token/rotate` stores the new token in NVS; `hub/reboot`;
+`hub/mode/set`; `hub/system` (internal heap free, minimum and largest block,
+uptime, Wi-Fi SSID/IP/RSSI/channel, reset reason); `hub/logs` from a 3 KiB
+RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it). The
+energy-scan advice avoids the AP's channel. Maintenance jobs run on a 12 KiB
+thread. On the hwlab board (2026-11-21): `hub/system`, `hub/logs`,
+`hub/reboot`, the network map (the C6 as the coordinator's child), backup,
+and channel change 17 → 25 → 17 (about 9 s each; the C6 followed within a
+minute) work; `hub/wifi/set` and `hub/mode/set` were not tried on the shared
+board.
 
 **Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
