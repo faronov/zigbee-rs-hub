@@ -95,7 +95,7 @@ fn api_session_endpoint_and_interview_start() {
     // The hub identity for clients (the HA integration's unique ID).
     let info = call(&app, sid, &rx, 9, json!({"type": "hub/info"}));
     assert_eq!(info["result"]["coordinator_ieee"], "020100000000515a", "{info}");
-    assert_eq!(info["result"]["api_version"], "1.0");
+    assert_eq!(info["result"]["api_version"], hub_devices::api::messages::API_VERSION);
     assert_eq!(info["result"]["devices"], 0);
     // A join reaches the engine, which starts the interview through the NCP.
     let sub = call(&app, sid, &rx, 2, json!({"type": "subscribe", "topics": ["devices"]}));
@@ -218,6 +218,103 @@ fn connect_returns_before_the_hello_is_sent() {
     returned.store(true, Ordering::SeqCst);
     assert!(sid.is_some());
     assert_eq!(rx.recv_timeout(T), Ok(true), "the hello waited for connect() to return");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+#[test]
+fn network_info_and_permit_join_events() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let info = call(&app, sid, &rx, 1, json!({"type": "network/info"}));
+    assert_eq!(info["success"], true, "{info}");
+    let n = &info["result"];
+    assert_eq!(n["state"], "up");
+    assert_eq!(n["ownership"], "owned");
+    assert_eq!(n["pan_id"], r.sim.state().pan_id);
+    assert_eq!(n["channel"], r.sim.state().channel);
+    assert!(n["ncp"]["fw"].is_string() && n["ncp"]["ieee"].as_str().map(str::len) == Some(16), "{n}");
+    assert_eq!(n["permit_join_s"], 0);
+
+    let sub = call(&app, sid, &rx, 2, json!({"type": "subscribe", "topics": ["network"]}));
+    assert_eq!(sub["success"], true);
+    let pj = call(&app, sid, &rx, 3, json!({"type": "network/permit_join", "duration_s": 60}));
+    assert_eq!(pj["success"], true, "{pj}");
+    let ev = loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "event" && f["event"]["topic"] == "permit_join" {
+            break f;
+        }
+    };
+    assert_eq!(ev["event"]["remaining_s"], 60);
+    let info = call(&app, sid, &rx, 4, json!({"type": "network/info"}));
+    let left = info["result"]["permit_join_s"].as_u64().unwrap();
+    assert!((58..=60).contains(&left), "{left}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// A connection that goes away without a close notification.
+struct Vanishing(Arc<std::sync::atomic::AtomicBool>);
+
+impl crate::SessionSink for Vanishing {
+    fn send(&mut self, _text: &str) -> bool {
+        true
+    }
+    fn alive(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn silently_closed_connections_lose_their_session() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    assert!(app.connect(Box::new(Vanishing(alive.clone()))).is_some());
+    assert!(app.wait(T, |s| s.sessions == 1));
+    alive.store(false, Ordering::SeqCst);
+    assert!(app.wait(T, |s| s.sessions == 0), "{:?}", app.status());
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// A sink that, like esp_http_server's detached sender, needs the
+/// transport's thread (here: a mutex the "server thread" holds).
+struct NeedsServerThread(Arc<std::sync::Mutex<()>>);
+
+impl crate::SessionSink for NeedsServerThread {
+    fn send(&mut self, _text: &str) -> bool {
+        drop(self.0.lock().unwrap());
+        true
+    }
+}
+
+#[test]
+fn connect_never_waits_for_the_app_thread() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let server = Arc::new(std::sync::Mutex::new(()));
+    let (done_tx, done_rx) = mpsc::channel();
+    let (a, s) = (app.clone(), server.clone());
+    std::thread::spawn(move || {
+        // The server thread is busy in its handler (holds the lock) while
+        // the app thread blocks sending the first session's hello to it.
+        let _busy = s.lock().unwrap();
+        let first = a.connect(Box::new(NeedsServerThread(s.clone())));
+        std::thread::sleep(Duration::from_millis(100));
+        let second = a.connect(Box::new(NeedsServerThread(s.clone())));
+        done_tx.send((first, second)).unwrap();
+    });
+    let (first, second) = done_rx.recv_timeout(T).expect("connect() blocked on the app thread");
+    assert!(first.is_some() && second.is_some() && first != second);
+    assert!(app.wait(T, |st| st.sessions == 2));
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

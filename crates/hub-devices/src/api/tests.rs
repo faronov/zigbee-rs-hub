@@ -58,7 +58,7 @@ fn auth_subscribe_snapshot_deltas_and_commands() {
     assert_eq!(bad[0]["type"], "auth_invalid");
     let ok = parse(&api.handle_text(&mut hub, s, r#"{"type": "auth", "token": "secret"}"#, T0));
     assert_eq!(ok[0]["type"], "auth_ok");
-    assert_eq!(ok[0]["api_version"], "1.0");
+    assert_eq!(ok[0]["api_version"], "1.1");
     assert_eq!(ok[0]["zdef_versions"], json!([1]));
     assert!(ok[0]["features"].as_array().unwrap().contains(&json!("gp")));
 
@@ -112,6 +112,7 @@ fn auth_subscribe_snapshot_deltas_and_commands() {
     // devices/list, entities/list, entities/states.
     let r = call(&mut api, &mut hub, s, 1, json!({"type": "devices/list"}));
     assert_eq!(r["result"][0]["id"], "zb:0017880100aabbcc");
+    assert_eq!(r["result"][0]["nwk"], 0x2001);
     assert_eq!(r["result"][0]["interview"], "complete");
     let r = call(
         &mut api,
@@ -501,4 +502,43 @@ fn hub_info_carries_the_application_fields() {
     api.set_info("coordinator_ieee", J::Null);
     let r = call(&mut api, &mut hub, s, 3, json!({"type": "hub/info"}));
     assert!(r["result"].get("coordinator_ieee").is_none());
+}
+
+#[test]
+fn network_info_and_network_events() {
+    let mut hub = hub_with(&[]);
+    let mut api = ApiServer::new("zrs-hub-7cdfa1", "secret");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type": "auth", "token": "secret"}"#, T0);
+
+    // Without host-core facts the method is refused, not invented.
+    let r = call(&mut api, &mut hub, s, 1, json!({"type": "network/info"}));
+    assert_eq!(r["success"], false);
+    assert_eq!(r["error"]["code"], "unsupported");
+
+    hub.transport.network = Some(json!({"pan_id": 0x1C06, "channel": 17, "permit_join_s": 0}));
+    let r = call(&mut api, &mut hub, s, 2, json!({"type": "network/info"}));
+    assert_eq!(r["result"]["channel"], 17);
+    assert_eq!(r["result"]["time"], crate::device::ts(T0 + 10_000));
+
+    // The network topic: snapshot carries the same facts, then events.
+    let out = parse(&api.handle_text(
+        &mut hub,
+        s,
+        r#"{"id": 3, "type": "subscribe", "topics": ["network"]}"#,
+        T0,
+    ));
+    assert_eq!(out[0]["success"], true);
+    assert_eq!(out[1]["event"]["network"]["pan_id"], 0x1C06);
+    hub.network_event(json!({"topic": "permit_join", "remaining_s": 120}));
+    let ev = parse(
+        &api.pump(&mut hub)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["id"], 3);
+    assert_eq!(ev[0]["event"]["topic"], "permit_join");
+    assert_eq!(ev[0]["event"]["remaining_s"], 120);
 }

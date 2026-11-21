@@ -94,16 +94,20 @@ impl ApiServer {
     /// A new connection; returns its ID and the `auth_required` frame.
     pub fn connect(&mut self) -> (SessionId, String) {
         let id = self.next_session;
-        self.next_session += 1;
+        (id, self.connect_as(id))
+    }
+
+    /// A new connection under an ID the caller allocated (unique, e.g. from
+    /// a counter shared with the transport thread, so that thread never
+    /// waits for the API's); returns the `auth_required` frame.
+    pub fn connect_as(&mut self, id: SessionId) -> String {
+        self.next_session = self.next_session.max(id + 1);
         self.sessions.insert(id, Session::default());
-        (
-            id,
-            ServerMessage::AuthRequired {
-                hub: self.hub_name.clone(),
-                api_version: API_VERSION.into(),
-            }
-            .to_text(),
-        )
+        ServerMessage::AuthRequired {
+            hub: self.hub_name.clone(),
+            api_version: API_VERSION.into(),
+        }
+        .to_text()
     }
 
     /// A closed connection.
@@ -201,7 +205,7 @@ impl ApiServer {
                 sess.subs.insert(id, topics.iter().cloned().collect());
             }
             // Snapshot first, then deltas with increasing seq (14.1).
-            let snap = self.snapshot(hub, topics);
+            let snap = self.snapshot(hub, topics, now);
             return vec![
                 ServerMessage::ok(id, json!({"seq": self.seq})),
                 ServerMessage::Event {
@@ -254,7 +258,7 @@ impl ApiServer {
         }]
     }
 
-    fn snapshot<T: ZigbeeTransport>(&self, hub: &Hub<T>, topics: &[String]) -> J {
+    fn snapshot<T: ZigbeeTransport>(&self, hub: &mut Hub<T>, topics: &[String], now: Millis) -> J {
         let mut snap = json!({"topic": "snapshot"});
         if topics.iter().any(|t| t == "devices") {
             snap["devices"] = hub.devices().map(|d| d.record()).collect();
@@ -271,6 +275,9 @@ impl ApiServer {
         }
         if topics.iter().any(|t| t == "gp") {
             snap["bindings"] = J::Array(hub.list_bindings(None, None));
+        }
+        if topics.iter().any(|t| t == "network") {
+            snap["network"] = network_info(hub, now).unwrap_or(J::Null);
         }
         snap
     }
@@ -298,6 +305,8 @@ impl ApiServer {
                 }
                 r
             }
+            R::NetworkInfo => network_info(hub, now)
+                .ok_or_else(|| ApiError::new("unsupported", "no network information"))?,
             R::PermitJoin {
                 duration_s,
                 target,
@@ -785,6 +794,15 @@ impl ApiServer {
                     "events",
                     json!({"topic": "entity_event", "uid": uid, "event_type": event_type, "attributes": attributes, "time": time}),
                 ),
+                HubEvent::Network(mut body) => {
+                    if !body.is_object() {
+                        body = json!({"body": body});
+                    }
+                    if body.get("topic").is_none() {
+                        body["topic"] = "network".into();
+                    }
+                    ("network", body)
+                }
                 HubEvent::Gp { kind, mut body } => {
                     if let Some(o) = body.as_object_mut() {
                         o.insert("topic".into(), kind.into());
@@ -814,6 +832,17 @@ impl ApiServer {
         }
         out
     }
+}
+
+/// The host core's facts plus `time`, the hub's clock (s, the time base of
+/// `last_seen` and state timestamps), so a client can show relative times
+/// even before the hub has synchronised its clock.
+fn network_info<T: ZigbeeTransport>(hub: &mut Hub<T>, now: Millis) -> Option<J> {
+    let mut v = hub.transport.network_info()?;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("time".into(), crate::device::ts(now).into());
+    }
+    Some(v)
 }
 
 impl<T: ZigbeeTransport> Hub<T> {

@@ -1,7 +1,8 @@
 //! `hubctl serve`: the WebSocket JSON API (spec device-support 14) of the
-//! hub application on a desktop, and `hubctl ws-call`, a minimal client.
+//! hub application on a desktop, the embedded web UI on `/` (as the
+//! firmware serves it), and `hubctl ws-call`, a minimal client.
 
-use std::io;
+use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
@@ -14,10 +15,58 @@ fn timed_out(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
 }
 
-/// One connection: text frames to the app, the app's frames back.
-fn connection(app: App, stream: TcpStream) {
+/// A plain HTTP request (no WebSocket upgrade): the web UI on `/`.
+/// Returns `false` if the connection is a WebSocket upgrade.
+fn http_page(stream: &mut TcpStream) -> io::Result<bool> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buf = [0u8; 4096];
+    let mut n = 0;
+    while n < buf.len() {
+        n = stream.peek(&mut buf)?;
+        if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+    if head.lines().any(|l| l.starts_with("upgrade:") && l.contains("websocket")) {
+        return Ok(false);
+    }
+    let path = head.split_whitespace().nth(1).unwrap_or("");
+    let inm = head.lines().find_map(|l| l.strip_prefix("if-none-match:")).unwrap_or("");
+    let mut resp = Vec::new();
+    if path == "/" || path == "/index.html" {
+        let fresh = hub_web::not_modified(inm);
+        write!(resp, "HTTP/1.1 {}\r\nConnection: close\r\n", if fresh { "304 Not Modified" } else { "200 OK" })?;
+        for (k, v) in hub_web::HEADERS {
+            write!(resp, "{k}: {v}\r\n")?;
+        }
+        if fresh {
+            write!(resp, "\r\n")?;
+        } else {
+            write!(resp, "Content-Length: {}\r\n\r\n", hub_web::INDEX_HTML_GZ.len())?;
+            resp.extend_from_slice(hub_web::INDEX_HTML_GZ);
+        }
+    } else {
+        write!(resp, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
+    }
+    stream.write_all(&resp)?;
+    Ok(true)
+}
+
+/// One connection: the web UI, or text frames to the app and the app's
+/// frames back.
+fn connection(app: App, mut stream: TcpStream) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     let _ = stream.set_nodelay(true);
+    match http_page(&mut stream) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            log::warn!("http {peer}: {e}");
+            return;
+        }
+    }
     let mut ws = match tungstenite::accept(stream) {
         Ok(ws) => ws,
         Err(e) => {
@@ -55,7 +104,7 @@ fn connection(app: App, stream: TcpStream) {
 pub fn serve(app: &App, addr: &str, until: Option<Instant>) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
-    log::info!("WebSocket JSON API on ws://{addr}/");
+    log::info!("web UI on http://{addr}/, WebSocket JSON API on ws://{addr}/api");
     loop {
         if until.is_some_and(|t| Instant::now() >= t) {
             return Ok(());

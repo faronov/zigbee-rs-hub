@@ -1140,11 +1140,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hub-web"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide",
+ "sha2",
+]
+
+[[package]]
 name = "hubctl"
 version = "0.1.0"
 dependencies = [
  "hub-app",
  "hub-ncp",
+ "hub-web",
  "log",
  "serde_json",
  "serialport",
@@ -2254,6 +2263,7 @@ dependencies = [
  "hub-app",
  "hub-core",
  "hub-ncp",
+ "hub-web",
  "log",
  "tbr-bridge",
 ]

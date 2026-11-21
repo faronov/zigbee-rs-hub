@@ -32,6 +32,12 @@ impl SessionSink for WsSink {
     fn send(&mut self, text: &str) -> bool {
         !self.0.is_closed() && self.0.send(FrameType::Text(false), text.as_bytes()).is_ok()
     }
+    fn alive(&self) -> bool {
+        !self.0.is_closed()
+    }
+    fn keepalive(&mut self) -> bool {
+        !self.0.is_closed() && self.0.send(FrameType::Ping, &[]).is_ok()
+    }
 }
 
 fn set_state(s: String) {
@@ -100,9 +106,23 @@ fn run(app: App, modem: Modem<'static>, ssid: &str, pass: &str, on_up: impl Fn(b
 
 fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
     let mut server =
-        EspHttpServer::new(&server::Configuration { stack_size: 8192, ..Default::default() }).map_err(|e| e.0)?;
+        EspHttpServer::new(&server::Configuration {
+            stack_size: 8192,
+            // The web UI (page + WebSocket) and an integration at once; the
+            // least recently used socket is purged when they run out.
+            max_open_sockets: 6,
+            // Peers that vanished without a FIN.
+            keep_alive: Some(server::KeepAlive { idle_secs: 30, interval_secs: 5, probe_count: 3 }),
+            ..Default::default()
+        })
+        .map_err(|e| e.0)?;
+    // The web UI: one pre-compressed page that talks to /api (crates/hub-web).
     server.fn_handler("/", Method::Get, |req| {
-        req.into_ok_response()?.write_all(b"zigbee-rs-hub: WebSocket JSON API at /api\n").map(|_| ())
+        if req.header("If-None-Match").is_some_and(hub_web::not_modified) {
+            let headers = [("ETag", hub_web::ETAG), ("Cache-Control", "no-cache")];
+            return req.into_response(304, Some("Not Modified"), &headers).map(|_| ());
+        }
+        req.into_response(200, None, &hub_web::HEADERS)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
     })?;
     let sessions: Arc<Mutex<BTreeMap<i32, u64>>> = Arc::default();
     server.ws_handler("/api", None, move |ws| {
@@ -121,13 +141,28 @@ fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
             }
             return Ok(());
         }
-        let (_, len) = ws.recv(&mut [])?;
+        let (kind, len) = ws.recv(&mut [])?;
+        if matches!(kind, FrameType::Close | FrameType::SocketClose) {
+            // A browser closing the page sends a Close frame; answer it and
+            // end the session (esp_http_server then closes the socket).
+            let _ = ws.send(FrameType::Close, &[]);
+            if let Some(sid) = map.remove(&ws.session()) {
+                app.disconnect(sid);
+            }
+            return Ok(());
+        }
         if len > MAX_FRAME {
             ws.send(FrameType::Close, &[])?;
             return Err(EspError::from_infallible::<ESP_ERR_INVALID_SIZE>());
         }
         let mut buf = vec![0u8; len];
         ws.recv(&mut buf)?;
+        if kind == FrameType::Ping {
+            return ws.send(FrameType::Pong, &buf);
+        }
+        if !matches!(kind, FrameType::Text(_)) {
+            return Ok(());
+        }
         while buf.last() == Some(&0) {
             buf.pop();
         }

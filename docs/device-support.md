@@ -311,6 +311,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 |---|---|---|---|
 | `id` | `zb:<ieee>` (16 hex) | `gp:<srcid>` (8 hex) or `gp:<ieee>:<ep>` | `identifiers: {(DOMAIN, id)}` |
 | `ieee` / `src_id` | IEEE | SrcID or IEEE + endpoint | `connections: {("zigbee", ieee)}` (Zigbee only) |
+| `nwk` | short address (API 1.1) | null | (diagnostic) |
 | `manufacturer` | definition `vendor`, else Basic 0x0004 | definition `vendor`, else manufacturer ID as hex | `manufacturer` |
 | `model` | definition `model`, else Basic 0x0005 | definition `model`, else "GPD 0x<device id>" | `model` |
 | `model_id` | Basic 0x0005 | `0x<mfr>/0x<model>` | `model_id` |
@@ -2058,13 +2059,14 @@ code feels familiar:
 {"id": 17, "type": "result", "success": false,
  "error": {"code": "not_found", "message": "no device zb:00…"}}
 
-{"id": 18, "type": "subscribe", "topics": ["devices", "entities", "events", "gp"]}
+{"id": 18, "type": "subscribe", "topics": ["devices", "entities", "events", "gp", "network"]}
 {"id": 18, "type": "event", "seq": 1042, "event": {"topic": "entity_state", …}}
 ```
 
 - `id` is chosen by the client, unique per connection.
 - `api_version` is `major.minor`; minor versions only add fields and message
-  types. Clients ignore unknown fields.
+  types. Clients ignore unknown fields. 1.1 added `network/info`, the
+  `network` topic and the device record's `nwk`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2078,6 +2080,7 @@ code feels familiar:
 | Type | Parameters | Result |
 |---|---|---|
 | `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`; once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
+| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised) (fields the host core does not know are absent; `unsupported` without a host core) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
 | `devices/list` | — | device records (4.1) |
 | `devices/get` | `id` | device record + endpoints + resolution summary |
@@ -2091,6 +2094,10 @@ code feels familiar:
 Events (topic `devices`): `device_added`, `device_updated` (any registry field,
 availability, `last_seen` at most once per minute), `device_removed`,
 `interview_progress`, `resolution_changed` (layers, added/orphaned entities).
+
+Events (topic `network`, API 1.1): `permit_join` (`remaining_s`, when joining
+opens or closes) and `network_state` (`state`: `down`, `forming`, `up`,
+`leaving`); the snapshot carries `network` (the `network/info` result).
 
 ### 14.3 Entities
 

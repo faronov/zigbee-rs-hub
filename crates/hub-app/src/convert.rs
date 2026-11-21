@@ -8,7 +8,7 @@ use zigbee_zrhp::codec::List;
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication, indication_flags, tx_options};
 use zigbee_zrhp::msg::gp as wg;
 use zigbee_zrhp::msg::ids;
-use zigbee_zrhp::msg::network::EvtDeviceJoined;
+use zigbee_zrhp::msg::network::{EvtDeviceJoined, EvtNetworkState, EvtPermitJoinState};
 use zigbee_zrhp::records::Record;
 use zigbee_zrhp::types::Ieee;
 
@@ -26,6 +26,8 @@ pub enum EngineInput {
     },
     /// `Hub::on_gp_event`.
     Gp(eg::GpEvent),
+    /// `Hub::network_event` (API topic `network`).
+    Network(serde_json::Value),
 }
 
 fn gpd(id: &wg::GpdId) -> eg::GpdId {
@@ -90,6 +92,20 @@ pub fn engine_input(m: &Message) -> Option<EngineInput> {
                 lqi: e.lqi,
                 rssi: e.rssi,
             })
+        }
+        ids::EVT_PERMIT_JOIN_STATE => {
+            let e: EvtPermitJoinState = m.decode().ok()?;
+            EngineInput::Network(serde_json::json!({"topic": "permit_join", "remaining_s": e.remaining_s}))
+        }
+        ids::EVT_NETWORK_STATE => {
+            let e: EvtNetworkState = m.decode().ok()?;
+            let state = match e.state {
+                0 => "down",
+                1 => "forming",
+                2 => "up",
+                _ => "leaving",
+            };
+            EngineInput::Network(serde_json::json!({"topic": "network_state", "state": state}))
         }
         ids::EVT_DEVICE_JOINED => {
             let e: EvtDeviceJoined = m.decode().ok()?;

@@ -132,6 +132,8 @@ pub enum HubEvent {
         /// `Ok("ok")` or the error.
         result: Result<String, ApiError>,
     },
+    /// Network topic events (`permit_join` …), from the host core.
+    Network(J),
     /// GP topic events (13.7).
     Gp {
         /// `gp/commissioning`, `gp/pending`, `gp/commissioned`, `gp/failed`, `gp/binding`.
@@ -449,6 +451,12 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Maps a NWK address to a device (restore).
     pub(crate) fn index_nwk(&mut self, nwk: u16, id: &str) {
         self.nwk_index.insert(nwk, id.to_string());
+    }
+
+    /// A `network` topic event from the host core, e.g.
+    /// `{"topic": "permit_join", "remaining_s": 180}`.
+    pub fn network_event(&mut self, body: J) {
+        self.emit(HubEvent::Network(body));
     }
 
     pub(crate) fn emit(&mut self, e: HubEvent) {

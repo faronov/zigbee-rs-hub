@@ -9,8 +9,8 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -33,7 +33,24 @@ use crate::transport::{ApsCounters, NcpTransport};
 pub trait SessionSink: Send {
     /// Send one text frame.
     fn send(&mut self, text: &str) -> bool;
+
+    /// Whether the connection still exists. Checked every second, so a
+    /// connection that went away silently (no close notification, no frame
+    /// to fail on) does not keep its session.
+    fn alive(&self) -> bool {
+        true
+    }
+
+    /// Probe the connection (a WebSocket ping), every
+    /// [`KEEPALIVE_S`] seconds; `false` ends the session. A peer that
+    /// half-closed its socket is only found by sending to it.
+    fn keepalive(&mut self) -> bool {
+        true
+    }
 }
+
+/// Period of [`SessionSink::keepalive`].
+pub const KEEPALIVE_S: u64 = 30;
 
 impl SessionSink for Sender<String> {
     fn send(&mut self, text: &str) -> bool {
@@ -143,7 +160,7 @@ pub struct AppStatus {
 
 enum Input {
     Ncp(Message),
-    Connect(Box<dyn SessionSink>, SyncSender<SessionId>),
+    Connect(SessionId, Box<dyn SessionSink>),
     Text(SessionId, String),
     Disconnect(SessionId),
     Shutdown,
@@ -155,6 +172,8 @@ pub struct App {
     tx: Sender<Input>,
     status: Arc<Mutex<AppStatus>>,
     stopped: Arc<AtomicBool>,
+    // 32-bit: the S3 has no 64-bit atomics.
+    next_session: Arc<AtomicU32>,
 }
 
 fn wall_ms() -> Millis {
@@ -187,14 +206,18 @@ impl App {
             .stack_size(cfg.stack_size)
             .spawn(move || Runner::new(ncp, cfg, st).run(rx, stop))
             .expect("hub-app thread");
-        App { tx, status, stopped }
+        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)) }
     }
 
     /// A new API connection; the `auth_required` frame goes to `sink`.
+    ///
+    /// Never waits for the app thread: the caller may be the transport's
+    /// own thread (esp_http_server's WebSocket handler), which the app
+    /// thread itself waits for when it sends through a blocking sink.
     pub fn connect(&self, sink: Box<dyn SessionSink>) -> Option<SessionId> {
-        let (rtx, rrx) = mpsc::sync_channel(1);
-        self.tx.send(Input::Connect(sink, rtx)).ok()?;
-        rrx.recv().ok()
+        let sid = SessionId::from(self.next_session.fetch_add(1, Ordering::SeqCst));
+        self.tx.send(Input::Connect(sid, sink)).ok()?;
+        Some(sid)
     }
 
     /// A text frame from a connection.
@@ -325,14 +348,11 @@ impl Runner {
                     self.engine.on_device_joined(ieee, nwk, now);
                 }
                 Some(EngineInput::Gp(e)) => self.engine.on_gp_event(e, now),
+                Some(EngineInput::Network(body)) => self.engine.network_event(body),
                 None => {}
             },
-            Input::Connect(mut sink, reply) => {
-                let (sid, hello) = self.api.connect();
-                // Reply first: the caller may be the transport's own thread
-                // (esp_http_server's WebSocket handler), which a blocking
-                // sink needs free to deliver the frame.
-                let _ = reply.send(sid);
+            Input::Connect(sid, mut sink) => {
+                let hello = self.api.connect_as(sid);
                 if sink.send(&hello) {
                     self.sinks.insert(sid, sink);
                 } else {
@@ -363,6 +383,16 @@ impl Runner {
 
     fn tick(&mut self) {
         let now = self.now();
+        let probe = self.t0.elapsed().as_secs().is_multiple_of(KEEPALIVE_S);
+        let dead: Vec<SessionId> = self
+            .sinks
+            .iter_mut()
+            .filter_map(|(sid, s)| (!s.alive() || (probe && !s.keepalive())).then_some(*sid))
+            .collect();
+        for sid in dead {
+            self.sinks.remove(&sid);
+            self.api.disconnect(sid);
+        }
         if !self.registered && self.ncp.client().state() == SessionState::Ready {
             self.register();
         }

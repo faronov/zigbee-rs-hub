@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hubctl
+      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hub-web -p hubctl
 
   home-assistant:
     name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)
