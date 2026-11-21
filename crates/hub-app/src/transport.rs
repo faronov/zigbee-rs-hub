@@ -157,7 +157,10 @@ pub fn network_info(ncp: &Ncp) -> serde_json::Value {
         o["ext_pan_id"] = be(&n.ext_pan_id).into();
         o["channel"] = n.channel.into();
         o["nwk_update_id"] = n.nwk_update_id.into();
-        o["tx_power"] = n.tx_power.into();
+        // 0x7F: unknown (spec 9.3, NWK_GET_INFO before the power is set).
+        if n.tx_power != 0x7F {
+            o["tx_power"] = n.tx_power.into();
+        }
     }
     if let Some(s) = &st.ncp {
         let mut ncp_o = json!({
