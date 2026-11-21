@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Phase 1: zigbee-rs-hub on the ESP32-S3 of the Thread BR board: ZRHP host (hub mode) with the phase-0 USB bridge kept as the default mode"
+description = "zigbee-rs-hub on the ESP32-S3 of the Thread BR board: ZRHP host and application (hub mode, the default) with the phase-0 USB bridge as a second mode"
 publish = false
 
 [[bin]]

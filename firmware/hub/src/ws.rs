@@ -115,6 +115,12 @@ unsafe extern "C" fn handle(req: *mut httpd_req_t) -> esp_err_t {
         )
     };
     if method == http_method_HTTP_GET as i32 {
+        // Through the open setup AP the client would send its token in the
+        // clear: closed before `auth_required`.
+        if crate::setup::via_ap(req) {
+            warn!("api: socket {fd} through the setup access point, closing");
+            return ESP_FAIL;
+        }
         endpoint.open(hd, fd);
         return ESP_OK;
     }

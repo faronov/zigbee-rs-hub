@@ -5,6 +5,10 @@ CONFIG_APP_PROJECT_VER="tbr-hub-0.2.0"
 
 # WebSocket JSON API (esp_http_server).
 CONFIG_HTTPD_WS_SUPPORT=y
+# One socket budget (hub_core::resources, checked at build time): 7 API/web
+# clients (the setup page shares them) + the HTTP server's own 3 + the setup
+# AP's DNS server + the mDNS responder + the MQTT connection = 13.
+CONFIG_LWIP_MAX_SOCKETS=13
 
 # Core dumps to the `coredump` partition (dev and production tables):
 # hub-mode logs go to UART0, which the lab host cannot see.

@@ -4,13 +4,55 @@
 //! other PSRAM interface) the firmware does not start the application yet
 //! (it needs about 100 KB more internal RAM than is left); the reduced
 //! limits are for that future internal-RAM mode.
+//!
+//! Sockets are one budget: [`Resources::sockets`] of every mode fits
+//! [`LWIP_MAX_SOCKETS`], which is `CONFIG_LWIP_MAX_SOCKETS` of
+//! `firmware/hub/sdkconfig.defaults` (compile-time checks here and in the
+//! firmware, a test against the file). With PSRAM:
+//!
+//! | Sockets | |
+//! |---|---|
+//! | 7 | API/web server clients ([`Resources::http_sockets`]; the setup page shares them while the setup AP is open) |
+//! | 3 | esp_http_server itself ([`HTTPD_INTERNAL_SOCKETS`]: listen, control send and receive) |
+//! | 2 | the setup AP's DNS server and the mDNS responder ([`Resources::setup_sockets`], UDP) |
+//! | 1 | the MQTT bridge's connection ([`Resources::mqtt_sockets`]) |
+//! | **13** | `CONFIG_LWIP_MAX_SOCKETS` |
+//!
+//! DHCP (client and the AP's server), SNTP and the DNS resolver use lwIP's
+//! raw API, not sockets. The wrong-image mode (no app) has its own small
+//! server: [`WRONG_IMAGE_HTTP_SOCKETS`] + 3 + mDNS.
+
+/// Sockets esp_http_server opens itself: the listening socket and its
+/// control socket pair (`httpd_start` refuses more than
+/// `CONFIG_LWIP_MAX_SOCKETS` − 3 client sockets).
+pub const HTTPD_INTERNAL_SOCKETS: usize = 3;
+
+/// `CONFIG_LWIP_MAX_SOCKETS` of `firmware/hub/sdkconfig.defaults`.
+pub const LWIP_MAX_SOCKETS: usize = 13;
+
+/// Client sockets of the wrong-image page's server (no app, no setup AP).
+pub const WRONG_IMAGE_HTTP_SOCKETS: usize = 2;
+
+/// Sockets of the wrong-image mode: its server and the mDNS responder.
+pub const WRONG_IMAGE_SOCKETS: usize = WRONG_IMAGE_HTTP_SOCKETS + HTTPD_INTERNAL_SOCKETS + 1;
+
+// Every mode fits the budget; the PSRAM limits use all of it.
+const _: () = assert!(Resources::for_psram(1).sockets() == LWIP_MAX_SOCKETS);
+const _: () = assert!(Resources::for_psram(0).sockets() <= LWIP_MAX_SOCKETS);
+const _: () = assert!(WRONG_IMAGE_SOCKETS <= LWIP_MAX_SOCKETS);
 
 /// Limits of one boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resources {
     pub psram_bytes: usize,
-    /// Open sockets of the API/web server.
+    /// Open client sockets of the API/web server (also the setup page's
+    /// while the setup AP is open).
     pub http_sockets: usize,
+    /// UDP sockets of the setup AP's DNS server (while the AP is open) and
+    /// the mDNS responder (while the station is up).
+    pub setup_sockets: usize,
+    /// The MQTT bridge's TCP connection.
+    pub mqtt_sockets: usize,
     /// Whether the web server may close the least recently used socket for
     /// a new connection. Off without PSRAM: an authenticated client (Home
     /// Assistant) keeps its socket and a new connection is refused.
@@ -38,6 +80,8 @@ impl Resources {
                 psram_bytes,
                 // One browser, one integration and a short HTTP request.
                 http_sockets: 3,
+                setup_sockets: 2,
+                mqtt_sockets: 1,
                 http_lru_purge: false,
                 ws_client_bytes: 16 * 1024,
                 ws_total_bytes: 32 * 1024,
@@ -51,6 +95,8 @@ impl Resources {
             Self {
                 psram_bytes,
                 http_sockets: 7,
+                setup_sockets: 2,
+                mqtt_sockets: 1,
                 http_lru_purge: true,
                 ws_client_bytes: 128 * 1024,
                 ws_total_bytes: 384 * 1024,
@@ -61,6 +107,11 @@ impl Resources {
                 heap_guard: false,
             }
         }
+    }
+
+    /// lwIP sockets this boot may open at once.
+    pub const fn sockets(self) -> usize {
+        self.http_sockets + HTTPD_INTERNAL_SOCKETS + self.setup_sockets + self.mqtt_sockets
     }
 
     pub const fn internal_fallback(self) -> bool {
@@ -100,6 +151,15 @@ mod tests {
             assert_eq!(r.memory_mode(), "psram");
             assert_eq!(Resources { psram_bytes: two.psram_bytes, ..r }, two);
         }
+    }
+
+    #[test]
+    fn the_sdkconfig_has_the_socket_budget() {
+        let sdkconfig = include_str!("../../../firmware/hub/sdkconfig.defaults");
+        let line = sdkconfig.lines().find(|l| l.starts_with("CONFIG_LWIP_MAX_SOCKETS=")).expect("CONFIG_LWIP_MAX_SOCKETS set");
+        assert_eq!(line.split('=').nth(1).and_then(|v| v.trim().parse().ok()), Some(LWIP_MAX_SOCKETS));
+        let octal = include_str!("../../../firmware/hub/sdkconfig.octal");
+        assert!(!octal.contains("CONFIG_LWIP_MAX_SOCKETS"), "one value for both PSRAM variants");
     }
 
     #[test]

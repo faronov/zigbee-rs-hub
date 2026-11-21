@@ -135,16 +135,23 @@ impl hub_app::Platform for S3 {
             "uptime_s": unsafe { sys::esp_timer_get_time() } / 1_000_000,
             "heap": {"free": free, "min_free": min, "largest_block": largest, "psram": psram},
             "mode": boot.map(|b| if b.once { "hub (once)" } else { "hub" }),
-            "persisted_mode": match mode::stored() { Some(Mode::Hub) => "hub", Some(Mode::Bridge) => "bridge", None => "unknown" },
+            "persisted_mode": match mode::stored() { Some(Mode::Hub) => "hub", Some(Mode::Bridge) => "bridge", None => "default (hub)" },
             "wifi": net::info(),
             "reset_reason": unsafe { sys::esp_reset_reason() },
             "build": {"features": crate::resources::features(), "psram": crate::resources::psram_mode()},
             "memory_mode": r.memory_mode(),
             "limits": {
                 "http_sockets": r.http_sockets,
+                "sockets": r.sockets(),
                 "ws_client_bytes": r.ws_client_bytes,
                 "ws_total_bytes": r.ws_total_bytes,
             },
+            "flash": crate::esp::FLASH.get().map(|f| json!({
+                "chip_kib": f.chip / 1024,
+                "image_kib": f.image / 1024,
+                "layout": f.layout.map(|l| format!("{l:?}")),
+                "warning": f.warning,
+            })),
         })
     }
     fn heap(&self) -> Option<(usize, usize)> {
@@ -166,7 +173,9 @@ impl hub_app::Platform for S3 {
         net::configure(ssid, password)
     }
     fn save_token(&self, token: &str) -> Result<(), String> {
-        mode::set_str("api_token", Some(token))
+        mode::set_str("api_token", Some(token))?;
+        // The rotating client has the new one.
+        mode::token_handed_out()
     }
     fn reboot(&self) -> Result<(), String> {
         reboot_soon("hub/reboot");

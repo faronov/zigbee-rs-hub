@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zigbee-rs hub setup</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:28em;margin:1em auto;padding:0 1em;color:#1d2228;background:#f4f5f7}
+input,select,button{font:inherit;width:100%;box-sizing:border-box;margin:.25em 0 .8em;padding:.5em}
+label{color:#6b7380;font-size:.9em}.w{color:#b45309}.e{color:#dc2626}.ok{color:#16a34a}.hide{display:none}code{word-break:break-all}
+</style></head><body>
+<h2>zigbee-rs hub setup</h2>
+<p id="warn" class="w hide"></p>
+<form id="f">
+<label>Wi-Fi network<select id="list"><option value="">scanning…</option></select></label>
+<label>Network name (SSID)<input id="ssid" autocomplete="off" required maxlength="32"></label>
+<label>Password<input id="pass" type="password" maxlength="64"></label>
+<label id="tl" class="hide">API token (this hub is set up already: console <code>token</code>, or hold the S3 BOOT button for 3 s to reopen setup without it). It stays on this device: the page sends only a proof.<input id="tok" type="password" autocomplete="off"></label>
+<button>Connect</button>
+</form>
+<button id="rescan" type="button">Scan again</button>
+<p id="st"></p>
+<div id="res"></div>
+<script>
+// SHA-256 (H), HMAC-SHA256 (M), UTF-8 (E), hex (X): nothing that yields the token or the setup key goes over this open network.
+function H(m){const K=[],W=[];let h=[],i,j,n,c=0;
+ for(n=2;c<64;n++){for(j=2;j*j<=n&&n%j;j++);if(j*j>n){if(c<8)h[c]=n**.5*2**32|0;K[c++]=n**(1/3)*2**32|0}}
+ const l=m.length,b=new Uint8Array(l+72>>6<<6),v=new DataView(b.buffer);b.set(m);b[l]=128;v.setUint32(b.length-4,l*8);
+ for(i=0;i<b.length;i+=64){let[a,B,C,D,e,f,g,k]=h;
+  for(j=0;j<64;j++){if(j<16)W[j]=v.getUint32(i+j*4);else{const x=W[j-15],y=W[j-2];W[j]=((x>>>7|x<<25)^(x>>>18|x<<14)^x>>>3)+W[j-7]+((y>>>17|y<<15)^(y>>>19|y<<13)^y>>>10)+W[j-16]|0}
+   const t=k+((e>>>6|e<<26)^(e>>>11|e<<21)^(e>>>25|e<<7))+(e&f^~e&g)+K[j]+W[j]|0,u=((a>>>2|a<<30)^(a>>>13|a<<19)^(a>>>22|a<<10))+(a&B^a&C^B&C)|0;
+   k=g;g=f;f=e;e=D+t|0;D=C;C=B;B=a;a=t+u|0}
+  h=[a,B,C,D,e,f,g,k].map((x,n)=>x+h[n]|0)}
+ const o=new Uint8Array(32),w=new DataView(o.buffer);h.forEach((x,n)=>w.setUint32(n*4,x));return o}
+const E=s=>new TextEncoder().encode(s),X=b=>Array.from(b,x=>x.toString(16).padStart(2,"0")).join("");
+function M(k,m){k=E(k);if(k.length>64)k=H(k);m=E(m);const p=new Uint8Array(64+m.length),q=new Uint8Array(96);
+ for(let i=0;i<64;i++){p[i]=(k[i]|0)^54;q[i]=(k[i]|0)^92}p.set(m,64);q.set(H(p),64);return H(q)}
+</script>
+<script>
+const $=i=>document.getElementById(i),K=()=>sessionStorage.k||"";let nets="",shown="",lost=0,st={};
+function txt(e,t,c){e.textContent=t;e.className=c||""}
+function render(s){lost=0;st=s;const w=s.wifi||{};
+ $("warn").textContent=s.warning||"";$("warn").classList.toggle("hide",!s.warning);
+ $("tl").classList.toggle("hide",!s.need_token);
+ const n=JSON.stringify(s.networks);if(n!=nets){nets=n;const l=$("list");l.textContent="";
+  l.append(new Option(s.networks.length?"choose…":"no networks found",""));
+  for(const[x,r,o]of s.networks.sort((a,b)=>b[1]-a[1]))l.append(new Option(x+"  "+r+" dBm"+(o?" (open)":""),x))}
+ txt($("st"),"Setup network "+s.ap+(s.scanning?" · scanning…":"")+" · Wi-Fi: "+[w.ssid,w.state].filter(Boolean).join(" "));
+ const r=$("res"),c=s.claim_void?"":K(),k=w.ip+"|"+c+"|"+s.claim_void;if(k==shown)return;shown=k;r.textContent="";
+ if(s.claim_void)r.append(Object.assign(document.createElement("p"),{className:"e",textContent:"Another device on this open setup network also sent a setup key, so none works now. Hold the hub's BOOT button for 3 s, then press Connect again (or get the token with the console command token)."}));
+ if(w.ip){const a=document.createElement("p");a.className="ok";
+  a.append("Connected. Switch this device to "+(w.ssid||"your home network")+", then open the hub: ");
+  for(const h of[w.ip,s.host,"zigbee-rs-hub.local"]){const k=document.createElement("a");k.href="http://"+h+"/"+(c?"#claim="+c:"");k.textContent="http://"+h+"/";a.append(k," ")}
+  r.append(a);const p=document.createElement("p");
+  if(c){p.append("Setup key ");const b=document.createElement("code");b.textContent=c.match(/..../g).join("-");p.append(b,
+   ": the links above carry it; on your home network the hub's page trades it for the API token, once, within 30 minutes (or type it into the page's token field). Neither ever goes over this open setup network.")}
+  else p.append("Sign in there with the API token.");
+  r.append(p,"The setup network closes in about two minutes.")}}
+function get(){return fetch("/setup/state").then(r=>r.json()).then(render)}
+function poll(){get().catch(()=>{if(++lost>2)txt($("st"),
+ "The setup network is gone: the hub has probably joined your Wi-Fi. Reconnect to your home network and open http://zigbee-rs-hub.local/"+(K()?"#claim="+K():"")+" — or reconnect to the setup network if it is still there.","w")}).finally(()=>setTimeout(poll,2000))}
+$("list").onchange=e=>{if(e.target.value)$("ssid").value=e.target.value};
+$("rescan").onclick=()=>fetch("/setup/scan",{method:"POST"});
+$("f").onsubmit=e=>{e.preventDefault();txt($("st"),"connecting…");
+ const ssid=$("ssid").value,pass=$("pass").value,nonce=st.nonce||"",key=K()||X(crypto.getRandomValues(new Uint8Array(8)));
+ fetch("/setup/wifi",{method:"POST",body:JSON.stringify({ssid,pass,nonce,proof:st.need_token?X(M($("tok").value.trim(),nonce+"\n"+ssid+"\n"+pass)):"",commit:X(H(E(key)))})})
+ .then(r=>r.json()).then(j=>{if(j.error){txt($("st"),j.error,"e");get().catch(()=>{})}else sessionStorage.k=j.claim?key:""}).catch(()=>txt($("st"),"no answer","e"))};
+poll();
+</script></body></html>

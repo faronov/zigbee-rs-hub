@@ -67,9 +67,10 @@ progress{width:12em}
 </head>
 <body>
 <header><span id="dot" class="dot" title="disconnected"></span><h1 id="hub">zigbee-rs-hub</h1><span id="conn" class="mut">connecting…</span></header>
+<p id="fw" class="card warn hide"></p>
 <div id="login" class="card hide">
 <h2>API token</h2>
-<p class="mut">The hub's console prints it with <code>token</code>; a link ending in <code>#token=…</code> also works.</p>
+<p class="mut">The hub's console prints it with <code>token</code>; a link ending in <code>#token=…</code> also works. Just set up from the setup network? Its setup key (<code>xxxx-xxxx-xxxx-xxxx</code>) works here once.</p>
 <form id="lf"><input id="tok" type="password" autocomplete="current-password" placeholder="token" required><button class="p">Connect</button></form>
 </div>
 <nav id="tabs" class="hide"></nav>
@@ -210,8 +211,15 @@ function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";cl
 function status(s,c){$("#conn").textContent=s;$("#dot").className="dot "+c}
 function call(type,p={},q){return new Promise((ok,no)=>{if(!ws||ws.readyState!=1)return no(new Error("not connected"));const id=++rid;pend[id]={ok,no,q};ws.send(JSON.stringify(Object.assign({id,type},p)))})}
 function act(type,p){return call(type,p).catch(e=>{toast(type+": "+e.message);throw e})}
-{const m=/[#&]token=([^&]+)/.exec(location.hash);if(m){localStorage.setItem("zrhToken",decodeURIComponent(m[1]));const v=location.hash.slice(1).split("&").filter(x=>!x.startsWith("token=")).join("&");history.replaceState(null,"",location.pathname+(v?"#"+v:""))}}
+// A link argument (#token=…, #claim=…), taken out of the address.
+function hashArg(k){const m=new RegExp("[#&]"+k+"=([^&]+)").exec(location.hash);if(!m)return"";const v=location.hash.slice(1).split("&").filter(x=>!x.startsWith(k+"=")).join("&");history.replaceState(null,"",location.pathname+(v?"#"+v:""));return decodeURIComponent(m[1])}
+{const t=hashArg("token");if(t)localStorage.setItem("zrhToken",t)}
+// A fresh hub's setup key (setup page): the token once, over this network.
+let setupKey=hashArg("claim");
+const isKey=v=>/^[0-9a-f]{4}([- ]?[0-9a-f]{4}){3}$/i.test(v);
+function claim(key){return fetch("/setup/claim",{method:"POST",body:JSON.stringify({key})}).then(r=>r.json()).then(j=>{if(!j.token)throw new Error(j.error||"refused");localStorage.setItem("zrhToken",j.token);prompt("API token of this hub (copy it for Home Assistant and other clients; console: token):",j.token)})}
 function connect(){
+ if(setupKey){const k=setupKey;setupKey="";claim(k).catch(e=>toast("Setup key: "+e.message)).finally(connect);return}
  const tok=localStorage.getItem("zrhToken");
  if(!tok){showLogin();return}
  status("connecting…","wait");
@@ -220,12 +228,13 @@ function connect(){
  ws.onclose=()=>{for(const k in pend)pend[k].no(new Error("connection closed"));pend={};authed=false;status("disconnected, retrying…","");setTimeout(connect,retry);retry=Math.min(retry*2,15000)};
 }
 function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");$("#tabs").classList.add("hide");status("no token","")}
-$("#lf").onsubmit=e=>{e.preventDefault();localStorage.setItem("zrhToken",$("#tok").value.trim());$("#login").classList.add("hide");connect()};
+$("#lf").onsubmit=e=>{e.preventDefault();const v=$("#tok").value.trim();if(isKey(v)){claim(v).then(()=>{$("#login").classList.add("hide");connect()},e=>toast("Setup key: "+e.message));return}localStorage.setItem("zrhToken",v);$("#login").classList.add("hide");connect()};
 function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();if(hub.automations){call("subscribe",{topics:["automations"]}).catch(()=>{});if($("#aul").offsetParent)onTab.auto()}}).catch(()=>{});
+  call("hub/system").then(s=>{const w=(s.flash||{}).warning;$("#fw").textContent=w||"";$("#fw").classList.toggle("hide",!w)}).catch(()=>{});
   call("subscribe",{topics:["devices","entities","network","gp","catalog","groups"]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
@@ -466,7 +475,7 @@ let tm={};
 $("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;toast("Time zone saved");loadSys()})).catch(()=>{});
 function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a=s.app||{},n=s.ncp||{};
  kv($("#ssys"),[["Version",s.version],["API",hub.api_version],["Mode",s.mode],["Uptime",s.uptime_s!=null&&dur(s.uptime_s)],["Time",tm.time_synced?tm.local+" ("+tm.source+(tm.dst&&tm.dst.active?", daylight saving":"")+")":"not synchronised yet"],["Free heap",h.free!=null&&Math.round(h.free/1024)+" KiB (min "+Math.round(h.min_free/1024)+" KiB"+(h.largest_block?", largest "+Math.round(h.largest_block/1024)+" KiB":"")+")"],
-  ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
+  ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["Flash",s.flash&&s.flash.chip_kib/1024+" MB chip, "+s.flash.image_kib/1024+" MB image"+(s.flash.layout?", "+s.flash.layout+" layout":"")],["Setup AP",w.setup_ap&&w.setup_ap.ssid+" ("+w.setup_ap.ip+")"],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
   ["Store",s.store&&(s.store.volatile?"RAM only":"hubdata, generation "+s.store.journal_generation)],["App",a.devices+" devices, "+a.sessions+" sessions, APS "+(a.aps?(a.aps.delivered!=null?a.aps.delivered+" delivered / "+a.aps.not_delivered+" not delivered / "+(a.aps.busy+a.aps.failed)+" refused":a.aps.accepted+" ok / "+a.aps.failed+" failed"):"")]]);
  if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}
 // MQTT bridge settings: checkboxes and fields map 1:1 to mqtt/config.

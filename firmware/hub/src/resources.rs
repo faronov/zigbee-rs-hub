@@ -29,6 +29,11 @@ pub fn psram_mode() -> &'static str {
     build_field("psram")
 }
 
+// One socket budget (hub_core::resources): the lwIP build has exactly it.
+const _: () = assert!(hub_core::resources::LWIP_MAX_SOCKETS == sys::CONFIG_LWIP_MAX_SOCKETS as usize);
+const _: () = assert!(Resources::for_psram(1).sockets() <= sys::CONFIG_LWIP_MAX_SOCKETS as usize);
+const _: () = assert!(Resources::for_psram(0).sockets() <= sys::CONFIG_LWIP_MAX_SOCKETS as usize);
+
 pub fn get() -> &'static Resources {
     static RESOURCES: OnceLock<Resources> = OnceLock::new();
     RESOURCES.get_or_init(|| {
@@ -65,10 +70,11 @@ pub fn log() {
         log::warn!("{}", wrong_image());
     } else {
         log::info!(
-            "{} KiB PSRAM ({}): {} HTTP sockets, {} KiB queued per WebSocket client",
+            "{} KiB PSRAM ({}): {} HTTP sockets ({} lwIP sockets in all), {} KiB queued per WebSocket client",
             r.psram_bytes / 1024,
             psram_mode(),
             r.http_sockets,
+            r.sockets(),
             r.ws_client_bytes / 1024,
         );
     }

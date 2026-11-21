@@ -17,3 +17,5 @@ sha2 = "0.10"
 
 [dev-dependencies]
 miniz_oxide = "0.8"
+# The setup page's token proof and setup key against the hub's (tests).
+hub-core = { path = "../hub-core" }

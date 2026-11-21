@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use esp_idf_svc::sys;
-use hub_core::layout::{self, Part, Verdict};
+use hub_core::layout::{self, Layout, Notice, Part, Verdict};
 use hub_ncp::Rng;
 use hub_ncp::store::{Flash, JOURNAL_BYTES, SECTOR};
 use hub_ncp::transport::{Line, NcpControl, PortRx, PortTx};
@@ -117,11 +117,59 @@ impl Flash for Partition {
     }
 }
 
+/// Flash facts of this boot: image header size, chip size, layout, warning.
+#[cfg_attr(not(feature = "app"), allow(dead_code))]
+pub struct FlashInfo {
+    pub image: u32,
+    pub chip: u32,
+    pub layout: Option<Layout>,
+    pub warning: Option<String>,
+}
+
+pub static FLASH: std::sync::OnceLock<FlashInfo> = std::sync::OnceLock::new();
+
+fn mb(bytes: u32) -> u32 {
+    bytes >> 20
+}
+
+fn warning(image: u32, chip: u32, notice: Notice) -> String {
+    match notice {
+        Notice::OtherImage { want } => format!(
+            "This board has {} MB of flash but runs the {} MB image: flash the {} image from the web flasher \
+             (tick Erase, then set up Wi-Fi again) for OTA updates and the full storage.",
+            mb(chip),
+            mb(image),
+            if want == Layout::Production { "8 MB" } else { "4 MB" }
+        ),
+        Notice::Foreign => "Not a hub partition table: the hub keeps its network and devices in RAM only. \
+             Flash the hub image for this board from the web flasher (tick Erase)."
+            .into(),
+        Notice::Fatal(m) => format!(
+            "The partition table does not belong to this {} MB flash ({m:?}): the hub does not start. \
+             Flash the image for this board.",
+            mb(chip.max(image))
+        ),
+    }
+}
+
+/// The flash warning of this boot, if any.
+pub fn flash_warning() -> Option<&'static str> {
+    FLASH.get()?.warning.as_deref()
+}
+
 /// Detected S3 flash size and the boot check of the partition table
 /// (`hub_core::layout`: 8 MB production, 4 MB dev; spec 3.4, decision N9).
+/// The size in the image header decides the table check; the chip's own
+/// size (JEDEC ID) only whether a different image would suit the board.
 pub fn flash_layout() -> (u32, Verdict) {
     let mut size = 0u32;
-    unsafe { sys::esp_flash_get_size(core::ptr::null_mut(), &mut size) };
+    let mut chip = 0u32;
+    unsafe {
+        sys::esp_flash_get_size(core::ptr::null_mut(), &mut size);
+        if sys::esp_flash_get_physical_size(core::ptr::null_mut(), &mut chip) != sys::ESP_OK {
+            chip = 0;
+        }
+    }
     let mut labels = Vec::new();
     let mut parts = Vec::new();
     unsafe {
@@ -150,5 +198,14 @@ pub fn flash_layout() -> (u32, Verdict) {
         Verdict::Foreign => warn!("S3 flash {} KiB, not a hub layout (stock table?): host store in RAM", size / 1024),
         Verdict::Fatal(m) => error!("S3 flash {} KiB: partition table does not belong to this flash ({m:?})", size / 1024),
     }
+    let warning = layout::notice(chip, verdict).map(|n| warning(size, chip, n));
+    if let Some(w) = &warning {
+        warn!("flash: chip {} KiB, image {} KiB: {w}", chip / 1024, size / 1024);
+    }
+    let layout = match verdict {
+        Verdict::Ok(l) => Some(l),
+        _ => None,
+    };
+    let _ = FLASH.set(FlashInfo { image: size, chip, layout, warning });
     (size, verdict)
 }

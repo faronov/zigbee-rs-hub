@@ -199,6 +199,45 @@ pub fn check(flash_size: u32, parts: &[Part<'_>]) -> Verdict {
     }
 }
 
+/// The layout made for a chip of `chip_size` bytes (the size its JEDEC ID
+/// reports): [`Layout::Production`] from 8 MB, [`Layout::Dev`] from 4 MB,
+/// `None` below (or when the size is unknown).
+pub fn layout_for(chip_size: u32) -> Option<Layout> {
+    match chip_size {
+        s if s >= 8 * 1024 * 1024 => Some(Layout::Production),
+        s if s >= 4 * 1024 * 1024 => Some(Layout::Dev),
+        _ => None,
+    }
+}
+
+/// A flash layout warning for the console and the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notice {
+    /// A hub image for another flash size than the chip's (the 4 MB image on
+    /// an 8 MB board: it runs, without OTA and with less storage); `want` is
+    /// the image to flash.
+    OtherImage {
+        /// The layout for this chip.
+        want: Layout,
+    },
+    /// Not a hub table: the host store is in RAM.
+    Foreign,
+    /// The table does not belong to the flash: the hub does not start.
+    Fatal(Mismatch),
+}
+
+/// The boot [`check`] (made with the image header's flash size) against
+/// the chip's real size. ESP-IDF itself refuses to start an image whose
+/// header names more flash than the chip has, so a too large image never
+/// gets here.
+pub fn notice(chip_size: u32, verdict: Verdict) -> Option<Notice> {
+    match verdict {
+        Verdict::Fatal(m) => Some(Notice::Fatal(m)),
+        Verdict::Foreign => Some(Notice::Foreign),
+        Verdict::Ok(l) => layout_for(chip_size).filter(|&want| want != l).map(|want| Notice::OtherImage { want }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +297,17 @@ mod tests {
         assert_eq!(check(MB4, &PRODUCTION), Verdict::Fatal(Mismatch::BeyondFlash));
         assert_eq!(check(MB8, &DEV), Verdict::Fatal(Mismatch::WrongSize(Layout::Dev)));
         assert_eq!(check(MB4, &STOCK), Verdict::Foreign);
+    }
+
+    #[test]
+    fn notice_compares_the_image_with_the_chip() {
+        // The 4 MB release image (header 4 MB) on a retail 8 MB board.
+        assert_eq!(notice(MB8, check(MB4, &DEV)), Some(Notice::OtherImage { want: Layout::Production }));
+        assert_eq!(notice(MB4, check(MB4, &DEV)), None);
+        assert_eq!(notice(MB8, check(MB8, &PRODUCTION)), None);
+        assert_eq!(notice(16 << 20, check(MB8, &PRODUCTION)), None, "8 MB image on 16 MB");
+        assert_eq!(notice(0, check(MB4, &DEV)), None, "chip size unknown");
+        assert_eq!(notice(MB8, check(MB8, &DEV)), Some(Notice::Fatal(Mismatch::WrongSize(Layout::Dev))));
+        assert_eq!(notice(MB4, check(MB4, &STOCK)), Some(Notice::Foreign));
     }
 }
