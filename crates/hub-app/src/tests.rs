@@ -284,3 +284,38 @@ fn silently_closed_connections_lose_their_session() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+/// A sink that, like esp_http_server's detached sender, needs the
+/// transport's thread (here: a mutex the "server thread" holds).
+struct NeedsServerThread(Arc<std::sync::Mutex<()>>);
+
+impl crate::SessionSink for NeedsServerThread {
+    fn send(&mut self, _text: &str) -> bool {
+        drop(self.0.lock().unwrap());
+        true
+    }
+}
+
+#[test]
+fn connect_never_waits_for_the_app_thread() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let server = Arc::new(std::sync::Mutex::new(()));
+    let (done_tx, done_rx) = mpsc::channel();
+    let (a, s) = (app.clone(), server.clone());
+    std::thread::spawn(move || {
+        // The server thread is busy in its handler (holds the lock) while
+        // the app thread blocks sending the first session's hello to it.
+        let _busy = s.lock().unwrap();
+        let first = a.connect(Box::new(NeedsServerThread(s.clone())));
+        std::thread::sleep(Duration::from_millis(100));
+        let second = a.connect(Box::new(NeedsServerThread(s.clone())));
+        done_tx.send((first, second)).unwrap();
+    });
+    let (first, second) = done_rx.recv_timeout(T).expect("connect() blocked on the app thread");
+    assert!(first.is_some() && second.is_some() && first != second);
+    assert!(app.wait(T, |st| st.sessions == 2));
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}

@@ -678,7 +678,11 @@ and humidity, `network/permit_join` — all answered. Found on the way: the
 first WebSocket connection deadlocked the app, because the app sent the
 `auth_required` frame through esp_http_server's detached sender (which
 needs the server thread) while that thread waited in the handler for the
-app's reply; the app now replies first. On macOS, Local Network privacy
+app's reply. `App::connect` now never waits for the app thread (the session
+ID comes from a shared counter), since any blocking send of the app (events,
+keepalive pings) can meet the server thread in a handler; sessions of
+closed connections are dropped on a Close frame, when the sender reports
+the socket closed, or when the 30 s WebSocket ping fails. On macOS, Local Network privacy
 may block an unsigned `hubctl` from reaching LAN addresses ("No route to
 host" while `curl` works): allow it in System Settings, or relay through
 `nc` on localhost.

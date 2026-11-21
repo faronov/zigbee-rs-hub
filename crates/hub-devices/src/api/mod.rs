@@ -94,16 +94,20 @@ impl ApiServer {
     /// A new connection; returns its ID and the `auth_required` frame.
     pub fn connect(&mut self) -> (SessionId, String) {
         let id = self.next_session;
-        self.next_session += 1;
+        (id, self.connect_as(id))
+    }
+
+    /// A new connection under an ID the caller allocated (unique, e.g. from
+    /// a counter shared with the transport thread, so that thread never
+    /// waits for the API's); returns the `auth_required` frame.
+    pub fn connect_as(&mut self, id: SessionId) -> String {
+        self.next_session = self.next_session.max(id + 1);
         self.sessions.insert(id, Session::default());
-        (
-            id,
-            ServerMessage::AuthRequired {
-                hub: self.hub_name.clone(),
-                api_version: API_VERSION.into(),
-            }
-            .to_text(),
-        )
+        ServerMessage::AuthRequired {
+            hub: self.hub_name.clone(),
+            api_version: API_VERSION.into(),
+        }
+        .to_text()
     }
 
     /// A closed connection.
