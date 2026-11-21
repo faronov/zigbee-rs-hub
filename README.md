@@ -737,7 +737,17 @@ integration) could crash the hub. Wi-Fi modem sleep (the ESP-IDF default)
 is off: the hub is mains powered, and with it frames to the hub waited for
 the next DTIM beacon — ping from the Mac avg 91 ms (max 334 ms), `hub/info`
 round trip median 144 ms / p90 456 ms; with `WIFI_PS_NONE` ping avg 23 ms
-(max 90 ms), `hub/info` median 68 ms / p90 134 ms. On macOS, Local Network privacy
+(max 90 ms), `hub/info` median 68 ms / p90 134 ms. API frames are queued to
+the server thread without waiting (a client that stopped reading held up
+every other client for 1–2 s; now it is closed when 32 frames behind or
+after a 2 s blocked send), WebSocket sockets use `TCP_NODELAY`, and page
+responses close their socket (idle browser keep-alive sockets made the
+server purge the least recently used socket — the Home Assistant
+WebSocket — at its limit, now 7). Then: WebSocket ping/pong median 27 ms,
+`hub/info` median 57 ms / p90 73 ms (the Mac's own Wi-Fi: ~17 ms to the
+access point). PTA: the H2 NCP image does not implement it (no `PTA_COEX`
+capability), so `coex_enable` is not sent; Wi-Fi is on channel 11, Zigbee
+on 17 (no overlap). On macOS, Local Network privacy
 may block an unsigned `hubctl` from reaching LAN addresses ("No route to
 host" while `curl` works): allow it in System Settings, or relay through
 `nc` on localhost.
