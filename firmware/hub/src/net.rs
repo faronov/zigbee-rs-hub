@@ -10,6 +10,7 @@ use embedded_svc::io::Write;
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::modem::Modem;
+use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::http::server::{self, EspHttpServer};
 use esp_idf_svc::sys::{EspError, esp};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
@@ -88,25 +89,39 @@ fn run(app: App, modem: Modem<'static>, ssid: &str, pass: &str, on_up: impl Fn(b
     }
 }
 
+/// Closes the request's socket once the response is out: idle keep-alive
+/// sockets of page loads (often never closed by the browser) would make
+/// the server purge the least recently used socket — an API client's.
+fn close_after(req: *mut esp_idf_svc::sys::httpd_req_t) {
+    unsafe {
+        let fd = esp_idf_svc::sys::httpd_req_to_sockfd(req);
+        esp_idf_svc::sys::httpd_sess_trigger_close((*req).handle, fd);
+    }
+}
+
 fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
     let mut server =
         EspHttpServer::new(&server::Configuration {
             stack_size: 8192,
-            // The web UI (page + WebSocket) and an integration at once; the
-            // least recently used socket is purged when they run out.
-            max_open_sockets: 6,
+            // The web UI (page + WebSocket) and integrations at once; the
+            // least recently used socket is purged when they run out, so
+            // page requests close their socket (`close_after`). 7 + the
+            // server's 3 = CONFIG_LWIP_MAX_SOCKETS.
+            max_open_sockets: 7,
             // Peers that vanished without a FIN.
             keep_alive: Some(server::KeepAlive { idle_secs: 30, interval_secs: 5, probe_count: 3 }),
             ..Default::default()
         })
         .map_err(|e| e.0)?;
     // The web UI: one pre-compressed page that talks to /api (crates/hub-web).
-    server.fn_handler("/", Method::Get, |req| {
+    server.fn_handler("/", Method::Get, |mut req| {
+        close_after(req.connection().handle());
         if req.header("If-None-Match").is_some_and(hub_web::not_modified) {
-            let headers = [("ETag", hub_web::ETAG), ("Cache-Control", "no-cache")];
+            let headers = [("ETag", hub_web::ETAG), ("Cache-Control", "no-cache"), ("Connection", "close")];
             return req.into_response(304, Some("Not Modified"), &headers).map(|_| ());
         }
-        req.into_response(200, None, &hub_web::HEADERS)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
+        let headers = [hub_web::HEADERS.as_slice(), &[("Connection", "close")]].concat();
+        req.into_response(200, None, &headers)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
     })?;
     crate::ws::register(&server, app)?;
     Ok(server)

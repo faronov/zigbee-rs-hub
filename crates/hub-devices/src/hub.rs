@@ -1135,7 +1135,14 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         };
         let was = d.available;
-        let minute_passed = d.last_seen.is_none_or(|t| now.saturating_sub(t) >= 60_000);
+        // Throttled against the last publication, not the previous frame: a
+        // device sending more than once a minute would never be published.
+        let minute_passed = d
+            .last_seen_published
+            .is_none_or(|t| now.saturating_sub(t) >= 60_000);
+        if minute_passed || !was {
+            d.last_seen_published = Some(now);
+        }
         d.last_seen = Some(now);
         if lqi.is_some() {
             d.lqi = lqi;

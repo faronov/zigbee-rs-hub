@@ -98,6 +98,34 @@ fn restored_mains_device_reads_unknown_states() {
 }
 
 #[test]
+fn last_seen_is_published_while_frames_come_more_than_once_a_minute() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(sensor());
+    sim.join(&mut hub, SENSOR, T0);
+    let uid = "zb:00158d0001a2b3c4:0:last_seen";
+    let s = sim.dev(SENSOR).clone();
+    let mut published = Vec::new();
+    for i in 1..=10 {
+        let now = T0 + i * 20_000;
+        hub.on_aps_indication(
+            s.report(
+                1,
+                0x0405,
+                None,
+                &[(0, TypedValue::uint(ZclType::U16, 4600))],
+            ),
+            now,
+        );
+        if state(&hub, uid) == json!(crate::device::ts(now)) {
+            published.push(i);
+        }
+    }
+    // Every 20 s for 200 s: published at least once a minute.
+    assert!(published.len() >= 3, "{published:?}");
+}
+
+#[test]
 fn temperature_sensor_interview_configure_and_reports() {
     let mut hub = hub_with(&[]);
     let mut sim = Sim::default();
