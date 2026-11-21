@@ -1,0 +1,20 @@
+{
+  "entity": {
+    "button": {
+      "permit_join": {
+        "default": "mdi:link-plus"
+      }
+    }
+  },
+  "services": {
+    "permit_join": {
+      "service": "mdi:link-plus"
+    },
+    "reinterview_device": {
+      "service": "mdi:magnify-scan"
+    },
+    "reconfigure_device": {
+      "service": "mdi:cog-refresh"
+    }
+  }
+}

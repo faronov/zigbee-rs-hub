@@ -1,0 +1,35 @@
+permit_join:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: zigbee_rs_hub
+    duration:
+      default: 254
+      selector:
+        number:
+          min: 0
+          max: 254
+          unit_of_measurement: s
+    include_gp:
+      default: false
+      selector:
+        boolean:
+    device_id:
+      selector:
+        device:
+          integration: zigbee_rs_hub
+reinterview_device:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: zigbee_rs_hub
+reconfigure_device:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: zigbee_rs_hub

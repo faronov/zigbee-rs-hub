@@ -94,6 +94,7 @@ ZRHP остаётся протоколом для USB/UART (сетевого т�
 | `definitions/examples/` | Примеры определений устройств (исходная форма YAML) |
 | `tools/herdsman-coverage/` | Замер покрытия и размеров определений zigbee-herdsman-converters (Node + Python) |
 | `tools/zdefc-proto/` | Прототип компилятора определений на Python (YAML → CBOR, байткод выражений) |
+| `integrations/home-assistant/` | Пользовательская интеграция Home Assistant `zigbee_rs_hub` поверх WebSocket API (config flow, push-обновления, все платформы сущностей), её тесты и инструкция по установке |
 
 ## Выбор фреймворка: esp-idf-svc (`std`), а не esp-hal
 
@@ -637,6 +638,9 @@ WebSocket API на `ws://<ip>/api` (esp_http_server, сессия на соке�
 (консоль `wifi set <ssid> <пароль>`, `wifi`, `token`, `catalog`) и тот же
 API строками JSON на CDC 0, пока хост держит порт открытым (тестовый путь
 без сети).
+`hub/info` возвращает имя хаба, версию API, возможности, текущий `seq`,
+число устройств и сущностей, а после подъёма сессии NCP — `coordinator_ieee`,
+`ncp_board` и `ncp_product` (уникальный ID для интеграции Home Assistant).
 
 **ОЗУ.** У S3 на плате hwlab **нет PSRAM** (флеш 4 МБ, без R2), поэтому
 приложение живёт в ~295 КБ внутренней кучи. При первом запуске на железе
@@ -698,6 +702,19 @@ Node_Desc_req уходит как `APS_DATA_REQUEST`), реестр пережи
 `hub-devices`: снимок туда-обратно, измеренные значения не попадают,
 восстановление самоописывающегося устройства без обмена. `hub-ncp`:
 многочастные значения через уплотнение и оборванная запись.
+
+## Интеграция с Home Assistant
+
+`integrations/home-assistant/custom_components/zigbee_rs_hub` — пользовательская
+интеграция для Home Assistant: одно постоянное WebSocket-соединение с
+`ws://<хаб>/api` (токен — команда консоли хаба `token`), устройство HA на
+каждое Zigbee/GP-устройство, сущности из модели сущностей хаба (раздел 4
+device-support) с живым состоянием, которое присылает хаб, команды через
+`entities/command`, разрешение подключения (кнопка и сервис), удаление
+устройств, диагностика. Хаб опознаётся по `hub/info` (`coordinator_ieee`,
+добавлен для неё; минорное расширение API). Установка, тесты и соответствие
+API: [integrations/home-assistant/README.md](integrations/home-assistant/README.md)
+(на английском).
 
 ## Лицензия
 

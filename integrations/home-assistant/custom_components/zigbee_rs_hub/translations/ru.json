@@ -1,0 +1,129 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "zigbee-rs hub",
+        "description": "Адрес WebSocket API хаба (`ws://<host>:<port>/api`). Токен API показывает команда консоли хаба `token`.",
+        "data": {
+          "host": "Хост",
+          "port": "Порт",
+          "token": "Токен API"
+        },
+        "data_description": {
+          "host": "IP-адрес или имя хоста хаба.",
+          "port": "HTTP-порт хаба (80 на хабе ESP32-S3, 8099 для `hubctl serve`).",
+          "token": "Токен API хаба."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Повторная аутентификация",
+        "description": "Хаб {host} отклонил токен API. Введите текущий токен (консоль хаба: `token`).",
+        "data": {
+          "token": "Токен API"
+        }
+      },
+      "reconfigure": {
+        "title": "zigbee-rs hub",
+        "description": "Новый адрес или токен хаба.",
+        "data": {
+          "host": "Хост",
+          "port": "Порт",
+          "token": "Токен API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться",
+      "invalid_auth": "Неверная аутентификация",
+      "unknown": "Непредвиденная ошибка"
+    },
+    "abort": {
+      "already_configured": "Это устройство уже добавлено",
+      "reauth_successful": "Повторная аутентификация выполнена успешно",
+      "reconfigure_successful": "Перенастройка выполнена успешно",
+      "wrong_hub": "По этому адресу находится другой хаб (другой IEEE координатора)."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "hub_connected": { "name": "Подключение" }
+    },
+    "button": {
+      "permit_join": { "name": "Разрешить подключение" },
+      "identify": { "name": "Идентификация" }
+    },
+    "event": {
+      "action": { "name": "Действие" },
+      "lock_event": { "name": "Событие замка" }
+    },
+    "number": {
+      "local_temperature_calibration": { "name": "Калибровка температуры" },
+      "occupancy_timeout": { "name": "Тайм-аут присутствия" },
+      "on_level": { "name": "Уровень при включении" },
+      "transition": { "name": "Время перехода" }
+    },
+    "select": {
+      "keypad_lockout": { "name": "Блокировка кнопок" },
+      "power_on_behavior": { "name": "Поведение при подаче питания" },
+      "temperature_display_mode": { "name": "Единицы отображения температуры" }
+    },
+    "sensor": {
+      "last_seen": { "name": "Последняя активность" },
+      "linkquality": { "name": "Качество связи" },
+      "pi_heating_demand": { "name": "Потребность в нагреве" },
+      "rssi": { "name": "RSSI" }
+    }
+  },
+  "exceptions": {
+    "unknown_device": {
+      "message": "Устройство {device_id} не принадлежит загруженному хабу zigbee-rs."
+    },
+    "no_hub": {
+      "message": "Ни один хаб zigbee-rs не загружен."
+    }
+  },
+  "services": {
+    "permit_join": {
+      "name": "Разрешить подключение",
+      "description": "Открывает сеть Zigbee для новых устройств.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Хаб",
+          "description": "Хаб; если не задан — все хабы."
+        },
+        "duration": {
+          "name": "Длительность",
+          "description": "Сколько секунд сеть остаётся открытой (0 закрывает её)."
+        },
+        "include_gp": {
+          "name": "Green Power",
+          "description": "Также открыть окно ввода устройств Green Power."
+        },
+        "device_id": {
+          "name": "Роутер",
+          "description": "Подключение только через этот роутер; если не задан — вся сеть."
+        }
+      }
+    },
+    "reinterview_device": {
+      "name": "Повторно опросить устройство",
+      "description": "Заново читает дескрипторы и атрибуты Basic устройства и заново определяет его сущности.",
+      "fields": {
+        "device_id": {
+          "name": "Устройство",
+          "description": "Устройство."
+        }
+      }
+    },
+    "reconfigure_device": {
+      "name": "Перенастроить устройство",
+      "description": "Повторяет привязки и настройку отчётов устройства.",
+      "fields": {
+        "device_id": {
+          "name": "Устройство",
+          "description": "Устройство."
+        }
+      }
+    }
+  }
+}
