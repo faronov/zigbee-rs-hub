@@ -445,7 +445,7 @@ so the bridge hands the PHY back to the USJ explicitly:
 |---|---|
 | console `s3 usj` / `s3 download`, or the console port set to 1200 baud | PHY → USJ, the app keeps running with the bridge off (verified) |
 | USB not enumerated within 20 s of boot | PHY → USJ |
-| boot after a panic or watchdog reset | safe mode: TinyUSB never starts, PHY → USJ |
+| boot after a panic or watchdog reset | persisted hub mode: the hub restarts (`info` shows the panic and the crash streak); bridge mode, or a fourth crash in a row each within 10 min of boot: safe mode, TinyUSB never starts, PHY → USJ |
 | power cycle, or S3 BOOT held + RESET pressed | cold boot / ROM download on USJ |
 
 The hand-back makes the host see a real detach and a new attach. It drops the
@@ -538,10 +538,12 @@ Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
 reboot), `mode hub once` (one boot in hub mode, any later reset returns to
 the persisted mode), `hub [status]`, `hub echo [n]`, `hub form [channel]`,
 `hub permit <s>`, `hub fw slots`, `hub fw confirm`, `hub ncp reset [hard]`,
-`hub rom` (manual NCP recovery: reboot into the bridge with the H2 in its ROM
+`hub crash` (a deliberate panic), `hub rom` (manual NCP recovery: reboot into the bridge with the H2 in its ROM
 loader, then esptool on CDC 0 with an operator-supplied image). USB recovery
 (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode) is the bridge's,
-in both modes.
+in both modes; a persisted hub restarts after a crash and leaves it to the
+safe mode only in a crash loop. Back to the bridge: `mode bridge` on the
+console (CDC 1), or `s3 usj` and reflash.
 
 The host store uses the `hubdata` partition when the table has one
 (`firmware/hub/partitions-4mb.csv`, `partitions-8mb.csv`; the 4 MB / 8 MB
@@ -650,7 +652,7 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 | `convert` | ZRHP events → engine inputs (APS indications with source IEEE and group, admitted joins, `EVT_GP_*` incl. commissioned sink records and remote sink/translation tables); engine APS/GP requests → wire (`APS_DATA_REQUEST`, `GP_*` 0x0A01–0x0A0D) |
 | `transport` | The engine's `ZigbeeTransport` on `hub_ncp`: APS data non-blocking (`Client::start`, held across an NCP resume, outcomes counted), GP/group/remove/permit-join as calls only while the session is ready |
 | `registry` | Device registry in the host store journal (device-support 16.1): `dev/<id>` = deflated JSON `DeviceSnapshot` (identity, fingerprint, descriptors, attribute support and the values resolution reads, self-description fragment as zdef CBOR, user settings and entity overrides, configure hash/results, GP sink record), `udef/<id>` = user definitions. Written on device changes (2 s coalescing) and in a 30 s sweep; identical values are skipped and snapshots hold no measured values, so reports never write flash. The journal stores values > 2000 B as parts, applied only when complete |
-| `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist; once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them |
+| `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist; once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them; after a start, reads the still-unknown states of restored devices once (`refresh_unknown`; a sleepy device gets the reads right after its next frame), since snapshots hold no measured values and a device may report only on change (the C6 sensor: temperature only after a 0.5 °C change or 15 min) |
 | `catalog` | Trusted keys of the definitions catalog: **slot 0** = `keys/zdef-catalog-ed25519.pub.pem` (`ff931767…63c6a2`, kid `66f64ac1cbfc9e27`), **slot 1** reserved for a rotation (add the successor in a firmware release, sign with it, retire slot 0 later); `verify_manifest` / `verify_bank` (COSE_Sign1 Ed25519, `zdef`) |
 
 `hub-devices` gained `persist` (`snapshot_device` / `restore_device`) and
@@ -725,7 +727,17 @@ app's reply. `App::connect` now never waits for the app thread (the session
 ID comes from a shared counter), since any blocking send of the app (events,
 keepalive pings) can meet the server thread in a handler; sessions of
 closed connections are dropped on a Close frame, when the sender reports
-the socket closed, or when the 30 s WebSocket ping fails. On macOS, Local Network privacy
+the socket closed, or when the 30 s WebSocket ping fails. The `/api`
+endpoint is registered on raw esp_http_server calls (`firmware/hub/src/ws.rs`)
+with control frames passed to the handler: with esp-idf-svc's `ws_handler`
+(0.53) esp_http_server leaves the rest of a client PONG unread, the next
+frame is parsed from inside it: the connection drops, or esp-idf-svc panics
+on a reserved opcode — a client answering the hub's ping (browsers, the HA
+integration) could crash the hub. Wi-Fi modem sleep (the ESP-IDF default)
+is off: the hub is mains powered, and with it frames to the hub waited for
+the next DTIM beacon — ping from the Mac avg 91 ms (max 334 ms), `hub/info`
+round trip median 144 ms / p90 456 ms; with `WIFI_PS_NONE` ping avg 23 ms
+(max 90 ms), `hub/info` median 68 ms / p90 134 ms. On macOS, Local Network privacy
 may block an unsigned `hubctl` from reaching LAN addresses ("No route to
 host" while `curl` works): allow it in System Settings, or relay through
 `nc` on localhost.

@@ -5,8 +5,9 @@
 //!   `HUB1` boots the hub once, `ROM1` boots the bridge once with the H2 in
 //!   its ROM serial loader (manual NCP recovery). Both are cleared on use,
 //!   so any later reset falls back to the persisted mode.
-//! - A boot after a panic or watchdog reset is handled before this (bridge
-//!   safe mode, USB on USB-Serial-JTAG).
+//! - A boot after a panic or watchdog reset: a persisted hub restarts (up
+//!   to three crashes in a row, each within 10 min of boot); otherwise the
+//!   bridge safe mode (USB on USB-Serial-JTAG) takes over.
 
 use std::sync::Mutex;
 

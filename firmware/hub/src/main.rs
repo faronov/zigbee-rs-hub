@@ -20,6 +20,8 @@ mod mode;
 #[cfg(feature = "app")]
 mod net;
 #[cfg(feature = "app")]
+mod ws;
+#[cfg(feature = "app")]
 mod usbapi;
 
 use std::sync::OnceLock;
@@ -57,6 +59,7 @@ hub firmware:\r
   hub ncp reset [hard] SYS_RESET, or an EN pulse\r
   hub rom              reboot into the bridge with the H2 in its ROM loader\r
                        (manual recovery: esptool on CDC 0)\r
+  hub crash            panic on purpose (tests the restart after a crash)\r
   wifi                 Wi-Fi state and the API address (hub mode, app build)\r
   wifi set <ssid> [pw] store Wi-Fi credentials (used from the next hub boot)\r
   wifi clear           forget them\r
@@ -217,6 +220,7 @@ fn extension(words: &[&str]) -> Option<String> {
         },
         ["hub"] | ["hub", "status"] => status_text(hub?),
         ["hub", "stacks"] => format!("{}\r\n", tasks_snapshot()),
+        ["hub", "crash"] => panic!("console: hub crash"),
         ["hub", "echo", rest @ ..] => {
             let n: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 200);
             let t = std::time::Instant::now();
@@ -479,6 +483,9 @@ fn watch_stacks() {
         buf[6..6 + n].copy_from_slice(&text.as_bytes()[..n]);
         // Fine-grained while starting up (where the crashes were), then 1 s.
         let up = unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000;
+        if up > HEALTHY_UPTIME_MS {
+            crash_streak_reset();
+        }
         std::thread::sleep(Duration::from_millis(if up < 10_000 { 20 } else { 1000 }));
     });
 }
@@ -490,6 +497,31 @@ static PREV_STAGE: OnceLock<u32> = OnceLock::new();
 /// Reset reason of the last crash (written by the safe-mode boot).
 #[unsafe(link_section = ".rtc_noinit")]
 static mut CRASH_REASON: u32 = 0;
+
+/// Hub restarts after a crash before the safe mode takes over.
+const MAX_CRASH_RESTARTS: u32 = 3;
+/// Uptime after which a hub boot counts as healthy (ends a crash streak).
+const HEALTHY_UPTIME_MS: i64 = 10 * 60 * 1000;
+const STREAK_MAGIC: u32 = 0x4353_0000;
+
+/// Consecutive crashed boots (RTC memory; `STREAK_MAGIC | n`).
+#[unsafe(link_section = ".rtc_noinit")]
+static mut CRASH_STREAK: u32 = 0;
+
+fn crash_streak() -> u32 {
+    let v = unsafe { (&raw const CRASH_STREAK).read_volatile() };
+    if v >> 16 == STREAK_MAGIC >> 16 { v & 0xFFFF } else { 0 }
+}
+
+fn crash_streak_next() -> u32 {
+    let n = crash_streak() + 1;
+    unsafe { (&raw mut CRASH_STREAK).write_volatile(STREAK_MAGIC | n) };
+    n
+}
+
+fn crash_streak_reset() {
+    unsafe { (&raw mut CRASH_STREAK).write_volatile(STREAK_MAGIC) };
+}
 
 /// Free internal heap at each start-up stage (RTC memory, for the next boot).
 #[unsafe(link_section = ".rtc_noinit")]
@@ -511,7 +543,11 @@ fn prev_stage() -> String {
     let s = *PREV_STAGE.get().unwrap_or(&0);
     let reason = unsafe { esp_idf_svc::sys::esp_reset_reason() };
     let crash = unsafe { (&raw const CRASH_REASON).read_volatile() };
-    let crash = if crash >> 16 == 0x4352 { format!("; last crash: reset reason {}", crash & 0xFFFF) } else { String::new() };
+    let crash = if crash >> 16 == 0x4352 {
+        format!("; last crash: reset reason {}, crash streak {}", crash & 0xFFFF, crash_streak())
+    } else {
+        String::new()
+    };
     if s >> 16 == 0x5354 {
         let heap: String = PREV_STAGE_HEAP
             .get()
@@ -532,15 +568,24 @@ fn main() {
     let _ = last_panic();
     record_panics();
     info!("tbr-hub {} starting", env!("CARGO_PKG_VERSION"));
-    // Safe mode never returns, so the crashed boot's stage survives it.
-    if tbr_bridge::recovery::crashed_last_boot() {
+    let crashed = tbr_bridge::recovery::crashed_last_boot();
+    if crashed {
         unsafe { (&raw mut CRASH_REASON).write_volatile(0x4352_0000 | esp_idf_svc::sys::esp_reset_reason()) };
     }
-    tbr_bridge::safe_mode_if_crashed();
+    let boot = mode::boot();
+    // A persisted hub restarts after a crash; only a crash loop falls back
+    // to the safe mode (which never returns, so the crashed boot's stage
+    // survives it).
+    if !crashed {
+        crash_streak_reset();
+    } else if boot.mode == Mode::Hub && crash_streak_next() <= MAX_CRASH_RESTARTS {
+        warn!("previous boot crashed: restarting the hub ({} of {MAX_CRASH_RESTARTS})", crash_streak());
+    } else {
+        tbr_bridge::safe_mode_if_crashed();
+    }
     unsafe { (&raw mut STAGE_HEAP).write_volatile([0; 10]) };
     stage(1);
 
-    let boot = mode::boot();
     let _ = BOOT.set(boot);
     info!("boot mode {boot:?}");
     console::set_extension(extension, HELP);

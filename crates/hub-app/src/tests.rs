@@ -259,6 +259,47 @@ fn network_info_and_permit_join_events() {
     r.sim.stop();
 }
 
+fn permit_events(rx: &Receiver<String>, until: impl Fn(&[u64]) -> bool) -> Vec<u64> {
+    let mut seen = Vec::new();
+    let t = std::time::Instant::now();
+    while !until(&seen) && t.elapsed() < T {
+        let Ok(f) = rx.recv_timeout(Duration::from_millis(100)) else { continue };
+        let f: J = serde_json::from_str(&f).unwrap();
+        if f["type"] == "event" && f["event"]["topic"] == "permit_join" {
+            seen.push(f["event"]["remaining_s"].as_u64().unwrap());
+        }
+    }
+    seen
+}
+
+#[test]
+fn permit_join_events_without_ncp_reports() {
+    let r = rig(Store::volatile());
+    // Like the zigbee-rs NCP image: no EVT_PERMIT_JOIN_STATE at all.
+    r.sim.with(|s| s.silent_permit_join = true);
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]}));
+    // Opened from the API: one event, then one at expiry (no countdown).
+    let pj = call(&app, sid, &rx, 2, json!({"type": "network/permit_join", "duration_s": 2}));
+    assert_eq!(pj["success"], true, "{pj}");
+    assert_eq!(permit_events(&rx, |e| e.last() == Some(&0)), [2, 0]);
+    // Re-opened while open.
+    call(&app, sid, &rx, 3, json!({"type": "network/permit_join", "duration_s": 30}));
+    assert_eq!(permit_events(&rx, |e| !e.is_empty()), [30]);
+    call(&app, sid, &rx, 4, json!({"type": "network/permit_join", "duration_s": 60}));
+    assert_eq!(permit_events(&rx, |e| !e.is_empty()), [60]);
+    // Closed by the NCP (its event, e.g. another commissioning tool).
+    let close = zigbee_zrhp::msg::network::EvtPermitJoinState { remaining_s: 0 };
+    r.sim.inject_event(ids::EVT_PERMIT_JOIN_STATE, hub_ncp::driver::encode_body(&close).unwrap());
+    assert_eq!(permit_events(&rx, |e| !e.is_empty()), [0]);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 /// A connection that goes away without a close notification.
 struct Vanishing(Arc<std::sync::atomic::AtomicBool>);
 

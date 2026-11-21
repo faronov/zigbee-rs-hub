@@ -272,6 +272,16 @@ struct Runner {
     imported_in: Option<u32>,
     import_retry: Option<Instant>,
     imported: usize,
+    /// Unknown states of restored mains devices have been read.
+    refreshed: bool,
+    /// Permit-join seconds left at the last look.
+    permit_left: u32,
+}
+
+/// Opened, closed (or expired), or re-opened since the last look; the
+/// countdown itself is not an event.
+fn permit_changed(before: u32, now: u32) -> bool {
+    (before == 0) != (now == 0) || now > before
 }
 
 impl Runner {
@@ -296,6 +306,8 @@ impl Runner {
             imported_in: None,
             import_retry: None,
             imported: 0,
+            refreshed: false,
+            permit_left: 0,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -348,6 +360,8 @@ impl Runner {
                     self.engine.on_device_joined(ieee, nwk, now);
                 }
                 Some(EngineInput::Gp(e)) => self.engine.on_gp_event(e, now),
+                // The host core's remaining time decides (see `observe_permit`).
+                Some(EngineInput::Network(body)) if body["topic"] == "permit_join" => {}
                 Some(EngineInput::Network(body)) => self.engine.network_event(body),
                 None => {}
             },
@@ -398,6 +412,14 @@ impl Runner {
         }
         if self.registered && self.cfg.import_ncp_devices {
             self.import_ncp_devices(now);
+        }
+        // The registry keeps devices, not live states.
+        if self.registered && !self.refreshed && self.ncp.client().state() == SessionState::Ready {
+            self.refreshed = true;
+            let n = self.engine.refresh_unknown(now);
+            if n > 0 {
+                info!("app: reading {n} unknown states of restored devices");
+            }
         }
         self.engine.tick(now);
         self.engine.transport.poll();
@@ -464,7 +486,20 @@ impl Runner {
         }
     }
 
+    /// `permit_join` events whoever opened or closed joining (API, console,
+    /// an NCP event) and on expiry: NCP images need not send
+    /// `EVT_PERMIT_JOIN_STATE` (the zigbee-rs NCP does not), so the event
+    /// follows the host core's remaining time.
+    fn observe_permit(&mut self) {
+        let left = self.ncp.permit_join_remaining();
+        if permit_changed(self.permit_left, left) {
+            self.engine.network_event(serde_json::json!({"topic": "permit_join", "remaining_s": left}));
+        }
+        self.permit_left = left;
+    }
+
     fn after_input(&mut self) {
+        self.observe_permit();
         let now = self.now();
         let events = self.engine.drain_events();
         self.registry.note(&events, now);

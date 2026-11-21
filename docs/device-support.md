@@ -2096,7 +2096,9 @@ availability, `last_seen` at most once per minute), `device_removed`,
 `interview_progress`, `resolution_changed` (layers, added/orphaned entities).
 
 Events (topic `network`, API 1.1): `permit_join` (`remaining_s`, when joining
-opens or closes) and `network_state` (`state`: `down`, `forming`, `up`,
+opens, is re-opened, closes or expires — whoever changed it: the API, the
+console, the NCP — not every second; the hub derives it from its own
+deadline, as an NCP image need not report `EVT_PERMIT_JOIN_STATE`) and `network_state` (`state`: `down`, `forming`, `up`,
 `leaving`); the snapshot carries `network` (the `network/info` result).
 
 ### 14.3 Entities

@@ -235,6 +235,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             return Err(format!("device {} exists", s.id));
         }
         let mut d = Device::new(s.id.clone(), s.kind.clone(), now);
+        // Not heard from yet: a sleepy device's requests wait for it.
+        d.awake_until = 0;
         d.fp = s.fp;
         d.node_desc = s.node_desc;
         d.active_eps = s.active_eps;
