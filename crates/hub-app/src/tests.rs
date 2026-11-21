@@ -360,3 +360,354 @@ fn connect_never_waits_for_the_app_thread() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+// ── Maintenance API (admin) ─────────────────────────────────────────────
+
+#[derive(Default)]
+struct TestPlatform {
+    token: std::sync::Mutex<Option<String>>,
+    wifi: std::sync::Mutex<Option<(String, String)>>,
+    reboots: AtomicU32,
+    ring: Option<crate::LogRing>,
+}
+
+impl crate::Platform for TestPlatform {
+    fn system(&self) -> J {
+        json!({"version": "test", "uptime_s": 12, "heap": {"free": 65000, "min_free": 57000}})
+    }
+    fn wifi_channel(&self) -> Option<u8> {
+        Some(6)
+    }
+    fn set_wifi(&self, ssid: &str, password: &str) -> Result<(), String> {
+        *self.wifi.lock().unwrap() = Some((ssid.into(), password.into()));
+        Ok(())
+    }
+    fn save_token(&self, token: &str) -> Result<(), String> {
+        *self.token.lock().unwrap() = Some(token.into());
+        Ok(())
+    }
+    fn reboot(&self) -> Result<(), String> {
+        self.reboots.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn random(&self, buf: &mut [u8]) {
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = 0xA0 + i as u8;
+        }
+    }
+    fn logs(&self, max: usize) -> Vec<String> {
+        self.ring.as_ref().map(|r| r.lines(max)).unwrap_or_default()
+    }
+    fn features(&self) -> Vec<&'static str> {
+        vec!["wifi", "reboot", "logs", "token_rotate"]
+    }
+}
+
+fn admin_app(r: &Rig, platform: Option<Arc<TestPlatform>>) -> App {
+    let mut c = cfg();
+    c.platform = platform.map(|p| p as Arc<dyn crate::Platform>);
+    let app = App::start(r.ncp.clone(), c);
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    app
+}
+
+fn ok(f: &J) -> &J {
+    assert_eq!(f["success"], true, "{f}");
+    &f["result"]
+}
+
+fn err_code(f: &J) -> String {
+    assert_eq!(f["success"], false, "{f}");
+    f["error"]["code"].as_str().unwrap().to_string()
+}
+
+fn form(app: &App, sid: u64, rx: &Receiver<String>, channel: u8) -> J {
+    let f = call(app, sid, rx, 900, json!({"type": "network/reset", "confirm": "RESET", "channel": channel}));
+    ok(&f).clone()
+}
+
+#[test]
+fn maintenance_requests_need_an_authenticated_session() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (tx, rx) = mpsc::channel();
+    let sid = app.connect(Box::new(tx)).unwrap();
+    let _hello = rx.recv_timeout(T).unwrap();
+    app.text(sid, json!({"id": 1, "type": "network/reset", "confirm": "RESET"}).to_string());
+    let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+    assert_eq!(f["type"], "auth_invalid");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!r.sim.state().requests.iter().any(|(id, _)| *id == ids::NWK_FORM));
+}
+
+#[test]
+fn energy_scan_channel_change_tx_power_and_diagnostics() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, Some(Arc::new(TestPlatform::default())));
+    let (sid, rx) = session(&app);
+    let formed = form(&app, sid, &rx, 15);
+    assert_eq!(formed["network"]["channel"], 15);
+    assert_eq!(formed["backup"], J::Null, "no network before: nothing to back up");
+    let info = call(&app, sid, &rx, 1, json!({"type": "hub/info"}));
+    let maint = ok(&info)["maintenance"].as_array().unwrap().clone();
+    for f in ["energy_scan", "tx_power", "backup", "restore", "topology", "wifi"] {
+        assert!(maint.contains(&json!(f)), "{f} in {maint:?}");
+    }
+
+    let scan = call(&app, sid, &rx, 2, json!({"type": "network/energy_scan", "duration_exp": 2}));
+    let scan = ok(&scan);
+    assert_eq!(scan["channels"].as_array().unwrap().len(), 16);
+    assert_eq!(scan["wifi_channel"], 6);
+    assert_eq!(scan["current"], 15);
+    let overlap: Vec<u64> = scan["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["wifi_overlap"] == true)
+        .map(|c| c["channel"].as_u64().unwrap())
+        .collect();
+    assert_eq!(overlap, vec![16, 17, 18, 19]);
+    // The sim's quietest channel, a Light Link primary away from Wi-Fi 6.
+    assert_eq!(scan["recommended"], 25, "{scan}");
+    let bad = call(&app, sid, &rx, 3, json!({"type": "network/energy_scan", "channels": [10]}));
+    assert_eq!(err_code(&bad), "invalid_value");
+
+    let sub = call(&app, sid, &rx, 4, json!({"type": "subscribe", "topics": ["network"]}));
+    ok(&sub);
+    app.text(sid, json!({"id": 5, "type": "network/change_channel", "channel": 20}).to_string());
+    let (mut moved, mut ev) = (J::Null, J::Null);
+    while moved.is_null() || ev.is_null() {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "result" && f["id"] == 5 {
+            moved = f;
+        } else if f["type"] == "event" && f["event"]["topic"] == "network_updated" {
+            ev = f;
+        }
+    }
+    assert_eq!(ok(&moved)["channel"], 20);
+    assert_eq!(ok(&moved)["nwk_update_id"], 1);
+    assert_eq!(ev["event"]["reason"], "channel_changed");
+    let net = call(&app, sid, &rx, 6, json!({"type": "network/info"}));
+    assert_eq!(ok(&net)["channel"], 20);
+
+    let tx = call(&app, sid, &rx, 7, json!({"type": "network/set_tx_power", "dbm": 25}));
+    assert_eq!(ok(&tx)["applied_dbm"], 20);
+    assert_eq!(r.ncp.stored_tx_power(), Some(25));
+
+    let d = call(&app, sid, &rx, 8, json!({"type": "network/diagnostics"}));
+    let d = ok(&d);
+    assert_eq!(d["ncp"]["uptime_s"], 3600);
+    assert!(d["counters"].as_array().unwrap().iter().any(|c| c["name"] == "tx_frames"), "{d}");
+    assert_eq!(d["pta"]["capable"], false);
+    assert!(d["host_link"].as_array().unwrap().iter().any(|c| c["name"] == "tx_frames"));
+    let d = call(&app, sid, &rx, 9, json!({"type": "network/diagnostics", "reset": true, "groups": 1}));
+    assert!(ok(&d)["counters"].as_array().unwrap().iter().all(|c| c["value"] == 0));
+
+    // An NCP image without NWK_SET_TX_POWER.
+    r.sim.with(|s| s.unsupported.push(ids::NWK_SET_TX_POWER));
+    let tx = call(&app, sid, &rx, 10, json!({"type": "network/set_tx_power", "dbm": 3}));
+    assert_eq!(err_code(&tx), "unsupported");
+    app.shutdown();
+}
+
+#[test]
+fn network_map_from_coordinator_tables_and_router_answers() {
+    use hub_ncp::sim::SimRemote;
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 15);
+    let (r1, r2, e1, e2) = ([0x11; 8], [0x22; 8], [0xE1; 8], [0xE2; 8]);
+    let own = r.ncp.client().session().unwrap().info.as_ref().unwrap().ieee_active;
+    r.sim.with(|s| {
+        s.neighbors = Some(vec![(r1, 0x1111, 1, 2), (e1, 0x3333, 2, 1)]);
+        s.children = Some(vec![(e1, 0x3333, 0x80)]);
+        s.routes = vec![(0x2222, 0x1111, 0)];
+        s.remotes = vec![
+            SimRemote {
+                nwk: 0x1111,
+                ieee: r1,
+                neighbors: vec![(own, 0x0000, 0, 2, 220), (r2, 0x2222, 1, 2, 150), (e2, 0x4444, 2, 1, 90), ([0x99; 8], 0x9999, 2, 4, 10)],
+                routes: vec![(0x0000, 0x0000, 0), (0x2222, 0x2222, 0)],
+            },
+            SimRemote { nwk: 0x2222, ieee: r2, neighbors: vec![(r1, 0x1111, 1, 2, 140)], routes: vec![] },
+        ];
+    });
+    let sub = call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]}));
+    ok(&sub);
+    let map = call(&app, sid, &rx, 2, json!({"type": "network/topology"}));
+    let map = ok(&map).clone();
+    let nodes = map["nodes"].as_array().unwrap();
+    let nwks: Vec<u64> = nodes.iter().map(|n| n["nwk"].as_u64().unwrap()).collect();
+    assert_eq!(nwks, vec![0, 0x1111, 0x2222, 0x3333, 0x4444], "the previous child is left out: {map}");
+    let node = |nwk: u64| nodes.iter().find(|n| n["nwk"] == nwk).unwrap();
+    assert_eq!(node(0)["type"], "coordinator");
+    assert_eq!(node(0x2222)["type"], "router");
+    assert_eq!(node(0x2222)["scanned"], true, "found through 0x1111 and asked too");
+    assert_eq!(node(0x4444)["ieee"], "e2e2e2e2e2e2e2e2");
+    let links = map["links"].as_array().unwrap();
+    assert!(links.iter().any(|l| l["source"] == 0x1111 && l["target"] == 0x2222 && l["lqi"] == 150));
+    assert!(links.iter().any(|l| l["source"] == 0 && l["target"] == 0x3333 && l["relationship"] == "child"));
+    let routes = map["routes"].as_array().unwrap();
+    assert!(routes.iter().any(|x| x["source"] == 0 && x["dst"] == 0x2222 && x["next_hop"] == 0x1111));
+    assert!(routes.iter().any(|x| x["source"] == 0x1111 && x["dst"] == 0x2222));
+    // The cached map without a new scan.
+    let aps = r.sim.state().aps.len();
+    let cached = call(&app, sid, &rx, 3, json!({"type": "network/topology", "refresh": false}));
+    assert_eq!(ok(&cached)["nodes"], map["nodes"]);
+    assert_eq!(r.sim.state().aps.len(), aps, "no requests for the cached map");
+    app.shutdown();
+}
+
+#[test]
+fn backup_then_restore_onto_a_fresh_ncp_in_chunks() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 17);
+    let dev = [0xC4, 0xB3, 0xA2, 0x01, 0x00, 0x8D, 0x15, 0x00];
+    r.sim.with(|s| {
+        s.table_devices = vec![(dev, 0x1234, Some(0x80))];
+        s.link_keys = vec![(dev, [0x42; 16])];
+    });
+    let b = call(&app, sid, &rx, 1, json!({"type": "network/backup"}));
+    let backup = ok(&b).clone();
+    assert_eq!(backup["metadata"]["format"], "zigpy/open-coordinator-backup");
+    assert_eq!(backup["channel"], 17);
+    let key: String = r.sim.state().key.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(backup["network_key"]["key"], key);
+    assert_eq!(backup["devices"][0]["ieee_address"], "00158d0001a2b3c4");
+    assert_eq!(backup["devices"][0]["link_key"]["key"], "42".repeat(16));
+    let last = call(&app, sid, &rx, 2, json!({"type": "network/backup/last"}));
+    assert_eq!(ok(&last)["backup"], backup, "kept in the host store");
+    // Restoring over a running network needs `force`.
+    let refused = call(&app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup}));
+    assert_eq!(err_code(&refused), "invalid_value");
+    app.shutdown();
+
+    let r2 = rig(Store::volatile());
+    let app2 = admin_app(&r2, None);
+    let (sid2, rx2) = session(&app2);
+    let text = backup.to_string();
+    let parts: Vec<&str> = text.as_bytes().chunks(300).map(|c| std::str::from_utf8(c).unwrap()).collect();
+    let mut offset = 0;
+    let mut last = J::Null;
+    for (i, p) in parts.iter().enumerate() {
+        last = call(&app2, sid2, &rx2, 10 + i as u64, json!({"type": "network/restore", "chunk": p, "offset": offset, "total": text.len()}));
+        offset += p.len();
+        if i + 1 < parts.len() {
+            assert_eq!(ok(&last)["received"], offset);
+        }
+    }
+    let rep = ok(&last);
+    assert_eq!(rep["channel"], 17);
+    assert_eq!(rep["children"], 1);
+    assert_eq!(rep["link_keys_on_ncp"], 1);
+    assert_eq!(rep["previous_network_backed_up"], false);
+    let s1 = r.sim.state();
+    let s2 = r2.sim.state();
+    assert_eq!((s2.pan_id, s2.ext_pan_id, s2.key, s2.channel, s2.network_state), (s1.pan_id, s1.ext_pan_id, s1.key, 17, 2));
+    assert!(s2.nwk_limit >= s1.nwk_limit + 10_000);
+    let net = call(&app2, sid2, &rx2, 50, json!({"type": "network/info"}));
+    assert_eq!(ok(&net)["ownership"], "owned");
+    // The restored device is imported and interviewed.
+    assert!(app2.wait(T, |s| s.imported == 1), "{:?}", app2.status());
+    // A chunk out of order is refused.
+    let oo = call(&app2, sid2, &rx2, 60, json!({"type": "network/restore", "chunk": "{}", "offset": 5, "total": 10}));
+    assert_eq!(err_code(&oo), "invalid_value");
+    app2.shutdown();
+}
+
+#[test]
+fn reset_backs_up_leaves_and_forms_a_new_network() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let first = form(&app, sid, &rx, 15);
+    let wrong = call(&app, sid, &rx, 1, json!({"type": "network/reset", "confirm": "reset"}));
+    assert_eq!(err_code(&wrong), "invalid_value");
+    let f = call(
+        &app,
+        sid,
+        &rx,
+        2,
+        json!({"type": "network/reset", "confirm": "RESET", "channels": [25], "pan_id": 0x1A2B, "ext_pan_id": "00112233445566ff", "tx_power": 4}),
+    );
+    let res = ok(&f);
+    assert_eq!(res["network"]["channel"], 25);
+    assert_eq!(res["network"]["pan_id"], 0x1A2B);
+    assert_eq!(res["network"]["ext_pan_id"], "00112233445566ff");
+    assert_eq!(res["backup"]["pan_id"], format!("{:04x}", first["network"]["pan_id"].as_u64().unwrap()), "the old network was backed up");
+    assert!(r.sim.state().log.iter().any(|(id, _)| *id == ids::NWK_LEAVE_RESET));
+    assert_eq!(r.sim.state().tx_power, 4);
+    assert_eq!(r.ncp.store_state().network.unwrap().pan_id, 0x1A2B);
+    app.shutdown();
+}
+
+#[test]
+fn hub_settings_through_the_platform() {
+    let r = rig(Store::volatile());
+    let ring = crate::LogRing::new(1024);
+    ring.push("INFO hub: started");
+    let p = Arc::new(TestPlatform { ring: Some(ring), ..TestPlatform::default() });
+    let app = admin_app(&r, Some(p.clone()));
+    let (sid, rx) = session(&app);
+    let sys = call(&app, sid, &rx, 1, json!({"type": "hub/system"}));
+    let sys = ok(&sys);
+    assert_eq!(sys["heap"]["free"], 65000);
+    assert_eq!(sys["app"]["sessions"], 1);
+    assert_eq!(sys["ncp"]["fw"], "sim-ncp 0.1.0");
+    let logs = call(&app, sid, &rx, 2, json!({"type": "hub/logs", "lines": 5}));
+    assert_eq!(ok(&logs)["lines"], json!(["INFO hub: started"]));
+    let w = call(&app, sid, &rx, 3, json!({"type": "hub/wifi/set", "ssid": "home", "password": "short"}));
+    assert_eq!(err_code(&w), "invalid_value");
+    let w = call(&app, sid, &rx, 4, json!({"type": "hub/wifi/set", "ssid": "home", "password": "longenough"}));
+    ok(&w);
+    assert_eq!(p.wifi.lock().unwrap().clone(), Some(("home".into(), "longenough".into())));
+    let t = call(&app, sid, &rx, 5, json!({"type": "hub/token/rotate"}));
+    let token = ok(&t)["token"].as_str().unwrap().to_string();
+    assert_eq!(token, "a0a1a2a3a4a5a6a7a8a9aaab");
+    assert_eq!(p.token.lock().unwrap().as_deref(), Some(token.as_str()));
+    // A new connection needs the new token; this one stays.
+    let (tx2, rx2) = mpsc::channel();
+    let s2 = app.connect(Box::new(tx2)).unwrap();
+    let _ = rx2.recv_timeout(T).unwrap();
+    app.text(s2, json!({"type": "auth", "token": "secret"}).to_string());
+    let f: J = serde_json::from_str(&rx2.recv_timeout(T).unwrap()).unwrap();
+    assert_eq!(f["type"], "auth_invalid");
+    let (tx3, rx3) = mpsc::channel();
+    let s3 = app.connect(Box::new(tx3)).unwrap();
+    let _ = rx3.recv_timeout(T).unwrap();
+    app.text(s3, json!({"type": "auth", "token": token}).to_string());
+    let f: J = serde_json::from_str(&rx3.recv_timeout(T).unwrap()).unwrap();
+    assert_eq!(f["type"], "auth_ok");
+    let still = call(&app, sid, &rx, 6, json!({"type": "hub/reboot"}));
+    assert_eq!(ok(&still)["rebooting"], true);
+    assert_eq!(p.reboots.load(Ordering::SeqCst), 1);
+    let m = call(&app, sid, &rx, 7, json!({"type": "hub/mode/set", "mode": "bridge"}));
+    assert_eq!(err_code(&m), "failed", "the test platform has no boot modes");
+    app.shutdown();
+}
+
+#[test]
+fn hub_settings_without_a_platform_are_unsupported() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let f = call(&app, sid, &rx, 1, json!({"type": "hub/token/rotate"}));
+    assert_eq!(err_code(&f), "unsupported");
+    let f = call(&app, sid, &rx, 2, json!({"type": "hub/system"}));
+    assert!(ok(&f)["app"].is_object());
+    app.shutdown();
+}
+
+#[test]
+fn cached_network_map_is_null_before_the_first_scan() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let f = call(&app, sid, &rx, 1, json!({"type": "network/topology", "refresh": false}));
+    assert_eq!(ok(&f), &J::Null);
+    assert!(r.sim.state().aps.iter().all(|p| p.get(5..7) != Some(&[0x31, 0x00])), "no scan started");
+    app.shutdown();
+}

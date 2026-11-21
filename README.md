@@ -654,6 +654,10 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 | `registry` | Device registry in the host store journal (device-support 16.1): `dev/<id>` = deflated JSON `DeviceSnapshot` (identity, fingerprint, descriptors, attribute support and the values resolution reads, self-description fragment as zdef CBOR, user settings and entity overrides, configure hash/results, GP sink record), `udef/<id>` = user definitions. Written on device changes (2 s coalescing) and in a 30 s sweep; identical values are skipped and snapshots hold no measured values, so reports never write flash. The journal stores values > 2000 B as parts, applied only when complete |
 | `app` | One thread: engine, `ApiServer` sessions (any `SessionSink`), registry, 1 s tick; registers the hub endpoint 1 (HA profile) once (replayed by `hub-ncp` on every resume) and the coordinator IEEE; built-in catalog = the definition examples until banks exist; once per NCP session imports devices the NCP knows and the engine does not (joined before the hub adopted the network) and interviews them; after a start, reads the still-unknown states of restored devices once (`refresh_unknown`; a sleepy device gets the reads right after its next frame), since snapshots hold no measured values and a device may report only on change (the C6 sensor: temperature only after a 0.5 °C change or 15 min) |
 | `catalog` | Trusted keys of the definitions catalog: **slot 0** = `keys/zdef-catalog-ed25519.pub.pem` (`ff931767…63c6a2`, kid `66f64ac1cbfc9e27`), **slot 1** reserved for a rotation (add the successor in a firmware release, sign with it, retire slot 0 later); `verify_manifest` / `verify_bank` (COSE_Sign1 Ed25519, `zdef`) |
+| `admin` | Network and hub maintenance (API 1.2, device-support 14.6): energy scan with a channel recommendation that avoids the hub's own Wi-Fi channel, channel change, TX power, NCP diagnostics, the network map, Open Coordinator Backup export/restore, reset + form; Wi-Fi credentials, API token rotation, reboot, boot mode, system facts and a log tail through the platform. NCP work runs on one job thread at a time (`busy` otherwise), so the app thread keeps serving |
+| `ocb` | `zigpy/open-coordinator-backup` v1 ⇄ ZRHP record streams (byte orders and Z2M/zigpy quirks of ZRHP 9.1); the export is written as text, not a JSON tree (RAM) |
+| `topology` | Network map: the coordinator's `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN`, then Mgmt_Lqi_req/Mgmt_Rtg_req to every router found, breadth first |
+| `platform` | `Platform` (what the app needs from the S3 or the desktop) and `LogRing` (a fixed-size ring of recent log lines) |
 
 `hub-devices` gained `persist` (`snapshot_device` / `restore_device`) and
 `ApiServer::pump_events`; `hub-ncp` gained key/value records, PTA
@@ -700,6 +704,25 @@ added what the page needed: `network/info`, the `network` topic
 (`permit_join`, `network_state`), `time` in it for relative times, and `nwk`
 in device records (device-support 14.2); the header and the hub facts
 (coordinator IEEE, API version, counts) come from `hub/info`.
+
+**Maintenance API (1.2).** Network settings and upkeep over the same
+WebSocket (device-support 14.6): `network/energy_scan` (per-channel energy,
+the channels under the hub's own Wi-Fi channel marked, a recommendation),
+`network/change_channel`, `network/set_tx_power` (re-applied after every NCP
+restart), `network/diagnostics` (NCP status incl. PTA, DIAG counters, frame
+counters, host link counters), `network/topology` (map from the
+coordinator's tables and Mgmt_Lqi/Mgmt_Rtg over the air),
+`network/backup` / `network/backup/last` / `network/restore` (Open ZigBee
+Coordinator Backup, as zigpy/ZHA and Z2M write it; restore in chunks to a
+fresh NCP), `network/reset` (confirm `RESET`: automatic backup, leave,
+form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
+`hub/system`, `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
+`hub/mode/set`. `hubctl serve` implements the hub side for a desktop
+(credentials and token in memory, its own log tail; `--wifi-channel N` for
+the scan advice); `hubctl --sim --sim-demo serve` forms a network on the
+simulated NCP with three routers that answer Mgmt_Lqi/Mgmt_Rtg, and
+`--sim-unsupported 0x0106,0x0108` mimics an NCP image without energy scan
+and TX power.
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
 application lives in ~295 KB of internal heap. On the first hardware run

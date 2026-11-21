@@ -14,6 +14,7 @@
 //! does RTS/CTS towards the H2 itself; opening the port asserts DTR and
 //! RTS, which leaves the H2 running (esptool auto-reset mapping).
 
+mod platform;
 mod serve;
 
 use std::io::{self, Read};
@@ -33,7 +34,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-unsupported ID,…]) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -48,10 +49,18 @@ commands:
                             a reset then rolls the NCP back)
   fw-confirm                FW_CONFIRM
   reset [--hard]            SYS_RESET, or an EN pulse through the bridge's DTR/RTS
-  serve [--listen ADDR] [--token T] [--for SECS]
+  serve [--listen ADDR] [--token T] [--for SECS] [--wifi-channel N]
                             the hub application (device engine, registry in the
-                            store) with its WebSocket JSON API (default
-                            127.0.0.1:8099, token from HUB_TOKEN or random)
+                            store) with its WebSocket JSON API and the web UI
+                            (default 127.0.0.1:8099, token from HUB_TOKEN or
+                            random); --wifi-channel: the Wi-Fi channel the
+                            energy-scan advice avoids
+simulated NCP:
+  --sim-demo                form on channel 15 and add a small mesh (routers
+                            answering Mgmt_Lqi/Mgmt_Rtg) for the network map
+  --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.
+                            0x0106,0x0108 (no energy scan / TX power, like the
+                            current NCP image)
 also, without a hub:
   hubctl ws-call URL --token T [--listen SECS] JSON...
                             authenticate, send requests, print the frames
@@ -68,7 +77,11 @@ impl log::Log for Logger {
     }
     fn log(&self, r: &log::Record<'_>) {
         if self.enabled(r.metadata()) {
-            eprintln!("{:>8.3} {:5} {}", self.0.elapsed().as_secs_f64(), r.level(), r.args());
+            let t = self.0.elapsed().as_secs_f64();
+            eprintln!("{t:>8.3} {:5} {}", r.level(), r.args());
+            if r.level() <= log::Level::Info {
+                platform::LOGS.push(&format!("{t:.3} {} {}", r.level(), r.args()));
+            }
         }
     }
     fn flush(&self) {}
@@ -387,7 +400,14 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                 hex(&b).to_lowercase()
             });
             let until = args.value("--for").and_then(|s| s.parse().ok()).map(|s: u64| Instant::now() + Duration::from_secs(s));
-            let cfg = hub_app::AppConfig { hub_name: "hubctl".into(), api_token: token.clone(), ..Default::default() };
+            let wifi_channel = args.value("--wifi-channel").and_then(|c| c.parse().ok());
+            let desktop = platform::Desktop { started: Instant::now(), rng: urandom(), wifi_channel, wifi: Default::default() };
+            let cfg = hub_app::AppConfig {
+                hub_name: "hubctl".into(),
+                api_token: token.clone(),
+                platform: Some(Arc::new(desktop)),
+                ..Default::default()
+            };
             let app = hub_app::App::start(hub.clone(), cfg);
             println!("token: {token}");
             let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
@@ -486,12 +506,18 @@ fn main() -> ExitCode {
         None => Store::volatile(),
     };
     let sim = args.flag("--sim");
+    let demo = args.flag("--sim-demo");
     let serial = args.value("--serial");
     let baud = args.value("--baud").and_then(|b| b.parse().ok()).unwrap_or(921_600u32);
     let mut sim_ncp = None;
     let hub = if sim {
         let (host, ncp) = pipe::pair();
-        sim_ncp = Some(SimNcp::start(ncp));
+        let s = SimNcp::start(ncp);
+        if let Some(list) = args.value("--sim-unsupported") {
+            let ids: Vec<u16> = list.split(',').filter_map(|x| parse_u32(x.trim())).map(|x| x as u16).collect();
+            s.with(|st| st.unsupported = ids);
+        }
+        sim_ncp = Some(s);
         let (rx, tx) = host.split();
         cfg.driver.lines = vec![Line::BR_DEFAULT];
         Hub::start(cfg, rx, tx, None, store, urandom())
@@ -518,7 +544,10 @@ fn main() -> ExitCode {
         eprint!("{USAGE}");
         return ExitCode::from(2);
     };
-    let result = run(&hub, args);
+    let result = match sim_ncp.as_ref().filter(|_| demo) {
+        Some(sim) => platform::sim_demo(&hub, sim).and_then(|()| run(&hub, args)),
+        None => run(&hub, args),
+    };
     let c = hub.client().counters();
     log::info!(
         "host link: tx {} retx {} rx {} bad {} dup {} rto {}",
