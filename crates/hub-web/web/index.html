@@ -156,6 +156,7 @@ function devCard(id){
 }
 function fmt(e,s){
  if(!s||s.state==null)return"–";let v=s.state;
+ if(e.device_class=="timestamp"&&typeof v=="number")return ago(v);
  if(typeof v=="number"){const p=e.precision??(e.capabilities&&e.capabilities.suggested_display_precision);if(p!=null)v=v.toFixed(p)}
  return v+(e.unit&&typeof s.state=="number"?" "+e.unit:"");
 }
