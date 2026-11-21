@@ -84,6 +84,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 |---|---|
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
+| `crates/hub-web` | The embedded web UI: one static page (`web/index.html`), gzip-compressed by `build.rs` |
 | `crates/hub-app` | Stage 2: the engine on the host core: event/request conversion, transport, device registry in the host store, app thread with the API sessions, catalog verifier (trusted keys) |
 | `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, host store journal, simulated NCP (`sim`) |
 | `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim` |
@@ -630,6 +631,26 @@ without network).
 `hub/info` returns the hub name, API version, features, current `seq`,
 device/entity counts and, once the NCP session is up, `coordinator_ieee`,
 `ncp_board` and `ncp_product` (the Home Assistant integration's unique ID).
+
+**Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
+HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
+on `/api`: network (state, PAN ID, channel, extended PAN ID, NCP firmware,
+IEEE and link), permit join with a countdown, the device list (name, model,
+IEEE, NWK, interview state, LQI/RSSI, last seen, availability) with each
+device's entities and their live states (subscription to `devices`,
+`entities` and `network`), controls for switches and lights (on/off,
+brightness), numbers, selects and buttons, rename, re-interview and remove
+(with confirmation), connection status with automatic reconnect; mobile
+layout, light/dark from `prefers-color-scheme`. It asks for the API token
+once (console `token`; a link ending in `#token=…` stores it too) and keeps
+it in the browser. `build.rs` gzips the page at build time (deterministic,
+pure Rust, no node toolchain) and derives a strong ETag; the hub answers
+`Content-Encoding: gzip`, `Cache-Control: no-cache` and `304` on a matching
+`If-None-Match`. `hubctl serve` serves the same page on `/` (the WebSocket on
+`/api`), so the UI can be tried on a desktop, also with `--sim`. API 1.1
+added what the page needed: `network/info`, the `network` topic
+(`permit_join`, `network_state`) and `nwk` in device records
+(device-support 14.2).
 
 **RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
 application lives in ~295 KB of internal heap. On the first hardware run
