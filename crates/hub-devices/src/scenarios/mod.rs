@@ -6,6 +6,7 @@ mod gp;
 mod merge;
 mod plain;
 mod props;
+mod tuya_plug;
 mod tuya_trv;
 mod vendors;
 
