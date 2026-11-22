@@ -25,11 +25,15 @@ log = "0.4"
 tbr-bridge = { path = "../bridge" }
 
 [features]
-default = ["app"]
+default = ["app", "ota-store"]
 # The application (device engine, registry) with its WebSocket JSON API over
 # Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
 # phase-1 hub (ZRHP host core only).
 app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json"]
+# The devices' OTA image store in the inactive app slot (8 MB layout).
+# The 4 MB dev image is built without it (`--no-default-features
+# --features app`): its OTA server serves streamed images only.
+ota-store = ["app", "hub-app/ota-store"]
 
 [build-dependencies]
 embuild = "0.33"

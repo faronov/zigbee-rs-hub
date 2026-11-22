@@ -136,6 +136,14 @@ pub enum HubEvent {
     },
     /// Network topic events (`permit_join` …), from the host core.
     Network(J),
+    /// Events of a service outside the engine (the OTA server: topic
+    /// `ota`).
+    App {
+        /// Topic.
+        topic: &'static str,
+        /// Body (with its own `topic` field naming the event).
+        body: J,
+    },
     /// GP topic events (13.7).
     Gp {
         /// `gp/commissioning`, `gp/pending`, `gp/commissioned`, `gp/failed`, `gp/binding`.
@@ -322,6 +330,30 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) gp_last_frame: Option<(GpdId, u8, Vec<u8>)>,
     /// Features advertised and accepted (8.5).
     pub features: Vec<&'static str>,
+    /// Cluster commands devices send to the hub's server side of these
+    /// clusters go to the application ([`Hub::take_app_frames`]) instead
+    /// of the engine: no default response, no events. The OTA server
+    /// (0x0019) lives in the application.
+    pub app_clusters: Vec<u16>,
+    app_frames: Vec<AppFrame>,
+    /// Snapshots of the topics of services outside the engine, sent on
+    /// `subscribe` (kept current by the application).
+    pub app_snapshots: BTreeMap<&'static str, String>,
+}
+
+/// A cluster command for the application (see [`Hub::app_clusters`]).
+#[derive(Debug, Clone)]
+pub struct AppFrame {
+    /// Device.
+    pub device: String,
+    /// Source endpoint.
+    pub ep: u8,
+    /// Cluster.
+    pub cluster: u16,
+    /// ZCL header.
+    pub header: ZclHeader,
+    /// Payload after the header.
+    pub payload: Vec<u8>,
 }
 
 /// The ExprEnv of one device.
@@ -400,7 +432,39 @@ impl<T: ZigbeeTransport> Hub<T> {
             gp: Default::default(),
             gp_last_frame: None,
             features: HUB_FEATURES.to_vec(),
+            app_clusters: Vec::new(),
+            app_frames: Vec::new(),
+            app_snapshots: BTreeMap::new(),
         }
+    }
+
+    /// Takes the frames of [`Hub::app_clusters`].
+    pub fn take_app_frames(&mut self) -> Vec<AppFrame> {
+        std::mem::take(&mut self.app_frames)
+    }
+
+    /// Sends a ZCL frame of the application to a device endpoint from the
+    /// hub's endpoint (queued for a sleepy device until it is awake); no
+    /// response is tracked.
+    pub fn send_app_zcl(
+        &mut self,
+        dev_id: &str,
+        ep: u8,
+        cluster: u16,
+        frame: ZclFrame,
+        now: Millis,
+    ) {
+        self.send_zcl(dev_id, ep, cluster, frame, Purpose::None, now);
+    }
+
+    /// A ZCL transaction sequence number from the engine's counter.
+    pub fn new_tsn(&mut self) -> u8 {
+        self.next_zcl_tsn()
+    }
+
+    /// An event of a service outside the engine on `topic`.
+    pub fn app_event(&mut self, topic: &'static str, body: J) {
+        self.emit(HubEvent::App { topic, body });
     }
 
     /// Installs the self-description decoder (zdef).
@@ -1391,6 +1455,19 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
             (FrameType::Global, _) => needs_default_rsp = false,
+            (FrameType::Cluster, _)
+                if h.direction == Direction::ClientToServer
+                    && self.app_clusters.contains(&ind.cluster) =>
+            {
+                self.app_frames.push(AppFrame {
+                    device: id.to_string(),
+                    ep,
+                    cluster: ind.cluster,
+                    header: h,
+                    payload: frame.payload,
+                });
+                return;
+            }
             (FrameType::Cluster, cmd) => {
                 let handled = match ind.cluster {
                     cl::TUYA => {

@@ -98,6 +98,10 @@ pub struct AppConfig {
     /// Stack of the maintenance job thread (network map, backup, …),
     /// started per job.
     pub admin_stack: usize,
+    /// The OTA image store's region (the inactive app slot on the hub; none:
+    /// streamed images only).
+    #[cfg(feature = "ota-store")]
+    pub ota_flash: crate::ota_store::OtaFlash,
 }
 
 impl Default for AppConfig {
@@ -122,6 +126,8 @@ impl Default for AppConfig {
             import_ncp_devices: true,
             platform: None,
             admin_stack: 16 * 1024,
+            #[cfg(feature = "ota-store")]
+            ota_flash: Default::default(),
         }
     }
 }
@@ -331,6 +337,8 @@ struct Runner {
     maintenance_for: Option<u32>,
     /// The catalog store and its downloads.
     catalog: Option<CatalogService>,
+    /// The OTA Upgrade server.
+    ota: crate::ota::Ota,
 }
 
 /// Opens the catalog store in `hubdata` and its service.
@@ -395,7 +403,10 @@ impl Runner {
         let hub_cfg = HubConfig { tz_offset_s: cfg.tz_offset_s, ..HubConfig::default() };
         let mut engine = Engine::new(NcpTransport::new(ncp.clone()), hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
-        let api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        engine.app_clusters.push(hub_ota::server::CLUSTER);
+        let ota = crate::ota::Ota::new(&cfg);
+        let mut api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        api.set_info("ota", ota.info());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
         admin.start_worker();
@@ -419,6 +430,7 @@ impl Runner {
             jobs,
             maintenance_for: None,
             catalog: service,
+            ota,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -426,6 +438,7 @@ impl Runner {
         r.registry = registry;
         let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
         r.engine.transport.nwk.extend(known);
+        r.ota.load(&r.ncp, &r.engine, now);
         // Restored devices produce added events; nobody is subscribed yet,
         // and their snapshots are what the store holds.
         let _ = r.engine.drain_events();
@@ -439,7 +452,10 @@ impl Runner {
     fn run(mut self, rx: Receiver<Input>, stopped: Arc<AtomicBool>) {
         let mut next_tick = Instant::now();
         loop {
-            let wait = next_tick.saturating_duration_since(Instant::now());
+            let mut wait = next_tick.saturating_duration_since(Instant::now());
+            if let Some(due) = self.ota.next_due() {
+                wait = wait.min(Duration::from_millis(due.saturating_sub(self.now())));
+            }
             match rx.recv_timeout(wait) {
                 Ok(Input::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(input) => self.handle(input),
@@ -486,6 +502,16 @@ impl Runner {
                 }
             }
             Input::Text(sid, text) => {
+                if self.api.is_authed(sid)
+                    && let Some((id, ty, v)) = crate::ota::head(&text)
+                {
+                    let frame = match self.ota.request(&mut self.engine, &self.ncp, sid, &ty, &v, now) {
+                        Ok(r) => r.frame(id),
+                        Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),
+                    };
+                    self.send(sid, &frame);
+                    return;
+                }
                 if self.api.is_authed(sid)
                     && let Some(head) = admin::head(&text)
                 {
@@ -601,6 +627,8 @@ impl Runner {
         let cookie = self.ncp.client().session().map(|s| s.link.peer_cookie);
         if self.ncp.client().state() == SessionState::Ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
+            let asdu = self.ncp.client().session().and_then(|s| s.negotiated.capacity(zigbee_zrhp::msg::system::capacity::MAX_ASDU));
+            self.ota.set_asdu(asdu);
             self.api.set_info("maintenance", self.admin.features(&self.ncp).into());
         }
         if self.registered && self.cfg.import_ncp_devices {
@@ -725,6 +753,14 @@ impl Runner {
         let now = self.now();
         if self.catalog.as_ref().is_some_and(|c| c.config_dirty || !c.events.is_empty()) {
             self.pump_catalog();
+        }
+        self.ota.frames(&mut self.engine, now);
+        self.ota.poll(&mut self.engine, &self.ncp, now);
+        // Streams of sessions that are gone wait for a client.
+        let sinks = &self.sinks;
+        self.ota.prune(|sid| sinks.contains_key(&sid), now);
+        for (sid, frame) in self.ota.outbox() {
+            self.send(sid, &frame);
         }
         let events = self.engine.drain_events();
         self.registry.note(&events, now);

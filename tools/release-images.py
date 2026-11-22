@@ -56,6 +56,9 @@ LAYOUTS = [
         "csv": "firmware/hub/partitions-4mb-dev.csv",
         "app_partition": "factory",
         "max_app": 2944 * 1024,
+        # Built without the OTA image store (`--no-default-features
+        # --features app`; the store needs the 8 MB layout's second slot).
+        "elf": "tbr-hub-4mb-dev.elf",
         "note": "Development layout: one 2 944 KiB app slot, no OTA, 1 MiB hubdata.",
     },
 ]
@@ -148,8 +151,14 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     table = out / f"{stem}-partition-table.bin"
     boot = out / f"{stem}-bootloader.bin"
     merged = out / f"{stem}-merged.bin"
-    run("tools/make-app-image.sh", "release", str(app), "tbr-hub",
-        env={"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])})
+    env = {"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])}
+    if "elf" in spec:
+        # In the variant's target directory (built first, see hub-release.yml).
+        elf = ROOT / spec["target"] / spec["elf"]
+        if not elf.is_file():
+            raise ReleaseError(f"{spec['id']}: {elf.relative_to(ROOT)} missing (build it first, see hub-release.yml)")
+        env["ELF"] = str(elf)
+    run("tools/make-app-image.sh", "release", str(app), "tbr-hub", env=env)
     run("tools/make-partition-table.sh", spec["csv"], str(table), size)
     # The bootloader configures the flash from its own header: give it the board's size.
     run("esptool", "--chip", "esp32s3", "merge-bin", "--flash-size", size, "-o", str(boot), "0x0", str(boot_src))

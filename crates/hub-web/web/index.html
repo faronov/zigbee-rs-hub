@@ -122,6 +122,19 @@ progress{width:12em}
 <p class="mut">The coordinator's tables, then every router asked for its neighbours (Mgmt_Lqi) and routes. Line colour: link quality (LQI) as the routers report it.</p>
 <div id="mp"></div><div id="mpl"></div></section>
 </div>
+<div data-tab="ota" data-title="Updates" data-need="ota" class="tab">
+<p id="otk" class="badge bad hide"></p>
+<section class="card"><h2>Device firmware <span id="otn" class="mut"></span></h2>
+<p class="mut">Zigbee OTA (cluster 0x0019). <b>manual</b>: a device updates after Update only; <b>auto</b>: by itself, inside the window. A sleepy device takes the request when it next wakes up.</p>
+<ul class="ents" id="otd"></ul></section>
+<section class="card"><h2>Images <span id="otu" class="mut"></span></h2><ul class="ents" id="oti"></ul>
+<div class="row acts otst"><input id="otf" type="file"><button class="p" id="otb">Upload to the hub</button><span id="otp" class="mut"></span></div>
+<div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div>
+<p class="mut">Install from this tab: the hub stores nothing, this tab serves the image while the device downloads it — keep it open until the update is done.</p></section>
+<section class="card"><h2>Online index</h2><p class="mut">The browser fetches the index and the images: the hub downloads nothing itself.</p>
+<div class="row"><input id="otx" size="48"><button id="otc">Find updates</button><span id="ots" class="mut"></span></div><ul class="ents" id="otr"></ul></section>
+<section class="card"><h2>Settings</h2><div class="row"><label>Policy <select id="otpo"><option>manual</option><option>auto</option><option>off</option></select></label><label>Window <input id="otw1" size="5" placeholder="02:00">–<input id="otw2" size="5" placeholder="05:00"></label><label>At once <input id="otmc" type="number" class="num" min="1" max="8"></label><label>Blocks/s <input id="otbs" type="number" class="num" min="0"></label><label>Block period <input id="otbp" type="number" class="num" min="0"> ms</label><button id="otsv">Apply</button></div><p class="mut" id="ota"></p></section>
+</div>
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
 <div class="row acts"><label>Channel <select id="ch"></select></label><button id="chb">Change channel</button></div>
@@ -161,7 +174,8 @@ const onTab={};
 function tabs(){
  const nav=$("#tabs");nav.textContent="";
  const want=(/^#\/(\w+)/.exec(location.hash)||[])[1];
- const all=[...document.querySelectorAll("main>.tab")];
+ const tabsAll=[...document.querySelectorAll("main>.tab")],all=tabsAll.filter(t=>!t.dataset.need||hub[t.dataset.need]);
+ for(const t of tabsAll)t.classList.add("hide");
  const cur=all.find(t=>t.dataset.tab==want)||all[0];
  for(const t of all){t.classList.toggle("hide",t!=cur);nav.append(el("button",{class:t==cur?"on":null,onclick:()=>{location.hash="#/"+t.dataset.tab}},t.dataset.title))}
  if(onTab[cur.dataset.tab])onTab[cur.dataset.tab]();
@@ -186,12 +200,13 @@ function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
-  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate()}).catch(()=>{});
-  call("subscribe",{topics:["devices","entities","network","gp","catalog"]}).catch(e=>toast(e.message));
+  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();tabs();otRe()}).catch(()=>{});
+  call("subscribe",{topics:["devices","entities","network","gp","catalog","ota"]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
+ if(m.type=="ota/block_needed"){otNeed(m);return}
  if(m.type=="event")onEvent(m.event);
 }
 function onEvent(e){
@@ -212,6 +227,7 @@ function onEvent(e){
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
+ case"ota_device":case"ota_images":otEv(e);break;
  default:if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
  }
 }
@@ -612,6 +628,55 @@ $("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r
  if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
 function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctSerial(()=>ctShards(e.shards));if($("#ctl").offsetParent)onTab.catalog()}
 // ---- end of converters and catalog tabs ----
+// ---- Updates (OTA) tab ----
+let otD={},otI=[],otA={},otIdx=null,otS={};
+const ver=v=>v==null?"?":hex(v,8),kb=n=>Math.round((n||0)/1024)+" KiB";
+onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()}).catch(()=>{});call("ota/images/list").then(l=>{otI=l;otImg()}).catch(()=>{});call("ota/status").then(s=>{otA=s.area;otSet(s.settings);$("#ota").textContent="Blocks of up to "+s.block_max+" B (NCP max_asdu "+s.asdu_max+")";otImg()}).catch(e=>$("#ota").textContent=e.message)};
+function otEv(e){if(e.topic=="ota_device"&&e.device){const j=e.device.job;otD[e.device.device]=e.device;otDev();if(j&&otStr[j.image]&&["done","failed","aborted"].includes(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}}else if(e.topic=="ota_images"){otA=e.area||otA;call("ota/images/list").then(l=>{otI=l;otImg()}).catch(()=>{})}}
+function otDev(){
+ const box=$("#otd");box.textContent="";const ids=Object.keys(otD);$("#otn").textContent="("+ids.length+")";
+ if(!ids.length)box.append(el("li",{class:"mut"},"No device with an OTA client (cluster 0x0019) yet."));
+ const sd=$("#otsd"),sv=sd.value;sd.textContent="";for(const id of ids)sd.append(el("option",{value:id},otD[id].name||id));if(sv)sd.value=sv;
+ for(const id of ids){const d=otD[id],j=d.job,a=d.available,run=j&&["waiting","queued","downloading","installing"].includes(j.state);
+  const st=j?j.state+(j.state=="downloading"?" "+j.progress+" %"+(j.stalled?" (stalled)":""):"")+(j.error&&!run?": "+j.error:""):"";
+  const pol=el("select",{onchange:e=>act("ota/devices/policy",{device:id,policy:e.target.value||null}).catch(()=>{})},...[["","default ("+d.effective_policy+")"],["manual","manual"],["auto","auto"],["off","off"]].map(([v,t])=>el("option",{value:v},t)));pol.value=d.policy||"";
+  box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||id),el("br"),el("span",{class:"mut"},(d.manufacturer_code!=null?hex(d.manufacturer_code,4)+"/"+hex(d.image_type,4)+" ":"")+"runs "+ver(d.current_version)+(a?" → "+ver(a.file_version):"")+(d.sleepy?" · sleepy":""))),
+   el("span",{class:"v mut"},st),pol,
+   el("button",{onclick:e=>busy(e.target,act("ota/devices/check",{device:id}).then(()=>toast(d.sleepy?"Asked; a sleepy device answers when it wakes up":"Asked")))},"Check"),
+   run?el("button",{class:"d",onclick:e=>busy(e.target,act("ota/abort",{device:id}))},"Abort"):el("button",{class:"p",disabled:a?null:"",onclick:e=>busy(e.target,act("ota/start",{device:id}))},"Update")))}
+}
+function otImg(){const box=$("#oti"),a=otA||{};box.textContent="";$("#otu").textContent=a.capacity?kb(a.used)+" of "+kb(a.capacity)+" used, largest free "+kb(a.largest_free)+(a.foreign?"; the area holds other data":""):a.error||"";
+ for(const i of otI){const r=i.state=="ready";box.append(el("li",{},el("span",{class:"n"},el("b",{},i.label||i.name||"image "+i.image),el("br"),el("span",{class:"mut"},(i.state=="streamed"?"streamed from a client · ":r?"":"uploading, "+kb(i.written)+" · ")+hex(i.manufacturer_code||0,4)+"/"+hex(i.image_type||0,4)+" "+ver(i.file_version)+" · "+kb(i.size)+(i.hw_min!=null?" · hw "+i.hw_min+"–"+i.hw_max:"")+(i.name?" · "+i.name:""))),
+  el("button",{class:"d",onclick:e=>{if(confirm("Delete this image?"))busy(e.target,act(i.state=="streamed"?"ota/stream/close":r?"ota/images/delete":"ota/upload/abort",i.state=="streamed"?{session:i.image}:r?{image:i.image}:{upload:i.image}).then(onTab.ota))}},"Delete")))}
+ if(!otI.length)box.append(el("li",{class:"mut"},"No images."))}
+let otStr={};
+function otCut(buf){const u=new Uint8Array(buf),m=otMagic(u);if(m<0)throw new Error("not a Zigbee OTA file");return u.subarray(m)}
+function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: it serves "+n+" image(s) to devices while they download";k.classList.toggle("hide",!n)}
+async function otStream(buf,name,meta,dev){const u=otCut(buf),o=await call("ota/stream/offer",Object.assign({size:u.length,name,header:b64(u.subarray(0,256))},meta||{}));otStr[o.session]=u;otKeep();await call("ota/start",{device:dev,image:o.session});toast("Started: keep this tab open until the update is done");return o}
+function otNeed(m){const u=otStr[m.session];if(u)call("ota/block_data",{session:m.session,offset:m.offset,data:b64(u.subarray(m.offset,m.offset+m.len))}).catch(()=>{})}
+// After a reconnect: offer the images again (the hub keeps the sessions for a while).
+function otRe(){const old=otStr;otStr={};for(const k in old)call("ota/stream/offer",{size:old[k].length,name:"image.ota",header:b64(old[k].subarray(0,256))}).then(o=>{otStr[o.session]=old[k];otKeep()}).catch(()=>{});otKeep();for(const e of document.querySelectorAll(".otst"))e.classList.toggle("hide",!(hub.ota&&hub.ota.store))}
+addEventListener("beforeunload",e=>{if(Object.keys(otStr).length){e.preventDefault();e.returnValue=""}});
+$("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otStream(b,f.name,null,d)).catch(x=>toast(x.message)))};
+function otMagic(u){for(let i=0;i+3<Math.min(u.length,4096);i++)if(u[i]==0x1E&&u[i+1]==0xF1&&u[i+2]==0xEE&&u[i+3]==0x0B)return i;return-1}
+async function otUp(buf,name,meta){
+ const u=otCut(buf);
+ const p=$("#otp"),b=await call("ota/upload/begin",Object.assign({size:u.length,name},meta||{})),n=b.chunk_max||8192;let at=b.offset;
+ while(at<u.length){const e=Math.min(at+n,u.length);await call("ota/upload/chunk",{upload:b.upload,offset:at,data:b64(u.subarray(at,e))});at=e;p.textContent=Math.round(at*100/u.length)+" %"}
+ const r=await call("ota/upload/commit",{upload:b.upload});p.textContent="";toast("Stored "+(r.label||name)+" "+ver(r.file_version)+(r.devices.length?", for "+r.devices.length+" device(s)":""));onTab.ota();return r}
+$("#otb").onclick=e=>{const f=$("#otf").files[0];if(f)busy(e.target,f.arrayBuffer().then(b=>otUp(b,f.name)).catch(x=>toast(x.message)))};
+$("#otc").onclick=e=>{const url=$("#otx").value.trim();if(url!=otS.index_url)call("ota/settings/set",{index_url:url}).then(otSet,x=>toast(x.message));$("#ots").textContent="fetching…";busy(e.target,fetch(url).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.json()}).then(l=>{otIdx=l;otFind()}).catch(x=>{$("#ots").textContent=x.message}))};
+const otFits=(d,x)=>x.manufacturerCode==d.manufacturer_code&&x.imageType==d.image_type&&x.fileVersion>d.current_version&&!(x.minFileVersion>d.current_version)&&!(x.maxFileVersion<d.current_version)&&(d.hw_version==null||!(x.hardwareVersionMin>d.hw_version)&&!(x.hardwareVersionMax<d.hw_version));
+function otFind(){const box=$("#otr");box.textContent="";let n=0;
+ for(const d of Object.values(otD)){if(d.manufacturer_code==null)continue;const c=otIdx.filter(x=>otFits(d,x)).sort((a,b)=>b.fileVersion-a.fileVersion)[0];if(!c)continue;n++;
+  const have=otI.some(i=>i.manufacturer_code==c.manufacturerCode&&i.image_type==c.imageType&&i.file_version==c.fileVersion);
+  box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||d.device),el("br"),el("span",{class:"mut"},ver(d.current_version)+" → "+ver(c.fileVersion)+" · "+kb(c.fileSize)+" · "+c.fileName)),
+   have?el("span",{class:"mut"},"on the hub"):el("button",{class:"p",onclick:e=>{const st=hub.ota&&hub.ota.store,mt={min_file_version:c.minFileVersion,max_file_version:c.maxFileVersion};busy(e.target,fetch(c.url).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.arrayBuffer()}).then(b=>otSha(b,c.sha512).then(()=>st?otUp(b,c.fileName,mt):otStream(b,c.fileName,mt,d.device))).then(otFind).catch(x=>toast(x.message)))}},hub.ota&&hub.ota.store?"Download to hub":"Install from this tab")))}
+ $("#ots").textContent=otIdx.length+" images in the index, "+n+" for your devices"+(crypto.subtle?"":" (SHA-512 not checked: not a secure context)")}
+function otSha(b,want){if(!want||!crypto.subtle)return Promise.resolve();return crypto.subtle.digest("SHA-512",b).then(h=>{if(bytes([...new Uint8Array(h)])!=want.toLowerCase())throw new Error("SHA-512 mismatch")})}
+function otSet(s){if(!s)return;otS=s;V("otx",s.index_url||"");V("otpo",s.policy);V("otw1",s.window?s.window.start:"");V("otw2",s.window?s.window.end:"");V("otmc",s.max_concurrent);V("otbs",s.blocks_per_s);V("otbp",s.min_block_period_ms)}
+$("#otsv").onclick=e=>{const a=V("otw1"),b=V("otw2");busy(e.target,act("ota/settings/set",{policy:V("otpo"),window:a&&b?{start:a,end:b}:null,max_concurrent:+V("otmc"),blocks_per_s:+V("otbs"),min_block_period_ms:+V("otbp")}).then(otSet,()=>{}))};
+// ---- end of Updates tab ----
 connect();
 </script>
 </body>

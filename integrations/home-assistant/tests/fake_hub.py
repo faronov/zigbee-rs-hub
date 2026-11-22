@@ -381,6 +381,18 @@ class FakeHub:
             # The hub's clock: seconds since boot (not synchronised).
             "time": 4098.5,
         }
+        # OTA server records by device (`ota/*`, `ota` topic); None: a hub
+        # without the OTA server.
+        self.ota: dict[str, dict[str, Any]] | None = None
+        # The OTA index the hub names (served here at /index.json) and its
+        # files (/files/<name>); uploads received: upload id → bytes.
+        self.ota_index: list[dict[str, Any]] | None = None
+        self.files: dict[str, bytes] = {}
+        self.uploads: dict[int, bytearray] = {}
+        self.images: list[dict[str, Any]] = []
+        # A hub without an image store (4 MB): streams only.
+        self.ota_store = True
+        self.streamed: dict[tuple[int, int], bytes] = {}
         # Answer only the first hub/info of a connection (a hung hub).
         self.hang_after_connect = False
         # `None`: a hub without the catalog API.
@@ -399,6 +411,8 @@ class FakeHub:
         """Listen on 127.0.0.1."""
         app = web.Application()
         app.router.add_get("/api", self._handler)
+        app.router.add_get("/index.json", self._index)
+        app.router.add_get("/files/{name}", self._file)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, "127.0.0.1", port or self.port)
@@ -406,6 +420,12 @@ class FakeHub:
         server = self._site._server
         assert server is not None
         self.port = server.sockets[0].getsockname()[1]
+
+    async def _index(self, _request: web.Request) -> web.Response:
+        return web.json_response(self.ota_index or [])
+
+    async def _file(self, request: web.Request) -> web.Response:
+        return web.Response(body=self.files[request.match_info["name"]])
 
     async def stop(self) -> None:
         """Close all connections and stop listening."""
@@ -508,8 +528,14 @@ class FakeHub:
         if kind == "hub/info" and self.hang_after_connect and subs:
             return
         if kind == "hub/info" and self.hub_info:
+            extra = (
+                {"ota": {"store": self.ota_store, "stream": True, "chunk_max": 4096}}
+                if self.ota is not None
+                else {}
+            )
             await ok(
-                {
+                extra
+                | {
                     "name": self.name,
                     "api_version": self.api_version,
                     "features": ["expr-v1", "gp"],
@@ -528,6 +554,8 @@ class FakeHub:
                 known.add("catalog")
             if self.api_version >= "1.1":
                 known.add("network")
+            if self.ota is not None:
+                known.add("ota")
             if topics - known:
                 await err("invalid_value", f"unknown topics {sorted(topics - known)}")
                 return
@@ -567,6 +595,46 @@ class FakeHub:
             await ok({"started": True})
         elif kind.startswith(("catalog/", "definitions/")) and self.catalog is not None:
             await self._answer_catalog(ws, req, ok, err)
+        elif kind == "ota/devices/list" and self.ota is not None:
+            await ok(copy.deepcopy(list(self.ota.values())))
+        elif kind == "ota/start" and self.ota is not None:
+            await ok({"sleepy": False})
+            if req.get("image", 0) >= 0x1_0000:
+                await ws.send_json(
+                    {"type": "ota/block_needed", "session": req["image"], "offset": 0, "len": 4096}
+                )
+        elif kind == "ota/stream/offer" and self.ota is not None:
+            head = base64.b64decode(req["header"])
+            await ok(
+                {
+                    "session": 0x1_0000,
+                    "manufacturer_code": int.from_bytes(head[10:12], "little"),
+                    "image_type": int.from_bytes(head[12:14], "little"),
+                    "file_version": int.from_bytes(head[14:18], "little"),
+                    "devices": [],
+                }
+            )
+        elif kind == "ota/block_data" and self.ota is not None:
+            self.streamed[(req["session"], req["offset"])] = base64.b64decode(req["data"])
+            await ok(None)
+        elif kind == "ota/stream/close" and self.ota is not None:
+            await ok(None)
+        elif kind == "ota/status" and self.ota is not None:
+            url = f"http://127.0.0.1:{self.port}/index.json" if self.ota_index is not None else ""
+            await ok({"settings": {"policy": "manual", "index_url": url}, "chunk_max": 4096})
+        elif kind == "ota/upload/begin" and self.ota is not None:
+            upload = len(self.uploads) + 1
+            self.uploads[upload] = bytearray()
+            await ok({"upload": upload, "offset": 0, "chunk_max": 4096})
+        elif kind == "ota/upload/chunk" and self.ota is not None:
+            buf = self.uploads[req["upload"]]
+            assert req["offset"] == len(buf)
+            buf.extend(base64.b64decode(req["data"]))
+            await ok({"written": len(buf)})
+        elif kind == "ota/upload/commit" and self.ota is not None:
+            image = {"image": 40 + req["upload"], "size": len(self.uploads[req["upload"]])}
+            self.images.append(image)
+            await ok(image)
         else:
             await err("invalid_format", f"unknown variant `{kind}`")
 

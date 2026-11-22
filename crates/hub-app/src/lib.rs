@@ -10,6 +10,8 @@
 //! | [`catalog`] | the definitions catalog: trusted keys (slot 0, slot 1 for rotation), bank/manifest verification, the store in `hubdata` (bank slots A/B, active-bank record, manifest, local definitions) and the service (update checks, downloads, on-demand fetch, uploads, `catalog/*` API) |
 //! | [`admin`] | network and hub maintenance API (energy scan, channel, TX power, diagnostics, map, backup/restore, reset; Wi-Fi, token, reboot, mode, logs) |
 //! | [`ocb`] | Open Coordinator Backup JSON ⇄ ZRHP record streams |
+//! | [`ota`] | OTA Upgrade server (cluster 0x0019, `hub-ota`): streamed images, `ota/*` requests, `ota` topic |
+//! | `ota_store` | (feature `ota-store`) the image store in the inactive app slot, its lock against the hub's own update |
 //! | [`topology`] | network map: coordinator tables and Mgmt_Lqi/Mgmt_Rtg over the air |
 //! | [`platform`] | what the app needs from the machine ([`Platform`]), log ring |
 //!
@@ -24,13 +26,20 @@ pub mod jobs;
 pub mod jw;
 pub mod convert;
 pub mod ocb;
+pub mod ota;
+#[cfg(feature = "ota-store")]
+pub mod ota_store;
 pub mod platform;
 pub mod registry;
 pub mod topology;
 pub mod transport;
 
 pub use app::{App, AppConfig, AppStatus, CatalogSetup, SessionSink, builtin_catalog};
+#[cfg(feature = "ota-store")]
+pub use ota_store::OtaFlash;
 pub use platform::{LogRing, Platform};
 
+#[cfg(test)]
+mod ota_tests;
 #[cfg(test)]
 mod tests;

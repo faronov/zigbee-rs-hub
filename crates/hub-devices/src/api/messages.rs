@@ -12,7 +12,9 @@ use crate::hub::ApiError;
 pub const API_VERSION: &str = "1.2";
 
 /// Topics of `subscribe`.
-pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp", "network", "catalog"];
+pub const TOPICS: &[&str] = &[
+    "devices", "entities", "events", "gp", "network", "catalog", "ota",
+];
 
 /// The first frame from the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

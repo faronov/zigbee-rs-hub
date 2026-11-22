@@ -76,6 +76,8 @@ class HubClient:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._subscriptions: dict[int, EventCallback] = {}
+        # Other unsolicited messages (`ota/block_needed`).
+        self.on_message: Callable[[dict[str, Any]], None] | None = None
         self.hello: dict[str, Any] = {}
         self.closed = asyncio.Event()
 
@@ -212,6 +214,11 @@ class HubClient:
                     cb(event, int(frame.get("seq", 0)))
                 except Exception:
                     _LOGGER.exception("Error handling hub event %s", event.get("topic"))
+        elif self.on_message is not None:
+            try:
+                self.on_message(frame)
+            except Exception:
+                _LOGGER.exception("Error handling hub message %s", kind)
 
     def _finish(self) -> None:
         self.closed.set()

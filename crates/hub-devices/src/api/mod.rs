@@ -425,6 +425,15 @@ impl ApiServer {
                 &network_info(hub, now).unwrap_or(J::Null),
             );
         }
+        // Application topics (e.g. `ota`), kept as text by the app.
+        for (t, v) in &hub.app_snapshots {
+            if has(t) {
+                s.push_str(",\"");
+                s.push_str(t);
+                s.push_str("\":");
+                s.push_str(v);
+            }
+        }
         s.push_str("}}");
         s
     }
@@ -1026,6 +1035,7 @@ impl ApiServer {
                     }
                     ("network", body)
                 }
+                HubEvent::App { topic, body } => (topic, body),
                 HubEvent::Gp { kind, mut body } => {
                     if let Some(o) = body.as_object_mut() {
                         o.insert("topic".into(), kind.into());

@@ -16,7 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hub-web -p hubctl
+      - run: cargo test -p hub-core -p hub-ncp -p hub-ota -p hub-app -p hub-web -p hubctl
+      - run: cargo test -p hub-ota --no-default-features && cargo test -p hub-app --no-default-features
+      - run: cargo fmt -p hub-ota -- --check
+      - run: cargo clippy -p hub-ota --all-targets -- -D warnings
+      - run: cargo clippy -p hub-ota --no-default-features --all-targets -- -D warnings
       - name: S3 flashing helpers (partition offsets from the device's table)
         run: python3 -m unittest discover -s tools/flow -p 'test_*.py'
 
@@ -160,22 +164,29 @@ jobs:
       - name: Build tbr-hub without the application (ZRHP host core only)
         working-directory: firmware/hub
         run: cargo build --release --no-default-features
+      - name: Build tbr-hub for the 4 MB dev layout (application without the OTA image store)
+        run: |
+          (cd firmware/hub && cargo build --release --no-default-features --features app)
+          cp target/xtensa-esp32s3-espidf/release/tbr-hub target/tbr-hub-4mb-dev.elf
       - name: Build tbr-hub (application)
         working-directory: firmware/hub
         run: cargo build --release
-      - name: Build tbr-hub (application, octal PSRAM variant)
+      - name: Build tbr-hub (application, octal PSRAM variant; 4 MB dev build without the store first)
         working-directory: firmware/hub
         env:
           ESP_IDF_SDKCONFIG_DEFAULTS: firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal
           CARGO_TARGET_DIR: ${{ github.workspace }}/target-opi
-        run: cargo build --release
+        run: |
+          cargo build --release --no-default-features --features app
+          cp "$CARGO_TARGET_DIR/xtensa-esp32s3-espidf/release/tbr-hub" "$CARGO_TARGET_DIR/tbr-hub-4mb-dev.elf"
+          cargo build --release
       - name: App images (tbr-hub must fit the 3 MiB production slot and the 2 944 KiB dev slot)
         run: |
           pip install --quiet "esptool>=5,<6"
           tools/make-app-image.sh release target/tbr-bridge-app.bin tbr-bridge
           FLASH_SIZE=8MB MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-8mb-app.bin tbr-hub
-          FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-app.bin tbr-hub
-          TARGET_DIR=target-opi FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-opi-app.bin tbr-hub
+          ELF=target/tbr-hub-4mb-dev.elf FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-app.bin tbr-hub
+          ELF=target-opi/tbr-hub-4mb-dev.elf FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-opi-app.bin tbr-hub
       - name: Partition tables (8 MB production, 4 MB dev)
         run: |
           tools/make-partition-table.sh firmware/hub/partitions-8mb.csv target/partitions-8mb.bin 8MB

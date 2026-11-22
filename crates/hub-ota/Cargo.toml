@@ -1,0 +1,27 @@
+[package]
+name = "hub-ota"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Zigbee OTA Upgrade server of zigbee-rs-hub (cluster 0x0019): OTA file format, image store on raw flash, server state machine, simulated OTA client"
+publish = false
+
+[dependencies]
+# `store::Flash`, the raw-flash region trait of the host store.
+hub-ncp = { workspace = true, optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
+serde_json = "1"
+# Store warnings only.
+log = { version = "0.4", optional = true }
+
+[features]
+default = ["store"]
+# The image store on raw flash (8 MB layout); without it the server serves
+# streamed images only (4 MB layout).
+store = ["dep:hub-ncp", "dep:sha2", "dep:log"]
+
+[dev-dependencies]
+hub-ncp = { workspace = true }
+sha2 = { version = "0.10", default-features = false }
