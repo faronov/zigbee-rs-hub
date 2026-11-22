@@ -309,9 +309,11 @@ newer than the running one; the image inside is what the product's
 - By hand: `hubctl --sim --sim-ota serve` with `hubctl ota-stream` and the
   web UI's Updates tab.
 
-**Hardware: streaming fails on the 4 MB board without PSRAM** (2026-11-22,
-procedure and results below: the hub runs out of internal heap during the
-download). The store needs an 8 MB board (host tests only so far).
+**Hardware:** streaming works on the lab board's octal-PSRAM 4 MB build
+(2026-11-23: two complete downloads to the C6, steps 3–10 pass, internal
+heap flat) with one unexplained hub panic during the first run; the first
+test without the memory fixes failed (heap). Results below. The store needs
+an 8 MB board (host tests only so far).
 
 ## Hardware test
 
@@ -401,6 +403,50 @@ any NCP errors, the Match_Desc result of step 4, the outcome of steps
 7–10.
 
 ## Hardware results
+
+### Round 3: memory fixes, octal-PSRAM build (2026-11-23)
+
+Lab BR board, S3 N4R8 (8 MB octal PSRAM), 4 MB dev layout. Image
+`zigbee-ota` 6d09647 (rebased on main 0.1.8), octal variant
+(`sdkconfig.octal`, `-opi`), 2 662 592 B, app only at 0x10000 (`nvs`,
+`hubdata` kept). H2 NCP 0.1.0 (caps 0xD683B8, `asdu_max` 82). C6 sensor
+child 0x93B2 (PAN 0x1C06, ch 17), Home Assistant connected.
+**Result: all steps pass; one unexplained hub panic (below).**
+
+| Step | Result |
+|---|---|
+| 3. Boot | `ota` = `{"store": false, "stream": true, "stream_chunk": 1024}`; internal heap 118.0 KB free (min 111.9 KB, largest block 45 KB), PSRAM 8 MB |
+| 4. Identity | `check` → `sleepy: true`; the C6 queried within 1 min: 0x1234 / 1 / version 1 / hw 1 (pre-0x6D6B firmware). Match_Desc: still not exercised (the zigbee-rs client answers the Image Notify) |
+| 5. File | the round-2 file (zigbee-rs master bd91d015, `--legacy-manufacturer`, 406 978 B, 0x1234 / 0x0001 / v2), so the C6's suspended download stayed valid |
+| 6. Stream | `notified`, the download started at the C6's next poll (2.7 min) and continued from its saved offset (27 %); 1 KiB per 4–5 s (~200 B/s) |
+| 7. Away 60 s | (at 33 %) `running download, notified again`, continued at 33 % |
+| 8. Away 150 s | (at 41 %) job `aborted`, error "the stream's client did not come back", `available` gone; the C6 kept reporting. Rerun: `notified`, continued at 41 % |
+| 9. Hub restart | (at 59 %, console `s3 reset`, `hubctl` left running) `connection lost …; connecting again` after 2 s, `stream session 65536`, `running download, notified again`, continued at 59 % |
+| 10. Done | `installing` → `done` 61 s later, `hubctl` exited; `ota/devices/list`: `current_version` 2, job `done`; Basic SWBuildID "2" after a re-interview; the C6 rejoined and reports |
+| Heap | 5-min samples: internal free 116.7–118.1 KB, `min_free` 110.6 KB at the lowest (step 3: 111.9 KB); PSRAM free ≥ 8 264 752 of 8 388 608 B (console); `stream_paused` never true, stream `memory` 4 156 B, `waits` 1–5, no `ota: heap low` |
+| NCP | `last_error` null, APS 0 failed / 0 not delivered (8 488 delivered in the v3 run), no TOO_LARGE/UNSUPPORTED |
+
+A second complete download, v2 → v3 (zigbee-rs master a8fb590c, 0x6D6B /
+0x0001 / v3, 407 058 B), ran in one go with a debug variant of the same
+commit (USB-Serial-JTAG secondary console, S3 in `s3 usj` mode so the
+console could be captured): 39 min 20 s from the first block (172 B/s),
+no reconnect, `installing` → `done` after 62 s, the C6 rejoined with
+`current_version` 3 / 0x6D6B. Heap as above (internal min 110.6 KB). The
+captured console showed no warning beyond one 404 for `/favicon.ico`.
+
+**Open: an unexplained hub panic.** During the first run, at t = 592 s of
+the boot that started with the step-9 reset (84 %), the hub restarted with
+reset reason 4 (panic): crash streak 1, no Rust panic message, no failed
+allocation, internal heap 117.5 KB / PSRAM 8.27 MB free in the last stack
+watch, and an empty `coredump` partition. `hubctl` reconnected after 2 s and
+the C6 continued (84 %), so the download still finished. One more
+unexplained `connection lost` came at 58 % (23:48, before the step-9
+reset; whether the hub restarted then is unknown). The 40-minute repro in
+USJ mode (no TinyUSB) did not panic. Needed: the panic output (UART0, or
+the USJ secondary console in TinyUSB mode) and a comparable soak of main
+0.1.8 octal, to tell whether this branch causes it.
+
+### Round 2: before the memory fixes (2026-11-22)
 
 2026-11-22, lab BR board (S3 without PSRAM, 4 MB dev layout), H2 NCP 0.1.0
 (zigbee-rs master 67fcb086, caps 0xD683B8, `max_asdu` 82), C6 sensor
