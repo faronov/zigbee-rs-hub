@@ -964,3 +964,33 @@ fn jobs_run_on_the_worker_and_only_a_second_one_needs_heap() {
     *p.heap.lock().unwrap() = Some((4 * 1024, 4 * 1024));
     ok(&call(&app, sid, &rx, 13, json!({"type": "network/jobs"})));
 }
+
+#[test]
+fn time_zone_and_servers_are_set_kept_and_reported() {
+    let store = Store::volatile();
+    let r = rig(store);
+    let app = admin_app(&r, Some(Arc::new(TestPlatform::default())));
+    let (sid, rx) = session(&app);
+    let t = call(&app, sid, &rx, 1, json!({"type": "hub/time"}));
+    let t = ok(&t);
+    assert_eq!((t["time_synced"].as_bool(), t["tz"].as_str(), t["servers"][0].as_str()), (Some(true), Some("UTC0"), Some("pool.ntp.org")));
+    let set = call(&app, sid, &rx, 2, json!({"type": "hub/time/set", "tz": "EET-2EEST,M3.5.0/3,M10.5.0/4", "servers": ["time.cloudflare.com", "pool.ntp.org"]}));
+    let set = ok(&set).clone();
+    assert!([7200, 10_800].contains(&set["tz_offset_s"].as_i64().unwrap()), "{set}");
+    assert_eq!(set["servers"], json!(["time.cloudflare.com", "pool.ntp.org"]));
+    assert!(set["dst"]["start"].as_i64().unwrap() < set["dst"]["end"].as_i64().unwrap());
+    assert_eq!(set["local"].as_str().unwrap().len(), 19);
+    let bad = call(&app, sid, &rx, 3, json!({"type": "hub/time/set", "tz": "Europe/Kyiv"}));
+    assert_eq!(err_code(&bad), "invalid_value");
+    let bad = call(&app, sid, &rx, 4, json!({"type": "hub/time/set", "servers": []}));
+    assert_eq!(err_code(&bad), "invalid_value");
+    // Kept in the host store; network/info carries the wall clock.
+    let kept = r.ncp.with_store(|s| s.kv_get(crate::admin::TZ_KEY).map(<[u8]>::to_vec));
+    assert_eq!(kept.as_deref(), Some(&b"EET-2EEST,M3.5.0/3,M10.5.0/4"[..]));
+    std::thread::sleep(Duration::from_millis(1100));
+    let n = call(&app, sid, &rx, 5, json!({"type": "network/info"}));
+    let n = ok(&n);
+    assert_eq!(n["time_synced"], true);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    assert!((n["time_utc"].as_f64().unwrap() - now).abs() < 5.0, "{n}");
+}

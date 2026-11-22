@@ -58,3 +58,6 @@ CONFIG_LWIP_IPV6=n
 # core dump and the UART0 backtrace still locate it with the ELF). Saves
 # 49 KB of flash and 5 KB of internal RAM (IRAM and DRAM strings).
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+
+# SNTP: up to three servers (hub/time/set).
+CONFIG_LWIP_SNTP_MAX_SERVERS=3

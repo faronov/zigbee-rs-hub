@@ -22,6 +22,7 @@ use serde_json::{Value as J, json};
 use zigbee_zrhp::msg::system::caps;
 use zigbee_zrhp::types::Status;
 
+use crate::clock;
 use crate::jobs::{self, Lane};
 use crate::jw::{Jw, oom};
 use crate::ocb;
@@ -49,7 +50,14 @@ pub const TYPES: &[&str] = &[
     "hub/token/rotate",
     "hub/reboot",
     "hub/mode/set",
+    "hub/time",
+    "hub/time/set",
 ];
+
+/// Host store keys of the time settings.
+pub const TZ_KEY: &str = "cfg/tz";
+/// SNTP servers, comma separated.
+pub const NTP_KEY: &str = "cfg/ntp";
 
 /// Host store key of the last complete backup (OCB text).
 pub const LAST_BACKUP_KEY: &str = "bkp/last";
@@ -107,6 +115,35 @@ pub struct Ctx<'a> {
     pub now_s: f64,
 }
 
+/// The hub's time settings and clock state.
+struct ClockState {
+    tz: clock::Tz,
+    tz_text: String,
+    servers: Vec<String>,
+    source: Option<&'static str>,
+    /// Engine ms → Unix ms.
+    offset_ms: i64,
+    /// When the clock was first known this run, Unix s.
+    last_set: Option<i64>,
+}
+
+impl Default for ClockState {
+    fn default() -> Self {
+        ClockState {
+            tz: clock::Tz::default(),
+            tz_text: clock::DEFAULT_TZ.into(),
+            servers: vec![clock::DEFAULT_SERVER.into()],
+            source: None,
+            offset_ms: 0,
+            last_set: None,
+        }
+    }
+}
+
+fn wall_s() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
 /// Maintenance state of the app.
 pub struct Admin {
     /// The platform (`None`: hub settings unsupported).
@@ -115,6 +152,8 @@ pub struct Admin {
     pub source: String,
     /// Stack of the job thread.
     pub job_stack: usize,
+    /// Time zone, SNTP servers and the clock's state.
+    clock: ClockState,
     /// The long-lived job thread ([`start_worker`](Self::start_worker)).
     worker: Option<jobs::Worker>,
     board: jobs::Shared,
@@ -501,7 +540,7 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
-        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None, worker: None }
+        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None, worker: None, clock: ClockState::default() }
     }
 
     /// Start the long-lived job thread (with `job_stack`); call once,
@@ -537,6 +576,11 @@ impl Admin {
         let r = match head.ty.as_str() {
             "hub/system" => Ok(self.system(&ctx)),
             "hub/logs" => self.logs(v),
+            "hub/time" => return vec![self.time_frame(id)],
+            "hub/time/set" => match self.set_time(ctx.ncp, v) {
+                Ok(()) => return vec![self.time_frame(id)],
+                Err(e) => Err(e),
+            },
             "hub/wifi/set" => self.wifi(v),
             "hub/token/rotate" => self.rotate_token(ctx.api),
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
@@ -610,6 +654,7 @@ impl Admin {
                 }),
             );
             o.insert("time".into(), ctx.now_s.into());
+            o.insert("time_synced".into(), hub_devices::device::time_synced().into());
         }
         v
     }
@@ -618,6 +663,123 @@ impl Admin {
         let q = LogsReq::from(v)?;
         let p = self.platform()?;
         Ok(json!({"lines": p.logs(q.lines.unwrap_or(100).min(500))}))
+    }
+
+    /// Time settings from the host store; hands them to the platform.
+    #[inline(never)]
+    pub fn load_clock(&mut self, ncp: &Ncp) {
+        let (tz, ntp) = ncp.with_store(|s| {
+            let get = |k| s.kv_get(k).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string);
+            (get(TZ_KEY), get(NTP_KEY))
+        });
+        if let Some(t) = tz.as_deref().and_then(clock::parse) {
+            self.clock.tz = t;
+            self.clock.tz_text = tz.unwrap_or_default();
+        }
+        if let Some(n) = ntp {
+            self.clock.servers = n.split(',').map(str::to_string).collect();
+        }
+        if let Some(p) = &self.platform
+            && let Err(e) = p.set_time(&self.clock.servers)
+        {
+            warn!("time: {e}");
+        }
+    }
+
+    /// Once a second: the wall-clock offset, the engine's time zone and its
+    /// Time cluster clock.
+    #[inline(never)]
+    pub fn clock_tick(&mut self, engine: &mut hub_devices::hub::HubConfig, now: hub_devices::device::Millis) {
+        let source = match &self.platform {
+            Some(p) => p.time_source(),
+            None => (wall_s() >= clock::VALID_AFTER_UNIX).then_some("system"),
+        };
+        let wall_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        let c = &mut self.clock;
+        c.source = source;
+        if source.is_some() {
+            let off = wall_ms - now as i64;
+            // Small corrections are SNTP slewing; the offset only follows jumps.
+            if (off - c.offset_ms).abs() > 1000 {
+                c.offset_ms = off;
+                hub_devices::device::set_wall_offset(off);
+            }
+            c.last_set.get_or_insert(wall_ms / 1000);
+        }
+        hub_devices::device::set_time_synced(source.is_some());
+        let t = wall_ms / 1000;
+        let off = c.tz.offset_at(t).0;
+        if i64::from(off) != engine.tz_offset_s
+            && let Some(p) = &self.platform
+        {
+            p.set_utc_offset(off);
+        }
+        engine.tz_offset_s = i64::from(off);
+        engine.clock = clock::zcl_clock(&c.tz, t, source.is_some(), c.last_set);
+    }
+
+    /// The `hub/time` result frame.
+    fn time_frame(&self, id: u64) -> String {
+        let c = &self.clock;
+        let t = wall_s();
+        let (off, in_dst) = c.tz.offset_at(t);
+        let synced = c.source.is_some();
+        let w = Jw::result(id, 400).map(|mut w| {
+            let opt = |w: &mut Jw, k: &str, v: Option<i64>| {
+                w.key(k);
+                match v {
+                    Some(v) => w.num(v),
+                    None => w.null(),
+                };
+            };
+            w.obj();
+            opt(&mut w, "time_utc", synced.then_some(t));
+            w.key("time_synced").num(synced).key("source");
+            match c.source {
+                Some(s) => w.str(s),
+                None => w.null(),
+            };
+            w.key("local");
+            if synced { w.str(&clock::civil(t, off)) } else { w.null() };
+            w.key("tz").str(&c.tz_text).key("tz_offset_s").num(off).key("dst");
+            match c.tz.dst_utc(clock::civil_from_days(t.div_euclid(86_400)).0) {
+                Some((s, e, shift)) => w.obj().key("start").num(s).key("end").num(e).key("shift_s").num(shift).key("active").num(in_dst).end_obj(),
+                None => w.null(),
+            };
+            w.key("servers").arr();
+            for s in &c.servers {
+                w.str(s);
+            }
+            w.end_arr();
+            opt(&mut w, "last_set", c.last_set);
+            w.end_obj();
+            w
+        });
+        w.and_then(Jw::finish).unwrap_or_else(|e| frame(id, Err(e)))
+    }
+
+    #[inline(never)]
+    fn set_time(&mut self, ncp: &Ncp, v: &J) -> Result<(), ApiError> {
+        if let Some(tz) = text(v, "tz")? {
+            let t = clock::parse(tz).ok_or_else(|| bad("tz: a POSIX TZ string such as EET-2EEST,M3.5.0/3,M10.5.0/4"))?;
+            ncp.with_store(|s| s.kv_put(TZ_KEY, tz.trim().as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            self.clock.tz = t;
+            self.clock.tz_text = tz.trim().to_string();
+        }
+        if let Some(list) = field(v, "servers") {
+            let servers: Vec<String> = list
+                .as_array()
+                .and_then(|a| a.iter().map(|s| s.as_str().map(|s| s.trim().to_string())).collect::<Option<Vec<_>>>())
+                .filter(|l| (1..=3).contains(&l.len()) && l.iter().all(|s| (1..=64).contains(&s.len()) && !s.contains(',')))
+                .ok_or_else(|| bad("servers: 1–3 host names"))?;
+            ncp.with_store(|s| s.kv_put(NTP_KEY, servers.join(",").as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            self.clock.servers = servers;
+        }
+        if let Some(p) = &self.platform {
+            p.set_time(&self.clock.servers).map_err(|e| ApiError::new("failed", e))?;
+        }
+        info!("time: zone {}, servers {}", self.clock.tz_text, self.clock.servers.join(","));
+        Ok(())
     }
 
     fn wifi(&self, v: &J) -> Result<J, ApiError> {

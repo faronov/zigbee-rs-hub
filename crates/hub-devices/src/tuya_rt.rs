@@ -58,8 +58,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             .tuya
             .as_ref()
             .map_or(TimeSync::Off, |t| t.time_sync);
-        let Some(p) = tuya::time_sync_payload((now / 1000) as i64, self.cfg.tz_offset_s, epoch)
-        else {
+        let Some(p) = tuya::time_sync_payload(
+            crate::device::wall_ms(now).div_euclid(1000),
+            self.cfg.tz_offset_s,
+            epoch,
+        ) else {
             return;
         };
         d.tuya_time_at = Some(now);

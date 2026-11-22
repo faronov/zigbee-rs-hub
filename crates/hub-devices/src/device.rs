@@ -20,7 +20,40 @@ pub type Millis = u64;
 
 /// Seconds as the API's float timestamps.
 pub fn ts(ms: Millis) -> f64 {
-    ms as f64 / 1000.0
+    wall_ms(ms) as f64 / 1000.0
+}
+
+/// Engine time → Unix time, ms. The engine's clock stays monotonic (its
+/// timers compare it); when the hub learns the real time later (SNTP after
+/// boot) the API shows wall-clock times through this offset.
+/// (A lock: the S3 has no 64-bit atomics.)
+static WALL_OFFSET_MS: std::sync::Mutex<i64> = std::sync::Mutex::new(0);
+
+/// Set the engine → Unix offset (see [`ts`]).
+pub fn set_wall_offset(ms: i64) {
+    *WALL_OFFSET_MS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = ms;
+}
+
+static TIME_SYNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The hub knows UTC: [`ts`] values are Unix times.
+pub fn set_time_synced(on: bool) {
+    TIME_SYNCED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`set_time_synced`].
+pub fn time_synced() -> bool {
+    TIME_SYNCED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Engine time as Unix time, ms.
+pub fn wall_ms(ms: Millis) -> i64 {
+    ms as i64
+        + *WALL_OFFSET_MS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// One attribute the hub knows about.

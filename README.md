@@ -711,8 +711,18 @@ booted without any (console `wifi set` does the same in hub mode);
 `hub/token/rotate` stores the new token in NVS; `hub/reboot`;
 `hub/mode/set`; `hub/system` (internal heap free, minimum and largest block,
 uptime, Wi-Fi SSID/IP/RSSI/channel, reset reason); `hub/logs` from a 3 KiB
-RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it). The
-energy-scan advice avoids the AP's channel. Maintenance jobs run on one
+RAM ring of Rust log lines up to Info (ESP-IDF's C logs are not in it),
+stamped with the local time once the clock is set. **Time:** SNTP
+(`esp_sntp`, default `pool.ntp.org`, up to three servers) starts with the
+first Wi-Fi connection; the S3 keeps its clock over a software restart, so
+after the first synchronisation the time is known at boot (`source`
+`rtc`). The engine's clock stays monotonic for its timers; API times
+(`time`, `last_seen`, events) become Unix time through an offset once the
+time is known (`time_synced`, `time_utc`). The hub endpoint serves the ZCL
+Time cluster (0x000A: Time, TimeStatus Master|Synchronized|MasterZoneDst,
+TimeZone, DstStart/End/Shift, StandardTime, LocalTime, LastSetTime) to
+thermostats and clocks, and Tuya devices' time requests (EF00 0x24) get the
+local time of the configured zone. The energy-scan advice avoids the AP's channel. Maintenance jobs run on one
 long-lived 12 KiB worker thread started with the app; a job that starts
 while another runs (a diagnostics read during a scan) gets a thread of its
 own, only while the internal heap has its stack in one block plus 16 KiB
@@ -817,7 +827,8 @@ Coordinator Backup, as zigpy/ZHA and Z2M write it; restore in device batches to 
 fresh NCP), `network/reset` (confirm `RESET`: automatic backup, leave,
 form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
 `hub/system`, `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
-`hub/mode/set`. `hubctl serve` implements the hub side for a desktop
+`hub/mode/set`, `hub/time` / `hub/time/set` (time zone as a POSIX TZ
+string, SNTP servers). `hubctl serve` implements the hub side for a desktop
 (credentials and token in memory, its own log tail; `--wifi-channel N` for
 the scan advice); `hubctl --sim --sim-demo serve` forms a network on the
 simulated NCP with three routers that answer Mgmt_Lqi/Mgmt_Rtg, and

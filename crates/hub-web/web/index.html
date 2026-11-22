@@ -143,6 +143,8 @@ progress{width:12em}
 <div class="row acts"><input id="nconf" placeholder="type RESET" size="11"><button class="d" id="nrb">Back up and reset</button></div></section>
 <section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
 <div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
+<div class="row acts"><label>Time zone <input id="tzi" list="tzl" size="26" placeholder="POSIX TZ, e.g. EET-2EEST,M3.5.0/3,M10.5.0/4"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button></div>
+<datalist id="tzl"><option value="UTC0">UTC</option><option value="GMT0BST,M3.5.0/1,M10.5.0">London</option><option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin, Paris, Warsaw</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Kyiv, Helsinki, Riga</option><option value="MSK-3">Moscow, Istanbul (+3)</option><option value="EST5EDT,M3.2.0,M11.1.0">New York</option><option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles</option><option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney</option></datalist>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
 <section class="card"><h2>Diagnostics</h2><div class="row acts"><button id="dgb">Refresh</button><button id="dgr">Reset counters</button><button id="lgb" class="f-logs">Logs</button></div><div id="dg"></div><pre id="lg" class="hide"></pre></section>
@@ -308,7 +310,7 @@ setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById
 // ── Views: map and settings (API 1.2, device-support 14.6) ──
 const has=f=>(hub.maintenance||[]).includes(f);
 onTab.map=()=>{if(authed&&!mapData)call("network/topology",{refresh:false}).then(drawMap).catch(()=>{})};
-onTab.settings=()=>{if(authed){renderSNet();loadSys();for(const k of["energy_scan","active_scan"])if(!(k=="energy_scan"?Object.keys(esAgg).length:asNets))call("network/job/result",{kind:k}).then(jobRes).catch(()=>{})}};
+onTab.settings=()=>{if(authed){renderSNet();loadTime();for(const k of["energy_scan","active_scan"])if(!(k=="energy_scan"?Object.keys(esAgg).length:asNets))call("network/job/result",{kind:k}).then(jobRes).catch(()=>{})}};
 function gate(){$("#esno").classList.toggle("hide",!hub.maintenance||has("energy_scan"));for(const e of document.querySelectorAll("[class*=f-]")){const f=[...e.classList].find(c=>c.startsWith("f-"));if(f)e.classList.toggle("hide",!has(f.slice(2)))}}
 const kv=(box,rows)=>{box.textContent="";for(const[k,v]of rows)if(v!=null&&v!==""&&v!==false)box.append(el("dt",{},k),el("dd",{},String(v)))};
 const dur=s=>s<3600?Math.round(s/60)+" min":s<86400?(s/3600).toFixed(1)+" h":(s/86400).toFixed(1)+" d";
@@ -398,8 +400,11 @@ $("#nrb").onclick=e=>{
  if(c)p.channel=+c;if(pan)p.pan_id=parseInt(pan,16);if(ep)p.ext_pan_id=ep;if(tx!=="")p.tx_power=+tx;
  if(!confirm("Leave the current network and form a new one? All devices must be paired again."))return;
  busy(e.target,act("network/reset",p).then(r=>{if(r.backup)saveBackup(r.backup);$("#nconf").value="";toast("New network: PAN "+hex(r.network.pan_id,4)+", channel "+r.network.channel)})).catch(()=>{})};
+function loadTime(){call("hub/time").then(t=>{tm=t;if(document.activeElement!=$("#tzi"))$("#tzi").value=t.tz;if(document.activeElement!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys()}).catch(()=>{})}
+let tm={};
+$("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;toast("Time zone saved");loadSys()})).catch(()=>{});
 function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a=s.app||{},n=s.ncp||{};
- kv($("#ssys"),[["Version",s.version],["API",hub.api_version],["Mode",s.mode],["Uptime",s.uptime_s!=null&&dur(s.uptime_s)],["Free heap",h.free!=null&&Math.round(h.free/1024)+" KiB (min "+Math.round(h.min_free/1024)+" KiB"+(h.largest_block?", largest "+Math.round(h.largest_block/1024)+" KiB":"")+")"],
+ kv($("#ssys"),[["Version",s.version],["API",hub.api_version],["Mode",s.mode],["Uptime",s.uptime_s!=null&&dur(s.uptime_s)],["Time",tm.time_synced?tm.local+" ("+tm.source+(tm.dst&&tm.dst.active?", daylight saving":"")+")":"not synchronised yet"],["Free heap",h.free!=null&&Math.round(h.free/1024)+" KiB (min "+Math.round(h.min_free/1024)+" KiB"+(h.largest_block?", largest "+Math.round(h.largest_block/1024)+" KiB":"")+")"],
   ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
   ["Store",s.store&&(s.store.volatile?"RAM only":"hubdata, generation "+s.store.journal_generation)],["App",a.devices+" devices, "+a.sessions+" sessions, APS "+(a.aps?(a.aps.delivered!=null?a.aps.delivered+" delivered / "+a.aps.not_delivered+" not delivered / "+(a.aps.busy+a.aps.failed)+" refused":a.aps.accepted+" ok / "+a.aps.failed+" failed"):"")]]);
  if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}

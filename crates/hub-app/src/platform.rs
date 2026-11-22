@@ -55,6 +55,21 @@ pub trait Platform: Send + Sync {
         None
     }
 
+    /// Where the system clock's UTC comes from (`sntp`, `rtc`, `system`),
+    /// None while it has not been set.
+    fn time_source(&self) -> Option<&'static str> {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        (t >= crate::clock::VALID_AFTER_UNIX).then_some("system")
+    }
+
+    /// Use these SNTP servers.
+    fn set_time(&self, _servers: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The local time's offset east of UTC changed (log times), s.
+    fn set_utc_offset(&self, _offset_s: i32) {}
+
     /// The least free stack the calling thread had so far, in bytes
     /// (job threads log it when they end).
     fn stack_high_water(&self) -> Option<usize> {

@@ -237,6 +237,47 @@ fn tuya_trv_me167() {
         (T0 as i64 + 6000) / 1000 - crate::tuya::EPOCH_2000
     );
     hub.transport.take();
+    // The Time cluster server on the hub endpoint (ZCL 3.12).
+    let utc = ((T0 as i64 + 7000) / 1000 - crate::hub::ZCL_EPOCH_UNIX) as u32;
+    hub.cfg.clock = crate::hub::Clock {
+        synced: true,
+        tz_s: 7200,
+        dst: Some((utc - 10, utc + 3600, 3600)),
+        last_set: Some(utc - 60),
+    };
+    hub.on_aps_indication(
+        s.zcl(
+            1,
+            0x000A,
+            crate::zcl::FrameType::Global,
+            None,
+            0x22,
+            0x00,
+            crate::zcl::frame::read_attributes(&[0x0000, 0x0001, 0x0002, 0x0007, 0x0042]),
+        ),
+        T0 + 7000,
+    );
+    let a = hub
+        .transport
+        .aps()
+        .into_iter()
+        .find(|a| a.cluster == 0x000A)
+        .unwrap()
+        .clone();
+    let f = crate::zcl::ZclFrame::parse(&a.payload).unwrap();
+    assert_eq!((f.header.cmd, f.header.tsn, a.src_ep), (0x01, 0x22, 1));
+    let recs = crate::zcl::frame::parse_read_attributes_rsp(&f.payload).unwrap();
+    let v = |i: usize| recs[i].value.as_ref().map(|v| v.value.clone());
+    assert_eq!(v(0), Some(crate::zcl::ZclValue::Uint(u64::from(utc))));
+    assert_eq!(v(1), Some(crate::zcl::ZclValue::Uint(0x07)));
+    assert_eq!(v(2), Some(crate::zcl::ZclValue::Int(7200)));
+    // Local time: UTC + 2 h + 1 h of daylight saving.
+    assert_eq!(
+        v(3),
+        Some(crate::zcl::ZclValue::Uint(u64::from(utc + 10800)))
+    );
+    assert_eq!(recs[4].status, crate::zcl::Status::UNSUPPORTED_ATTRIBUTE);
+    hub.transport.take();
     // mcuGatewayConnectionStatus: connected.
     hub.on_aps_indication(
         s.zcl(

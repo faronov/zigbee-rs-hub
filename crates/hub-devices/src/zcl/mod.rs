@@ -36,6 +36,7 @@ pub mod cluster {
     pub const ANALOG_INPUT: u16 = 0x000C;
     pub const BINARY_INPUT: u16 = 0x000F;
     pub const MULTISTATE_INPUT: u16 = 0x0012;
+    pub const TIME: u16 = 0x000A;
     pub const OTA: u16 = 0x0019;
     pub const POLL_CONTROL: u16 = 0x0020;
     pub const GREEN_POWER: u16 = 0x0021;

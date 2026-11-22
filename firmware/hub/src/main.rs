@@ -412,6 +412,7 @@ fn start_app(hub: Hub) {
     stage(7);
     match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(p) => net::start(app, p.modem, move |up| {
+            platform::wifi_changed(up);
             if let Err(e) = hub.set_coex(up) {
                 warn!("coex_enable {up}: {e}");
             }
