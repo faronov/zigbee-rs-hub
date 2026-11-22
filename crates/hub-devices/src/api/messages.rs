@@ -299,6 +299,10 @@ pub enum ServerMessage {
     },
     #[serde(rename = "event")]
     Event { id: u64, seq: u64, event: J },
+    /// A message serialized piece by piece (a subscription snapshot: as one
+    /// `Value` tree it took several times its text in heap).
+    #[serde(skip)]
+    Text(String),
 }
 
 impl ServerMessage {
@@ -322,6 +326,16 @@ impl ServerMessage {
     }
     /// JSON text.
     pub fn to_text(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
+        match self {
+            Self::Text(t) => t.clone(),
+            m => serde_json::to_string(m).unwrap_or_else(|_| "{}".into()),
+        }
+    }
+    /// [`ServerMessage::to_text`] without copying a pre-serialized text.
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Text(t) => t,
+            m => m.to_text(),
+        }
     }
 }

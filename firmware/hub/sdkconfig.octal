@@ -1,0 +1,8 @@
+# Octal PSRAM variant (ESP32-S3R8 die: WROOM-1 N4R8/N8R8/N16R8, the lab BR
+# board). Applied after firmware/bridge/sdkconfig.defaults and
+# firmware/hub/sdkconfig.defaults:
+#   ESP_IDF_SDKCONFIG_DEFAULTS="firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal"
+# Octal PSRAM takes GPIO33-37 (only GPIO35-37 reach the BR board's J4
+# header; the hub uses none of them).
+# CONFIG_SPIRAM_MODE_QUAD is not set
+CONFIG_SPIRAM_MODE_OCT=y

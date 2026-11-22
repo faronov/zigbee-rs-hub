@@ -15,6 +15,7 @@
 //! USB recovery (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode)
 //! works the same in both modes.
 
+mod alloc;
 #[cfg(feature = "app")]
 mod catalog;
 mod cpu;
@@ -629,8 +630,12 @@ fn prev_stage() -> String {
     }
 }
 
+#[global_allocator]
+static HEAP: alloc::PreferPsram = alloc::PreferPsram;
+
 fn main() {
     esp_idf_svc::sys::link_patches();
+    alloc::init();
     #[cfg(feature = "app")]
     platform::init_logger();
     #[cfg(not(feature = "app"))]

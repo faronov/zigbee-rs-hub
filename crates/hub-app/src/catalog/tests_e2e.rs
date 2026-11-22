@@ -202,7 +202,13 @@ fn uploads_install_fetch_restart_resume_and_corruption() {
     // Chunks above 4 KiB are refused (a hub without PSRAM holds a request
     // three times while handling it).
     let big = base64::engine::general_purpose::STANDARD.encode(vec![0u8; UPLOAD_CHUNK_MAX + 1]);
-    let no = call(&app, sid, &rx, 3, json!({"type": "catalog/upload_chunk", "target": "manifest", "offset": 0, "data": big}));
+    let no = call(
+        &app,
+        sid,
+        &rx,
+        3,
+        json!({"type": "catalog/upload_chunk", "target": "manifest", "offset": 0, "data": big}),
+    );
     assert_eq!(no["error"]["code"], "invalid_value", "{no}");
 
     // 1. The manifest: what the hub wants.
@@ -215,6 +221,16 @@ fn uploads_install_fetch_restart_resume_and_corruption() {
     let st = call(&app, sid, &rx, 900, json!({"type": "catalog/status"}));
     let at = st["result"]["upload"]["written"].as_u64().unwrap() as usize;
     assert_eq!((st["result"]["upload"]["target"].as_str(), at), (Some("bank"), 1024), "{st}");
+    // Another target meanwhile (a second client, the page's own
+    // definition_needed fetch): refused, the bank upload goes on.
+    let other = call(
+        &app,
+        sid,
+        &rx,
+        899,
+        json!({"type": "catalog/upload_chunk", "target": "shard", "offset": 0, "data": "AA=="}),
+    );
+    assert_eq!(other["error"]["code"], "busy", "{other}");
     let b = upload(&app, sid, &rx, &mut id, "bank", &bank, at, json!({}));
     assert_eq!(b["result"]["generation"], 3, "{b}");
     // 3. The web tools: served at /zdefc/.

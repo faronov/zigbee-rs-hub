@@ -163,12 +163,19 @@ jobs:
       - name: Build tbr-hub (application)
         working-directory: firmware/hub
         run: cargo build --release
+      - name: Build tbr-hub (application, octal PSRAM variant)
+        working-directory: firmware/hub
+        env:
+          ESP_IDF_SDKCONFIG_DEFAULTS: firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-opi
+        run: cargo build --release
       - name: App images (tbr-hub must fit the 3 MiB production slot and the 2 944 KiB dev slot)
         run: |
           pip install --quiet "esptool>=5,<6"
           tools/make-app-image.sh release target/tbr-bridge-app.bin tbr-bridge
           FLASH_SIZE=8MB MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-8mb-app.bin tbr-hub
           FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-app.bin tbr-hub
+          TARGET_DIR=target-opi FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-opi-app.bin tbr-hub
       - name: Partition tables (8 MB production, 4 MB dev)
         run: |
           tools/make-partition-table.sh firmware/hub/partitions-8mb.csv target/partitions-8mb.bin 8MB
@@ -184,6 +191,7 @@ jobs:
             target/tbr-bridge-app.bin
             target/tbr-hub-8mb-app.bin
             target/tbr-hub-4mb-dev-app.bin
+            target/tbr-hub-4mb-dev-opi-app.bin
             target/partitions-8mb.bin
             target/partitions-4mb-dev.bin
             target/release-dryrun/

@@ -5,11 +5,13 @@
 # FLASH_SIZE (default 4MB) goes into the image header. With MAX_APP_BYTES set,
 # fail if the image is larger (app slots: 3 MiB = 3145728 on the 8 MB
 # production layout, 2 944 KiB = 3014656 on the 4 MB dev layout).
+# TARGET_DIR (default target/) selects the cargo target directory, e.g.
+# target-opi for the octal PSRAM build.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 profile="${1:-release}"
 app="${3:-tbr-bridge}"
-elf="$root/target/xtensa-esp32s3-espidf/$profile/$app"
+elf="${TARGET_DIR:-$root/target}/xtensa-esp32s3-espidf/$profile/$app"
 out="${2:-$root/target/$app-app.bin}"
 esptool --chip esp32s3 elf2image --flash-mode dio --flash-freq 80m --flash-size "${FLASH_SIZE:-4MB}" \
   --elf-sha256-offset 0xb0 --min-rev-full 0 --max-rev-full 99 -o "$out" "$elf"

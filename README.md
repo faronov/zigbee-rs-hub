@@ -185,7 +185,11 @@ Measured on the hwlab board (early sample):
   ordering table notes 4 MB "in some early samples"; retail boards have 8 MB.
   The stock image is laid out for 4 MB (ota_0/ota_1 1.6 MB each, `rcp_fw`
   500 KB). The hub must therefore support both sizes (see "S3 flash budget").
-  PSRAM not yet checked.
+  PSRAM: the lab board's module is an **ESP32-S3-WROOM-1 N4R8** (marking
+  M0N4R8: 4 MB flash, **8 MB octal PSRAM** in the ESP32-S3R8 die). Builds up
+  to hub 0.1.3 were quad-PSRAM only, so it ran without PSRAM. Other boards
+  carry N4R2 (2 MB quad, seen at a user) and, at retail, N8R2/N8R8; the
+  module marking or `esptool chip-id` ("Embedded PSRAM 8MB"/"2MB") tells.
 - H2: ESP32-H2 **rev v0.1**, flash **4 MB** (GigaDevice c84016). This answers
   the spec's open 2 MB/4 MB question for this board; the NCP still detects
   the size at runtime (spec decision N4).
@@ -831,8 +835,9 @@ are hidden (`maintenance` in `hub/info`); the page stays usable while a
 scan runs, and a page opened meanwhile follows it. The page is 21.0 KB gzipped with the
 other tabs (Green Power included).
 
-**RAM.** The hwlab board's S3 has **no PSRAM** (4 MB flash, no R2), so the
-application lives in ~295 KB of internal heap. On the first hardware run
+**RAM.** Until hub 0.1.3 the hwlab board's S3 ran **without PSRAM** (its
+N4R8 module has 8 MB of octal PSRAM, which the quad-only builds did not
+enable), so the application lived in ~295 KB of internal heap. On the first hardware run
 (2026-11-20, 4 MB dev table) it ran out of memory within a second: the
 registry's deflate compressor (~250 KB) and the decoded example catalog
 (~90 KB). Now the registry stores plain JSON (deflated values of earlier
@@ -840,7 +845,19 @@ builds are still read), the example catalog loads only with PSRAM, the app
 thread has 40 KiB of stack and the hub-mode UART rings are 4/2 KiB. In hub
 mode, after the C6 sensor was imported and interviewed: ~106 KB internal
 heap free (minimum 103 KB), Wi-Fi not yet started. PSRAM support is on
-(`CONFIG_SPIRAM`, ignored when absent) for boards that have it. For the next
+(`CONFIG_SPIRAM`, ignored when absent). ESP-IDF fixes the PSRAM mode at build
+time, so from 0.1.4 every layout has two images: quad (`…-app.bin`, N4R2/N8R2,
+S3FH4R2, or no PSRAM) and octal (`…-opi-app.bin`, N4R8/N8R8/N16R8, the lab
+board); the web flasher picks by the chip's embedded PSRAM, a wrong pick boots
+without PSRAM. In 0.1.3 a board *with* PSRAM ran out of internal RAM (N4R2:
+4 KB free a minute after boot, every maintenance request refused): `malloc`
+keeps requests below `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` internal, and the
+hub's data are many small Rust allocations, while 2 MB of PSRAM stayed empty.
+From 0.1.4 Rust allocations prefer PSRAM (`firmware/hub/src/alloc.rs`; C
+mallocs above 1 KiB and Wi-Fi/lwIP buffers too; thread stacks stay internal).
+Measured on an ESP32-S3 SuperMini (S3FH4R2, 2 MB quad) in hub mode without an
+NCP, Wi-Fi up: 0.1.3 8.4 KB internal free; 0.1.4 120 KB internal free
+(minimum 119 KB while installing the whole catalog), PSRAM 160 KB used. For the next
 crash, `info` shows the previous boot's start-up stage, free heap per stage,
 the last stack/heap watch, the last Rust panic message and the crash reset
 reason (RTC memory; hub-mode logs go to UART0, which the lab host cannot

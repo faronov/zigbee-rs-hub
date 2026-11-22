@@ -542,7 +542,7 @@ async function cvLoad(id){
 $("#cvp").onchange=e=>act("devices/pin_definition",{device:cvDev,definition:e.target.value||null}).then(()=>cvLoad(cvDev)).catch(()=>{});
 async function cvShow(id){const g=await act("definitions/get",{definition:id});$("#cvt").value=g.source_text||(await zdefc()).decompile(unb64(g.cbor),"yaml")}
 for(const[b,t]of[["cvr","devices/reinterview"],["cvc","devices/reconfigure"]])$("#"+b).onclick=()=>act(t,{device:cvDev}).then(()=>toast(t+": ok")).catch(()=>{});
-$("#cvf").onclick=()=>act("definitions/fetch",{device:cvDev}).then(r=>ctShards(r.shards)).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message));
+$("#cvf").onclick=()=>act("definitions/fetch",{device:cvDev}).then(r=>ctSerial(()=>ctShards(r.shards))).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message));
 $("#cvs").onclick=()=>act("definitions/scaffold",{device:cvDev}).then(s=>{
  const q=v=>JSON.stringify(v),i=s.identity||{},m=(s.match||[])[0]||{},y=["zdef: 1","id: "+q(((i.manufacturer||"vendor")+"/"+(i.model||"model")).toLowerCase().replace(/[^a-z0-9/_-]+/g,"-")),"revision: 1","vendor: "+q(i.manufacturer||""),"model: "+q(i.model||""),"match:","  - "+q(m),"entities:"];
  for(const e of s.generic_entities||[])y.push("  # generic: "+e.key+" ("+e.platform+", ep "+e.ep+")");
@@ -573,19 +573,22 @@ async function ctGet(n){const r=await fetch(ct.config.base_url+"/"+n,{cache:"no-
 async function ctPut(target,u,extra={},from=0){const p=$("#ctp");p.max=u.length;p.classList.remove("hide");
  try{for(let o=from;o==from||o<u.length;o+=4096){await call("catalog/upload_chunk",Object.assign({target,offset:o,data:b64(u.subarray(o,o+4096))},o?{}:{size:u.length}));p.value=o}
  return await call("catalog/commit",Object.assign({target},extra))}finally{p.classList.add("hide")}}
+// One catalog transfer at a time (the hub keeps one upload): the update,
+// definition_needed fetches and file uploads queue up behind each other.
+let ctQ=Promise.resolve();const ctSerial=f=>ctQ=ctQ.catch(()=>{}).then(f);
 async function ctShards(sh){for(const n of sh||[]){const h=n.toString(16).padStart(2,"0");ctMsg("shard "+h+"…");const r=await ctPut("shard",await ctGet("shard-"+h+".cbor"),{shard:n});ctMsg("shard "+h+": "+(r.definitions.join(", ")||"nothing new"))}}
 async function ctFetch(){const s=await call("catalog/status");await ctShards([...new Set((s.missing||[]).flatMap(x=>x.shards))])}
-$("#ctu").onclick=async()=>{try{const s=await call("catalog/status");ct=s;ctMsg("manifest…");const m=await ctPut("manifest",await ctGet("manifest.cose"));
+$("#ctu").onclick=()=>ctSerial(async()=>{try{const s=await call("catalog/status");ct=s;ctMsg("manifest…");const m=await ctPut("manifest",await ctGet("manifest.cose"));
  for(const t of["bank","web"]){const a=m.wants&&m.wants[t];if(!a)continue;ctMsg(a.name+"…");await ctPut(t,await ctGet(a.name),{},s.upload&&s.upload.target==t?s.upload.written:0)}
- await ctFetch();ctMsg("catalog "+m.catalog_date+"."+m.catalog_serial+" installed")}catch(e){ctMsg(e.message)}onTab.catalog()};
-$("#ctf").onclick=()=>ctFetch().then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(onTab.catalog);
-$("#ctfi").onchange=async e=>{const fs=[...e.target.files].sort((a,b)=>(b.name=="manifest.cose")-(a.name=="manifest.cose"));
+ await ctFetch();ctMsg("catalog "+m.catalog_date+"."+m.catalog_serial+" installed")}catch(e){ctMsg(e.message)}onTab.catalog()});
+$("#ctf").onclick=()=>ctSerial(ctFetch).then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(onTab.catalog);
+$("#ctfi").onchange=e=>ctSerial(async()=>{const fs=[...e.target.files].sort((a,b)=>(b.name=="manifest.cose")-(a.name=="manifest.cose"));
  try{for(const f of fs){const n=f.name,sh=/^shard-([0-9a-f]{2})\.cbor$/.exec(n),t=n=="manifest.cose"?"manifest":/\.zdb$/.test(n)?"bank":/\.zwb$/.test(n)?"web":sh&&"shard";
-  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";onTab.catalog()};
+  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";onTab.catalog()});
 $("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r=>{const ul=$("#ctr");ul.textContent="";
  for(const d of r.items)ul.append(el("li",{},el("span",{class:"n"},d.vendor+" "+d.model),el("span",{class:"mut"},d.id+" · "+d.source)));
  if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
-function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctShards(e.shards).catch(()=>{});if($("#ctl").offsetParent)onTab.catalog()}
+function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctSerial(()=>ctShards(e.shards));if($("#ctl").offsetParent)onTab.catalog()}
 // ---- end of converters and catalog tabs ----
 connect();
 </script>

@@ -43,7 +43,8 @@ pub fn decode(b: &[u8]) -> Result<DeviceSnapshot, String> {
     if b.first() == Some(&b'{') {
         return DeviceSnapshot::from_bytes(b);
     }
-    let json = miniz_oxide::inflate::decompress_to_vec_with_limit(b, 256 * 1024).map_err(|e| format!("inflate: {e:?}"))?;
+    let json =
+        miniz_oxide::inflate::decompress_to_vec_with_limit(b, 256 * 1024).map_err(|e| format!("inflate: {e:?}"))?;
     DeviceSnapshot::from_bytes(&json)
 }
 
@@ -107,7 +108,9 @@ impl Registry {
         for ev in events {
             let id = match ev {
                 HubEvent::DeviceAdded(id) | HubEvent::DeviceUpdated(id) => id.clone(),
-                HubEvent::ResolutionChanged { device, .. } | HubEvent::InterviewProgress { device, .. } => device.clone(),
+                HubEvent::ResolutionChanged { device, .. } | HubEvent::InterviewProgress { device, .. } => {
+                    device.clone()
+                }
                 HubEvent::EntityAdded(uid) | HubEvent::EntityUpdated(uid) => device_of_uid(uid).to_string(),
                 HubEvent::DeviceRemoved(id) => {
                     self.dirty.remove(id);
@@ -121,6 +124,13 @@ impl Registry {
             self.dirty.insert(id);
             self.dirty_since.get_or_insert(now);
         }
+    }
+
+    /// User definitions changed (upload, delete): written with the next
+    /// flush, [`FLUSH_MS`] from now, instead of at the sweep (a reboot
+    /// right after an upload lost it on the BR board).
+    pub fn definitions_changed(&mut self, now: Millis) {
+        self.last_sweep = self.last_sweep.min(now.saturating_sub(SWEEP_MS - FLUSH_MS));
     }
 
     /// Writes what changed: coalesced event-driven writes, and a sweep of
@@ -140,7 +150,8 @@ impl Registry {
             .iter()
             .filter_map(|id| engine.snapshot_device(id).map(|s| (format!("{DEV}{id}"), encode(&s))))
             .collect();
-        let mut dels: Vec<String> = std::mem::take(&mut self.removed).into_iter().map(|id| format!("{DEV}{id}")).collect();
+        let mut dels: Vec<String> =
+            std::mem::take(&mut self.removed).into_iter().map(|id| format!("{DEV}{id}")).collect();
         if sweep {
             self.dirty.clear();
             self.last_sweep = now;

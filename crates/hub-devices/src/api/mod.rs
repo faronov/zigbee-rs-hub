@@ -228,6 +228,20 @@ impl ApiServer {
                 ],
             };
         }
+        // An extension may take a request from its text (uploads: no copy
+        // of the payload in a `Value`).
+        let mut ext = ext;
+        if let Some(ext) = ext.as_deref_mut()
+            && let Some((id, r)) = ext.request_text(hub, text, now)
+        {
+            return vec![
+                match r {
+                    Ok(v) => ServerMessage::ok(id, v),
+                    Err(e) => ServerMessage::err(id, e),
+                }
+                .to_text(),
+            ];
+        }
         // Only requests an extension may serve are parsed twice.
         if let Some(ext) = ext
             && (text.contains("catalog/") || text.contains("definitions/fetch"))
@@ -258,7 +272,7 @@ impl ApiServer {
         };
         self.handle(hub, s, env, now)
             .into_iter()
-            .map(|m| m.to_text())
+            .map(ServerMessage::into_text)
             .collect()
     }
 
@@ -286,14 +300,10 @@ impl ApiServer {
                 sess.subs.insert(id, topics.iter().cloned().collect());
             }
             // Snapshot first, then deltas with increasing seq (14.1).
-            let snap = self.snapshot(hub, topics, now);
+            let snap = self.snapshot(hub, topics, id, now);
             return vec![
                 ServerMessage::ok(id, json!({"seq": self.seq})),
-                ServerMessage::Event {
-                    id,
-                    seq: self.seq,
-                    event: snap,
-                },
+                ServerMessage::Text(snap),
             ];
         }
         if let Request::Unsubscribe { subscription } = env.request {
@@ -339,29 +349,84 @@ impl ApiServer {
         }]
     }
 
-    fn snapshot<T: ZigbeeTransport>(&self, hub: &mut Hub<T>, topics: &[String], now: Millis) -> J {
-        let mut snap = json!({"topic": "snapshot"});
-        if topics.iter().any(|t| t == "devices") {
-            snap["devices"] = hub.devices().map(|d| d.record()).collect();
+    /// The `snapshot` event of a subscription as text, one record at a time:
+    /// as a `Value` tree the entities and states of a single sensor took
+    /// about 15 KB of heap on the S3 for 4 KB of text.
+    fn snapshot<T: ZigbeeTransport>(
+        &self,
+        hub: &mut Hub<T>,
+        topics: &[String],
+        id: u64,
+        now: Millis,
+    ) -> String {
+        fn list(s: &mut String, key: &str, items: impl Iterator<Item = J>) {
+            s.push_str(",\"");
+            s.push_str(key);
+            s.push_str("\":[");
+            for (i, v) in items.enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&v.to_string());
+            }
+            s.push(']');
         }
-        if topics.iter().any(|t| t == "entities") {
-            snap["entities"] = hub
-                .devices()
-                .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id)))
-                .collect();
-            snap["states"] = hub
-                .devices()
-                .flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available)))
-                .collect();
+        fn field(s: &mut String, key: &str, v: &J) {
+            s.push_str(",\"");
+            s.push_str(key);
+            s.push_str("\":");
+            s.push_str(&v.to_string());
         }
-        if topics.iter().any(|t| t == "gp") {
-            snap["bindings"] = J::Array(hub.list_bindings(None, None));
-            snap["gp_commissioning"] = hub.gp_commissioning_status(now);
+        let has = |t: &str| topics.iter().any(|x| x == t);
+        // Room for the usual record sizes: no copy while the text grows.
+        let (devs, ents) = hub
+            .devices()
+            .fold((0, 0), |(d, e), x| (d + 1, e + x.entities.len()));
+        let mut s = String::with_capacity(
+            256 + has("devices") as usize * devs * 448 + has("entities") as usize * ents * 512,
+        );
+        s.push_str(&format!(
+            "{{\"type\":\"event\",\"id\":{id},\"seq\":{},\"event\":{{\"topic\":\"snapshot\"",
+            self.seq
+        ));
+        if has("devices") {
+            list(&mut s, "devices", hub.devices().map(|d| d.record()));
         }
-        if topics.iter().any(|t| t == "network") {
-            snap["network"] = network_info(hub, now).unwrap_or(J::Null);
+        if has("entities") {
+            list(
+                &mut s,
+                "entities",
+                hub.devices()
+                    .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id))),
+            );
+            list(
+                &mut s,
+                "states",
+                hub.devices()
+                    .flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available))),
+            );
         }
-        snap
+        if has("gp") {
+            list(
+                &mut s,
+                "bindings",
+                hub.list_bindings(None, None).into_iter(),
+            );
+            field(
+                &mut s,
+                "gp_commissioning",
+                &hub.gp_commissioning_status(now),
+            );
+        }
+        if has("network") {
+            field(
+                &mut s,
+                "network",
+                &network_info(hub, now).unwrap_or(J::Null),
+            );
+        }
+        s.push_str("}}");
+        s
     }
 
     fn dispatch<T: ZigbeeTransport>(
@@ -1011,6 +1076,18 @@ pub trait ApiExtension<T: ZigbeeTransport> {
         req: &J,
         now: Millis,
     ) -> Option<Result<J, ApiError>>;
+
+    /// Handles a request from its text before any parsing (`None`: not
+    /// this extension's, or not handled this way); returns the request id
+    /// and the result.
+    fn request_text(
+        &mut self,
+        _hub: &mut Hub<T>,
+        _text: &str,
+        _now: Millis,
+    ) -> Option<(u64, Result<J, ApiError>)> {
+        None
+    }
 }
 
 /// The host core's facts plus `time`, the hub's clock (s, the time base of
