@@ -207,7 +207,7 @@ impl Zdo<'_> {
             let zdp = self.request(nwk, MGMT_LQI_REQ, &[out.len() as u8])?;
             let (status, total, _, page) = parse_lqi_rsp(&zdp).ok_or("malformed Mgmt_Lqi_rsp")?;
             if status != 0 {
-                return Err(format!("Mgmt_Lqi_rsp status 0x{status:02X}"));
+                return Err(format!("Mgmt_Lqi_rsp: {}", status_text(status)));
             }
             let n = page.len();
             out.extend(page);
@@ -224,7 +224,7 @@ impl Zdo<'_> {
             let zdp = self.request(nwk, MGMT_RTG_REQ, &[out.len() as u8])?;
             let (status, total, _, page) = parse_rtg_rsp(&zdp).ok_or("malformed Mgmt_Rtg_rsp")?;
             if status != 0 {
-                return Err(format!("Mgmt_Rtg_rsp status 0x{status:02X}"));
+                return Err(format!("Mgmt_Rtg_rsp: {}", status_text(status)));
             }
             let n = page.len();
             out.extend(page);
@@ -234,6 +234,23 @@ impl Zdo<'_> {
         }
         Ok(out)
     }
+}
+
+/// A ZDP status (Mgmt_Lqi_rsp, Mgmt_Rtg_rsp) with its name and meaning;
+/// delivery failures are named by `hub_devices::transport::zb_status_text`.
+pub fn status_text(code: u8) -> String {
+    let name = match code {
+        0x80 => "INV_REQUESTTYPE",
+        0x81 => "DEVICE_NOT_FOUND",
+        0x84 => "NOT_SUPPORTED: the device does not implement this request",
+        0x85 => "TIMEOUT",
+        0x88 => "NO_ENTRY",
+        0x8A => "INSUFFICIENT_SPACE",
+        0x8B => "NOT_PERMITTED",
+        0x8D => "NOT_AUTHORIZED",
+        _ => "",
+    };
+    if name.is_empty() { format!("status 0x{code:02X}") } else { format!("0x{code:02X} {name}") }
 }
 
 /// A link as `source` reports it.
@@ -354,6 +371,8 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
         if opts.routes && nodes.get(&nwk).is_some_and(|n| n.scanned) {
             match zdo.routes(nwk) {
                 Ok(list) => routes.extend(list.iter().map(|r| RouteRow { source: nwk, dst: r.dst, next_hop: r.next_hop, status: r.status })),
+                // Many routers do not implement Mgmt_Rtg: a fact, not an error.
+                Err(e) if e.starts_with("Mgmt_Rtg_rsp: 0x84") => notes.push(format!("0x{nwk:04X} does not report its routes (Mgmt_Rtg not supported)")),
                 Err(e) => notes.push(format!("routes of 0x{nwk:04X}: {e}")),
             }
         }
@@ -407,6 +426,12 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statuses_have_names() {
+        assert_eq!(status_text(0x84), "0x84 NOT_SUPPORTED: the device does not implement this request");
+        assert_eq!(status_text(0x42), "status 0x42");
+    }
 
     #[test]
     fn mgmt_lqi_and_rtg_responses_parse() {
