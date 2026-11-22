@@ -28,6 +28,7 @@ pub mod fingerprint;
 pub mod generic;
 pub mod gp;
 pub mod hub;
+pub mod last_values;
 pub mod model;
 pub mod persist;
 pub mod resolve;

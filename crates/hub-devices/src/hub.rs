@@ -2683,6 +2683,7 @@ pub(crate) fn set_value(d: &mut Device, i: usize, part: Option<&str>, v: Value, 
         }
     };
     e.state.last_reported = Some(now);
+    e.state.restored = false;
     if changed || e.state.last_changed.is_none() {
         e.state.last_changed = Some(now);
     }

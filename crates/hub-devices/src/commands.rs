@@ -904,7 +904,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .iter()
             .filter(|(_, d)| d.interview == InterviewStep::Done && d.gp.is_none())
             .flat_map(|(id, d)| d.entities.iter().map(move |e| (id, e)))
-            .filter(|(_, e)| e.state.last_reported.is_none() && !e.orphaned)
+            .filter(|(_, e)| (e.state.last_reported.is_none() || e.state.restored) && !e.orphaned)
             .map(|(id, e)| (id.clone(), e.uid.clone()))
             .collect();
         uids.iter()

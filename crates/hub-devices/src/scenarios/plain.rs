@@ -98,6 +98,45 @@ fn restored_mains_device_reads_unknown_states() {
 }
 
 #[test]
+fn last_values_come_back_marked_restored_until_a_report() {
+    let mut sim = Sim::default();
+    sim.devices.push(sensor());
+    let mut hub = hub_with(&[]);
+    sim.join(&mut hub, SENSOR, T0);
+    let id = "zb:00158d0001a2b3c4";
+    let uid = "zb:00158d0001a2b3c4:1:temperature";
+    assert_eq!(state(&hub, uid), json!(21.37));
+    // (The hub does not know the time here: no times are kept.)
+    let kept = hub.last_values(id).unwrap();
+    let mut restored = hub_with(&[]);
+    restored
+        .restore_device(hub.snapshot_device(id).unwrap(), None, T0 + 60_000)
+        .unwrap();
+    assert!(restored.restore_last_values(id, &kept, T0 + 60_000) >= 2);
+    let (d, e) = restored.entity(uid).unwrap();
+    let msg = e.state_msg(d.available);
+    assert_eq!(
+        (msg["state"].clone(), msg["attributes"]["restored"].clone()),
+        (json!(21.37), json!(true))
+    );
+    assert_eq!(msg["last_reported"], J::Null);
+    assert_eq!(d.lqi, hub.device(id).unwrap().lqi);
+    // Restored values are read again like unknown ones; a report ends the mark.
+    assert!(restored.refresh_unknown(T0 + 60_000) >= 2);
+    let s = sim.dev(SENSOR).clone();
+    restored.on_aps_indication(
+        s.report(1, 0x0402, None, &[(0, TypedValue::int(ZclType::I16, 2200))]),
+        T0 + 120_000,
+    );
+    let (d, e) = restored.entity(uid).unwrap();
+    let msg = e.state_msg(d.available);
+    assert_eq!(
+        (msg["state"].clone(), msg["attributes"].get("restored")),
+        (json!(22.0), None)
+    );
+}
+
+#[test]
 fn last_seen_is_published_while_frames_come_more_than_once_a_minute() {
     let mut hub = hub_with(&[]);
     let mut sim = Sim::default();

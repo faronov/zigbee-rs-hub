@@ -50,7 +50,7 @@ input.num{width:6em}
 .row label{display:inline-flex;align-items:center;gap:.3em}
 table{border-collapse:collapse;font-size:.9em}td,th{padding:.15em .6em .15em 0;text-align:left;font-variant-numeric:tabular-nums}
 pre{white-space:pre-wrap;font-size:.8em;max-height:24em;overflow:auto;background:var(--bg);padding:.5em;border-radius:7px}
-svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}svg .h{paint-order:stroke;stroke:var(--card);stroke-width:3px}
+.rs .v,.rs input,.rs select{opacity:.6;font-style:italic}svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}svg .h{paint-order:stroke;stroke:var(--card);stroke-width:3px}
 .warn{color:var(--warn)}
 .hide{display:none!important}
 nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
@@ -282,6 +282,8 @@ function cmd(e,command,params,b){const n=e.name||(e.key||"").replace(/_/g," ");i
  return call("entities/command",{uid:e.uid,command,params:params||{}}).then(r=>{if(r&&r.status=="queued")toast(n+": queued until the device wakes")}).catch(x=>toast(n+": "+command.replace(/_/g," ")+" failed: "+x.message)).finally(()=>{if(b)b.disabled=false})}
 function entRow(e){
  const s=states[e.uid],li=el("li",{id:"e-"+e.uid});if(s&&s.available===false)li.className="na";
+ // Kept from before the hub restarted, not reported since.
+ if(s&&s.attributes&&s.attributes.restored){li.classList.add("rs");li.title="last known value, kept over the hub's restart"}
  const name=e.name||(e.key||"").replace(/_/g," ");
  li.append(el("span",{class:"n",title:e.uid},name));
  const caps=e.capabilities||{},st=s&&s.state;

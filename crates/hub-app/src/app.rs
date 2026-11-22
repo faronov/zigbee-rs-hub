@@ -168,6 +168,8 @@ pub struct AppStatus {
     pub restored: usize,
     /// Registry writes and failures.
     pub registry_writes: u64,
+    /// Kept last values: `(restored, writes, bytes, errors)`.
+    pub last_values: (usize, u64, u64, u64),
     /// Registry write failures.
     pub registry_errors: u64,
     /// APS outcome counters.
@@ -311,6 +313,7 @@ struct Runner {
     api: ApiServer,
     sinks: BTreeMap<SessionId, Box<dyn SessionSink>>,
     registry: Registry,
+    last: crate::laststate::LastValues,
     status: Arc<Mutex<AppStatus>>,
     wall0: Millis,
     t0: Instant,
@@ -407,6 +410,7 @@ impl Runner {
             api,
             sinks: BTreeMap::new(),
             registry: Registry::default(),
+            last: Default::default(),
             status,
             wall0: wall_ms(),
             t0: Instant::now(),
@@ -425,6 +429,11 @@ impl Runner {
         let mut registry = std::mem::take(&mut r.registry);
         registry.load(&r.ncp, &mut r.engine, now);
         r.registry = registry;
+        // The clock first: kept times convert only once the time is known.
+        r.admin.clock_tick(&mut r.engine.cfg, now);
+        let mut last = std::mem::take(&mut r.last);
+        last.load(&r.ncp, &mut r.engine, now);
+        r.last = last;
         let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
         r.engine.transport.nwk.extend(known);
         // Restored devices produce added events; nobody is subscribed yet,
@@ -454,6 +463,7 @@ impl Runner {
         }
         let now = self.now();
         self.registry.flush(&self.ncp, &self.engine, now, true);
+        self.last.flush(&self.ncp, &self.engine, now, true);
         stopped.store(true, Ordering::SeqCst);
     }
 
@@ -490,8 +500,9 @@ impl Runner {
                 if self.api.is_authed(sid)
                     && let Some(head) = admin::head(&text)
                 {
-                    if head.ty == "hub/reboot" {
+                    if matches!(head.ty.as_str(), "hub/reboot" | "hub/mode/set") {
                         self.registry.flush(&self.ncp, &self.engine, now, true);
+                        self.last.flush(&self.ncp, &self.engine, now, true);
                     }
                     for frame in self.admin_request(sid, &head, now) {
                         self.send(sid, &frame);
@@ -557,6 +568,7 @@ impl Runner {
                 "imported": a.imported,
                 "registry_writes": a.registry_writes,
                 "registry_errors": a.registry_errors,
+                "last_values": {"restored": a.last_values.0, "writes": a.last_values.1, "bytes": a.last_values.2, "errors": a.last_values.3},
                 "aps": {"accepted": a.aps.accepted, "busy": a.aps.busy, "failed": a.aps.failed,
                     "delivered": a.aps.delivered, "not_delivered": a.aps.not_delivered, "unconfirmed": a.aps.unconfirmed},
             })
@@ -730,11 +742,14 @@ impl Runner {
         }
         let events = self.engine.drain_events();
         self.registry.note(&events, now);
+        self.last.note(&events, &self.engine);
         for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
             self.send(sid, &frame);
         }
         self.registry.flush(&self.ncp, &self.engine, now, false);
+        self.last.flush(&self.ncp, &self.engine, now, false);
         let mut st = self.status.lock().unwrap();
+        st.last_values = (self.last.restored, self.last.writes, self.last.bytes, self.last.errors);
         st.devices = self.engine.devices().count();
         st.sessions = self.sinks.len();
         st.restored = self.registry.restored;
