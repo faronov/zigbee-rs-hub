@@ -12,6 +12,7 @@
 
 pub mod console;
 pub mod diag;
+pub mod pta_lines;
 pub mod h2;
 pub mod recovery;
 pub mod reserved;

@@ -26,6 +26,8 @@ mod net;
 #[cfg(feature = "app")]
 mod platform;
 #[cfg(feature = "app")]
+mod pta;
+#[cfg(feature = "app")]
 mod ws;
 #[cfg(feature = "app")]
 mod usbapi;
@@ -68,6 +70,7 @@ hub firmware:\r
   hub crash            panic on purpose (tests the restart after a crash)\r
   hub cpu [ms]         CPU use per task over a window (default 2000 ms)\r
   wifi                 Wi-Fi state and the API address (hub mode, app build)\r
+  hub coex [auto|on|off]  PTA: S3 leader state; NCP follower with Wi-Fi (auto) or forced\r
   wifi set <ssid> [pw] store Wi-Fi credentials (hub mode: connect with them now)\r
   wifi clear           forget them\r
   token                the API token (generated at the first hub boot)\r
@@ -290,6 +293,16 @@ fn extension(words: &[&str]) -> Option<String> {
         #[cfg(feature = "app")]
         ["wifi"] => format!("wifi: {}\r\n", net::STATE.lock().unwrap()),
         #[cfg(feature = "app")]
+        ["hub", "coex"] => pta::status(),
+        #[cfg(feature = "app")]
+        ["hub", "coex", mode] => match pta::set_mode(mode) {
+            Some(on) => match hub?.set_coex(on) {
+                Ok(()) => pta::status(),
+                Err(e) => format!("error: {e}\r\n"),
+            },
+            None => "usage: hub coex [auto|on|off]\r\n".into(),
+        },
+        #[cfg(feature = "app")]
         ["catalog"] => catalog_keys(),
         #[cfg(feature = "app")]
         ["wifi", "set", ssid, rest @ ..] if hub_mode && APP.get().is_some() => match net::configure(ssid, &rest.join(" ")) {
@@ -407,8 +420,16 @@ fn start_app(hub: Hub) {
     stage(6);
     usbapi::start(app.clone());
     stage(7);
+    // Until Wi-Fi is up the NCP's PTA follower stays off; also replayed to
+    // an NCP that kept it on across an S3 restart (its grant line is not
+    // driven before the leader is configured).
+    if let Err(e) = hub.set_coex(false) {
+        warn!("coex_enable false: {e}");
+    }
     match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(p) => net::start(app, p.modem, move |up| {
+            // Only with the leader configured (after the Wi-Fi start).
+            let up = pta::wifi_changed(up);
             if let Err(e) = hub.set_coex(up) {
                 warn!("coex_enable {up}: {e}");
             }

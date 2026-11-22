@@ -120,6 +120,11 @@ fn run(app: App, modem: Modem<'static>, mut ssid: String, pass: String, on_up: B
     // The hub is mains powered: modem sleep (the default) holds frames to the
     // hub until the next DTIM beacon, adding 100-300 ms and lost pings.
     esp!(unsafe { esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE) })?;
+    // Coexistence is initialised by the Wi-Fi start: the S3 leads the H2's
+    // PTA from now on (the NCP follower follows the Wi-Fi state, `on_up`).
+    if let Err(e) = crate::pta::enable_leader() {
+        warn!("PTA leader: {e}");
+    }
     let mut server_up = false;
     loop {
         if let Some((s, p)) = SWITCH.lock().unwrap().take() {
