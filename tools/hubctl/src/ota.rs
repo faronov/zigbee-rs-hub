@@ -118,11 +118,25 @@ pub fn make(image: &[u8], manufacturer: u16, image_type: u16, version: u32, labe
     file::build(manufacturer, image_type, version, label, image, hw)
 }
 
+/// How a stream session ended.
+enum Ended {
+    /// The device runs the image.
+    Done,
+    /// The connection is gone (hub restart, Wi-Fi): connect again.
+    Dropped(String),
+}
+
+/// No frame for this long: ping the hub.
+const PING_AFTER: Duration = Duration::from_secs(10);
+/// No frame (not even the pong) for this long: the connection is dead.
+const DEAD_AFTER: Duration = Duration::from_secs(25);
+
 /// `hubctl ota-stream URL --token T FILE [--device ID]`: offers the file
 /// as a stream (no storage on the hub, the 4 MB layout's way) and serves
 /// `ota/block_needed` until the device runs it (or forever without a
-/// device). Run it again after a drop: the hub keeps the device waiting
-/// for two minutes and continues with the same session.
+/// device). A dropped connection (a hub restart, Wi-Fi) is noticed within
+/// 25 s (ping) and the command connects again, offers the file again and
+/// notifies the device again; the device continues from its own offset.
 pub fn stream(url: &str, token: &str, path: &str, device: Option<String>) -> Result<(), String> {
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let (f, c) = prepare(&data)?;
@@ -134,30 +148,106 @@ pub fn stream(url: &str, token: &str, path: &str, device: Option<String>) -> Res
         h.file_version,
         f.len()
     );
-    let (mut ws, _) = tungstenite::connect(url).map_err(|e| format!("{url}: {e}"))?;
-    next(&mut ws)?;
-    ws.send(Message::text(json!({"type": "auth", "token": token}).to_string())).map_err(|e| e.to_string())?;
-    if next(&mut ws)?["type"] != "auth_ok" {
-        return Err("authentication failed".into());
-    }
-    let mut id = 0;
-    call(&mut ws, &mut id, json!({"type": "subscribe", "topics": ["ota"]}))?;
-    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let name = std::path::Path::new(path).file_name().map_or("image.ota".into(), |n| n.to_string_lossy().into_owned());
+    let mut served = 0usize;
+    let mut connected_once = false;
+    loop {
+        match stream_session(url, token, f, &name, device.as_deref(), &mut served, &mut connected_once)? {
+            Ended::Done => return Ok(()),
+            // Never got through: the URL or the hub is wrong.
+            Ended::Dropped(why) if !connected_once => return Err(why),
+            Ended::Dropped(why) => println!("connection lost ({why}); connecting again"),
+        }
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_secs(10));
+            if url_reachable(url) {
+                break;
+            }
+        }
+    }
+}
+
+/// The hub's TCP port answers.
+fn url_reachable(url: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let host = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("");
+    let host = if host.contains(':') { host.to_string() } else { format!("{host}:80") };
+    host.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
+}
+
+/// Why a read or call failed.
+enum Fail {
+    /// The connection is gone.
+    Dropped(String),
+    /// The hub answered with an error.
+    Refused(String),
+}
+
+/// One connection: offer, notify, serve. `Err`: give up (a refused file,
+/// authentication, the job failed); `Dropped`: connect again.
+fn stream_session(
+    url: &str,
+    token: &str,
+    f: &[u8],
+    name: &str,
+    device: Option<&str>,
+    served: &mut usize,
+    connected_once: &mut bool,
+) -> Result<Ended, String> {
+    let mut ws = match tungstenite::connect(url) {
+        Ok((ws, _)) => ws,
+        Err(e) => return Ok(Ended::Dropped(format!("{url}: {e}"))),
+    };
+    if let MaybeTlsStream::Plain(s) = ws.get_ref() {
+        let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+    }
+    let mut live = Live::new();
+    match serve_on(&mut ws, &mut live, token, f, name, device, served, connected_once) {
+        Ok(()) => Ok(Ended::Done),
+        Err(Fail::Dropped(e)) => Ok(Ended::Dropped(e)),
+        Err(Fail::Refused(e)) => Err(e),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_on(
+    ws: &mut Ws,
+    live: &mut Live,
+    token: &str,
+    f: &[u8],
+    name: &str,
+    device: Option<&str>,
+    served: &mut usize,
+    connected_once: &mut bool,
+) -> Result<(), Fail> {
+    let mut id = 0;
+    live.next(ws)?;
+    send(ws, json!({"type": "auth", "token": token}))?;
+    if live.next(ws)?["type"] != "auth_ok" {
+        return Err(Fail::Refused("authentication failed".into()));
+    }
+    *connected_once = true;
+    live.call(ws, &mut id, json!({"type": "subscribe", "topics": ["ota"]}))?;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let head = &f[..f.len().min(256)];
-    let o = call(&mut ws, &mut id, json!({"type": "ota/stream/offer", "size": f.len(), "header": b64(head), "name": name}))?;
+    let o = live.call(ws, &mut id, json!({"type": "ota/stream/offer", "size": f.len(), "header": b64(head), "name": name}))?;
     let session = o["session"].clone();
     println!("stream session {session}, for {}", o["devices"]);
-    if let Some(d) = &device {
-        // A running download (this command run again, e.g. after a hub
-        // restart, whose ABORT made the device wait for a notify): notify
-        // again; the device resumes from its own offset.
+    if let Some(d) = device {
+        // A running download (this command run again, or connected again
+        // after a hub restart whose ABORT made the device wait for a
+        // notify): notify again; the device resumes from its own offset.
         let start = json!({"type": "ota/start", "device": d, "image": session});
-        match call(&mut ws, &mut id, start.clone()) {
-            Err(e) if e.contains("busy") => {
+        match live.call(ws, &mut id, start.clone()) {
+            Err(Fail::Refused(e)) if e.contains("busy") => {
                 let mut again = start;
                 again["force"] = true.into();
-                call(&mut ws, &mut id, again)?;
+                live.call(ws, &mut id, again)?;
                 println!("{d}: running download, notified again");
             }
             r => {
@@ -166,17 +256,16 @@ pub fn stream(url: &str, token: &str, path: &str, device: Option<String>) -> Res
             }
         }
     }
-    let mut served = 0usize;
     let mut last = String::new();
     loop {
-        let m = next(&mut ws)?;
+        let m = live.next(ws)?;
         if m["type"] == "ota/block_needed" && m["session"] == session {
             let off = m["offset"].as_u64().unwrap_or(0) as usize;
             let end = (off + m["len"].as_u64().unwrap_or(0) as usize).min(f.len());
             id += 1;
-            let req = json!({"id": id, "type": "ota/block_data", "session": session, "offset": off, "data": b64(&f[off..end])});
-            ws.send(Message::text(req.to_string())).map_err(|e| e.to_string())?;
-            served += end - off;
+            let req = json!({"id": id, "type": "ota/block_data", "session": session, "offset": off, "data": b64(&f[off.min(end)..end])});
+            send(ws, req)?;
+            *served += end.saturating_sub(off);
             continue;
         }
         if m["type"] == "result" && m["success"] == false {
@@ -187,7 +276,10 @@ pub fn stream(url: &str, token: &str, path: &str, device: Option<String>) -> Res
             continue;
         }
         let d = &m["event"]["device"];
-        let mine = d["job"]["image"] == session && device.as_ref().is_none_or(|x| d["device"] == x.as_str());
+        let this_device = device.is_none_or(|x| d["device"] == x);
+        // A job that ended without the stream (aborted after the grace
+        // time) no longer names the session: match it by version.
+        let mine = this_device && (d["job"]["image"] == session || (device.is_some() && d["job"]["file_version"] == o["file_version"]));
         if !mine {
             continue;
         }
@@ -201,7 +293,67 @@ pub fn stream(url: &str, token: &str, path: &str, device: Option<String>) -> Res
             return Ok(());
         }
         if device.is_some() && (state == "failed" || state == "aborted") {
-            return Err(format!("{state}: {}", d["job"]["error"]));
+            return Err(Fail::Refused(format!("{state}: {}", d["job"]["error"])));
+        }
+    }
+}
+
+fn send(ws: &mut Ws, req: J) -> Result<(), Fail> {
+    ws.send(Message::text(req.to_string())).map_err(|e| Fail::Dropped(e.to_string()))
+}
+
+/// Liveness: pings an idle connection, gives up on a silent one.
+struct Live {
+    last_rx: Instant,
+    pinged: bool,
+}
+
+impl Live {
+    fn new() -> Self {
+        Self { last_rx: Instant::now(), pinged: false }
+    }
+
+    fn next(&mut self, ws: &mut Ws) -> Result<J, Fail> {
+        use tungstenite::Error as E;
+        loop {
+            match ws.read() {
+                Ok(m) => {
+                    self.last_rx = Instant::now();
+                    self.pinged = false;
+                    match m {
+                        Message::Text(t) => return serde_json::from_str(&t).map_err(|e| Fail::Dropped(e.to_string())),
+                        Message::Close(_) => return Err(Fail::Dropped("connection closed".into())),
+                        _ => {}
+                    }
+                }
+                Err(E::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    let idle = self.last_rx.elapsed();
+                    if idle >= DEAD_AFTER {
+                        return Err(Fail::Dropped(format!("no answer for {} s", idle.as_secs())));
+                    }
+                    if idle >= PING_AFTER && !self.pinged {
+                        self.pinged = true;
+                        ws.send(Message::Ping(Vec::new().into())).map_err(|e| Fail::Dropped(e.to_string()))?;
+                    }
+                }
+                Err(e) => return Err(Fail::Dropped(e.to_string())),
+            }
+        }
+    }
+
+    fn call(&mut self, ws: &mut Ws, id: &mut u64, mut req: J) -> Result<J, Fail> {
+        *id += 1;
+        req["id"] = (*id).into();
+        send(ws, req.clone())?;
+        loop {
+            let m = self.next(ws)?;
+            if m["type"] == "result" && m["id"] == *id {
+                return if m["success"] == true {
+                    Ok(m["result"].clone())
+                } else {
+                    Err(Fail::Refused(format!("{}: {}", req["type"], m["error"])))
+                };
+            }
         }
     }
 }
