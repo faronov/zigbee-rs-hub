@@ -901,25 +901,28 @@ fn scans_are_background_jobs_that_leave_the_api_usable() {
 }
 
 #[test]
-fn jobs_are_refused_when_the_heap_is_low() {
+fn jobs_run_on_the_worker_and_only_a_second_one_needs_heap() {
     let r = rig(Store::volatile());
     let p = Arc::new(TestPlatform::default());
     let app = admin_app(&r, Some(p.clone()));
     let (sid, rx) = session(&app);
     form(&app, sid, &rx, 15);
-    // 16 KiB job stack (host default) + 16 KiB reserve.
-    *p.heap.lock().unwrap() = Some((30 * 1024, 30 * 1024));
-    let d = call(&app, sid, &rx, 1, json!({"type": "network/diagnostics"}));
+    // Fragmented heap: no block for a job stack. The worker's stack
+    // exists already, so jobs one at a time still run, again and again.
+    *p.heap.lock().unwrap() = Some((30 * 1024, 8 * 1024));
+    for i in 1..=5 {
+        ok(&call(&app, sid, &rx, i, json!({"type": "network/diagnostics"})));
+    }
+    // A second job while the worker scans needs a thread of its own.
+    r.sim.with(|s| s.scan_time = Duration::from_millis(1500));
+    let s = call(&app, sid, &rx, 10, json!({"type": "network/energy_scan"}));
+    ok(&s);
+    let d = call(&app, sid, &rx, 11, json!({"type": "network/diagnostics"}));
     assert_eq!(err_code(&d), "busy");
     assert!(d["error"]["message"].as_str().unwrap().contains("low memory (30 KB free)"), "{d}");
-    let s = call(&app, sid, &rx, 2, json!({"type": "network/energy_scan"}));
-    assert_eq!(err_code(&s), "busy");
-    // Free, but no block for the stack.
-    *p.heap.lock().unwrap() = Some((60 * 1024, 12 * 1024));
-    assert_eq!(err_code(&call(&app, sid, &rx, 3, json!({"type": "network/diagnostics"}))), "busy");
     *p.heap.lock().unwrap() = Some((60 * 1024, 31 * 1024));
-    ok(&call(&app, sid, &rx, 4, json!({"type": "network/diagnostics"})));
+    ok(&call(&app, sid, &rx, 12, json!({"type": "network/diagnostics"})));
     // Requests that need no job thread are not affected.
     *p.heap.lock().unwrap() = Some((4 * 1024, 4 * 1024));
-    ok(&call(&app, sid, &rx, 5, json!({"type": "network/jobs"})));
+    ok(&call(&app, sid, &rx, 13, json!({"type": "network/jobs"})));
 }

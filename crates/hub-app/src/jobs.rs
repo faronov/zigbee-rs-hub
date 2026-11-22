@@ -309,9 +309,68 @@ impl Drop for Done {
     }
 }
 
-/// Run `body` on its own thread; the caller has registered the job. With
-/// `reply` (a request ID) the body's text is the whole result frame for
-/// that request; otherwise it is a background job's result value.
+type Task = Box<dyn FnOnce() + Send>;
+
+/// The long-lived job thread, started with the app while the heap is
+/// still in one piece. A thread per job needs its whole stack in one free
+/// block every time: after hours of uptime the S3's heap had 51 KB free
+/// but no block of 12 KiB, and every job failed with `os error 12`; each
+/// thread also left about 300 B behind. Jobs run here; only a job that
+/// starts while another one runs gets a thread of its own.
+pub struct Worker {
+    tx: Mutex<std::sync::mpsc::Sender<Task>>,
+    busy: Arc<AtomicBool>,
+}
+
+impl Worker {
+    /// Start the worker thread (None when even that fails).
+    pub fn start(stack: usize) -> Option<Worker> {
+        let (tx, rx) = std::sync::mpsc::channel::<Task>();
+        let busy = Arc::new(AtomicBool::new(false));
+        let b = busy.clone();
+        std::thread::Builder::new()
+            .name("hub-job".into())
+            .stack_size(stack)
+            .spawn(move || {
+                for task in rx {
+                    task();
+                    b.store(false, Ordering::Release);
+                }
+            })
+            .ok()?;
+        Some(Worker { tx: Mutex::new(tx), busy })
+    }
+
+    /// Hand `task` to the worker if it is idle; else give it back.
+    fn try_run(&self, task: Task) -> Result<(), Task> {
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return Err(task);
+        }
+        self.tx.lock().unwrap().send(task).map_err(|e| {
+            self.busy.store(false, Ordering::Release);
+            e.0
+        })
+    }
+
+    /// A job is running on the worker.
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+}
+
+/// Where and how a job runs.
+pub struct Exec<'a> {
+    /// The long-lived worker, when there is one.
+    pub worker: Option<&'a Worker>,
+    /// Stack of a job thread of its own.
+    pub stack: usize,
+    /// Logs the stack high water of finished jobs.
+    pub platform: Option<Arc<dyn crate::Platform>>,
+}
+
+/// Run `body` on the worker (or its own thread); the caller has registered
+/// the job. With `reply` (a request ID) the body's text is the whole result
+/// frame for that request; otherwise it is a background job's result value.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     board: Shared,
@@ -320,14 +379,18 @@ pub fn run(
     cancel: Arc<AtomicBool>,
     out: Out,
     sid: SessionId,
-    stack: usize,
+    exec: Exec<'_>,
     reply: Option<u64>,
     body: BgBody,
 ) -> Result<(), ApiError> {
     let bg = Bg { job, kind, board: board.clone(), cancel, out: out.clone(), sid };
     let done = Done(board.clone(), job);
-    let spawned = std::thread::Builder::new().name("hub-job".into()).stack_size(stack).spawn(move || {
+    let platform = exec.platform;
+    let task: Task = Box::new(move || {
         let r = body(&bg);
+        if let Some(hw) = platform.as_ref().and_then(|p| p.stack_high_water()) {
+            log::info!("admin: {kind} done, stack high water {hw} B free");
+        }
         if let Err(e) = &r {
             log::warn!("admin: {kind}: {}", e.message);
         }
@@ -354,6 +417,14 @@ pub fn run(
         drop(done);
         out(JobOut::Event(ev.map_or(J::Null, |t| jv(&t))));
     });
+    let task = match exec.worker {
+        Some(w) => match w.try_run(task) {
+            Ok(()) => return Ok(()),
+            Err(t) => t,
+        },
+        None => task,
+    };
+    let spawned = std::thread::Builder::new().name("hub-job2".into()).stack_size(exec.stack).spawn(task);
     spawned.map(drop).map_err(|e| ApiError::new("failed", format!("job thread: {e}")))
 }
 

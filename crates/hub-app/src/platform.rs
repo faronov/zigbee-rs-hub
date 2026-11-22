@@ -55,6 +55,12 @@ pub trait Platform: Send + Sync {
         None
     }
 
+    /// The least free stack the calling thread had so far, in bytes
+    /// (job threads log it when they end).
+    fn stack_high_water(&self) -> Option<usize> {
+        None
+    }
+
     /// The last `max` log lines, oldest first.
     fn logs(&self, _max: usize) -> Vec<String> {
         Vec::new()

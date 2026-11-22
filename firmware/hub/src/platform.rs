@@ -85,6 +85,10 @@ impl hub_app::Platform for S3 {
         let caps = sys::MALLOC_CAP_INTERNAL;
         Some(unsafe { (sys::heap_caps_get_free_size(caps), sys::heap_caps_get_largest_free_block(caps)) })
     }
+    fn stack_high_water(&self) -> Option<usize> {
+        // ESP-IDF counts the stack in bytes.
+        Some(unsafe { sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()) } as usize)
+    }
     fn wifi_channel(&self) -> Option<u8> {
         net::ap().map(|(channel, _)| channel)
     }

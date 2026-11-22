@@ -115,6 +115,8 @@ pub struct Admin {
     pub source: String,
     /// Stack of the job thread.
     pub job_stack: usize,
+    /// The long-lived job thread ([`start_worker`](Self::start_worker)).
+    worker: Option<jobs::Worker>,
     board: jobs::Shared,
     staged: Option<Staged>,
 }
@@ -499,7 +501,18 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
-        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None }
+        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None, worker: None }
+    }
+
+    /// Start the long-lived job thread (with `job_stack`); call once,
+    /// early, while the heap is in one piece.
+    pub fn start_worker(&mut self) {
+        if self.worker.is_none() {
+            self.worker = jobs::Worker::start(self.job_stack);
+            if self.worker.is_none() {
+                warn!("admin: no job worker thread, jobs get threads of their own");
+            }
+        }
     }
 
     /// `hub/info` `maintenance`: what this hub and its NCP support.
@@ -680,8 +693,11 @@ impl Admin {
         // A job thread needs its stack in one block plus room for its
         // result and the frames in flight: without it, refuse instead of
         // running the heap dry (the S3 has no PSRAM).
+        // The worker's stack exists already; a second job needs its own.
+        let own_stack = self.worker.as_ref().is_none_or(jobs::Worker::is_busy);
+        let need = if own_stack { self.job_stack } else { 0 };
         if let Some((free, largest)) = self.platform.as_ref().and_then(|p| p.heap())
-            && (free < self.job_stack + JOB_HEAP_RESERVE || largest < self.job_stack)
+            && (free < need + JOB_HEAP_RESERVE || largest < need)
         {
             let e = ApiError::new("busy", format!("low memory ({} KB free): try again when the running job ended", free / 1024));
             return vec![frame(id, Err(e))];
@@ -690,7 +706,8 @@ impl Admin {
             Ok(j) => j,
             Err(e) => return vec![frame(id, Err(e))],
         };
-        match jobs::run(self.board.clone(), job, kind, cancel, out, sid, self.job_stack, (!background).then_some(id), body) {
+        let exec = jobs::Exec { worker: self.worker.as_ref(), stack: self.job_stack, platform: self.platform.clone() };
+        match jobs::run(self.board.clone(), job, kind, cancel, out, sid, exec, (!background).then_some(id), body) {
             Ok(()) if background => {
                 vec![format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{{\"job\":{job},\"kind\":\"{kind}\",\"passes\":{passes}}}}}")]
             }
