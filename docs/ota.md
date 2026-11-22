@@ -29,19 +29,45 @@ sub-elements and the provider's SHA) and offers the image to devices like
 a stored one; `ota/start {device, image: session}` notifies the device.
 When the device asks for bytes the hub does not have, the hub answers
 WAIT_FOR_DATA (1 s) and sends the client
-`{"type": "ota/block_needed", "session", "offset", "len"}` (4 KiB chunks);
-the client answers `ota/block_data {session, offset, data}`. The hub keeps
-**two chunks (8 KiB) per stream** and asks for the next chunk as soon as
-the device reads the newest one, so after the first block the device does
-not wait; the hub checks chunk 0 against the offered header. At most 4
-streams.
+`{"type": "ota/block_needed", "session", "offset", "len"}` (1 KiB chunks);
+the client answers `ota/block_data {session, offset, data}`. The hub checks
+chunk 0 against the offered header. At most 4 streams.
+
+**Memory per stream is fixed** (the first hardware run, an S3 without
+PSRAM, ran out of heap after 2–3 chunks of 4 KiB: the request's `Value`
+copy, the decoded bytes and the chunk copy per chunk, with fragmentation):
+
+- a ring of **4 × 1 KiB**, allocated when the first chunk arrives;
+- `ota/block_data` is taken from the request text: the base64 stays in the
+  WebSocket frame (about 1.4 KB) and decodes straight into the ring — no
+  `Value`, no buffer per chunk (`ota/upload/chunk` of the store likewise
+  decodes into a stack buffer);
+- at most one chunk is asked for at a time (plus the one a device needs
+  while a prefetch is on its way), **2 chunks ahead** of the device, so
+  after the first block the device does not wait;
+- **heap guard**: below 20 KiB free or without a 6 KiB block nothing is
+  asked for (devices get WAIT_FOR_DATA, `ota/status` shows
+  `stream_paused`) until the heap recovers;
+- `ota_device` events are built as text and serialized once for all
+  subscribers (the API also no longer copies a `Value` per subscriber for
+  any event).
+
+A host test with a counting allocator (`crates/hub-ota/tests/stream_heap.rs`)
+downloads 120 KB through the server and the streams: after the first
+chunk the largest allocation is 256 B, the peak +0.9 KB, nothing grows.
+`ota/status` counts per stream `asks`, `waits` (WAIT_FOR_DATA answers) and
+`memory`.
 
 If the client goes away (session closed), its streams wait **2 minutes**
 for a client to offer the same image again (same session ID, e.g. Home
 Assistant reconnecting after a hub restart); devices get WAIT_FOR_DATA
-meanwhile, then ABORT. A device keeps what it has (zigbee-rs: suspended
+meanwhile, then ABORT, and the job ends `aborted` ("the stream's client did
+not come back"). A device keeps what it has (zigbee-rs: suspended
 download) and continues when the image is offered again and the upgrade
-is started again. Home Assistant keeps streamed files on disk
+is started again. `hubctl ota-stream` notices a dropped connection itself
+(a ping after 10 s of silence, given up after 25 s), connects again with
+backoff, offers the file again and notifies the device again
+(`ota/start … force` while the job runs). Home Assistant keeps streamed files on disk
 (`.storage/zigbee_rs_hub_ota/`) and, after any reconnect, offers the files
 of running jobs again and restarts them (`ota/start … force`); the file is
 deleted when the job is done.
@@ -335,19 +361,21 @@ reaches the hub over Wi-Fi. `<hub>` is the hub's IP, `<t>` its API token
    Expected: the header line, `stream session 65536…`, `<c6>: notified`,
    then `downloading N %` lines, `installing`, `done`, exit 0. About
    370 KB in 48-B blocks: expect 30–45 min (ZHA took 43 min). Every
-   5 min note `hub/system` free heap; the S3 log must show no NCP
-   `TOO_LARGE`/`UNSUPPORTED` for the block responses.
+   5 min note `hub/system` free heap and `ota/status` (`stream_paused`,
+   the stream's `asks`, `waits`, `memory`); the S3 log must show no NCP
+   `TOO_LARGE`/`UNSUPPORTED` for the block responses; `ota: heap low`
+   means the guard paused the stream (note how often and how long).
 7. **Client away, back in time** (at ~20 %): Ctrl-C `hubctl`, wait 60 s,
    run the same command again. Expected: `running download, notified
    again`, progress continues from where it was (not from 0 %).
 8. **Client away too long** (at ~40 %): Ctrl-C, wait 150 s. Expected:
-   `ota/devices/list` shows the job `aborted` (stream gone), the C6 keeps
-   working. Run the command again: progress continues from the C6's saved
-   offset.
-9. **Hub restart** (at ~60 %): reset the S3 (keep `hubctl` stopped), and
-   once the hub is back run the command again. Expected: the C6 got ABORT
-   while no stream was offered; after the rerun (`notified again`) it
-   continues from its saved offset.
+   `ota/devices/list` shows the job `aborted` ("the stream's client did
+   not come back"), the C6 keeps working. Run the command again: progress
+   continues from the C6's saved offset.
+9. **Hub restart** (at ~60 %): reset the S3 and leave `hubctl` running.
+   Expected: within 25 s `connection lost …; connecting again`, then once
+   the hub is back `stream session …`, `running download, notified again`
+   (or `notified`), and the C6 continues from its saved offset.
 10. **Done.** After `done` the C6 reboots into `<V>`, rejoins and
     reports; `ota/devices/list` shows `current_version` = `<V>` and the job
     `done`; Basic SWBuildID shows the new version.
@@ -414,3 +442,16 @@ guard that answers WAIT_FOR_DATA instead of allocating below a threshold
 (like the job guard of #31), a smaller chunk, and a ping/read timeout in
 `hubctl`. Retest on top of main 0.1.4+ (#36, lighter snapshots and
 uploads); this branch does not contain it and conflicts with main.
+
+**Changes after this run** (rebased on main 0.1.7 with #36 and #31; retest
+pending): a fixed 4 × 1 KiB ring per stream, `ota/block_data` and
+`ota/upload/chunk` decoded from the request text (no `Value`, no buffer per
+chunk), one chunk asked for at a time, the heap guard (20 KiB free, a 6 KiB
+block), `ota_device` events as text and every API event serialized once
+for all subscribers, owned frames to the WebSocket sinks; a job ends
+`aborted` when its stream is dropped after the grace time; `hubctl
+ota-stream` pings an idle connection, notices a dead one within 25 s and
+connects again by itself; `ota/status` counts `asks`, `waits` and
+`memory` per stream. Not addressed: the per-session WebSocket send queue
+(up to 32 frames) and Wi-Fi/lwIP buffers are shared with the rest of the
+hub; the heap guard keeps OTA from taking the last of it.
