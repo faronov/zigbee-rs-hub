@@ -93,6 +93,9 @@ jobs:
                   set -euo pipefail
                   (cd firmware/bridge && cargo build --release --locked)
                   (cd firmware/hub && cargo build --release --locked)
+                  # Octal PSRAM variant (N4R8/N8R8/N16R8 modules): ESP-IDF fixes the mode at build time.
+                  (cd firmware/hub && ESP_IDF_SDKCONFIG_DEFAULTS="firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal" \
+                    CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-opi" cargo build --release --locked)
             - name: Release images
               run: |
                   set -euo pipefail
@@ -117,7 +120,9 @@ jobs:
                       app = b["files"]["app"]
                       print(f"| {b['title']} | `{b['layout']}` | `{b['files']['merged']['name']}` | `{app['name']}` at 0x{app['offset']:X} |")
                   print("\nWith esptool, a first install (erases the S3):")
-                  print("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 tbr-hub-<v>-<8mb|4mb-dev>-merged.bin\n```")
+                  print("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 tbr-hub-<v>-<8mb|4mb-dev>[-opi]-merged.bin\n```")
+                  print("`-opi` images: modules with octal PSRAM (`esptool chip-id` shows \"Embedded PSRAM 8MB\" or 16MB: WROOM-1 N4R8/N8R8/N16R8); "
+                        "the others: quad PSRAM (\"Embedded PSRAM 2MB\"/4MB: N4R2/N8R2, S3FH4R2) or none. A wrong choice boots without PSRAM.")
                   print("Update keeping `nvs` and `hubdata` (8 MB layout; the 4 MB dev layout has no otadata and its app is at 0x10000):")
                   print("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 <...-bootloader.bin> 0x8000 <...-partition-table.bin> 0xF000 <...-otadata-blank.bin> 0x20000 <...-app.bin>\n```")
                   for f in m.get("extra_files", []):

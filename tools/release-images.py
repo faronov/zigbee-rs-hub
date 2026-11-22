@@ -37,7 +37,7 @@ CONNECT_STEPS = [
     "After the install the S3 boots tbr-hub in bridge mode (the default without a stored mode); "
     "the console commands mode hub and wifi set <ssid> <password> (second serial port) make it a hub.",
 ]
-BOARDS = [
+LAYOUTS = [
     {
         "id": "thread-br-s3-hub-8mb",
         "title": "Espressif Thread Border Router board, S3 (8 MB): zigbee-rs hub",
@@ -50,7 +50,7 @@ BOARDS = [
     },
     {
         "id": "thread-br-s3-hub-4mb-dev",
-        "title": "Espressif Thread Border Router board, S3 (4 MB early sample): zigbee-rs hub, dev layout",
+        "title": "Espressif Thread Border Router board, S3 (4 MB): zigbee-rs hub, dev layout",
         "flash_size": "4MB",
         "layout": "partitions-4mb-dev",
         "csv": "firmware/hub/partitions-4mb-dev.csv",
@@ -58,6 +58,23 @@ BOARDS = [
         "max_app": 2944 * 1024,
         "note": "Development layout: one 2 944 KiB app slot, no OTA, 1 MiB hubdata.",
     },
+]
+# ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
+# variant by the chip's embedded PSRAM (eFuse PSRAM_CAP, esptool's
+# "Embedded PSRAM 8MB"); a wrong pick boots without PSRAM.
+PSRAM_VARIANTS = [
+    {"psram": "quad", "suffix": "", "target": "target", "title": "",
+     "match": {"embedded_psram_mb": [0, 2, 4]},
+     "note": "Quad PSRAM (WROOM-1 N4R2/N8R2, S3FH4R2) or none."},
+    {"psram": "octal", "suffix": "-opi", "target": "target-opi", "title": ", octal PSRAM",
+     "match": {"embedded_psram_mb": [8, 16]},
+     "note": "Octal PSRAM (WROOM-1 N4R8/N8R8/N16R8, ESP32-S3R8/R16V die)."},
+]
+BOARDS = [
+    {**layout, "id": layout["id"] + v["suffix"], "title": layout["title"] + v["title"],
+     "note": layout["note"] + " " + v["note"], "psram": v["psram"], "match": v["match"], "target": v["target"]}
+    for layout in LAYOUTS
+    for v in PSRAM_VARIANTS
 ]
 PRESERVED = {
     "nvs": "Wi-Fi credentials, boot mode, API token",
@@ -132,7 +149,7 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     boot = out / f"{stem}-bootloader.bin"
     merged = out / f"{stem}-merged.bin"
     run("tools/make-app-image.sh", "release", str(app), "tbr-hub",
-        env={"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot)})
+        env={"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])})
     run("tools/make-partition-table.sh", spec["csv"], str(table), size)
     # The bootloader configures the flash from its own header: give it the board's size.
     run("esptool", "--chip", "esp32s3", "merge-bin", "--flash-size", size, "-o", str(boot), "0x0", str(boot_src))
@@ -172,6 +189,8 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
         "chip_family": "ESP32-S3",
         "flash_size": size,
         "layout": spec["layout"],
+        "psram": spec["psram"],
+        "match": spec["match"],
         "note": spec["note"],
         "connect": CONNECT,
         "connect_steps": CONNECT_STEPS,

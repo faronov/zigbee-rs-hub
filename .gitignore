@@ -8,3 +8,4 @@
 # zdef signing keys (never commit; see crates/zdefc)
 *.key
 zdef-signing*
+/target-opi
