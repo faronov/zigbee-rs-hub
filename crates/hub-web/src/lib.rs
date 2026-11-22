@@ -42,7 +42,8 @@ mod tests {
     #[test]
     fn embedded_page_is_the_source_and_small() {
         assert_eq!(page(), include_bytes!("../web/index.html"));
-        assert!(INDEX_HTML_GZ.len() <= 25 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
+        // Budget raised from 25 to 32 KiB with the Updates (OTA) tab.
+        assert!(INDEX_HTML_GZ.len() <= 32 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
     }
 
     #[test]

@@ -315,27 +315,36 @@ download). The store needs an 8 MB board (host tests only so far).
 
 ## Hardware test
 
-The lab's 4 MB BR board with the **standard 4 MB dev image of this
-branch** (streaming only; no special build, no layout change) and the
-zigbee-rs **ESP32-C6 sensor** (`products/esp32-zigbee-devkit`, image type
-0x0001, hardware version 1) joined to it. The Mac runs `hubctl` and
-reaches the hub over Wi-Fi. `<hub>` is the hub's IP, `<t>` its API token
-(hub console `token`), `<c6>` the C6's `zb:<ieee>`.
+The lab's 4 MB BR board (since 2026-11-22 an **N4R8, octal PSRAM**; its
+standard state is hub main's octal 4 MB dev image) with **this branch's
+octal 4 MB dev image** (4 MB builds have no image store: streaming only;
+no layout change) and the zigbee-rs **ESP32-C6 sensor**
+(`products/esp32-zigbee-devkit`, image type 0x0001, hardware version 1)
+joined to it. The Mac runs `hubctl` and reaches the hub over Wi-Fi.
+`<hub>` is the hub's IP, `<t>` its API token (hub console `token`), `<c6>`
+the C6's `zb:<ieee>`.
 
 1. **Lock and record.** Take the BR-board lock (queue protocol). Note the
    hub's current app image and the C6's firmware (build features,
    version) — both are restored at the end.
-2. **Build.** In this branch: `cargo build -p hubctl --release`; hub image:
+2. **Build.** In this branch: `cargo build -p hubctl --release`; the
+   octal hub image (the 4 MB dev build is the one without the store):
    ```sh
    . ~/export-esp.sh
-   (cd firmware/hub && cargo build --release --no-default-features --features app)
-   cp target/xtensa-esp32s3-espidf/release/tbr-hub /tmp/hub-4mb.elf
-   FLASH_SIZE=4MB MAX_APP_BYTES=3014656 ELF=/tmp/hub-4mb.elf \
-     tools/make-app-image.sh release /tmp/hub-4mb.bin tbr-hub
+   (cd firmware/hub && \
+     ESP_IDF_SDKCONFIG_DEFAULTS="firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal" \
+     CARGO_TARGET_DIR="$PWD/../../target-opi" cargo build --release --no-default-features --features app)
+   cp target-opi/xtensa-esp32s3-espidf/release/tbr-hub /tmp/hub-4mb-opi.elf
+   FLASH_SIZE=4MB MAX_APP_BYTES=3014656 ELF=/tmp/hub-4mb-opi.elf \
+     tools/make-app-image.sh release /tmp/hub-4mb-opi.bin tbr-hub
    ```
-   (or the `thread-br-s3-hub-4mb-dev` app image of the PR's CI/release
-   build). Flash **only the app** at 0x10000 (`factory`); do not erase
-   `nvs` or `hubdata` (network, registry and OTA records stay).
+   (or `tbr-hub-4mb-dev-opi-app.bin` from the PR's CI artifact
+   `firmware`; a board without PSRAM takes `tbr-hub-4mb-dev-app.bin`, the
+   same build without `sdkconfig.octal`). Flash **only the app** at
+   0x10000 (`factory`); do not erase `nvs` or `hubdata` (network,
+   registry and OTA records stay). The boot log must report the octal
+   PSRAM (8 MB) and the Rust heap in PSRAM; `hub/system` then shows the
+   internal heap, which the stream's heap guard watches.
 3. **Boot.** S3 log: no panic or reset loop; the hub forms/resumes its
    network, the C6 stays joined (entities update). Then
    `hubctl ws-call ws://<hub>/api --token <t> '{"id":1,"type":"hub/info"}'`:

@@ -834,8 +834,8 @@ the last automatic backup, restore from a file in device batches, a new-network 
 that needs `RESET` typed, hub facts, Wi-Fi, token rotation, reboot, bridge
 mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
 are hidden (`maintenance` in `hub/info`); the page stays usable while a
-scan runs, and a page opened meanwhile follows it. The page is 21.0 KB gzipped with the
-other tabs (Green Power included).
+scan runs, and a page opened meanwhile follows it. The page is 25.0 KB gzipped with the
+other tabs (Green Power, Converters, Catalog, Updates; budget 32 KiB).
 
 **RAM.** Until hub 0.1.3 the hwlab board's S3 ran **without PSRAM** (its
 N4R8 module has 8 MB of octal PSRAM, which the quad-only builds did not
