@@ -510,13 +510,20 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     // Active scan: the beacons around; our own network is marked.
     let own = r.ncp.status().network.unwrap();
     r.sim.with(|s| {
-        s.beacons = vec![(20, 0x6A0B, [0xA0; 8], 0, 90, -84, true), (15, own.pan_id, own.ext_pan_id, 0x1234, 200, -50, false), (25, 0x1111, [1; 8], 0, 30, -95, false)];
+        s.beacons = vec![
+            (20, 0x6A0B, [0xA0; 8], 0, 90, -84, true),
+            (15, own.pan_id, own.ext_pan_id, 0x1234, 200, -50, false),
+            (25, 0x1111, [1; 8], 0, 30, -95, false),
+            (20, 0x6A0B, [0xA0; 8], 0x5555, 120, -70, true),
+        ];
     });
     let a = job(&app, sid, &rx, 30, json!({"type": "network/active_scan", "channels": [15, 20]}));
     let nets = ok(&a)["networks"].as_array().unwrap().clone();
     assert_eq!(nets.len(), 2, "channel 25 not scanned");
     assert_eq!((nets[0]["pan_id"].as_u64(), nets[0]["permit_join"].as_bool(), nets[0]["own"].as_bool()), (Some(0x6A0B), Some(true), Some(false)));
     assert_eq!(nets[0]["ext_pan_id"], "a0a0a0a0a0a0a0a0");
+    // Two routers of that network beaconed: one entry, the better link.
+    assert_eq!((nets[0]["beacons"].as_u64(), nets[0]["src"].as_u64(), nets[0]["lqi"].as_u64()), (Some(2), Some(0x5555), Some(120)));
     assert_eq!(nets[1]["own"], true);
     r.sim.with(|s| s.unsupported.push(ids::NWK_ACTIVE_SCAN));
     let a = job(&app, sid, &rx, 31, json!({"type": "network/active_scan"}));

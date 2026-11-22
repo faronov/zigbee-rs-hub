@@ -25,9 +25,9 @@ use crate::jw::{Jw, oom};
 /// total, u8 networks_found`).
 pub const EVT_SCAN_PROGRESS: u16 = 0x018B;
 
-/// Results kept for `network/job/result` (larger ones only go to the
-/// session that started the job).
-pub const MAX_KEPT_RESULT: usize = 16 * 1024;
+/// Results kept for `network/job/result`, all kinds together (the oldest
+/// go first; larger ones only go to the session that started the job).
+pub const MAX_KEPT_RESULT: usize = 8 * 1024;
 
 /// A lane: one job at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,9 +204,13 @@ impl Board {
 
     fn keep(&mut self, job: u64, kind: &'static str, text: String) {
         self.results.retain(|(_, k, _)| *k != kind);
-        if text.len() <= MAX_KEPT_RESULT {
-            self.results.push((job, kind, text));
+        if text.len() > MAX_KEPT_RESULT {
+            return;
         }
+        while self.results.iter().map(|r| r.2.len()).sum::<usize>() + text.len() > MAX_KEPT_RESULT {
+            self.results.remove(0);
+        }
+        self.results.push((job, kind, text));
     }
 }
 

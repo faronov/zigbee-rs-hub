@@ -690,22 +690,23 @@ impl Admin {
     fn launch(&mut self, kind: &'static str, background: bool, passes: u32, estimate: Duration, out: Out, sid: SessionId, id: u64, body: jobs::BgBody) -> Vec<String> {
         // Reads and settings do not wait for a scan.
         let lane = if !background && matches!(kind, "diagnostics" | "TX power") { Lane::Light } else { Lane::Heavy };
+        let (job, cancel) = match self.board.lock().unwrap().start(lane, kind, background, passes, estimate) {
+            Ok(j) => j,
+            Err(e) => return vec![frame(id, Err(e))],
+        };
         // A job thread needs its stack in one block plus room for its
         // result and the frames in flight: without it, refuse instead of
-        // running the heap dry (the S3 has no PSRAM).
-        // The worker's stack exists already; a second job needs its own.
+        // running the heap dry (the S3 has no PSRAM). The worker's stack
+        // exists already; only a second job needs its own.
         let own_stack = self.worker.as_ref().is_none_or(jobs::Worker::is_busy);
         let need = if own_stack { self.job_stack } else { 0 };
         if let Some((free, largest)) = self.platform.as_ref().and_then(|p| p.heap())
             && (free < need + JOB_HEAP_RESERVE || largest < need)
         {
+            self.board.lock().unwrap().finish(job);
             let e = ApiError::new("busy", format!("low memory ({} KB free): try again when the running job ended", free / 1024));
             return vec![frame(id, Err(e))];
         }
-        let (job, cancel) = match self.board.lock().unwrap().start(lane, kind, background, passes, estimate) {
-            Ok(j) => j,
-            Err(e) => return vec![frame(id, Err(e))],
-        };
         let exec = jobs::Exec { worker: self.worker.as_ref(), stack: self.job_stack, platform: self.platform.clone() };
         match jobs::run(self.board.clone(), job, kind, cancel, out, sid, exec, (!background).then_some(id), body) {
             Ok(()) if background => {
@@ -789,13 +790,27 @@ impl Admin {
                         let t = std::time::Instant::now();
                         let found = ncp.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
                         let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
-                        let mut w = Jw::value(100 + 190 * found.len())?;
-                        w.obj().key("networks").arr();
+                        // Every router of a network beacons: one entry per
+                        // network and channel, its best beacon, and the count.
+                        let mut nets: Vec<(&zigbee_zrhp::msg::network::ScanResult, u32)> = Vec::new();
                         for b in &found {
+                            match nets.iter_mut().find(|(n, _)| (n.channel, n.pan, n.epid) == (b.channel, b.pan, b.epid)) {
+                                Some((n, c)) => {
+                                    *c += 1;
+                                    if b.lqi > n.lqi {
+                                        *n = b;
+                                    }
+                                }
+                                None => nets.push((b, 1)),
+                            }
+                        }
+                        let mut w = Jw::value(100 + 200 * nets.len())?;
+                        w.obj().key("networks").arr();
+                        for (b, n) in nets {
                             w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan).key("ext_pan_id").str(&be_hex(&b.epid));
                             w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit != 0);
                             w.key("stack_profile").num(b.stack_profile).key("update_id").num(b.update_id);
-                            w.key("own").num(own == Some((b.pan, b.epid))).end_obj();
+                            w.key("beacons").num(n).key("own").num(own == Some((b.pan, b.epid))).end_obj();
                         }
                         w.end_arr().key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
                         w.finish_value()
