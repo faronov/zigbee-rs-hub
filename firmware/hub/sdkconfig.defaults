@@ -61,3 +61,9 @@ CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 
 # SNTP: up to three servers (hub/time/set).
 CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# MQTT bridge (esp-mqtt): plain TCP only. The hub does no TLS, so the SSL
+# and WebSocket transports stay out of the image.
+CONFIG_MQTT_TRANSPORT_SSL=n
+CONFIG_MQTT_TRANSPORT_WEBSOCKET=n
+CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=n

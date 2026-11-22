@@ -52,6 +52,14 @@ pub fn get_str(key: &str) -> Option<String> {
     g.as_ref()?.get_str(key, &mut buf).ok().flatten().map(str::to_string)
 }
 
+/// A longer string setting (up to `max` bytes), e.g. the MQTT settings.
+#[cfg(feature = "mqtt")]
+pub fn get_long_str(key: &str, max: usize) -> Option<String> {
+    let g = NVS.lock().unwrap();
+    let mut buf = vec![0u8; max];
+    g.as_ref()?.get_str(key, &mut buf).ok().flatten().map(str::to_string)
+}
+
 /// Store (`Some`) or remove (`None`) a string setting.
 pub fn set_str(key: &str, value: Option<&str>) -> Result<(), String> {
     let mut g = NVS.lock().unwrap();

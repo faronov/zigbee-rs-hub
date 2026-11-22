@@ -21,6 +21,8 @@ mod catalog;
 mod cpu;
 mod esp;
 mod mode;
+#[cfg(feature = "mqtt")]
+mod mqtt;
 #[cfg(feature = "app")]
 mod net;
 #[cfg(feature = "app")]
@@ -49,6 +51,8 @@ static HUB: OnceLock<Hub> = OnceLock::new();
 static LAYOUT_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 #[cfg(feature = "app")]
 static APP: OnceLock<hub_app::App> = OnceLock::new();
+#[cfg(feature = "mqtt")]
+static MQTT: OnceLock<hub_mqtt::MqttService> = OnceLock::new();
 static BOOT: OnceLock<mode::Boot> = OnceLock::new();
 
 const HELP: &str = "\
@@ -407,6 +411,8 @@ fn start_app(hub: Hub) {
     stage(5);
     let app = cpu::named(c"app", || hub_app::App::start_with(hub.clone(), app_cfg, catalog));
     let _ = APP.set(app.clone());
+    #[cfg(feature = "mqtt")]
+    let _ = MQTT.set(mqtt::start(&app, psram > 0));
     stage(6);
     usbapi::start(app.clone());
     stage(7);

@@ -11,12 +11,12 @@ env:
 
 jobs:
   host:
-    name: hub-core, hub-ncp, hubctl (host tests)
+    name: hub-core, hub-ncp, hub-mqtt, hubctl (host tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hub-web -p hubctl
+      - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hub-web -p hub-mqtt -p hubctl
       - name: S3 flashing helpers (partition offsets from the device's table)
         run: python3 -m unittest discover -s tools/flow -p 'test_*.py'
 
@@ -160,6 +160,11 @@ jobs:
       - name: Build tbr-hub without the application (ZRHP host core only)
         working-directory: firmware/hub
         run: cargo build --release --no-default-features
+      - name: Build tbr-hub (application without the MQTT bridge, and with its own MQTT client)
+        working-directory: firmware/hub
+        run: |
+          cargo build --release --no-default-features --features app
+          cargo build --release --features mqtt-lite
       - name: Build tbr-hub (application)
         working-directory: firmware/hub
         run: cargo build --release
