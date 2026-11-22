@@ -23,6 +23,7 @@ main{max-width:1100px;margin:0 auto;padding:1em;display:grid;gap:1em}
 .devs{display:grid;gap:1em;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
 .dev .top{display:flex;gap:.5em;align-items:baseline}
 .dev .top b{flex:1;font-size:1.05em}
+.pic{width:2.6em;height:2.6em;object-fit:contain;flex:none;align-self:center}.pic.s{width:1.6em;height:1.6em;vertical-align:middle;margin-right:.4em}
 .mut{color:var(--mut);font-size:.88em}
 .badge{font-size:.78em;padding:.1em .5em;border-radius:1em;border:1px solid var(--line);color:var(--mut)}
 .badge.ok{color:var(--ok);border-color:var(--ok)}.badge.bad{color:var(--bad);border-color:var(--bad)}
@@ -142,6 +143,7 @@ progress{width:12em}
 <div class="row acts"><input id="nconf" placeholder="type RESET" size="11"><button class="d" id="nrb">Back up and reset</button></div></section>
 <section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
 <div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
+<div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
 <section class="card"><h2>Diagnostics</h2><div class="row acts"><button id="dgb">Refresh</button><button id="dgr">Reset counters</button><button id="lgb" class="f-logs">Logs</button></div><div id="dg"></div><pre id="lg" class="hide"></pre></section>
 </div>
@@ -195,12 +197,12 @@ function onMsg(m,tok){
 function onEvent(e){
  switch(e.topic){
  case"snapshot":
-  if(e.devices){devs={};for(const d of e.devices)devs[d.id]=d}
+  if(e.devices){devs={};for(const d of e.devices)devSet(d)}
   if(e.entities){ents={};for(const x of e.entities)ents[x.uid]=x}
   if(e.states){states={};for(const s of e.states)states[s.uid]=s}
   if(e.network)setNet(e.network);
   renderAll();renderNet();gpForm();break;
- case"device_added":case"device_updated":if(e.device){const n=!devs[e.device.id];devs[e.device.id]=e.device;renderDev(e.device.id);if(n)cnt()}break;
+ case"device_added":case"device_updated":if(e.device){const n=!devs[e.device.id];devSet(e.device);renderDev(e.device.id);if(n)cnt()}break;
  case"device_removed":delete devs[e.id];for(const u in ents)if(ents[u].device==e.id)delete ents[u];renderAll();cnt();break;
  case"interview_progress":if(devs[e.device]){devs[e.device].interview="in_progress";devs[e.device].step=e.step;renderDev(e.device)}break;
  case"entity_added":case"entity_updated":if(e.entity){ents[e.entity.uid]=e.entity;renderDev(e.entity.device);if(e.topic=="entity_added")cnt()}break;
@@ -238,6 +240,19 @@ $("#pjc").onclick=()=>act("network/permit_join",{duration_s:0}).then(()=>{pjEnd=
 function ago(t){if(!t)return"never";const s=Math.max(0,Date.now()/1000+skew-t);return s<60?Math.round(s)+" s ago":s<3600?Math.round(s/60)+" min ago":s<86400?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"}
 function renderAll(){const box=$("#devs");box.textContent="";const ids=Object.keys(devs).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));for(const id of ids)box.append(devCard(id));$("#nd").textContent="("+ids.length+")";if(!ids.length)box.append(el("p",{class:"mut"},"No devices yet. Permit join and pair a device."))}
 function renderDev(id){const old=document.getElementById("d-"+id);if(!devs[id]){if(old)old.remove();return}const c=devCard(id);if(old)old.replaceWith(c);else renderAll()}
+// Device pictures: the Zigbee2MQTT site's image of the resolved definition's
+// herdsman model (white label first, then its base model; their file name
+// rule replaces / : ' and space by -). Loaded by the browser, never by the
+// hub; a generic icon when offline, missing or without a definition.
+const PICI="data:image/svg+xml,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.5"><rect x="5" y="3" width="14" height="18" rx="3"/><circle cx="12" cy="10" r="3"/><path d="M9 17h6"/></svg>'),PICB=new Set;
+const Z2MI="https://www.zigbee2mqtt.io/images/devices/",picOn=()=>localStorage.getItem("zrhPics")!="0";
+// Picture URLs to try (`image_url` is the first); none when switched off.
+const picL=d=>picOn()&&d&&d.definition_model?[...new Set([d.model,d.definition_model])].filter(Boolean).map(m=>Z2MI+encodeURIComponent(m.replace(/[/:' ]/g,"-"))+".png").filter(u=>!PICB.has(u)):[];
+const devSet=d=>{d.image_url=picL(d)[0]||null;devs[d.id]=d};
+// The picture with its fallbacks (device cards, map); use this, not image_url, for an <img>.
+function pic(d,c){const us=picL(d),i=el("img",{class:"pic"+(c?" "+c:""),alt:"",loading:"lazy",referrerpolicy:"no-referrer"});
+ const next=()=>{const u=us.shift();i.dataset.u=u||"";i.src=u||PICI};
+ i.onerror=()=>{if(i.dataset.u){PICB.add(i.dataset.u);next()}};next();return i}
 function devCard(id){
  const d=devs[id];
  const iv=d.interview=="complete"?null:el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:""));
@@ -251,7 +266,7 @@ function devCard(id){
   el("button",{onclick:()=>{const n=prompt("Device name",d.name||"");if(n!=null)act("devices/update",{device:id,name:n.trim()}).catch(()=>{})}},"Rename"),
   el("button",{onclick:()=>act("devices/reinterview",{device:id}).catch(()=>{})},"Re-interview"),
   el("button",{class:"d",onclick:()=>{if(confirm("Remove "+(d.name||id)+" from the network?"))act("devices/remove",{device:id}).catch(()=>{})}},"Remove"));
- return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},el("b",{},d.name||id),iv,av),info,ids,q,ul,acts);
+ return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},pic(d),el("b",{},d.name||id),iv,av),info,ids,q,ul,acts);
 }
 function fmt(e,s){
  if(!s||s.state==null)return"–";let v=s.state;
@@ -388,6 +403,7 @@ function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a
   ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
   ["Store",s.store&&(s.store.volatile?"RAM only":"hubdata, generation "+s.store.journal_generation)],["App",a.devices+" devices, "+a.sessions+" sessions, APS "+(a.aps?a.aps.accepted+" ok / "+a.aps.failed+" failed":"")]]);
  if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}
+$("#pics").checked=picOn();$("#pics").onchange=e=>{localStorage.setItem("zrhPics",e.target.checked?"1":"0");for(const id in devs)devSet(devs[id]);renderAll();if(mapData)drawMap(mapData)};
 $("#wb").onclick=()=>{const ssid=$("#wss").value.trim();if(!ssid)return;if(!confirm("Save Wi-Fi \""+ssid+"\" and reconnect? This page loses the hub until it is on that network."))return;act("hub/wifi/set",{ssid,password:$("#wpw").value}).then(()=>toast("Wi-Fi saved, reconnecting")).catch(()=>{})};
 $("#tkb").onclick=()=>{if(!confirm("Create a new API token? Other clients (Home Assistant) need it then; this page switches to it."))return;act("hub/token/rotate").then(r=>{localStorage.setItem("zrhToken",r.token);prompt("New API token (copy it for other clients):",r.token)}).catch(()=>{})};
 $("#rbb").onclick=()=>{if(confirm("Reboot the hub?"))act("hub/reboot").then(()=>toast("Rebooting…")).catch(()=>{})};
@@ -433,7 +449,7 @@ function drawMap(m){
  $("#mp").textContent="";$("#mp").append(svg);
  const t=el("table",{},el("tr",{},el("th",{},"Device"),el("th",{},"Type"),el("th",{},"NWK"),el("th",{},"Best LQI"),el("th",{},"Note")));
  for(const n of m.nodes.slice().sort((a,b)=>(lvl[a.nwk]??99)-(lvl[b.nwk]??99))){const q=Object.values(pairs).filter(p=>p.a==n.nwk||p.b==n.nwk).flatMap(p=>p.q);
-  t.append(el("tr",{},el("td",{},label(n)),el("td",{},n.type),el("td",{},hex(n.nwk,4)),el("td",{},q.length?Math.max(...q):"–"),el("td",{class:n.error?"warn":"mut"},n.error||(n.type=="router"&&!n.scanned?"not asked":""))))}
+  t.append(el("tr",{},el("td",{},n.ieee&&devs["zb:"+n.ieee]?pic(devs["zb:"+n.ieee],"s"):null,label(n)),el("td",{},n.type),el("td",{},hex(n.nwk,4)),el("td",{},q.length?Math.max(...q):"–"),el("td",{class:n.error?"warn":"mut"},n.error||(n.type=="router"&&!n.scanned?"not asked":""))))}
  $("#mpl").textContent="";$("#mpl").append(t);if(m.notes.length)$("#mpl").append(el("p",{class:"mut"},m.notes.join("; ")));
  $("#mpt").textContent=m.nodes.length+" nodes, "+Object.keys(pairs).length+" links · "+ago(m.time)+" · "+(m.duration_ms/1000).toFixed(1)+" s";
 }

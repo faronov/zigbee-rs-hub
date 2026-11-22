@@ -439,6 +439,9 @@ pub struct Resolution {
     pub vendor: Option<String>,
     /// Display model.
     pub model: Option<String>,
+    /// Model of the definition that gave [`Self::model`] (differs for a
+    /// white label): the web UI's second choice for a device picture.
+    pub def_model: Option<String>,
     /// Diagnostics (`definition_skipped: …`).
     pub diagnostics: Vec<String>,
 }
@@ -769,6 +772,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         if !d.vendor.is_empty() {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());
+            res.def_model = Some(d.model.clone());
             if let Some(wl) = fp.manufacturer_name.as_deref().and_then(|m| {
                 d.white_label
                     .iter()

@@ -322,6 +322,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `manufacturer` | definition `vendor`, else Basic 0x0004 | definition `vendor`, else manufacturer ID as hex | `manufacturer` |
 | `model` | definition `model`, else Basic 0x0005 | definition `model`, else "GPD 0x<device id>" | `model` |
 | `model_id` | Basic 0x0005 | `0x<mfr>/0x<model>` | `model_id` |
+| `definition_model` | `model` of the resolved definition (the white label's base model when `model` is a white label); null without a definition | same | — (web UI device pictures: `https://www.zigbee2mqtt.io/images/devices/<model>.png`, `/`, `:`, `'` and space replaced by `-`, tried for `model`, then `definition_model`) |
 | `sw_version` / `hw_version` | Basic 0x4000 / 0x0003 | — | `sw_version` / `hw_version` |
 | `name` | user name, else `model` | same | `name` (user-editable in HA) |
 | `via` | the hub | the hub | `via_device` |

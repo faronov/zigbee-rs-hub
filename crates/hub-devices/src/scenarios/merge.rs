@@ -119,6 +119,9 @@ fn catalog_names_have_no_endpoint_suffix_and_one_identify() {
         name_of(&hub, "temperature_actions"),
         Some("temperature_actions".into())
     );
+    // The herdsman model, for device pictures.
+    let rec = hub.device(ID).unwrap().record();
+    assert_eq!(rec["definition_model"], "TS0201-z-SlD");
 }
 
 #[test]
