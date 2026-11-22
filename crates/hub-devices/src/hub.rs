@@ -2005,7 +2005,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
             let dev = p.device.clone();
-            self.fail_purpose(&dev, &p.purpose, not_delivered(f.zb_status), now);
+            self.fail_purpose(&dev, &p.purpose, not_delivered(&f), now);
         }
     }
 
@@ -2730,16 +2730,14 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 }
 
-/// The error of an undeliverable request. Zigbee statuses as the zigbee-rs
-/// NCP reports them: `0xA7` APS NO_ACK after the ACK retries, `0xA6`
-/// (its other NWK failures) and `0xA8` (route error or route discovery
-/// failed) from its APS status numbering.
-fn not_delivered(zb_status: Option<u8>) -> ApiError {
-    let message = match zb_status {
+/// The error of an undeliverable request.
+fn not_delivered(f: &crate::transport::ApsFailure) -> ApiError {
+    let message = match f.zb_status {
         None => "the NCP refused the request (queue full or network down)".to_string(),
-        Some(s @ (0xA6 | 0xA7)) => format!("not delivered: no APS ACK (zb_status 0x{s:02X})"),
-        Some(s @ 0xA8) => format!("not delivered: no route to the device (zb_status 0x{s:02X})"),
-        Some(s) => format!("not delivered (zb_status 0x{s:02X})"),
+        Some(s) => match crate::transport::zb_status_text(s, f.legacy_codes) {
+            Some(t) => format!("not delivered: {t} (zb_status 0x{s:02X})"),
+            None => format!("not delivered (zb_status 0x{s:02X})"),
+        },
     };
     ApiError::new("not_delivered", message)
 }

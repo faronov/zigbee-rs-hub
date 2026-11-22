@@ -175,7 +175,13 @@ impl Zdo<'_> {
         while self.events.try_recv().is_ok() {}
         let confirm = self.ncp.send_aps(&req, self.timeout).map_err(|e| format!("send: {e}"))?;
         if confirm.status != 0 {
-            return Err(format!("not delivered (zb status 0x{:02X})", confirm.zb_status));
+            let legacy =
+                self.ncp.client().session().is_some_and(|s| hub_devices::transport::legacy_zb_status(&s.negotiated.fw));
+            let st = confirm.zb_status;
+            return Err(match hub_devices::transport::zb_status_text(st, legacy) {
+                Some(t) => format!("not delivered: {t} (zb status 0x{st:02X})"),
+                None => format!("not delivered (zb status 0x{st:02X})"),
+            });
         }
         let until = Instant::now() + self.timeout;
         while let Some(left) = until.checked_duration_since(Instant::now()) {

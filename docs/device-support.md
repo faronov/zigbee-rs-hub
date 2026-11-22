@@ -2157,8 +2157,13 @@ code feels familiar:
 - Delivery: every `APS_DATA_REQUEST` waits for its `EVT_APS_DATA_CONFIRM`
   (up to 60 s). A confirmed failure retries once at once (a sleepy device's
   request waits for its next frame), then fails the request with
-  `not_delivered` and the Zigbee status in the message ("no APS ACK",
-  "no route to the device"), instead of the 3 × 8 s response timeout;
+  `not_delivered` and the Zigbee status in the message, instead of the
+  3 × 8 s response timeout. Statuses as in host protocol 7.3 (R22 Table
+  2-27 plus NWK pass-through): 0xA7 "no APS ACK", 0xD0 "no route to the
+  device", 0xD1 "route error", 0xA8/0xA9/0xAD/0xAE/0xA0 by name; zigbee-rs
+  NCP images up to 0.1.1 (by `fw` version) numbered them off by one:
+  0xA6/0xA7 no APS ACK, 0xA8 no route, 0xA9 table full. The network map's
+  "not delivered" notes use the same texts;
   `timeout` remains for delivered requests without a response.
   `hub/system` `app.aps` counts `delivered`, `not_delivered`,
   `unconfirmed` next to `accepted`, `busy`, `failed` (refused).

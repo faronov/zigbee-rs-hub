@@ -165,7 +165,8 @@ fn plug_command_fails_fast_when_not_delivered() {
         hub.transport.take();
         hub.transport.failures.push(ApsFailure {
             req: sent[0].clone(),
-            zb_status: Some(0xA8),
+            zb_status: Some(0xD0),
+            legacy_codes: false,
         });
     };
     // The first failure retries at once, the second fails the command.
@@ -183,6 +184,7 @@ fn plug_command_fails_fast_when_not_delivered() {
     hub.transport.failures.push(ApsFailure {
         req: sim.aps()[0].clone(),
         zb_status: Some(0xA7),
+        legacy_codes: false,
     });
     hub.tick(T0 + 2500);
     assert!(hub.transport.aps().is_empty());

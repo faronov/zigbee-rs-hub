@@ -79,6 +79,12 @@ impl NcpTransport {
 
     /// Collects finished APS requests.
     pub fn poll(&mut self) {
+        if self.inflight.is_empty() {
+            return;
+        }
+        // zigbee-rs NCP images up to 0.1.1 number APS statuses off by one.
+        let legacy_codes =
+            self.ncp.client().session().is_some_and(|s| hub_devices::transport::legacy_zb_status(&s.negotiated.fw));
         let (counters, failures) = (&mut self.counters, &mut self.failures);
         self.inflight.retain(|(t, req)| {
             let Some(r) = t.try_wait() else { return true };
@@ -122,7 +128,7 @@ impl NcpTransport {
                 }
             };
             if let Some(zb_status) = failed {
-                failures.push(ApsFailure { req: req.clone(), zb_status });
+                failures.push(ApsFailure { req: req.clone(), zb_status, legacy_codes });
             }
             false
         });
