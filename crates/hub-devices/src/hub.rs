@@ -144,6 +144,13 @@ pub enum HubEvent {
         /// Body (with its own `topic` field naming the event).
         body: J,
     },
+    /// [`HubEvent::App`] with the body as JSON text (no `Value` tree).
+    AppText {
+        /// Topic.
+        topic: &'static str,
+        /// Body: a JSON object with its own `topic` field.
+        text: String,
+    },
     /// GP topic events (13.7).
     Gp {
         /// `gp/commissioning`, `gp/pending`, `gp/commissioned`, `gp/failed`, `gp/binding`.
@@ -465,6 +472,11 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// An event of a service outside the engine on `topic`.
     pub fn app_event(&mut self, topic: &'static str, body: J) {
         self.emit(HubEvent::App { topic, body });
+    }
+
+    /// [`Self::app_event`] with the body as JSON text.
+    pub fn app_event_text(&mut self, topic: &'static str, text: String) {
+        self.emit(HubEvent::AppText { topic, text });
     }
 
     /// Installs the self-description decoder (zdef).
