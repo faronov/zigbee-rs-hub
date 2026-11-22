@@ -47,7 +47,13 @@ mod tests {
 
     #[test]
     fn page_is_self_contained_and_uses_only_the_api() {
-        let html = String::from_utf8(page()).unwrap();
+        // Device pictures are the one optional outside resource (an <img>,
+        // switched off in the page's settings): Zigbee2MQTT's image folder.
+        // The fallback icon's SVG namespace is a name, not a fetch.
+        let html = String::from_utf8(page())
+            .unwrap()
+            .replacen("\"https://www.zigbee2mqtt.io/images/devices/\"", "", 1)
+            .replace("xmlns=\"http://www.w3.org/2000/svg\"", "");
         for external in ["http://", "https://", "src=\"//", "<link", "<script src"] {
             assert!(!html.contains(external), "external reference {external:?}");
         }

@@ -467,6 +467,8 @@ impl Device {
             "manufacturer": self.manufacturer(),
             "model": self.model(),
             "model_id": model_id,
+            // Herdsman model of the resolved definition (device pictures).
+            "definition_model": self.resolution.def_model,
             "sw_version": self.fp.sw_build_id,
             "hw_version": self.fp.hw_version,
             "name": self.user_name.clone().or_else(|| self.model()),

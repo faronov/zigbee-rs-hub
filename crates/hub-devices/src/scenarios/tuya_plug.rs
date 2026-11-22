@@ -62,6 +62,11 @@ fn plug_switch_sends_on_off_and_reports_a_bool() {
     let d = hub.device(ID).unwrap();
     let layers: Vec<_> = d.resolution.layers.iter().map(|l| l.id.as_str()).collect();
     assert_eq!(layers, ["generic", "tuya/ts011f_plug_1"]);
+    // White label by manufacturer name; the base model for its picture.
+    let rec = d.record();
+    assert_eq!(rec["manufacturer"], "Elivco");
+    assert_eq!(rec["model"], "LSPA9");
+    assert_eq!(rec["definition_model"], "TS011F_plug_1");
     let sw = format!("{ID}:1:switch");
     assert_eq!(
         hub.entity(&sw).unwrap().1.record(ID)["device_class"],
