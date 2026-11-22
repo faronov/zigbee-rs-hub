@@ -398,6 +398,7 @@ impl Runner {
         let api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
+        admin.start_worker();
         let mut r = Self {
             ncp,
             cfg,

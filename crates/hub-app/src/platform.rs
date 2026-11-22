@@ -49,6 +49,18 @@ pub trait Platform: Send + Sync {
     /// Fill `buf` with random bytes (tokens).
     fn random(&self, buf: &mut [u8]);
 
+    /// `(free, largest free block)` of the heap job threads come from;
+    /// None where it does not matter (desktop).
+    fn heap(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// The least free stack the calling thread had so far, in bytes
+    /// (job threads log it when they end).
+    fn stack_high_water(&self) -> Option<usize> {
+        None
+    }
+
     /// The last `max` log lines, oldest first.
     fn logs(&self, _max: usize) -> Vec<String> {
         Vec::new()

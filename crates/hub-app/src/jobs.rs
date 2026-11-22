@@ -25,9 +25,9 @@ use crate::jw::{Jw, oom};
 /// total, u8 networks_found`).
 pub const EVT_SCAN_PROGRESS: u16 = 0x018B;
 
-/// Results kept for `network/job/result` (larger ones only go to the
-/// session that started the job).
-pub const MAX_KEPT_RESULT: usize = 16 * 1024;
+/// Results kept for `network/job/result`, all kinds together (the oldest
+/// go first; larger ones only go to the session that started the job).
+pub const MAX_KEPT_RESULT: usize = 8 * 1024;
 
 /// A lane: one job at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,9 +204,13 @@ impl Board {
 
     fn keep(&mut self, job: u64, kind: &'static str, text: String) {
         self.results.retain(|(_, k, _)| *k != kind);
-        if text.len() <= MAX_KEPT_RESULT {
-            self.results.push((job, kind, text));
+        if text.len() > MAX_KEPT_RESULT {
+            return;
         }
+        while self.results.iter().map(|r| r.2.len()).sum::<usize>() + text.len() > MAX_KEPT_RESULT {
+            self.results.remove(0);
+        }
+        self.results.push((job, kind, text));
     }
 }
 
@@ -309,9 +313,75 @@ impl Drop for Done {
     }
 }
 
-/// Run `body` on its own thread; the caller has registered the job. With
-/// `reply` (a request ID) the body's text is the whole result frame for
-/// that request; otherwise it is a background job's result value.
+type Task = Box<dyn FnOnce() + Send>;
+
+/// The long-lived job thread, started with the app while the heap is
+/// still in one piece. A thread per job needs its whole stack in one free
+/// block every time: after hours of uptime the S3's heap had 51 KB free
+/// but no block of 12 KiB, and every job failed with `os error 12`; each
+/// thread also left about 300 B behind. Jobs run here; only a job that
+/// starts while another one runs gets a thread of its own.
+pub struct Worker {
+    /// The next task and the worker's wake-up (no channel: its generic
+    /// code would cost more flash than this).
+    slot: Arc<(Mutex<Option<Task>>, std::sync::Condvar)>,
+    busy: Arc<AtomicBool>,
+}
+
+impl Worker {
+    /// Start the worker thread (None when even that fails).
+    pub fn start(stack: usize) -> Option<Worker> {
+        let slot: Arc<(Mutex<Option<Task>>, std::sync::Condvar)> = Arc::default();
+        let busy = Arc::new(AtomicBool::new(false));
+        let (s, b) = (slot.clone(), busy.clone());
+        let main: Task = Box::new(move || {
+            loop {
+                let task = {
+                    let mut g = s.0.lock().unwrap();
+                    loop {
+                        if let Some(t) = g.take() {
+                            break t;
+                        }
+                        g = s.1.wait(g).unwrap();
+                    }
+                };
+                task();
+                b.store(false, Ordering::Release);
+            }
+        });
+        spawn_task("hub-job", stack, main).ok()?;
+        Some(Worker { slot, busy })
+    }
+
+    /// Hand `task` to the worker if it is idle; else give it back.
+    fn try_run(&self, task: Task) -> Result<(), Task> {
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return Err(task);
+        }
+        *self.slot.0.lock().unwrap() = Some(task);
+        self.slot.1.notify_one();
+        Ok(())
+    }
+
+    /// A job is running on the worker.
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+}
+
+/// Where and how a job runs.
+pub struct Exec<'a> {
+    /// The long-lived worker, when there is one.
+    pub worker: Option<&'a Worker>,
+    /// Stack of a job thread of its own.
+    pub stack: usize,
+    /// Logs the stack high water of finished jobs.
+    pub platform: Option<Arc<dyn crate::Platform>>,
+}
+
+/// Run `body` on the worker (or its own thread); the caller has registered
+/// the job. With `reply` (a request ID) the body's text is the whole result
+/// frame for that request; otherwise it is a background job's result value.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     board: Shared,
@@ -320,14 +390,18 @@ pub fn run(
     cancel: Arc<AtomicBool>,
     out: Out,
     sid: SessionId,
-    stack: usize,
+    exec: Exec<'_>,
     reply: Option<u64>,
     body: BgBody,
 ) -> Result<(), ApiError> {
     let bg = Bg { job, kind, board: board.clone(), cancel, out: out.clone(), sid };
     let done = Done(board.clone(), job);
-    let spawned = std::thread::Builder::new().name("hub-job".into()).stack_size(stack).spawn(move || {
+    let platform = exec.platform;
+    let task: Task = Box::new(move || {
         let r = body(&bg);
+        if let Some(hw) = platform.as_ref().and_then(|p| p.stack_high_water()) {
+            log::info!("admin: {kind} done, stack high water {hw} B free");
+        }
         if let Err(e) = &r {
             log::warn!("admin: {kind}: {}", e.message);
         }
@@ -354,7 +428,19 @@ pub fn run(
         drop(done);
         out(JobOut::Event(ev.map_or(J::Null, |t| jv(&t))));
     });
-    spawned.map(drop).map_err(|e| ApiError::new("failed", format!("job thread: {e}")))
+    let task = match exec.worker {
+        Some(w) => match w.try_run(task) {
+            Ok(()) => return Ok(()),
+            Err(t) => t,
+        },
+        None => task,
+    };
+    spawn_task("hub-job2", exec.stack, task).map_err(|e| ApiError::new("failed", format!("job thread: {e}")))
+}
+
+/// The one thread entry for jobs (one generic instance in the firmware).
+fn spawn_task(name: &str, stack: usize, task: Task) -> std::io::Result<()> {
+    std::thread::Builder::new().name(name.into()).stack_size(stack).spawn(task).map(drop)
 }
 
 #[cfg(test)]

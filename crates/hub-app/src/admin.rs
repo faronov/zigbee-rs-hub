@@ -115,6 +115,8 @@ pub struct Admin {
     pub source: String,
     /// Stack of the job thread.
     pub job_stack: usize,
+    /// The long-lived job thread ([`start_worker`](Self::start_worker)).
+    worker: Option<jobs::Worker>,
     board: jobs::Shared,
     staged: Option<Staged>,
 }
@@ -499,7 +501,18 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
-        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None }
+        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None, worker: None }
+    }
+
+    /// Start the long-lived job thread (with `job_stack`); call once,
+    /// early, while the heap is in one piece.
+    pub fn start_worker(&mut self) {
+        if self.worker.is_none() {
+            self.worker = jobs::Worker::start(self.job_stack);
+            if self.worker.is_none() {
+                warn!("admin: no job worker thread, jobs get threads of their own");
+            }
+        }
     }
 
     /// `hub/info` `maintenance`: what this hub and its NCP support.
@@ -681,7 +694,21 @@ impl Admin {
             Ok(j) => j,
             Err(e) => return vec![frame(id, Err(e))],
         };
-        match jobs::run(self.board.clone(), job, kind, cancel, out, sid, self.job_stack, (!background).then_some(id), body) {
+        // A job thread needs its stack in one block plus room for its
+        // result and the frames in flight: without it, refuse instead of
+        // running the heap dry (the S3 has no PSRAM). The worker's stack
+        // exists already; only a second job needs its own.
+        let own_stack = self.worker.as_ref().is_none_or(jobs::Worker::is_busy);
+        let need = if own_stack { self.job_stack } else { 0 };
+        if let Some((free, largest)) = self.platform.as_ref().and_then(|p| p.heap())
+            && (free < need + JOB_HEAP_RESERVE || largest < need)
+        {
+            self.board.lock().unwrap().finish(job);
+            let e = ApiError::new("busy", format!("low memory ({} KB free): try again when the running job ended", free / 1024));
+            return vec![frame(id, Err(e))];
+        }
+        let exec = jobs::Exec { worker: self.worker.as_ref(), stack: self.job_stack, platform: self.platform.clone() };
+        match jobs::run(self.board.clone(), job, kind, cancel, out, sid, exec, (!background).then_some(id), body) {
             Ok(()) if background => {
                 vec![format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{{\"job\":{job},\"kind\":\"{kind}\",\"passes\":{passes}}}}}")]
             }
@@ -763,13 +790,27 @@ impl Admin {
                         let t = std::time::Instant::now();
                         let found = ncp.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
                         let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
-                        let mut w = Jw::value(100 + 190 * found.len())?;
-                        w.obj().key("networks").arr();
+                        // Every router of a network beacons: one entry per
+                        // network and channel, its best beacon, and the count.
+                        let mut nets: Vec<(&zigbee_zrhp::msg::network::ScanResult, u32)> = Vec::new();
                         for b in &found {
+                            match nets.iter_mut().find(|(n, _)| (n.channel, n.pan, n.epid) == (b.channel, b.pan, b.epid)) {
+                                Some((n, c)) => {
+                                    *c += 1;
+                                    if b.lqi > n.lqi {
+                                        *n = b;
+                                    }
+                                }
+                                None => nets.push((b, 1)),
+                            }
+                        }
+                        let mut w = Jw::value(100 + 200 * nets.len())?;
+                        w.obj().key("networks").arr();
+                        for (b, n) in nets {
                             w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan).key("ext_pan_id").str(&be_hex(&b.epid));
                             w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit != 0);
                             w.key("stack_profile").num(b.stack_profile).key("update_id").num(b.update_id);
-                            w.key("own").num(own == Some((b.pan, b.epid))).end_obj();
+                            w.key("beacons").num(n).key("own").num(own == Some((b.pan, b.epid))).end_obj();
                         }
                         w.end_arr().key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
                         w.finish_value()
@@ -1014,6 +1055,9 @@ impl Admin {
         })
     }
 }
+
+/// Heap a job needs besides its stack (its result, frames in flight).
+const JOB_HEAP_RESERVE: usize = 16 * 1024;
 
 /// `(channel mask, duration_exp, passes)` of a scan request.
 #[inline(never)]

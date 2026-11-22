@@ -125,13 +125,13 @@ progress{width:12em}
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
 <div class="row acts"><label>Channel <select id="ch"></select></label><button id="chb">Change channel</button></div>
 <div class="row acts f-tx_power"><label>TX power <input id="txp" type="number" class="num" step="1"> dBm</label><button id="txb">Apply</button><span id="txi" class="mut"></span></div>
-<p class="mut f-tx_power" id="txh"></p></section>
-<section class="card"><h2>Channel scan</h2>
-<p class="mut">Utilization per channel (energy detect, 0–100 %, as in ZHA), several rounds averaged or as the peak; then the Zigbee networks around (beacons). Orange: under a Wi-Fi channel (the hub's own, plus any you list).</p>
-<div class="row"><label>Rounds <select id="esn"><option>1</option><option>3</option><option selected>5</option><option>10</option></select></label><label>Show <select id="esm"><option value="avg">average</option><option value="max">peak</option></select></label><label>Other Wi-Fi channels <input id="eswf" placeholder="e.g. 1,6,11" size="9"></label><button class="p f-energy_scan" id="esb">Scan</button><button id="ess" class="hide">Stop</button><button id="asb">Find Zigbee networks</button></div>
-<div class="row hide" id="espr"><progress id="esp" max="100" value="0" style="flex:1;min-width:10em"></progress><span id="est" class="mut"></span></div>
+<p class="mut f-tx_power" id="txh"></p>
+<div class="row acts f-energy_scan"><button id="esb">Energy scan</button><select id="esn" title="Scan passes: averaged, peak kept"><option value="1">1 pass</option><option value="3" selected>3 passes</option><option value="5">5 passes</option><option value="10">10 passes</option></select><button id="ess" class="hide">Stop</button><span id="est" class="mut"></span></div>
+<progress id="esp" class="hide" max="100" value="0" style="width:100%;height:4px"></progress>
+<details class="f-energy_scan"><summary class="mut">options</summary><div class="row"><label>Show <select id="esm"><option value="avg">average</option><option value="max">peak</option></select></label><label>Other Wi-Fi channels <input id="eswf" placeholder="e.g. 1,6,11" size="9"></label></div></details>
 <p class="mut hide" id="esno">This NCP firmware has no energy scan.</p>
-<div id="es"></div><div id="esr"></div><div id="as"></div></section>
+<div id="es"></div></section>
+<section class="card"><h2>Zigbee networks nearby</h2><div class="row acts"><button id="asb">Find Zigbee networks</button><span id="ast" class="mut"></span></div><div id="as"></div></section>
 <section class="card"><h2>Backup and restore</h2>
 <p class="mut">Open ZigBee Coordinator Backup (zigpy/ZHA, Zigbee2MQTT). The file holds the network key: keep it private.</p>
 <div class="row acts f-backup"><button class="p" id="bkb">Download backup</button><button id="bkl">Last automatic backup</button></div>
@@ -310,63 +310,54 @@ const TXR={1:[-24,20,"ESP32-H2"],2:[-15,20,"ESP32-C6"]};
 function txHint(){const n=net,r=TXR[(n.ncp||{}).chip],i=$("#txp");if(r){i.min=r[0];i.max=r[1]}
  $("#txh").textContent=(r?r[2]+": "+r[0]+"…+"+r[1]+" dBm in 3 dB steps (the NCP rounds down). ":"")+"Antenna-referred; re-applied after every NCP restart. Rules differ by country: in the EU, ETSI EN 300 328 caps the power density at 10 dBm/MHz EIRP, so more than about +10 dBm with a gain antenna may exceed it. More power helps the hub send, not hear."}
 $("#txb").onclick=e=>{const d=+$("#txp").value;busy(e.target,act("network/set_tx_power",{dbm:d}).then(r=>{$("#txi").textContent="requested "+r.requested_dbm+" dBm → applied "+r.applied_dbm+" dBm";net.tx_power=r.applied_dbm;net.tx_power_requested=d;renderSNet()})).catch(()=>{})};
-// Channel scan: rounds of NWK_ENERGY_SCAN merged here; the recommendation
-// mirrors the hub's scoring (4 × energy, +1000 under Wi-Fi, +120 next to
-// it, +160 for 26, +30 off the Light Link primaries 11/15/20/25).
+// Energy scan: the hub averages the passes and keeps the peak; the
+// recommendation mirrors its scoring (4 × energy, +1000 under Wi-Fi, +120
+// next to it, +160 for 26, +30 off the Light Link primaries 11/15/20/25,
+// +20 per other Zigbee network), here with the Wi-Fi channels listed too.
 let esAgg={},esMeta={},asNets=null;
 const zMHz=c=>2405+5*(c-11),wMHz=w=>w==14?2484:2407+5*w;
 const wifiList=()=>[...new Set([esMeta.wifi,...$("#eswf").value.split(/[ ,;]+/).map(Number)].filter(w=>w>=1&&w<=14))];
-const pct=e=>Math.round(e/2.55);
 $("#eswf").value=localStorage.getItem("zrhWifi")||"";$("#eswf").onchange=()=>{localStorage.setItem("zrhWifi",$("#eswf").value);drawScan()};$("#esm").onchange=()=>drawScan();
 // Background jobs (14.6): a scan answers {job} at once; progress comes as
-// job_progress events (once a second, refined by the NCP's per-channel
-// EVT_SCAN_PROGRESS when it sends it), results as job_result frames (one per
-// energy-scan pass). Any page connected meanwhile follows the same job.
+// job_progress events, results as job_result frames (one per energy-scan
+// pass). Any page connected meanwhile follows the same job.
 const JOB={},KINDS=["energy_scan","active_scan","topology"],sec=ms=>(ms/1000).toFixed(ms<1e4?1:0)+" s";
 function jobUi(){const e=JOB.energy_scan,a=JOB.active_scan,t=JOB.topology,any=e||a||t;$("#esb").disabled=$("#asb").disabled=!!any;$("#ess").classList.toggle("hide",!e);$("#mpb").textContent=t?"Stop":"Scan";$("#mpb").disabled=!!any&&!t}
-function jobProg(e){const p=Math.round(e.progress*100),tail=" · "+p+" % · "+sec(e.elapsed_ms)+(e.eta_ms?", about "+sec(e.eta_ms)+" left":"")+(e.cancelling?" · stopping":"");
- if(e.kind=="topology"){$("#mpt").textContent="scanning"+tail;return}
- $("#espr").classList.remove("hide");$("#esp").value=p;$("#est").textContent=(e.kind=="active_scan"?"listening for beacons":"pass "+Math.min(e.pass+1,e.passes)+" of "+e.passes)+tail}
-function progEnd(t){$("#esp").value=100;$("#est").textContent=t;setTimeout(()=>{if(!JOB.energy_scan&&!JOB.active_scan)$("#espr").classList.add("hide")},4000)}
-function jobStart(type,p,kind){return act(type,p).then(r=>{JOB[kind]=r.job;jobUi();jobProg({kind,progress:0,pass:0,passes:r.passes||1,elapsed_ms:0,eta_ms:0})})}
+function jobProg(e){const p=Math.round(e.progress*100),tail=p+" %"+(e.eta_ms?", about "+sec(e.eta_ms)+" left":"")+(e.cancelling?" · stopping":"");
+ if(e.kind=="topology")$("#mpt").textContent="scanning · "+tail;else if(e.kind=="active_scan")$("#ast").textContent="listening · "+tail;
+ else{$("#esp").classList.remove("hide");$("#esp").value=p;$("#est").textContent=(e.passes>1?"pass "+Math.min(e.pass+1,e.passes)+"/"+e.passes+" · ":"")+tail}}
+function jobStart(type,p,kind){return act(type,p).then(r=>{JOB[kind]=r.job;jobUi();jobProg({kind,progress:0,pass:0,passes:r.passes||1,eta_ms:0})})}
 function jobRes(m){if(!m.partial&&JOB[m.kind]==m.job){delete JOB[m.kind];jobUi()}
  if(m.error)return jobErr(m.kind,m.error);const r=m.result;if(!r)return;
- if(m.kind=="energy_scan")esShow(r,m.partial);else if(m.kind=="active_scan"){asShow(r);if(!m.partial)progEnd("")}else if(m.kind=="topology")drawMap(r)}
+ if(m.kind=="energy_scan")esShow(r,m.partial);else if(m.kind=="active_scan")asShow(r);else if(m.kind=="topology")drawMap(r)}
 function jobEnd(e){if(JOB[e.kind]!=e.job)return;delete JOB[e.kind];jobUi();
  if(e.error)jobErr(e.kind,e.error);else call("network/job/result",{job:e.job}).then(jobRes).catch(()=>{})}
-function jobErr(k,e){if(k=="topology")$("#mpt").textContent="";else progEnd("");const un=e.code=="unsupported";
- if(k=="energy_scan"&&un)$("#esno").classList.remove("hide");else if(k=="active_scan")$("#as").textContent=un?"This NCP firmware cannot scan for networks yet (NWK_ACTIVE_SCAN).":"active scan: "+e.message;else toast(k.replace("_"," ")+": "+e.message)}
+function jobErr(k,e){const un=e.code=="unsupported";$("#esp").classList.add("hide");
+ if(k=="topology")$("#mpt").textContent="";else if(k=="active_scan")$("#ast").textContent=un?"This NCP firmware cannot scan for networks (NWK_ACTIVE_SCAN).":e.message;
+ else{$("#est").textContent="";if(un)$("#esno").classList.remove("hide");else toast("energy scan: "+e.message)}}
 const jobStop=k=>call("network/job/cancel",{job:JOB[k]}).then(()=>{const x=$(k=="topology"?"#mpt":"#est");if(!/stopping/.test(x.textContent))x.textContent+=" · stopping"}).catch(()=>{});
 $("#ess").onclick=()=>jobStop("energy_scan");
 $("#esb").onclick=()=>{$("#esno").classList.add("hide");jobStart("network/energy_scan",{passes:+$("#esn").value,duration_exp:3},"energy_scan").catch(()=>{})};
-// The hub averages the passes and keeps the peak per channel.
-function esShow(r,partial){esAgg={};for(const c of r.channels)esAgg[c.channel]={avg:c.energy,max:c.energy_max,rssi:c.max_rssi_dbm};esMeta={wifi:r.wifi_channel,current:r.current,rounds:r.passes};drawScan();
- if(!partial)progEnd(r.passes+" pass(es) in "+sec(r.duration_ms)+(r.cancelled?" (stopped)":""))}
-function scored(){const W=wifiList(),mx=$("#esm").value=="max";return Object.keys(esAgg).map(Number).map(ch=>{const a=esAgg[ch],en=mx?a.max:a.avg,d=W.map(w=>Math.abs(zMHz(ch)-wMHz(w))),ov=d.some(x=>x<12),near=!ov&&d.some(x=>x<17),zb=asNets?asNets.filter(x=>x.channel==ch&&!x.own).length:0;
- return{ch,en,p:pct(en),ov,near,zb,rssi:a.rssi,s:4*en+(ov?1000:near?120:0)+(ch==26?160:0)+([11,15,20,25].includes(ch)?0:30)+20*zb}})}
+function esShow(r,partial){esAgg={};for(const c of r.channels)esAgg[c.channel]={avg:c.energy,max:c.energy_max,rssi:c.max_rssi_dbm};esMeta={wifi:r.wifi_channel,current:r.current};drawScan();
+ if(!partial){$("#esp").classList.add("hide");$("#est").textContent="took "+sec(r.duration_ms)+(r.passes>1?", "+r.passes+" passes":"")+(r.cancelled?" (stopped)":"")}}
 function drawScan(){
- const L=scored();if(!L.length)return;const best=L.reduce((a,b)=>b.s<a.s?b:a),cur=L.find(x=>x.ch==esMeta.current);
- const W=640,H=180,bw=W/16,svg=mkSvg(W,H),ns=svg.namespaceURI;
+ const W=wifiList(),mx=$("#esm").value=="max",L=Object.keys(esAgg).map(Number).map(ch=>{const a=esAgg[ch],en=mx?a.max:a.avg,d=W.map(w=>Math.abs(zMHz(ch)-wMHz(w))),ov=d.some(x=>x<12),zb=asNets?asNets.filter(x=>x.channel==ch&&!x.own).length:0;
+  return{ch,en,ov,zb,rssi:a.rssi,s:4*en+(ov?1000:d.some(x=>x<17)?120:0)+(ch==26?160:0)+([11,15,20,25].includes(ch)?0:30)+20*zb}});
+ if(!L.length)return;const best=L.reduce((a,b)=>b.s<a.s?b:a).ch,cur=esMeta.current;
+ const svg=mkSvg(640,170),ns=svg.namespaceURI,bw=40;
  const add=(t,a,txt)=>{const x=document.createElementNS(ns,t);for(const k in a)x.setAttribute(k,a[k]);if(txt!=null)x.textContent=txt;svg.append(x);return x};
- for(const g of [25,50,75,100]){add("line",{x1:0,x2:W,y1:150-g*1.2,y2:150-g*1.2,stroke:"var(--line)"});add("text",{x:W-2,y:148-g*1.2,"text-anchor":"end"},g+"%")}
- L.forEach((c,i)=>{const h=Math.max(2,c.p*1.2),x=i*bw+4;
-  const b=add("rect",{x,y:150-h,width:bw-8,height:h,rx:3,fill:c.ov?"var(--warn)":c.ch==best.ch?"var(--ok)":"var(--acc)",opacity:c.ch==esMeta.current?1:.7,stroke:c.ch==esMeta.current?"var(--fg)":"none"});
-  b.append(Object.assign(document.createElementNS(ns,"title"),{textContent:"channel "+c.ch+": "+c.p+" %, peak RSSI "+c.rssi+" dBm"+(c.ov?", under Wi-Fi":"")+(c.zb?", "+c.zb+" other Zigbee network(s)":"")}));
+ L.forEach((c,i)=>{const h=Math.max(2,c.en/255*120),x=i*bw+4;
+  const b=add("rect",{x,y:140-h,width:bw-8,height:h,rx:3,fill:c.ov?"var(--warn)":c.ch==best?"var(--ok)":"var(--acc)",opacity:c.ch==cur?1:.75});
+  b.append(Object.assign(document.createElementNS(ns,"title"),{textContent:"channel "+c.ch+": "+Math.round(c.en/2.55)+" % ("+(mx?"peak":"average")+"), max "+c.rssi+" dBm"+(c.ov?", under Wi-Fi":"")+(c.zb?", "+c.zb+" other Zigbee network(s)":"")}));
   b.style.cursor="pointer";b.onclick=()=>{$("#ch").value=c.ch};
-  add("text",{x:x+(bw-8)/2,y:166,"text-anchor":"middle","font-weight":c.ch==esMeta.current?"bold":""},c.ch);
-  add("text",{x:x+(bw-8)/2,y:146-h,"text-anchor":"middle"},(c.ch==best.ch?"★ ":"")+c.p+(c.zb?" ●"+c.zb:""))});
- const box=$("#es");box.textContent="";box.append(svg);
- const w=wifiList(),why=c=>c.p+" % "+($("#esm").value=="max"?"peak":"average")+(c.ov?", under Wi-Fi":c.near?", next to Wi-Fi":", clear of Wi-Fi")+([11,15,20,25].includes(c.ch)?", a Light Link primary channel":"")+(c.ch==26?", 26 (lower power on some devices)":"")+(c.zb?", "+c.zb+" other Zigbee network(s)":"");
- const t=[el("p",{class:"mut"},"Wi-Fi channels considered: "+(w.join(", ")||"none")+". Bars: utilization; orange under Wi-Fi; outlined: current; ★ recommended; ● other Zigbee networks."),
-  el("p",{},"Recommended: channel "+best.ch+" — "+why(best)+".")];
- if(cur)t.push(el("p",{},"Current: channel "+cur.ch+" — "+why(cur)+"."+(cur.ch==best.ch?" Stay.":cur.s-best.s<60?" The difference is small; moving is not worth it.":" Moving may help; sleepy devices follow on their next rejoin.")));
- if(cur&&best.ch!=cur.ch&&cur.s-best.s>=60)t.push(el("button",{onclick:()=>{$("#ch").value=best.ch;$("#chb").click()}},"Move to channel "+best.ch));
- $("#esr").textContent="";$("#esr").append(...t);
+  add("text",{x:x+(bw-8)/2,y:156,"text-anchor":"middle","font-weight":c.ch==cur?"bold":""},c.ch);
+  if(c.ch==best)add("text",{x:x+(bw-8)/2,y:134-h,"text-anchor":"middle"},"★")});
+ $("#es").textContent="";$("#es").append(svg,el("p",{class:"mut"},"Bars: energy per channel (lower is better); orange: under Wi-Fi"+(W.length?" ("+W.join(", ")+")":"")+"; bold: current; ★ recommended."),
+  best!=cur?el("button",{onclick:()=>{$("#ch").value=best;$("#chb").click()}},"Move to channel "+best):"");
 }
 $("#asb").onclick=()=>{$("#as").textContent="";jobStart("network/active_scan",{},"active_scan").catch(()=>{})};
-function asShow(r){const seen={};asNets=[];
- // One row per network and channel (routers of one network send beacons too), the best link kept.
- for(const n of r.networks){const k=n.channel+n.ext_pan_id+n.pan_id,o=seen[k];if(!o){seen[k]=n;asNets.push(n)}else if(n.lqi>o.lqi)Object.assign(o,n)}
+// One row per network and channel (the hub keeps the best beacon of each).
+function asShow(r){asNets=r.networks;$("#ast").textContent="took "+sec(r.duration_ms);
  const t=el("table",{},el("tr",{},...["Channel","PAN ID","Extended PAN ID","LQI","RSSI","Joining",""].map(h=>el("th",{},h))));
  for(const n of asNets.slice().sort((a,b)=>a.channel-b.channel))t.append(el("tr",{},el("td",{},n.channel),el("td",{},hex(n.pan_id,4)),el("td",{},n.ext_pan_id),el("td",{},n.lqi),el("td",{},n.rssi+" dBm"),el("td",{},n.permit_join?"open":"closed"),el("td",{class:"mut"},n.own?"this hub":"")));
  $("#as").textContent="";$("#as").append(asNets.length?t:el("p",{class:"mut"},"No other Zigbee networks heard."));drawScan()}

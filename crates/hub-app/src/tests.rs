@@ -372,9 +372,14 @@ struct TestPlatform {
     wifi: std::sync::Mutex<Option<(String, String)>>,
     reboots: AtomicU32,
     ring: Option<crate::LogRing>,
+    /// Free heap the platform reports (None: unknown).
+    heap: std::sync::Mutex<Option<(usize, usize)>>,
 }
 
 impl crate::Platform for TestPlatform {
+    fn heap(&self) -> Option<(usize, usize)> {
+        *self.heap.lock().unwrap()
+    }
     fn system(&self) -> J {
         json!({"version": "test", "uptime_s": 12, "heap": {"free": 65000, "min_free": 57000}})
     }
@@ -505,13 +510,20 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     // Active scan: the beacons around; our own network is marked.
     let own = r.ncp.status().network.unwrap();
     r.sim.with(|s| {
-        s.beacons = vec![(20, 0x6A0B, [0xA0; 8], 0, 90, -84, true), (15, own.pan_id, own.ext_pan_id, 0x1234, 200, -50, false), (25, 0x1111, [1; 8], 0, 30, -95, false)];
+        s.beacons = vec![
+            (20, 0x6A0B, [0xA0; 8], 0, 90, -84, true),
+            (15, own.pan_id, own.ext_pan_id, 0x1234, 200, -50, false),
+            (25, 0x1111, [1; 8], 0, 30, -95, false),
+            (20, 0x6A0B, [0xA0; 8], 0x5555, 120, -70, true),
+        ];
     });
     let a = job(&app, sid, &rx, 30, json!({"type": "network/active_scan", "channels": [15, 20]}));
     let nets = ok(&a)["networks"].as_array().unwrap().clone();
     assert_eq!(nets.len(), 2, "channel 25 not scanned");
     assert_eq!((nets[0]["pan_id"].as_u64(), nets[0]["permit_join"].as_bool(), nets[0]["own"].as_bool()), (Some(0x6A0B), Some(true), Some(false)));
     assert_eq!(nets[0]["ext_pan_id"], "a0a0a0a0a0a0a0a0");
+    // Two routers of that network beaconed: one entry, the better link.
+    assert_eq!((nets[0]["beacons"].as_u64(), nets[0]["src"].as_u64(), nets[0]["lqi"].as_u64()), (Some(2), Some(0x5555), Some(120)));
     assert_eq!(nets[1]["own"], true);
     r.sim.with(|s| s.unsupported.push(ids::NWK_ACTIVE_SCAN));
     let a = job(&app, sid, &rx, 31, json!({"type": "network/active_scan"}));
@@ -893,4 +905,31 @@ fn scans_are_background_jobs_that_leave_the_api_usable() {
     });
     let a = self::job(&app, sid, &rx, 8, json!({"type": "network/active_scan"}));
     assert_eq!(err_code(&a), "unsupported");
+}
+
+#[test]
+fn jobs_run_on_the_worker_and_only_a_second_one_needs_heap() {
+    let r = rig(Store::volatile());
+    let p = Arc::new(TestPlatform::default());
+    let app = admin_app(&r, Some(p.clone()));
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 15);
+    // Fragmented heap: no block for a job stack. The worker's stack
+    // exists already, so jobs one at a time still run, again and again.
+    *p.heap.lock().unwrap() = Some((30 * 1024, 8 * 1024));
+    for i in 1..=5 {
+        ok(&call(&app, sid, &rx, i, json!({"type": "network/diagnostics"})));
+    }
+    // A second job while the worker scans needs a thread of its own.
+    r.sim.with(|s| s.scan_time = Duration::from_millis(1500));
+    let s = call(&app, sid, &rx, 10, json!({"type": "network/energy_scan"}));
+    ok(&s);
+    let d = call(&app, sid, &rx, 11, json!({"type": "network/diagnostics"}));
+    assert_eq!(err_code(&d), "busy");
+    assert!(d["error"]["message"].as_str().unwrap().contains("low memory (30 KB free)"), "{d}");
+    *p.heap.lock().unwrap() = Some((60 * 1024, 31 * 1024));
+    ok(&call(&app, sid, &rx, 12, json!({"type": "network/diagnostics"})));
+    // Requests that need no job thread are not affected.
+    *p.heap.lock().unwrap() = Some((4 * 1024, 4 * 1024));
+    ok(&call(&app, sid, &rx, 13, json!({"type": "network/jobs"})));
 }
