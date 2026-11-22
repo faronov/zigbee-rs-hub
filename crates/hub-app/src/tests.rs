@@ -136,6 +136,12 @@ fn registry_survives_an_app_restart() {
     let text = "zdef: 1\nid: philips/sml001\n# my comment\n";
     let up = call(&app, sid, &rx, 2, json!({"type": "definitions/upload", "cbor": cbor, "source": text, "source_format": "yaml"}));
     assert_eq!(up["success"], true, "{up}");
+    // Written within the flush delay, not only at the 30 s sweep.
+    let t = std::time::Instant::now();
+    while r.ncp.with_store(|s| s.kv_get("usrc/philips/sml001").is_none()) && t.elapsed() < T {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(t.elapsed() < Duration::from_secs(5), "user definition written after {:?}", t.elapsed());
     app.shutdown();
     let stored = r.ncp.with_store(|s| s.kv_get("dev/zb:00158d0001a2b3c4").map(<[u8]>::to_vec));
     let snap = crate::registry::decode(&stored.expect("device persisted")).unwrap();

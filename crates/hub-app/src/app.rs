@@ -489,6 +489,9 @@ impl Runner {
                 if self.api.is_authed(sid)
                     && let Some(head) = admin::head(&text)
                 {
+                    if head.ty == "hub/reboot" {
+                        self.registry.flush(&self.ncp, &self.engine, now, true);
+                    }
                     for frame in self.admin_request(sid, &head, now) {
                         self.send(sid, &frame);
                     }
@@ -497,6 +500,9 @@ impl Runner {
                 let ext = self.catalog.as_mut().map(|c| c as &mut dyn ApiExtension<NcpTransport>);
                 for frame in self.api.handle_text_ext(&mut self.engine, sid, &text, now, ext) {
                     self.send(sid, &frame);
+                }
+                if text.contains("\"definitions/upload\"") || text.contains("\"definitions/delete\"") {
+                    self.registry.definitions_changed(now);
                 }
             }
             Input::Disconnect(sid) => {

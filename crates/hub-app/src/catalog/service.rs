@@ -46,6 +46,8 @@ pub const CONFIG_KEY: &str = "cfg/catalog";
 /// once (BR board: an 8 KiB chunk after a manifest install ran it out of
 /// heap).
 pub const UPLOAD_CHUNK_MAX: usize = 4 * 1024;
+/// An upload idle this long may be replaced by another target's.
+pub const UPLOAD_IDLE_MS: Millis = 30_000;
 
 /// Settings the clients follow (stored on the hub so the web UI and the
 /// Home Assistant integration agree).
@@ -126,6 +128,8 @@ pub struct CatalogService {
     pub cfg: CatalogConfig,
     web: SharedWeb,
     upload: Option<Upload>,
+    /// When the upload last advanced.
+    upload_at: Millis,
     /// Devices announced as needing a definition.
     announced: BTreeSet<String>,
     /// Events for the `catalog` topic, drained by the app.
@@ -160,6 +164,17 @@ fn generic_only<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &hub_d
     })
 }
 
+/// Byte range of the string value of key `key` in a JSON text (the first
+/// `"key": "` occurrence; good enough for the flat objects clients send).
+fn string_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let pat = format!("\"{key}\"");
+    text.match_indices(&pat).find_map(|(at, _)| {
+        let rest = text[at + pat.len()..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+        let start = text.len() - rest.len();
+        Some((start, start + rest.find('"')?))
+    })
+}
+
 /// Shards holding a device's keys (only those the manifest lists),
 /// ascending (insertion: a sort or a collected set costs kilobytes).
 fn shards_of(store: &CatalogStore, keys: &[u64]) -> Vec<u8> {
@@ -190,6 +205,7 @@ impl CatalogService {
             cfg,
             web,
             upload: None,
+            upload_at: 0,
             announced: BTreeSet::new(),
             events: Vec::new(),
             config_dirty: false,
@@ -261,19 +277,38 @@ impl CatalogService {
         s
     }
 
+    /// `catalog/upload_chunk`, parsed from the request text: the base64
+    /// stays in the WebSocket frame and decodes into a stack buffer (a hub
+    /// without PSRAM ran out of heap with a `Value` copy and a decoded
+    /// `Vec` per chunk next to the frame).
     #[inline(never)]
-    fn upload_chunk(&mut self, req: &J) -> Result<J, ApiError> {
+    fn upload_chunk(&mut self, req: &J, data: &str, now: Millis) -> Result<J, ApiError> {
         let target = req["target"].as_str().unwrap_or("bank");
         let offset = req["offset"].as_u64().ok_or_else(|| err("invalid_format", "offset: number"))?;
-        let data = base64::engine::general_purpose::STANDARD
-            .decode(req["data"].as_str().ok_or_else(|| err("invalid_format", "data: base64"))?.trim())
-            .map_err(|e| err("invalid_format", format!("base64: {e}")))?;
-        if data.len() > UPLOAD_CHUNK_MAX {
+        let mut buf = [0u8; UPLOAD_CHUNK_MAX + 3];
+        let n = base64::engine::general_purpose::STANDARD.decode_slice(data.trim(), &mut buf).map_err(|e| match e {
+            base64::DecodeSliceError::OutputSliceTooSmall => {
+                err("invalid_value", format!("chunks are at most {UPLOAD_CHUNK_MAX} bytes"))
+            }
+            e => err("invalid_format", format!("base64: {e}")),
+        })?;
+        if n > UPLOAD_CHUNK_MAX {
             return Err(err("invalid_value", format!("chunks are at most {UPLOAD_CHUNK_MAX} bytes")));
         }
+        let data = &buf[..n];
         if offset == 0 {
-            self.begin(target, req)?;
+            // Another target's upload that is still advancing belongs to
+            // another client (or another task of the same page): refuse
+            // rather than drop it; an idle one is taken over.
+            if let Some(u) = &self.upload
+                && u.target() != target
+                && now.saturating_sub(self.upload_at) < UPLOAD_IDLE_MS
+            {
+                return Err(err("busy", format!("a {} upload is in progress", u.target())));
+            }
+            self.begin(target, req["size"].as_u64().map(|s| s as u32), req["sha256"].as_str().and_then(unhex32))?;
         }
+        self.upload_at = now;
         let up = self
             .upload
             .as_mut()
@@ -289,12 +324,12 @@ impl CatalogService {
                     if size.is_some_and(|n| writer.len() as u64 + data.len() as u64 > n as u64) {
                         Err(std::io::Error::other("more bytes than announced"))
                     } else {
-                        hash.update(&data);
-                        writer.write(f, &data)
+                        hash.update(data);
+                        writer.write(f, data)
                     }
                 }
-                Upload::Bank(i) => i.write(f, &data),
-                Upload::Web(w) => w.write(f, &data),
+                Upload::Bank(i) => i.write(f, data),
+                Upload::Web(w) => w.write(f, data),
             }
         };
         let written = up.written();
@@ -313,10 +348,8 @@ impl CatalogService {
     }
 
     #[inline(never)]
-    fn begin(&mut self, target: &str, req: &J) -> Result<(), ApiError> {
+    fn begin(&mut self, target: &str, size: Option<u32>, sha: Option<[u8; 32]>) -> Result<(), ApiError> {
         self.abort();
-        let size = req["size"].as_u64().map(|s| s as u32);
-        let sha = req["sha256"].as_str().and_then(unhex32);
         let map = self.store.map;
         self.upload = Some(match target {
             "manifest" | "shard" => {
@@ -539,6 +572,25 @@ impl CatalogService {
 }
 
 impl<T: ZigbeeTransport> ApiExtension<T> for CatalogService {
+    fn request_text(&mut self, _hub: &mut Hub<T>, text: &str, now: Millis) -> Option<(u64, Result<J, ApiError>)> {
+        if !text.contains("catalog/upload_chunk") {
+            return None;
+        }
+        // The base64 stays in the frame; the rest is parsed without it
+        // (a serde derive would cost kilobytes of firmware).
+        let (a, b) = string_span(text, "data")?;
+        let data = &text[a..b];
+        if data.contains('\\') {
+            return None; // escaped: the `Value` path
+        }
+        let mut meta = String::with_capacity(text.len() - data.len());
+        meta.push_str(&text[..a]);
+        meta.push_str(&text[b..]);
+        let req = serde_json::from_str::<J>(&meta).ok()?;
+        let id = req["id"].as_u64()?;
+        (req["type"] == "catalog/upload_chunk").then(|| (id, self.upload_chunk(&req, data, now)))
+    }
+
     fn request(&mut self, hub: &mut Hub<T>, kind: &str, req: &J, now: Millis) -> Option<Result<J, ApiError>> {
         Some(match kind {
             "catalog/status" => Ok(self.status(hub)),
@@ -549,7 +601,10 @@ impl<T: ZigbeeTransport> ApiExtension<T> for CatalogService {
                     self.cfg.to_json()
                 })
             }
-            "catalog/upload_chunk" => self.upload_chunk(req),
+            "catalog/upload_chunk" => match req["data"].as_str() {
+                Some(d) => self.upload_chunk(req, d, now),
+                None => Err(err("invalid_format", "data: base64")),
+            },
             "catalog/commit" => self.commit(hub, req, now),
             "catalog/abort" => {
                 self.abort();
@@ -581,4 +636,18 @@ pub fn load_config(bytes: Option<Vec<u8>>) -> CatalogConfig {
         warn!("catalog: settings: {e}");
     }
     cfg
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::string_span;
+
+    #[test]
+    fn string_span_finds_the_value() {
+        let t = r#"{"id":3,"type":"catalog/upload_chunk","target":"data","offset":0, "data" : "QUJD","size":3}"#;
+        let (a, b) = string_span(t, "data").unwrap();
+        assert_eq!(&t[a..b], "QUJD");
+        assert_eq!(string_span(r#"{"data":3}"#, "data"), None);
+        assert_eq!(string_span(r#"{"x":"y"}"#, "data"), None);
+    }
 }
