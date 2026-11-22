@@ -1,0 +1,50 @@
+{
+  "action_template": "{% set values = {None:None,'idle':'idle','heat':'heating','cool':'cooling','fan_only':'fan'} %}{{ values[value_json.running_state] }}",
+  "action_topic": "zigbee2mqtt/ME167",
+  "availability": [
+    {
+      "topic": "zigbee2mqtt/bridge/state",
+      "value_template": "{{ value_json.state }}"
+    },
+    {
+      "topic": "zigbee2mqtt/ME167/availability",
+      "value_template": "{{ value_json.state }}"
+    }
+  ],
+  "availability_mode": "all",
+  "current_temperature_template": "{{ value_json.local_temperature }}",
+  "current_temperature_topic": "zigbee2mqtt/ME167",
+  "device": {
+    "identifiers": [
+      "zigbee2mqtt_0xa4c138aabbccddee"
+    ],
+    "manufacturer": "AVATTO",
+    "model": "TS0601_thermostat_3",
+    "model_id": "TS0601",
+    "name": "ME167",
+    "via_device": "zigbee2mqtt_bridge_0x00124b0000000001"
+  },
+  "max_temp": 35.0,
+  "min_temp": 5.0,
+  "mode_command_topic": "zigbee2mqtt/ME167/set/system_mode",
+  "mode_state_template": "{{ value_json.system_mode }}",
+  "mode_state_topic": "zigbee2mqtt/ME167",
+  "modes": [
+    "auto",
+    "heat",
+    "off"
+  ],
+  "name": null,
+  "object_id": "ME167_climate",
+  "origin": {
+    "name": "zigbee-rs-hub",
+    "sw": "0.1.8",
+    "url": "https://github.com/faronov/zigbee-rs-hub"
+  },
+  "temp_step": 0.5,
+  "temperature_command_topic": "zigbee2mqtt/ME167/set/current_heating_setpoint",
+  "temperature_state_template": "{{ value_json.current_heating_setpoint }}",
+  "temperature_state_topic": "zigbee2mqtt/ME167",
+  "temperature_unit": "C",
+  "unique_id": "0xa4c138aabbccddee_climate_zigbee2mqtt"
+}

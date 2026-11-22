@@ -1,0 +1,49 @@
+{
+  "features": [
+    {
+      "access": 1,
+      "label": "Local temperature",
+      "name": "local_temperature",
+      "property": "local_temperature",
+      "type": "numeric",
+      "unit": "°C"
+    },
+    {
+      "access": 3,
+      "label": "Current heating setpoint",
+      "name": "current_heating_setpoint",
+      "property": "current_heating_setpoint",
+      "type": "numeric",
+      "unit": "°C",
+      "value_max": 35,
+      "value_min": 5,
+      "value_step": 0.5
+    },
+    {
+      "access": 3,
+      "label": "System mode",
+      "name": "system_mode",
+      "property": "system_mode",
+      "type": "enum",
+      "values": [
+        "auto",
+        "heat",
+        "off"
+      ]
+    },
+    {
+      "access": 1,
+      "label": "Running state",
+      "name": "running_state",
+      "property": "running_state",
+      "type": "enum",
+      "values": [
+        "idle",
+        "heat",
+        "cool",
+        "fan_only"
+      ]
+    }
+  ],
+  "type": "climate"
+}

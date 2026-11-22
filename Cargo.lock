@@ -1171,6 +1171,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hub-mqtt"
+version = "0.1.0"
+dependencies = [
+ "hub-app",
+ "hub-devices",
+ "hub-ncp",
+ "log",
+ "serde_json",
+ "zigbee-zrhp",
+]
+
+[[package]]
 name = "hub-ncp"
 version = "0.1.0"
 dependencies = [

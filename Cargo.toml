@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/hub"]
+members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/hub"]
 # Host-side `cargo test` at the root only builds the portable crates and the
 # desktop tool; the firmware is built from `firmware/bridge` and
 # `firmware/hub` (Xtensa toolchain, see README).
-default-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/zdef", "crates/zdefc", "tools/hubctl"]
+default-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/zdef", "crates/zdefc", "tools/hubctl"]
 
 [workspace.package]
 edition = "2024"
@@ -18,6 +18,7 @@ hub-ncp = { path = "crates/hub-ncp" }
 hub-devices = { path = "crates/hub-devices" }
 hub-app = { path = "crates/hub-app" }
 hub-web = { path = "crates/hub-web" }
+hub-mqtt = { path = "crates/hub-mqtt" }
 # zigbee-rs crates, all at one master revision (c18875b, 2026-11-20):
 # ZRHP v1 protocol crate and the Green Power commissioning decoder and
 # default translation used by the device engine.

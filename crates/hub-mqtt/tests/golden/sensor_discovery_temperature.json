@@ -1,0 +1,37 @@
+{
+  "availability": [
+    {
+      "topic": "zigbee2mqtt/bridge/state",
+      "value_template": "{{ value_json.state }}"
+    },
+    {
+      "topic": "zigbee2mqtt/lumi.weather/availability",
+      "value_template": "{{ value_json.state }}"
+    }
+  ],
+  "availability_mode": "all",
+  "device": {
+    "identifiers": [
+      "zigbee2mqtt_0x00158d0001000001"
+    ],
+    "manufacturer": "LUMI",
+    "model": "lumi.weather",
+    "model_id": "lumi.weather",
+    "name": "lumi.weather",
+    "via_device": "zigbee2mqtt_bridge_0x00124b0000000001"
+  },
+  "device_class": "temperature",
+  "name": "Temperature",
+  "object_id": "lumi.weather_temperature",
+  "origin": {
+    "name": "zigbee-rs-hub",
+    "sw": "0.1.8",
+    "url": "https://github.com/faronov/zigbee-rs-hub"
+  },
+  "state_class": "measurement",
+  "state_topic": "zigbee2mqtt/lumi.weather",
+  "suggested_display_precision": 2,
+  "unique_id": "0x00158d0001000001_temperature_zigbee2mqtt",
+  "unit_of_measurement": "°C",
+  "value_template": "{{ value_json.temperature }}"
+}

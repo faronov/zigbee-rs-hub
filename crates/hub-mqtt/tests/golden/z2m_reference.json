@@ -1,0 +1,37 @@
+{
+  "_comment": "Documents as Zigbee2MQTT 2.x publishes them (zigbee-herdsman-converters exposes, MIT), for a WSDCGQ11LM-style sensor, a TRADFRI colour-temperature bulb and a plug. The bridge's documents must contain every field here with the same value; 'description' and 'presets' are not compared.",
+  "bridge_state": {"state": "online"},
+  "availability": {"state": "online"},
+  "sensor_state_keys": ["battery", "humidity", "linkquality", "temperature", "voltage"],
+  "sensor_exposes": [
+    {"type": "numeric", "name": "battery", "property": "battery", "label": "Battery", "access": 1, "unit": "%", "value_min": 0, "value_max": 100, "category": "diagnostic"},
+    {"type": "numeric", "name": "temperature", "property": "temperature", "label": "Temperature", "access": 1, "unit": "°C"},
+    {"type": "numeric", "name": "humidity", "property": "humidity", "label": "Humidity", "access": 1, "unit": "%"},
+    {"type": "numeric", "name": "voltage", "property": "voltage", "label": "Voltage", "access": 1, "unit": "mV", "category": "diagnostic"},
+    {"type": "numeric", "name": "linkquality", "property": "linkquality", "label": "Linkquality", "access": 1, "unit": "lqi", "value_min": 0, "value_max": 255, "category": "diagnostic"}
+  ],
+  "light_expose": {"type": "light", "features": [
+    {"type": "binary", "name": "state", "property": "state", "label": "State", "access": 7, "value_on": "ON", "value_off": "OFF", "value_toggle": "TOGGLE"},
+    {"type": "numeric", "name": "brightness", "property": "brightness", "label": "Brightness", "access": 7, "value_min": 0, "value_max": 254},
+    {"type": "numeric", "name": "color_temp", "property": "color_temp", "label": "Color temp", "access": 7, "unit": "mired", "value_min": 250, "value_max": 454}
+  ]},
+  "light_state": {"state": "ON", "brightness": 254, "color_temp": 370, "color_mode": "color_temp"},
+  "switch_expose": {"type": "switch", "features": [
+    {"type": "binary", "name": "state", "property": "state", "label": "State", "access": 7, "value_on": "ON", "value_off": "OFF", "value_toggle": "TOGGLE"}
+  ]},
+  "device_entry": {"ieee_address": "0x00158d0001000001", "type": "EndDevice", "network_address": 4097, "interview_completed": true, "power_source": "Battery", "disabled": false},
+  "ha_sensor_temperature": {
+    "device_class": "temperature", "state_class": "measurement", "unit_of_measurement": "°C",
+    "value_template": "{{ value_json.temperature }}", "state_topic": "zigbee2mqtt/lumi.weather",
+    "unique_id": "0x00158d0001000001_temperature_zigbee2mqtt", "object_id": "lumi.weather_temperature",
+    "availability_mode": "all",
+    "availability": [{"topic": "zigbee2mqtt/bridge/state", "value_template": "{{ value_json.state }}"}, {"topic": "zigbee2mqtt/lumi.weather/availability", "value_template": "{{ value_json.state }}"}],
+    "device": {"identifiers": ["zigbee2mqtt_0x00158d0001000001"], "name": "lumi.weather"}
+  },
+  "ha_light": {"schema": "json", "brightness": true, "brightness_scale": 254, "command_topic": "zigbee2mqtt/TRADFRI bulb E27 WS opal 980lm/set", "state_topic": "zigbee2mqtt/TRADFRI bulb E27 WS opal 980lm", "supported_color_modes": ["color_temp"], "max_mireds": 454, "min_mireds": 250, "unique_id": "0x00158d0001000002_light_zigbee2mqtt"},
+  "ha_switch": {"command_topic": "zigbee2mqtt/SP 120/set/state", "payload_on": "ON", "payload_off": "OFF", "value_template": "{{ value_json.state }}", "unique_id": "0x00158d0001000003_switch_zigbee2mqtt"},
+  "permit_join_response": {"data": {"time": 254}, "status": "ok"},
+  "rename_response": {"data": {"from": "SP 120", "to": "kitchen plug", "homeassistant_rename": false}, "status": "ok"},
+  "remove_response": {"data": {"id": "kitchen plug", "block": false, "force": false}, "status": "ok"},
+  "health_check_response": {"data": {"healthy": true}, "status": "ok"}
+}
