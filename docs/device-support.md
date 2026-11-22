@@ -2674,6 +2674,133 @@ switches gets a light); group entities carry no `last_seen`; the
 coordinator's own binding table (bindings with the hub as source) is not
 managed; scene names are not written to the devices.
 
+### 14.10 MQTT bridge (Zigbee2MQTT-compatible; API 1.3, 8 MB builds)
+
+`crates/hub-mqtt` publishes the hub's devices on an MQTT broker with
+Zigbee2MQTT's topics and payloads, so tools written for Zigbee2MQTT
+(Node-RED, ioBroker, openHAB, Home Assistant's MQTT discovery) work with
+the hub. It is a client of this API (an in-process session the app
+authenticates itself, `App::connect_trusted`), so it sees exactly what the
+web UI and the HA integration see. **Plain MQTT 3.1.1 over TCP**: the hub
+does no TLS (the esp-mqtt SSL and WebSocket transports are compiled out),
+so the broker belongs on the LAN; user name and password are optional.
+Firmware feature `mqtt` (default on; off: `--no-default-features
+--features app`); the bridge runs only when enabled in its settings.
+
+Requests (authenticated sessions; `hub/info` `maintenance` lists `mqtt`):
+
+| Type | Parameters | Result |
+|---|---|---|
+| `mqtt/config/get` | — | `enabled`, `host`, `port` (1883), `client_id` (empty: `zigbee-rs-hub-<last 6 hex of the coordinator IEEE>`), `username`, `password_set` (the password is never returned), `base_topic` (`zigbee2mqtt`), `keepalive_s` (60), `discovery` (false), `discovery_prefix` (`homeassistant`), `retain_state` (false), `retain_availability` (true), `qos` (0) |
+| `mqtt/config/set` | any of the fields above, and `password` (`""` removes it) | the new settings; validated (`invalid_value`: no wildcards or empty levels in topics, host without a scheme), stored (NVS `hub/mqtt` on the S3; `hubctl serve --mqtt-settings FILE`), applied at once (the bridge restarts) |
+| `mqtt/status` | — | `state` (`disabled`, `low_memory`, `waiting_for_hub`, `connecting`, `connected`, `retrying`), `last_error`, `retry_in_s`, `connects`, `published`, `received`, `dropped`, `errors`, `devices`, `queued_bytes`, `api_resyncs`, `stack_min_free`, `tls: false` |
+
+Topics (`<base>` = `base_topic`):
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `<base>/bridge/state` | out, retained, QoS 1 | `{"state":"online"}`; the LWT and a clean stop publish `{"state":"offline"}` |
+| `<base>/bridge/info` | out, retained | `version`, `coordinator` {`ieee_address`, `type`, `meta`}, `network` {`channel`, `pan_id`, `extended_pan_id`}, `permit_join`, `permit_join_end` (ms), `permit_join_timeout`, `config` (subset), `log_level`, `restart_required` |
+| `<base>/bridge/devices` | out, retained | the coordinator, then every device: `ieee_address`, `type` (`Router` for mains, `EndDevice`, `GreenPower`), `network_address`, `friendly_name`, `supported` (a catalog/user definition resolved), `definition` {`model`, `vendor`, `description`, `exposes`, `source` (`native` / `generated` for the generic tier)}, `power_source`, `model_id`, `manufacturer`, `software_build_id`, `interview_completed`, `disabled`; republished 1 s after a change. Larger than the limit (16 KB without PSRAM, 256 KB with): published without `exposes` |
+| `<base>/bridge/groups` | out, retained | `[]` (groups: later) |
+| `<base>/bridge/event` | out | `device_joined`, `device_interview` (`started`, `successful` with `definition`), `device_leave` (also on removal) |
+| `<base>/bridge/logging` | out | `{"level":"error","message":…}` for failed `/set`/`/get` (unknown device or property, a refused command) |
+| `<base>/bridge/request/permit_join` | in | `{"time": 0–254, "device": name?}` (2.x), `{"value": bool, "time"?}` (1.x), `true`/`false` |
+| `<base>/bridge/request/device/rename` | in | `{"from": name or 0xIEEE, "to": name}` or `{"last": true, "to": name}`: `devices/update`; refused when the name is taken or not a valid friendly name |
+| `<base>/bridge/request/device/remove` | in | `{"id": name or 0xIEEE, "force": bool}`: `devices/remove` |
+| `<base>/bridge/request/health_check` | in | `{"healthy": true}` |
+| `<base>/bridge/response/<request>` | out | `{"data": …, "status": "ok"}` or `{"data": {}, "status": "error", "error": …}`, with the request's `transaction` |
+| `<base>/<name>` | out | the device state: every entity's properties plus `linkquality`; unknown values left out; after every report (whole state, Zigbee2MQTT's `cache_state`) |
+| `<base>/<name>/availability` | out, QoS 1, retained by default | `{"state":"online"}` / `offline` from the hub's availability (4.6) |
+| `<base>/<name>/action` | out | the `action` value of an event (also in the state message that carries it, not kept afterwards) |
+| `<base>/<name>[/<endpoint>]/set[/<property>]` | in | `{"state":"ON","brightness":128,…}`, or a plain value on `/set/<property>` (`ON`, `128`), or `ON`/`OFF`/`TOGGLE` on `/set` |
+| `<base>/<name>[/<endpoint>]/get[/<property>]` | in | `{"state":""}`: `entities/refresh` of the entities behind the properties |
+| `<prefix>/<component>/<0xIEEE>/<object_id>/config` | out, retained, opt-in | Home Assistant discovery (below) |
+| `<prefix>/status` | in | `online` (Home Assistant restarted): configs and states again |
+
+Names and properties:
+
+- **Friendly name** = the hub device name (user name, else the model;
+  the IEEE address while the interview has not read it), with `+`, `#`,
+  empty levels, a second `/` and endpoint-like endings (`…/1`, `…/set`)
+  replaced. A name already in use gets `_<last 4 hex of the IEEE>`; a
+  device keeps its name while it stays unique. `0x<ieee>` addresses work
+  in every topic too. A rename (any client: MQTT, web UI, HA) clears the
+  old name's retained topics and publishes on the new one, as Zigbee2MQTT
+  does.
+- **Properties** are entity keys, which for catalog definitions are
+  Zigbee2MQTT's expose names (the catalog is generated from
+  zigbee-herdsman-converters). The generic tier maps to Zigbee2MQTT's
+  names and units: `switch` → `state` (`ON`/`OFF`), `battery_voltage` (V)
+  → `voltage` (mV), lights → `state`, `brightness` (0–254), `color_temp`
+  (mired), `color` {`x`,`y`} / {`hue`,`saturation`} (and `h`/`s`),
+  `color_mode`; covers → `state` (`OPEN`/`CLOSE`/`STOP`), `position`,
+  `tilt`; climate → `local_temperature`, `occupied_heating_setpoint`
+  (`current_heating_setpoint` for Tuya EF00 devices), `system_mode`,
+  `running_state`, `preset`, `fan_mode`; locks → `state` (`LOCK`/`UNLOCK`)
+  and `lock_state`; fans → `fan_state`, `fan_mode`; binary sensors →
+  `true`/`false`; events → `action` (`<event>_<endpoint>` when a device
+  has several event entities). A property two entities would share (the
+  same key on two endpoints) gets the endpoint name as a suffix
+  (`state_l1`; the endpoint number without a name), and the expose its
+  `endpoint`. `linkquality` and `last_seen` device fields are not entity
+  properties (`linkquality` comes from the device record; `last_seen` is
+  off, Zigbee2MQTT's default).
+- **Exposes** use Zigbee2MQTT's schema (`numeric`/`binary`/`enum`/`text`/
+  `composite`, `light`/`switch`/`cover`/`climate`/`lock`/`fan`, `access`
+  bits 1 state, 2 set, 4 get — get only for mains devices, `category`
+  from the entity category, limits and options from the capabilities).
+- `/set` with several light properties is one entity command (`turn_on`
+  with `brightness`, `color_temp_kelvin`, `xy_color`/`hs_color`,
+  `transition`); `brightness: 0` and `state: OFF` turn off; `hex` and
+  `r`/`g`/`b` colours are converted to xy; `brightness_step` and
+  `color_temp_step` use the last state.
+
+Home Assistant discovery (off by default): the hub's own HA integration
+(section 15) creates the same devices, so **use either the integration or
+MQTT discovery, not both**. Configs follow Zigbee2MQTT: `unique_id`
+`<0xieee>_<object_id>_<base_topic>`, device `identifiers`
+`zigbee2mqtt_<0xieee>`, `via_device` the bridge (`zigbee2mqtt_bridge_<0x
+coordinator>`, with a connection-state binary sensor and a permit-join
+switch), availability = `bridge/state` and the device's topic (mode
+`all`), `origin` zigbee-rs-hub; lights use the JSON schema (endpoint lights
+their own `<name>/<endpoint>` state and `…/set` topics), events an `event`
+entity on `<name>/action`. Removed devices and entities clear their
+configs; configs of devices removed while the bridge was not running stay
+until removed by hand.
+
+Robustness and memory: the client reconnects with backoff (1 s doubling to
+60 s) and only after the first API snapshot; every (re)connect publishes
+`online`, the bridge topics, availability, states and the configs again.
+Outgoing messages are rendered lazily (dirty device states, one discovery
+device at a time) into a queue bounded in bytes (12 KB without PSRAM,
+64 KB with); a full queue drops non-essential messages (counted in
+`dropped`). Inputs share one bounded channel: if the bridge falls behind
+the API, its session is dropped and a new one's snapshot replaces the
+model (`api_resyncs`). The bridge model keeps only the fields it maps;
+the snapshot is split into records without one JSON tree (3.4 KB per
+device measured on a 64-bit host, `tests/heap.rs`). On boards without
+PSRAM the bridge starts only with at least 64 KB of free internal heap
+(`low_memory` until then, checked every 30 s). Firmware cost: see the
+README (MQTT section).
+
+Tests: `crates/hub-mqtt` host tests run the engine with simulated devices
+(sensor, colour-temperature light, two-gang relay, Tuya TRV, remote)
+through the real API server into the bridge and compare the Zigbee2MQTT
+documents with golden files (`tests/golden/`); `tests/service.rs` runs the
+app on the simulated NCP, the bridge thread, the TCP client and the test
+broker (settings over the API, LWT, reconnect, credentials, disable);
+`tools/hubctl/tests/mqtt_e2e.rs` runs `hubctl --sim --sim-z2m-devices serve
+--mqtt …` as a process against the test broker or `MQTT_E2E_BROKER`
+(`host:port`; run against rumqttd 0.20 as well) like a Zigbee2MQTT tool;
+`tests/golden/z2m_reference.json` holds documents as Zigbee2MQTT 2.x
+publishes them, which the bridge's must contain.
+
+Not yet: groups (`bridge/groups` is empty; coordinated with the groups
+work), OTA topics, `bridge/request/device/options`, `/set` responses
+(Zigbee2MQTT 2.x `…/response`), `last_seen`, `elapsed`, legacy attribute
+output.
+
 ## 15. Boundary to a Home Assistant integration
 
 A later HA custom integration (far future, not part of this work) should be a

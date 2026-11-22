@@ -137,6 +137,7 @@ ZRHP остаётся протоколом для USB/UART (сетевого т�
 | `crates/hub-core` | Переносимое ядро `no_std`: разводка платы (`board`), логика esptool DTR/RTS → EN/BOOT (`lines`), реэкспорт `zigbee-zrhp` (git-зависимость от faronov/zigbee-rs, зафиксированная ревизия) |
 | `crates/hub-web` | Встроенный веб-интерфейс: одна статическая страница (`web/index.html`), сжатая gzip в `build.rs` |
 | `crates/hub-app` | Этап 2: движок на ядре хоста: преобразование событий и запросов, транспорт, реестр устройств в хранилище хоста, поток приложения с сессиями API, проверка каталога (доверенные ключи) |
+| `crates/hub-mqtt` | MQTT-мост, совместимый с Zigbee2MQTT: топики, сообщения и exposes из сущностей хаба, MQTT discovery HA, поток моста с переподключениями; MQTT-клиент для компьютера и тестовый брокер |
 | `crates/hub-ncp` | Этап 1: переносимое ядро ZRHP-хоста (`std`): драйвер линка, сессии и восстановление, клиентский API, жизненный цикл NCP, потоковая передача `FW_*`, журнал хранилища хоста, симулированный NCP (`sim`) |
 | `tools/hubctl` | Этап 1: `hub-ncp` на компьютере: настоящий NCP через мост или `--sim` |
 | `firmware/bridge` | Прошивка S3 этапа 0 (`tbr-bridge`, esp-idf-svc + esp_tinyusb); заодно библиотека — режим `tbr-hub` по умолчанию |
@@ -1067,6 +1068,68 @@ Node_Desc_req уходит как `APS_DATA_REQUEST`), реестр пережи
 `hub-devices`: снимок туда-обратно, измеренные значения не попадают,
 восстановление самоописывающегося устройства без обмена. `hub-ncp`:
 многочастные значения через уплотнение и оборванная запись.
+
+## MQTT (совместимо с Zigbee2MQTT)
+
+Хаб может публиковать свои устройства на MQTT-брокере **с топиками и
+сообщениями Zigbee2MQTT**, поэтому с ним работают инструменты, сделанные
+для Zigbee2MQTT: Node-RED (`node-red-contrib-zigbee2mqtt`), ioBroker,
+openHAB, MQTT discovery Home Assistant, скрипты. `crates/hub-mqtt` —
+клиент собственного WebSocket API хаба (сессия внутри процесса), поэтому
+видит то же, что веб-интерфейс и интеграция HA.
+
+- **Обычный MQTT 3.1.1 поверх TCP, без TLS** (хаб не делает TLS;
+  транспорты SSL и WebSocket в esp-mqtt выключены при сборке): брокер в
+  локальной сети (mosquitto, аддон HA …), по желанию с логином и паролем.
+- **Настройки**: веб-интерфейс → Settings → MQTT или API
+  (`mqtt/config/get`, `mqtt/config/set`, `mqtt/status`; device-support
+  14.7); хранятся в NVS. Выключено, пока не включат. Хост и порт брокера,
+  client ID (по умолчанию `zigbee-rs-hub-<6 hex IEEE координатора>`),
+  логин/пароль, базовый топик (`zigbee2mqtt`), keepalive, discovery HA и
+  его префикс (`homeassistant`), retain состояний/доступности, QoS.
+- **Топики**: `<base>/<friendly_name>` (состояние JSON, ключи — имена
+  exposes Zigbee2MQTT: `temperature`, `humidity`, `battery`, `voltage` (мВ),
+  `state` `ON`/`OFF`, `brightness` 0–254, `color_temp` (майред), `color`,
+  `action`, `linkquality` …), `…/set` и `…/get` (также `…/set/<свойство>`
+  и формы с endpoint вроде `state_l1` или `<имя>/l1/set`),
+  `…/availability` (`{"state":"online"}`), `bridge/state` (retained, LWT
+  `offline`), `bridge/info`, `bridge/devices` (с `definition` и `exposes`),
+  `bridge/event` (подключение, интервью, уход), `bridge/logging`,
+  `bridge/request/permit_join`, `…/device/rename`, `…/device/remove`,
+  `…/health_check` с `bridge/response/…` и transaction ID. Группы — позже.
+- **Friendly name** — имя устройства в хабе (с суффиксом, если два
+  совпадают); переименование где угодно (MQTT, веб-интерфейс, HA) очищает
+  старые retained-топики, как в Zigbee2MQTT.
+- **Home Assistant**: используйте **либо** интеграцию хаба
+  (`integrations/home-assistant`), **либо** MQTT discovery (включается
+  явно), не оба сразу — каждый создаёт те же устройства. Discovery как у
+  Zigbee2MQTT (`unique_id` `<ieee>_<object>_<base>`, доступность через
+  `bridge/state` и топик устройства).
+- **Надёжность**: переподключение с нарастающей паузой (1–60 с), после
+  переподключения или перезапуска HA (`homeassistant/status`) всё
+  публикуется заново, исходящие сообщения формируются по мере отправки в
+  очередь с ограничением в байтах (12 КБ без PSRAM), `bridge/devices` без
+  exposes сверх 16 КБ на платах без PSRAM; на них мост запускается только
+  при свободной внутренней куче не меньше 64 КБ (до тех пор состояние
+  `low_memory` в `mqtt/status`).
+- **Компьютер**: `hubctl --sim --sim-z2m-devices serve --mqtt HOST[:PORT]
+  [--mqtt-discovery] [--mqtt-base T] [--mqtt-user U --mqtt-password P]
+  [--mqtt-settings FILE]` запускает мост с тремя симулированными
+  устройствами; `hubctl mqtt-broker` — маленький брокер для тестов (не для
+  эксплуатации).
+- **Прошивка**: cargo-фича `mqtt` (по умолчанию) — esp-mqtt из ESP-IDF;
+  `mqtt-lite` — собственный MQTT-клиент моста на сокетах lwIP (esp-mqtt
+  тянет esp-tls и слой TLS mbedtls даже для обычного TCP);
+  `--no-default-features --features app` — без моста. Размеры образа
+  (release, заголовок 8 MB; main до этого: 2 568 416 Б): без моста
+  2 566 256 Б, `mqtt` 2 811 616 Б (+245 КБ: мост ~180 КБ, esp-mqtt с
+  esp-tls/mbedtls ~62 КБ), `mqtt-lite` 2 750 176 Б (+184 КБ). Статическая
+  RAM +1,5 КБ. Во время работы, только когда включено: поток моста (стек
+  16 КБ), задача esp-mqtt (стек 5 КБ) с 2 КБ буферов и до 8 КБ outbox для
+  QoS 1, очередь (≤ 12 КБ без PSRAM), модель устройств (3,4 КБ на
+  устройство, измерено на 64-битном компьютере,
+  `crates/hub-mqtt/tests/heap.rs`; на S3 меньше) и ненадолго снимок API,
+  который мост разбирает по одной записи.
 
 ## Интеграция с Home Assistant
 
