@@ -125,7 +125,10 @@ impl Net {
         while self.now < end {
             self.now += 50;
             self.serve();
-            self.streams.poll(self.now);
+            for gone in self.streams.poll(self.now) {
+                let out = self.srv.image_gone(gone.ident(), "stream gone", self.now);
+                self.device_gets(out);
+            }
             let mut src = Sources {
                 #[cfg(feature = "store")]
                 store: None,
@@ -175,7 +178,13 @@ fn a_streamed_image_is_downloaded_through_a_small_window() {
     assert_eq!(n.state(), "done");
     // The device waited for the client only at the start (prefetch).
     assert_eq!(n.waits_sent, 1);
-    assert!(n.streams.list()[0].received <= n.file.len() as u64 + 4096);
+    assert!(
+        n.streams.list()[0].received <= n.file.len() as u64 + 2 * u64::from(crate::stream::CHUNK)
+    );
+    assert_eq!(
+        n.streams.memory(),
+        56 + crate::stream::SLOTS * crate::stream::CHUNK as usize
+    );
 }
 
 #[test]
@@ -237,5 +246,6 @@ fn without_a_client_the_device_is_aborted_after_the_grace_time() {
     n.streams.disconnected(SESSION, n.now);
     n.run(GRACE_MS + 5_000);
     assert!(n.client.aborted, "ABORT once the stream is gone");
+    assert_eq!(n.state(), "aborted", "the job ends with the stream");
     assert_eq!(n.client.version, 0x0001_0000);
 }

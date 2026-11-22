@@ -1423,6 +1423,40 @@ impl Server {
         Ok(out)
     }
 
+    /// A streamed image is gone for good (its client did not come back):
+    /// the jobs downloading it end `aborted` (the devices got ABORT; they
+    /// keep what they have for a later offer).
+    pub fn image_gone(&mut self, ident: Ident, reason: &str, now: Millis) -> Vec<Action> {
+        let mut out = Vec::new();
+        let ids: Vec<String> = self
+            .devices
+            .iter_mut()
+            .filter_map(|(id, d)| {
+                let j = d.job.as_mut()?;
+                (j.target == Some(ident)
+                    && matches!(
+                        j.state,
+                        JobState::Waiting | JobState::Queued | JobState::Downloading
+                    ))
+                .then(|| {
+                    j.state = JobState::Aborted;
+                    j.error = Some(reason.into());
+                    j.updated = now;
+                    id.clone()
+                })
+            })
+            .collect();
+        for id in &ids {
+            self.due
+                .retain(|(_, a)| !matches!(a, Action::Send { device, .. } if device == id));
+            self.changed(&mut out, id, true);
+        }
+        if !ids.is_empty() {
+            self.notify_queued(now, &mut out);
+        }
+        out
+    }
+
     /// `ota/devices/check`: make the device query (Image Notify) and read
     /// its CurrentFileVersion.
     pub fn check(&mut self, dev: &Device, ep: Option<u8>) -> Result<Vec<Action>, ApiErr> {

@@ -247,6 +247,34 @@ impl StoreState {
 }
 
 /// The store's `ota/*` requests.
+/// `ota/upload/chunk` taken from the request text: decoded into a stack
+/// buffer, no `Value` copy (`None`: the generic path).
+pub fn upload_chunk_text(ota: &mut Ota, text: &str) -> Option<(u64, Result<J, ApiError>)> {
+    use hub_ota::json::{base64_decode_into, base64_len, string_span, uint_field};
+    if !text.contains("\"ota/upload/chunk\"") {
+        return None;
+    }
+    let (a, b) = string_span(text, "data")?;
+    let data = &text[a..b];
+    if data.contains('\\') {
+        return None;
+    }
+    let id = uint_field(text, "id")?;
+    let r = (|| {
+        let upload = uint_field(text, "upload").and_then(|n| u16::try_from(n).ok()).ok_or_else(|| err("invalid_value", "upload"))?;
+        let offset = uint_field(text, "offset").and_then(|n| u32::try_from(n).ok()).ok_or_else(|| err("invalid_value", "offset"))?;
+        let n = base64_len(data).map_err(|e| err("invalid_format", format!("data: {e}")))?;
+        if n > CHUNK_MAX {
+            return Err(err("invalid_value", format!("chunks of at most {CHUNK_MAX} B")));
+        }
+        let mut buf = [0u8; CHUNK_MAX];
+        let n = base64_decode_into(data, &mut buf).map_err(|e| err("invalid_format", format!("data: {e}")))?;
+        let written = ota.store.get()?.write(upload, offset, &buf[..n]).map_err(store_err)?;
+        Ok(json!({"written": written}))
+    })();
+    Some((id, r))
+}
+
 pub fn request<T: ZigbeeTransport>(ota: &mut Ota, engine: &mut Engine<T>, ty: &str, v: &J, now: Millis) -> Result<J, ApiError> {
     let str_ = |k: &str| v.get(k).and_then(J::as_str);
     let u16_ = |k: &str| v.get(k).and_then(J::as_u64).and_then(|n| u16::try_from(n).ok());

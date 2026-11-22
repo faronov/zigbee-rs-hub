@@ -130,7 +130,15 @@ pub struct Ota {
     dirty: BTreeSet<String>,
     snapshot_dirty: bool,
     last_sweep: Millis,
+    /// Free heap probe (`None`: the desktop).
+    platform: Option<std::sync::Arc<dyn crate::platform::Platform>>,
 }
+
+/// Streams ask for no chunk while the heap has less free than this, or no
+/// block this large (devices get WAIT_FOR_DATA; job threads keep 16 KiB).
+pub const STREAM_HEAP_FREE: usize = 20 * 1024;
+/// See [`STREAM_HEAP_FREE`].
+pub const STREAM_HEAP_BLOCK: usize = 6 * 1024;
 
 /// Mutable image sources of an [`Ota`] (store and streams).
 macro_rules! sources {
@@ -165,6 +173,58 @@ impl Ota {
             dirty: BTreeSet::new(),
             snapshot_dirty: true,
             last_sweep: 0,
+            platform: cfg.platform.clone(),
+        }
+    }
+
+    /// `ota/block_data` (and `ota/upload/chunk`) taken from the request
+    /// text: the base64 stays in the WebSocket frame and decodes into the
+    /// stream's ring (no `Value` copy, no buffer per chunk). `None`: not
+    /// such a request, or one for the generic path (escapes).
+    pub fn block_data_text(&mut self, sid: u64, text: &str) -> Option<String> {
+        use hub_ota::json::{string_span, uint_field};
+        #[cfg(feature = "ota-store")]
+        if let Some((id, r)) = crate::ota_store::upload_chunk_text(self, text) {
+            return Some(match r {
+                Ok(v) => hub_devices::api::ServerMessage::ok(id, v).to_text(),
+                Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),
+            });
+        }
+        if !text.contains("\"ota/block_data\"") {
+            return None;
+        }
+        let (a, b) = string_span(text, "data")?;
+        let data = &text[a..b];
+        if data.contains('\\') {
+            return None;
+        }
+        let id = uint_field(text, "id")?;
+        let num = |k: &str| uint_field(text, k).and_then(|v| u32::try_from(v).ok());
+        let r = match (num("session"), num("offset")) {
+            (Some(session), Some(offset)) => self
+                .streams
+                .data_base64(sid, session, offset, data)
+                .map(|()| J::Null)
+                .map_err(|m| err("invalid_value", m)),
+            _ => Err(err("invalid_value", "session, offset")),
+        };
+        Some(match r {
+            Ok(v) => hub_devices::api::ServerMessage::ok(id, v).to_text(),
+            Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),
+        })
+    }
+
+    /// Pauses the streams' asking while the heap is low.
+    fn heap_guard(&mut self) {
+        let Some((free, largest)) = self.platform.as_ref().and_then(|p| p.heap()) else { return };
+        let low = free < STREAM_HEAP_FREE || largest < STREAM_HEAP_BLOCK;
+        if low != self.streams.low_heap() {
+            if low {
+                warn!("ota: heap low ({free} B free, largest block {largest} B): streams paused");
+            } else {
+                info!("ota: heap {free} B free again: streams go on");
+            }
+            self.streams.set_low_heap(low);
         }
     }
 
@@ -265,8 +325,14 @@ impl Ota {
     /// Paced responses, housekeeping, version reads, persistence and the
     /// topic snapshot.
     pub fn poll<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, ncp: &Ncp, now: Millis) {
-        if !self.streams.poll(now).is_empty() {
-            info!("ota: a stream without a client was dropped");
+        self.heap_guard();
+        let gone = self.streams.poll(now);
+        if !gone.is_empty() {
+            for o in &gone {
+                info!("ota: stream {} ({}) without a client dropped", o.id, o.name);
+                let out = self.server.image_gone(o.ident(), "the stream's client did not come back", now);
+                self.exec(engine, out, now);
+            }
             self.images_changed(engine, now);
         }
         #[cfg(feature = "ota-store")]
@@ -420,8 +486,12 @@ impl Ota {
 
     /// `ota_device` with the device's record.
     fn device_event<T: ZigbeeTransport>(&self, engine: &mut Engine<T>, id: &str, now: Millis) {
-        if let Some(rec) = self.device_text(engine, id, now).and_then(|t| serde_json::from_str::<J>(&t).ok()) {
-            engine.app_event("ota", json!({"topic": "ota_device", "device": rec}));
+        if let Some(rec) = self.device_text(engine, id, now) {
+            let mut body = String::with_capacity(rec.len() + 32);
+            body.push_str("{\"topic\":\"ota_device\",\"device\":");
+            body.push_str(&rec);
+            body.push('}');
+            engine.app_event_text("ota", body);
         }
     }
 
@@ -495,7 +565,7 @@ impl Ota {
                     .streams
                     .list()
                     .iter()
-                    .map(|s| json!({"session": s.offer.id, "name": s.offer.name, "file_version": s.offer.header.file_version, "size": s.offer.size, "received": s.received, "client": s.owner.is_some()}))
+                    .map(|s| json!({"session": s.offer.id, "name": s.offer.name, "file_version": s.offer.header.file_version, "size": s.offer.size, "received": s.received, "asks": s.asks, "waits": s.waits, "memory": s.memory(), "client": s.owner.is_some()}))
                     .collect();
                 let mut r = json!({
                     "area": self.area_json(),
@@ -504,6 +574,7 @@ impl Ota {
                     "block_max": self.server.block_cap(),
                     "asdu_max": self.server.asdu_max,
                     "stream_chunk": STREAM_CHUNK,
+                    "stream_paused": self.streams.low_heap(),
                     "streams": streams,
                 });
                 #[cfg(feature = "ota-store")]
@@ -546,9 +617,8 @@ impl Ota {
             "ota/block_data" => {
                 let id = u32_("session").ok_or_else(|| err("invalid_value", "session"))?;
                 let offset = u32_("offset").ok_or_else(|| err("invalid_value", "offset"))?;
-                let data = hub_ota::json::base64_decode(str_("data").ok_or_else(|| err("invalid_value", "data"))?)
-                    .map_err(|e| err("invalid_format", format!("data: {e}")))?;
-                self.streams.data(sid, id, offset, &data).map_err(|m| err("invalid_value", m))?;
+                let data = str_("data").ok_or_else(|| err("invalid_value", "data"))?;
+                self.streams.data_base64(sid, id, offset, data).map_err(|m| err("invalid_value", m))?;
                 Ok(J::Null)
             }
             "ota/stream/close" => {
@@ -620,5 +690,47 @@ impl Ota {
         #[cfg(feature = "ota-store")]
         self.store.info(&mut v);
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct Heap(AtomicBool);
+
+    impl crate::platform::Platform for Heap {
+        fn random(&self, buf: &mut [u8]) {
+            buf.fill(4);
+        }
+        fn heap(&self) -> Option<(usize, usize)> {
+            Some(if self.0.load(Ordering::Relaxed) { (60_000, 30_000) } else { (30_000, 4_000) })
+        }
+    }
+
+    #[test]
+    fn streams_pause_while_the_heap_is_low() {
+        let p = Arc::new(Heap(AtomicBool::new(false)));
+        let cfg = crate::AppConfig { platform: Some(p.clone()), ..Default::default() };
+        let mut ota = Ota::new(&cfg);
+        ota.heap_guard();
+        assert!(ota.streams.low_heap(), "largest block below {STREAM_HEAP_BLOCK} B");
+        p.0.store(true, Ordering::Relaxed);
+        ota.heap_guard();
+        assert!(!ota.streams.low_heap());
+    }
+
+    #[test]
+    fn block_data_is_taken_from_the_text() {
+        let mut ota = Ota::new(&crate::AppConfig::default());
+        assert!(ota.block_data_text(1, r#"{"id":1,"type":"ota/status"}"#).is_none());
+        let f = r#"{"id":7,"type":"ota/block_data","session":65536,"offset":0,"data":"QUJD"}"#;
+        let r = ota.block_data_text(1, f).unwrap();
+        assert!(r.contains("\"id\":7") && r.contains("no such stream"), "{r}");
+        // Escaped data goes the generic way.
+        assert!(ota.block_data_text(1, r#"{"id":7,"type":"ota/block_data","data":"QU\/D"}"#).is_none());
     }
 }

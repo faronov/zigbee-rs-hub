@@ -503,6 +503,13 @@ impl Runner {
             }
             Input::Text(sid, text) => {
                 if self.api.is_authed(sid)
+                    && let Some(frame) = self.ota.block_data_text(sid, &text)
+                {
+                    drop(text);
+                    self.send_owned(sid, frame);
+                    return;
+                }
+                if self.api.is_authed(sid)
                     && let Some((id, ty, v)) = crate::ota::head(&text)
                 {
                     let frame = match self.ota.request(&mut self.engine, &self.ncp, sid, &ty, &v, now) {
@@ -603,6 +610,16 @@ impl Runner {
     fn send(&mut self, sid: SessionId, frame: &str) {
         if let Some(sink) = self.sinks.get_mut(&sid)
             && !sink.send(frame)
+        {
+            self.sinks.remove(&sid);
+            self.api.disconnect(sid);
+        }
+    }
+
+    /// [`Self::send`] handing the buffer over (no copy per frame).
+    fn send_owned(&mut self, sid: SessionId, frame: String) {
+        if let Some(sink) = self.sinks.get_mut(&sid)
+            && !sink.send_owned(frame)
         {
             self.sinks.remove(&sid);
             self.api.disconnect(sid);
@@ -760,12 +777,12 @@ impl Runner {
         let sinks = &self.sinks;
         self.ota.prune(|sid| sinks.contains_key(&sid), now);
         for (sid, frame) in self.ota.outbox() {
-            self.send(sid, &frame);
+            self.send_owned(sid, frame);
         }
         let events = self.engine.drain_events();
         self.registry.note(&events, now);
         for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
-            self.send(sid, &frame);
+            self.send_owned(sid, frame);
         }
         self.registry.flush(&self.ncp, &self.engine, now, false);
         let mut st = self.status.lock().unwrap();

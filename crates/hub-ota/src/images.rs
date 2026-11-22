@@ -129,6 +129,16 @@ impl<'a> View<'a> {
 }
 
 impl Images for View<'_> {
+    // Per block request: no list of every offer.
+    fn find(&self, ident: Ident) -> Option<Offer> {
+        #[cfg(feature = "store")]
+        if let Some(s) = self.store
+            && let Some(o) = s.offers().into_iter().find(|o| o.ident() == ident)
+        {
+            return Some(o);
+        }
+        self.streams.find(ident)
+    }
     fn offers(&self) -> Vec<Offer> {
         #[allow(unused_mut)]
         let mut v = Vec::new();
@@ -145,6 +155,16 @@ impl Images for View<'_> {
 }
 
 impl Images for Sources<'_> {
+    // Per block request: no list of every offer.
+    fn find(&self, ident: Ident) -> Option<Offer> {
+        #[cfg(feature = "store")]
+        if let Some(s) = self.store.as_deref()
+            && let Some(o) = s.offers().into_iter().find(|o| o.ident() == ident)
+        {
+            return Some(o);
+        }
+        self.streams.find(ident)
+    }
     fn offers(&self) -> Vec<Offer> {
         #[allow(unused_mut)]
         let mut v = Vec::new();

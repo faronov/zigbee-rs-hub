@@ -147,6 +147,25 @@ mod tests {
 /// API's binary fields. A few dozen bytes of code instead of a base64
 /// crate decoder instantiation.
 pub fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
+    let mut out = vec![0u8; base64_len(s)?];
+    let n = base64_decode_into(s, &mut out)?;
+    out.truncate(n);
+    Ok(out)
+}
+
+/// The decoded length of `s` (an upper bound for broken input).
+pub fn base64_len(s: &str) -> Result<usize, &'static str> {
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(4) {
+        return Err("base64: length is not a multiple of 4");
+    }
+    let pad = b.iter().rev().take_while(|&&c| c == b'=').count().min(2);
+    Ok(b.len() / 4 * 3 - pad)
+}
+
+/// Decodes `s` into `out` (no allocation); returns the decoded length.
+/// `out` must hold [`base64_len`] bytes.
+pub fn base64_decode_into(s: &str, out: &mut [u8]) -> Result<usize, &'static str> {
     fn val(c: u8) -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => c - b'A',
@@ -161,7 +180,7 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
     if !b.len().is_multiple_of(4) {
         return Err("base64: length is not a multiple of 4");
     }
-    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    let mut at = 0;
     for (i, q) in b.as_chunks::<4>().0.iter().enumerate() {
         let last = i + 1 == b.len() / 4;
         let pad = q.iter().rev().take_while(|&&c| c == b'=').count();
@@ -174,9 +193,43 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
         }
         n <<= 6 * pad as u32;
         let bytes = n.to_be_bytes();
-        out.extend_from_slice(&bytes[1..4 - pad]);
+        let k = 3 - pad;
+        out.get_mut(at..at + k)
+            .ok_or("base64: more data than room")?
+            .copy_from_slice(&bytes[1..4 - pad]);
+        at += k;
     }
-    Ok(out)
+    Ok(at)
+}
+
+/// The JSON string value of `"key"` in `text` as a byte span (no escapes
+/// handled: the caller refuses values with a backslash). Requests with a
+/// large base64 field are taken apart with this instead of a `Value` copy.
+pub fn string_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let pat = format!("\"{key}\"");
+    text.match_indices(&pat).find_map(|(at, _)| {
+        let rest = text[at + pat.len()..]
+            .trim_start()
+            .strip_prefix(':')?
+            .trim_start()
+            .strip_prefix('"')?;
+        let start = text.len() - rest.len();
+        Some((start, start + rest.find('"')?))
+    })
+}
+
+/// The unsigned integer value of `"key"` in `text` (outside the spans of
+/// string values that contain the key, which API requests do not have).
+pub fn uint_field(text: &str, key: &str) -> Option<u64> {
+    let pat = format!("\"{key}\"");
+    text.match_indices(&pat).find_map(|(at, _)| {
+        let rest = text[at + pat.len()..]
+            .trim_start()
+            .strip_prefix(':')?
+            .trim_start();
+        let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+        rest[..n].parse().ok()
+    })
 }
 
 #[cfg(test)]
@@ -195,5 +248,21 @@ mod b64_tests {
         assert!(d("Z===").is_err());
         assert!(d("Zg==Zm9v").is_err());
         assert!(d("Zm9*").is_err());
+        let mut small = [0u8; 2];
+        assert!(super::base64_decode_into("Zm9v", &mut small).is_err());
+        assert_eq!(super::base64_len("Zm8=").unwrap(), 2);
+    }
+
+    #[test]
+    fn fields_from_request_text() {
+        let t =
+            r#"{"id":12,"type":"ota/block_data","session": 65536 ,"offset":1024, "data" : "QUJD"}"#;
+        let (a, b) = super::string_span(t, "data").unwrap();
+        assert_eq!(&t[a..b], "QUJD");
+        assert_eq!(super::uint_field(t, "id"), Some(12));
+        assert_eq!(super::uint_field(t, "session"), Some(65536));
+        assert_eq!(super::uint_field(t, "offset"), Some(1024));
+        assert_eq!(super::uint_field(t, "type"), None);
+        assert_eq!(super::string_span(r#"{"data":3}"#, "data"), None);
     }
 }
