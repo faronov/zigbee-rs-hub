@@ -63,6 +63,19 @@ pub trait SessionSink: Send {
     }
 }
 
+/// Requests served by a service outside the engine (the MQTT bridge's
+/// `mqtt/*` settings), on the app thread. Must not block.
+pub trait RequestHook: Send {
+    /// Request types this hook serves start with this (e.g. `mqtt/`).
+    fn prefix(&self) -> &'static str;
+    /// A `hub/info` `maintenance` feature this hook adds.
+    fn feature(&self) -> Option<&'static str> {
+        None
+    }
+    /// Handles request `ty`; `req` is the whole frame.
+    fn request(&mut self, ty: &str, req: &serde_json::Value) -> Result<serde_json::Value, hub_devices::hub::ApiError>;
+}
+
 /// Period of [`SessionSink::keepalive`].
 pub const KEEPALIVE_S: u64 = 30;
 
@@ -195,6 +208,8 @@ pub struct CatalogSetup {
 enum Input {
     Ncp(Message),
     Connect(SessionId, Box<dyn SessionSink>),
+    ConnectTrusted(SessionId, Box<dyn SessionSink>),
+    Hook(Box<dyn RequestHook>),
     Text(SessionId, String),
     Disconnect(SessionId),
     Admin(JobOut),
@@ -263,6 +278,21 @@ impl App {
         let sid = SessionId::from(self.next_session.fetch_add(1, Ordering::SeqCst));
         self.tx.send(Input::Connect(sid, sink)).ok()?;
         Some(sid)
+    }
+
+    /// An in-process API session that is authenticated already (with the
+    /// current token, so a rotation does not lock it out): `auth_required`
+    /// and `auth_ok` go to `sink`. For services inside the hub (the MQTT
+    /// bridge); never exposed to the network.
+    pub fn connect_trusted(&self, sink: Box<dyn SessionSink>) -> Option<SessionId> {
+        let sid = SessionId::from(self.next_session.fetch_add(1, Ordering::SeqCst));
+        self.tx.send(Input::ConnectTrusted(sid, sink)).ok()?;
+        Some(sid)
+    }
+
+    /// Serve the requests of `hook` (types starting with its prefix).
+    pub fn add_hook(&self, hook: Box<dyn RequestHook>) {
+        let _ = self.tx.send(Input::Hook(hook));
     }
 
     /// A text frame from a connection.
@@ -341,6 +371,8 @@ struct Runner {
     automations: Automations,
     /// Last request ID of the automations' internal session.
     automation_requests: u64,
+    /// Requests served outside the engine (`mqtt/*`).
+    hooks: Vec<Box<dyn RequestHook>>,
 }
 
 /// The session automations send their `request` actions through.
@@ -511,6 +543,7 @@ impl Runner {
             catalog: service,
             automations: Automations::default(),
             automation_requests: 0,
+            hooks: Vec::new(),
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -644,7 +677,29 @@ impl Runner {
                     self.api.disconnect(sid);
                 }
             }
+            Input::ConnectTrusted(sid, mut sink) => {
+                let hello = self.api.connect_as(sid);
+                let auth = serde_json::json!({"type": "auth", "token": self.api.token()}).to_string();
+                let frames = self.api.handle_text(&mut self.engine, sid, &auth, now);
+                if sink.send(&hello) && frames.iter().all(|f| sink.send(f)) {
+                    self.sinks.insert(sid, sink);
+                } else {
+                    self.api.disconnect(sid);
+                }
+            }
+            Input::Hook(h) => {
+                self.hooks.push(h);
+                if self.maintenance_for.is_some() {
+                    self.set_maintenance();
+                }
+            }
             Input::Text(sid, text) => {
+                if self.api.is_authed(sid)
+                    && let Some(frame) = self.hook_request(&text)
+                {
+                    self.send(sid, &frame);
+                    return;
+                }
                 if self.api.is_authed(sid)
                     && let Some(head) = admin::head(&text)
                 {
@@ -707,6 +762,29 @@ impl Runner {
             },
             Input::Shutdown => {}
         }
+    }
+
+    /// `hub/info` `maintenance`: the admin features and the hooks'.
+    fn set_maintenance(&mut self) {
+        let mut f = self.admin.features(&self.ncp);
+        f.extend(self.hooks.iter().filter_map(|h| h.feature()));
+        self.api.set_info("maintenance", f.into());
+    }
+
+    /// A request of a [`RequestHook`]: the result frame, `None` when no
+    /// hook serves it.
+    fn hook_request(&mut self, text: &str) -> Option<String> {
+        let h = self.hooks.iter_mut().find(|h| text.contains(h.prefix()))?;
+        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        let ty = v["type"].as_str().filter(|t| t.starts_with(h.prefix()))?;
+        let id = v["id"].as_u64()?;
+        Some(
+            match h.request(ty, &v) {
+                Ok(r) => hub_devices::api::ServerMessage::ok(id, r),
+                Err(e) => hub_devices::api::ServerMessage::err(id, e),
+            }
+            .to_text(),
+        )
     }
 
     /// A maintenance request (`admin`), with what it may need from here.
@@ -794,7 +872,7 @@ impl Runner {
         let cookie = self.ncp.client().session().map(|s| s.link.peer_cookie);
         if self.ncp.client().state() == SessionState::Ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
-            self.api.set_info("maintenance", self.admin.features(&self.ncp).into());
+            self.set_maintenance();
         }
         // Group memberships of the hub endpoint, once per NCP session.
         if self.registered && self.ncp.client().state() == SessionState::Ready && self.groups_for != cookie {
