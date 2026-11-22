@@ -50,7 +50,7 @@ input.num{width:6em}
 .row label{display:inline-flex;align-items:center;gap:.3em}
 table{border-collapse:collapse;font-size:.9em}td,th{padding:.15em .6em .15em 0;text-align:left;font-variant-numeric:tabular-nums}
 pre{white-space:pre-wrap;font-size:.8em;max-height:24em;overflow:auto;background:var(--bg);padding:.5em;border-radius:7px}
-svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}
+svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}svg .h{paint-order:stroke;stroke:var(--card);stroke-width:3px}
 .warn{color:var(--warn)}
 .hide{display:none!important}
 nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
@@ -119,8 +119,8 @@ progress{width:12em}
 </div>
 <div data-tab="map" data-title="Map" class="tab">
 <section class="card"><div class="row"><h2 style="flex:1;margin:0">Network map</h2><span id="mpt" class="mut"></span><button class="p" id="mpb">Scan</button></div>
-<p class="mut">The coordinator's tables, then every router asked for its neighbours (Mgmt_Lqi) and routes. Line colour: link quality (LQI) as the routers report it.</p>
-<div id="mp"></div><div id="mpl"></div></section>
+<p class="mut">The coordinator's tables, then every router asked for its neighbours (Mgmt_Lqi) and routes. Lines: LQI as each side reports it (A/B when they differ), green ≥ 150, orange ≥ 80, red below, thicker is better; dashed: an end device and its parent. Tap a device for its links and routes.</p>
+<div id="mp"></div><div id="mpd"></div><div id="mpl"></div></section>
 </div>
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
@@ -422,33 +422,51 @@ $("#dgb").onclick=e=>diag(false,e.target);$("#dgr").onclick=e=>{if(confirm("Rese
 $("#lgb").onclick=()=>act("hub/logs",{lines:200}).then(r=>{const p=$("#lg");p.textContent=r.lines.join("\n");p.classList.remove("hide");p.scrollTop=p.scrollHeight}).catch(()=>{});
 let mapData=null;
 $("#mpb").onclick=()=>{if(JOB.topology)return jobStop("topology");$("#mpt").textContent="scanning…";jobStart("network/topology",{},"topology").catch(()=>$("#mpt").textContent="")};
+let mpSel=null;
 function drawMap(m){
  if(!m||!m.nodes)return;mapData=m;
  const N={},adj={},pairs={};for(const n of m.nodes){N[n.nwk]=n;adj[n.nwk]=[]}
- for(const l of m.links){if(!N[l.target]||!N[l.source])continue;const k=Math.min(l.source,l.target)+"-"+Math.max(l.source,l.target);
-  const p=pairs[k]||(pairs[k]={a:l.source,b:l.target,q:[]});if(l.lqi!=null)p.q.push(l.lqi);if(!adj[l.source].includes(l.target)){adj[l.source].push(l.target);adj[l.target].push(l.source)}}
+ // One edge per pair; q[x]: how x hears the other (its neighbour table).
+ for(const l of m.links){const a=Math.min(l.source,l.target),b=Math.max(l.source,l.target);if(!N[a]||!N[b])continue;
+  const p=pairs[a+"-"+b]||(pairs[a+"-"+b]={a,b,q:{}});if(l.lqi!=null)p.q[l.source]=l.lqi;if(!adj[a].includes(b)){adj[a].push(b);adj[b].push(a)}}
  // Breadth first from the coordinator: rings by hop count, children next to their parent.
  const lvl={0:0},par={},order=[0];for(let i=0;i<order.length;i++){const u=order[i];for(const v of adj[u].sort((x,y)=>(N[x].type=="router"?0:1)-(N[y].type=="router"?0:1)))if(lvl[v]==null&&(N[u].type!="end_device")){lvl[v]=lvl[u]+1;par[v]=u;order.push(v)}}
  const loose=m.nodes.filter(n=>lvl[n.nwk]==null);const maxl=Math.max(1,...Object.values(lvl))+(loose.length?1:0);
- const W=640,C=W/2,R=(C-50)/maxl,pos={0:[C,C]},ang={0:0};
+ const W=640,C=W/2,R=(C-60)/maxl,pos={0:[C,C]};
  const kids=u=>order.filter(v=>par[v]==u);
- const place=(u,a0,a1)=>{const k=kids(u);k.forEach((v,i)=>{const a=k.length==1&&u?a0+(a1-a0)/2:a0+(a1-a0)*(i+.5)/k.length;ang[v]=a;pos[v]=[C+R*lvl[v]*Math.cos(a),C+R*lvl[v]*Math.sin(a)];const w=(a1-a0)/k.length;place(v,a-w/2,a+w/2)})};
+ const place=(u,a0,a1)=>{const k=kids(u);k.forEach((v,i)=>{const a=k.length==1&&u?a0+(a1-a0)/2:a0+(a1-a0)*(i+.5)/k.length;pos[v]=[C+R*lvl[v]*Math.cos(a),C+R*lvl[v]*Math.sin(a)];const w=(a1-a0)/k.length;place(v,a-w/2,a+w/2)})};
  place(0,-Math.PI/2,1.5*Math.PI);
  loose.forEach((n,i)=>{const a=2*Math.PI*i/loose.length;pos[n.nwk]=[C+R*maxl*Math.cos(a),C+R*maxl*Math.sin(a)]});
  const svg=mkSvg(W,W),ns=svg.namespaceURI;
  const add=(t,a,txt)=>{const x=document.createElementNS(ns,t);for(const k in a)x.setAttribute(k,a[k]);if(txt!=null)x.textContent=txt;svg.append(x);return x};
+ const tip=(x,t)=>x.append(Object.assign(document.createElementNS(ns,"title"),{textContent:t}));
  const col=q=>q==null?"var(--mut)":q>=150?"var(--ok)":q>=80?"var(--warn)":"var(--bad)";
- const label=n=>n.name||(n.type=="coordinator"?"coordinator":hex(n.nwk,4));
- for(const k in pairs){const p=pairs[k],q=p.q.length?Math.max(...p.q):null,[x1,y1]=pos[p.a],[x2,y2]=pos[p.b];
-  const l=add("line",{x1,y1,x2,y2,stroke:col(q),"stroke-width":par[p.b]==p.a||par[p.a]==p.b?2.5:1,opacity:.8});
-  l.append(Object.assign(document.createElementNS(ns,"title"),{textContent:label(N[p.a])+" ↔ "+label(N[p.b])+": LQI "+(p.q.join(" / ")||"?")}))}
- for(const n of m.nodes){const[x,y]=pos[n.nwk],r=n.type=="coordinator"?11:n.type=="router"?8:5;
-  const c=add("circle",{cx:x,cy:y,r,fill:n.type=="end_device"?"var(--card)":"var(--acc)",stroke:n.error?"var(--bad)":"var(--acc)","stroke-width":2});
-  c.append(Object.assign(document.createElementNS(ns,"title"),{textContent:label(n)+"\n"+n.type+" · NWK "+hex(n.nwk,4)+(n.ieee?" · "+n.ieee:"")+(n.error?"\n"+n.error:"")}));
-  add("text",{x,y:y+r+12,"text-anchor":"middle"},label(n))}
+ const label=n=>(devs[n.device]&&devs[n.device].name)||n.name||(n.type=="coordinator"?"coordinator":hex(n.nwk,4));
+ const sel=N[mpSel]?mpSel:null,near=v=>sel==null||v==sel||adj[sel].includes(v);
+ const qs=p=>[p.q[p.a],p.q[p.b]].filter(q=>q!=null),hears=(x,y,p)=>p.q[x]!=null?label(N[x])+" hears "+label(N[y])+": LQI "+p.q[x]:"";
+ for(const k in pairs){const p=pairs[k],q=qs(p),lo=q.length?Math.min(...q):null,[x1,y1]=pos[p.a],[x2,y2]=pos[p.b],on=sel==null||p.a==sel||p.b==sel;
+  const ed=N[p.a].type=="end_device"||N[p.b].type=="end_device",o=on?.9:.12;
+  tip(add("line",{x1,y1,x2,y2,stroke:col(lo),"stroke-width":lo==null?1:1+lo/64,"stroke-dasharray":ed?"5 4":"",opacity:o}),[hears(p.a,p.b,p),hears(p.b,p.a,p)].filter(Boolean).join("\n")||"LQI unknown");
+  // The number sits beside the line, nearer the outer end (the middle is crowded).
+  const f=(lvl[p.b]??9)>=(lvl[p.a]??9)?.6:.4,dx=x2-x1,dy=y2-y1,L=Math.hypot(dx,dy)||1;
+  if(q.length)add("text",{x:x1+dx*f-dy/L*9,y:y1+dy*f+dx/L*9+4,"text-anchor":"middle",class:"h",opacity:on?1:.2},q.length==2&&q[0]!=q[1]?q.join("/"):q[0])}
+ for(const n of m.nodes){const[x,y]=pos[n.nwk],r=n.type=="coordinator"?14:n.type=="router"?11:8,d=devs[n.device],g=add("g",{opacity:near(n.nwk)?1:.25});
+  const c=document.createElementNS(ns,"circle");for(const[k,v]of Object.entries({cx:x,cy:y,r,fill:n.type=="end_device"?"var(--card)":"var(--acc)",stroke:n.error?"var(--bad)":n.nwk==sel?"var(--fg)":"var(--acc)","stroke-width":n.nwk==sel?3:2}))c.setAttribute(k,v);g.append(c);
+  // The page's picture (image_url: null when pictures are off); a 404 leaves the circle.
+  if(d&&d.image_url){const im=document.createElementNS(ns,"image");for(const[k,v]of Object.entries({href:d.image_url,x:x-r,y:y-r,width:2*r,height:2*r}))im.setAttribute(k,v);g.append(im)}
+  const t=document.createElementNS(ns,"text");for(const[k,v]of Object.entries({x,y:y+r+12,"text-anchor":"middle",class:"h"}))t.setAttribute(k,v);t.textContent=label(n);g.append(t);
+  tip(g,label(n)+"\n"+n.type+" · NWK "+hex(n.nwk,4)+(n.error?"\n"+n.error:""));g.style.cursor="pointer";g.onclick=e=>{e.stopPropagation();mpSel=n.nwk==sel?null:n.nwk;drawMap(m)}}
+ svg.onclick=()=>{if(sel!=null){mpSel=null;drawMap(m)}};
  $("#mp").textContent="";$("#mp").append(svg);
+ // Details of the selected device: its links both ways and its routes.
+ const dd=$("#mpd");dd.textContent="";
+ if(sel!=null){const n=N[sel],t=el("table",{},el("tr",{},...["Neighbour","It hears","Hears it",""].map(h=>el("th",{},h))));
+  for(const v of adj[sel]){const p=pairs[Math.min(sel,v)+"-"+Math.max(sel,v)];t.append(el("tr",{},el("td",{},label(N[v])),el("td",{},p.q[sel]??"–"),el("td",{},p.q[v]??"–"),el("td",{class:"mut"},par[v]==sel?"child":par[sel]==v?"parent":"")))}
+  const rt=(m.routes||[]).filter(r=>r.source==sel);
+  dd.append(el("h3",{},label(n)),el("p",{class:n.error?"warn":"mut"},n.type+" · NWK "+hex(n.nwk,4)+(n.ieee?" · "+n.ieee:"")+(n.error?" · "+n.error:"")),t);
+  if(rt.length)dd.append(el("p",{class:"mut"},"Routes: "+rt.map(r=>hex(r.dst,4)+(N[r.dst]?" ("+label(N[r.dst])+")":"")+" via "+(N[r.next_hop]?label(N[r.next_hop]):hex(r.next_hop,4))).join("; ")))}
  const t=el("table",{},el("tr",{},el("th",{},"Device"),el("th",{},"Type"),el("th",{},"NWK"),el("th",{},"Best LQI"),el("th",{},"Note")));
- for(const n of m.nodes.slice().sort((a,b)=>(lvl[a.nwk]??99)-(lvl[b.nwk]??99))){const q=Object.values(pairs).filter(p=>p.a==n.nwk||p.b==n.nwk).flatMap(p=>p.q);
+ for(const n of m.nodes.slice().sort((a,b)=>(lvl[a.nwk]??99)-(lvl[b.nwk]??99))){const q=Object.values(pairs).filter(p=>p.a==n.nwk||p.b==n.nwk).flatMap(qs);
   t.append(el("tr",{},el("td",{},n.ieee&&devs["zb:"+n.ieee]?pic(devs["zb:"+n.ieee],"s"):null,label(n)),el("td",{},n.type),el("td",{},hex(n.nwk,4)),el("td",{},q.length?Math.max(...q):"–"),el("td",{class:n.error?"warn":"mut"},n.error||(n.type=="router"&&!n.scanned?"not asked":""))))}
  $("#mpl").textContent="";$("#mpl").append(t);if(m.notes.length)$("#mpl").append(el("p",{class:"mut"},m.notes.join("; ")));
  $("#mpt").textContent=m.nodes.length+" nodes, "+Object.keys(pairs).length+" links · "+ago(m.time)+" · "+(m.duration_ms/1000).toFixed(1)+" s";
