@@ -259,7 +259,10 @@ function fmt(e,s){
  if(typeof v=="number"){const p=e.precision??(e.capabilities&&e.capabilities.suggested_display_precision);if(p!=null)v=v.toFixed(p)}
  return v+(e.unit&&typeof s.state=="number"?" "+e.unit:"");
 }
-function cmd(e,command,params){return act("entities/command",{uid:e.uid,command,params:params||{}}).catch(()=>{})}
+// The answer comes when the device confirms (ZCL default response), times
+// out (~25 s) or is queued for a sleepy device: say so, by entity name.
+function cmd(e,command,params,b){const n=e.name||(e.key||"").replace(/_/g," ");if(b)b.disabled=true;
+ return call("entities/command",{uid:e.uid,command,params:params||{}}).then(r=>{if(r&&r.status=="queued")toast(n+": queued until the device wakes")}).catch(x=>toast(n+": "+command.replace(/_/g," ")+" failed: "+x.message)).finally(()=>{if(b)b.disabled=false})}
 function entRow(e){
  const s=states[e.uid],li=el("li",{id:"e-"+e.uid});if(s&&s.available===false)li.className="na";
  const name=e.name||(e.key||"").replace(/_/g," ");
@@ -271,8 +274,9 @@ function entRow(e){
    const b=s&&s.attributes&&s.attributes.brightness;
    const r=el("input",{type:"range",min:1,max:100,value:b!=null?Math.max(1,Math.round(b/2.55)):100,title:"brightness"});
    r.onchange=()=>cmd(e,"turn_on",{brightness_pct:+r.value});li.append(r)}
-  const t=el("button",{class:"tg"+(st=="on"?" on":""),title:st||"unknown","aria-pressed":st=="on"});
-  t.onclick=()=>cmd(e,st=="on"?"turn_off":"turn_on");li.append(t);break}
+  // Lights, fans and sirens report "on"/"off", switches a bool (4.3).
+  const on=st===true||st=="on",t=el("button",{class:"tg"+(on?" on":""),title:st==null?"unknown":on?"on":"off","aria-pressed":on});
+  t.onclick=()=>cmd(e,on?"turn_off":"turn_on",0,t);li.append(t);break}
  case"number":{
   const i=el("input",{type:"number",class:"num",min:caps.native_min_value,max:caps.native_max_value,step:caps.native_step||"any"});
   if(st!=null)i.value=st;else i.placeholder="unknown";i.onchange=()=>cmd(e,"set_value",{value:+i.value});li.append(i);if(e.unit)li.append(el("span",{class:"mut"},e.unit));break}
