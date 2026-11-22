@@ -382,6 +382,7 @@ type, the commands, and the `capabilities` fields.
 | `siren` | on/off | `turn_on` (tone, duration, volume), `turn_off` | `available_tones`, `supported_features` | 0x0502 IAS WD |
 | `valve` | position or open/closed | `open_valve`, `close_valve`, `set_valve_position` | `reports_position`, `supported_features` | DPs, 0x0006 on valves |
 | `update` | installed/latest version | `install` | `supported_features` | 0x0019 OTA (later) |
+| `scene` | — | `activate` (`transition`, s) | — | group scenes (14.9): ZCL Recall Scene groupcast; not in definitions |
 
 Composite platforms (`light`, `cover`, `climate`, `lock`, `fan`, `siren`,
 `valve`) are built from **parts**: each HA property is its own binding
@@ -2160,7 +2161,9 @@ code feels familiar:
   (`attributes.restored`) and `app.last_values` in `hub/system`; the ZCL
   console (14.7: `zcl/*` requests, topic `frames`); the local
   automations of 14.8 (`automations/*`, the `automations` topic,
-  `automations` in `hub/info`).
+  `automations` in `hub/info`); Zigbee groups, scenes and bindings (14.9:
+  `groups/*`, `scenes/*`, `bindings/*`, the `groups` topic, group devices
+  and the `scene` platform).
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2544,6 +2547,130 @@ Not yet: sunrise/sunset triggers, `for` durations on state triggers,
 templates, webhooks; groups and scenes are reached through `request` once
 their API exists.
 
+### 14.9 Groups, scenes and bindings (API 1.3)
+
+Zigbee groups the hub manages, scenes per group, and device-to-device or
+device-to-group bindings. All additive: older clients see group devices and
+entities like any other (below) and ignore the new topic; a hub without
+this answers the requests `invalid_format`.
+
+**Groups.** IDs 0x0001–0xFFF7 (the lowest free one unless given; never the
+GP group 0x0B84). Members are device endpoints with the Groups cluster
+(0x0004, server): the hub sends ZCL Add Group (empty name; names are the
+hub's), Remove Group, View Group, Get Group Membership. With `hub_member`
+(default true) the hub's own endpoint joins too (ZRHP `NWK_GROUP_MEMBERSHIP`,
+replayed at the start of every NCP session), so the hub hears what a remote
+bound to the group sends. A member is `pending` until the device confirms,
+`ok`, `removing`, or `failed` (with `error`: the ZCL status or `timeout`;
+`INSUFFICIENT_SPACE` when its group table is full); pending and removing
+members are sent again until answered, also after a restart. A request to a
+sleepy device waits in its send queue until the device is next heard from
+(`queued: true`; press a button on a remote, or wait for its check-in).
+Deleting a group asks every member to leave (Remove Group also removes the
+group's scenes on the device, ZCL 3.6.2.3.5); the group stays `deleting`
+until they did (`force` drops it at once). Members of removed devices are
+dropped.
+
+**Group devices and entities.** A group with confirmed On/Off members gets a
+device `grp:<4 hex>` (record: `id`, `group`, `name` = the group's,
+`manufacturer` `zigbee-rs`, `model` `Zigbee group`, `model_id` `0x<id>`,
+`available` = any confirmed member available) in `devices/list`,
+`devices/get` and the `devices` topic, with entities in `entities/*` and the
+`entities` topic:
+
+- `grp:<id>:0:light` when a member endpoint has a light (else
+  `grp:<id>:0:switch` for On/Off switches): the capabilities of the member
+  light with the most parts (colour modes, colour temperature range); the
+  state is aggregated: on when any member is on, `brightness` the mean over
+  the lit members, colour from the first lit member. A command
+  (`entities/command`, HA's service names) is encoded as for that member and
+  sent as one APS groupcast (`dst_mode` 0x01, no APS ACK, Default Response
+  disabled), answered `{"status": "ok"}` at once; the members' states follow
+  optimistically, then with their reports.
+- `grp:<id>:0:scene_<n>` (platform `scene`, `name` = the scene's) per scene:
+  command `activate` (optional `transition`, s) recalls it.
+
+`devices/remove` of a group device deletes the group (HA's "delete device").
+
+**Scenes** (Scenes cluster 0x0005, per group). `scenes/store` makes the
+members' current state a scene: Store Scene to every confirmed member with
+the Scenes cluster (unicast, so each answer is seen: `results` per
+`<device>/<ep>`: `pending`, `ok` or the status); a new ID (1–255) unless
+given, the name is kept by the hub. `scenes/recall` is one Recall Scene
+groupcast (with the transition time when given); the members without
+reporting are read again 1.5 s (plus the transition) later. `scenes/remove`
+removes it from every member.
+
+**Bindings** (ZDO, on the source device). `bindings/create` sends a Bind_req
+per cluster (source endpoint, cluster, destination: a device endpoint by
+IEEE, a group, or the hub), `bindings/delete` an Unbind_req; `bindings/read`
+reads the table with Mgmt_Bind_req pages. Every cluster must be on the
+source endpoint (client clusters for a remote's commands, server clusters
+for reports). Requests stay `pending` (`queued` for a sleeping device) until
+the device answers, then the table follows; a failed one keeps its `error`
+and is not resent. Bindings the hub made for reporting appear with target
+`{"hub": true}`. Typical presets (web UI): remote → light On/Off 0x0006,
+Level Control 0x0008, Color Control 0x0300.
+
+| Type | Parameters | Result |
+|---|---|---|
+| `groups/list` | — | group records (below) |
+| `groups/endpoints` | — | `[{device, endpoint, in, out}]`: every Zigbee endpoint's server and client clusters (the pickers) |
+| `groups/create` | `name`, `group` (ID, optional; number or `"0x…"`), `hub_member` (default true) | group record |
+| `groups/update` | `group`, `name`, `hub_member` (each optional) | group record |
+| `groups/delete` | `group`, `force` | — |
+| `groups/add_member` | `group`, `device`, `endpoint` | group record (`unsupported` without the Groups cluster) |
+| `groups/remove_member` | `group`, `device`, `endpoint`, `force` | group record |
+| `groups/membership` | `device`, `endpoint` (optional: every Groups endpoint) | `{endpoints}`; Get Group Membership, answers as `group_membership` events; pending members it lists are confirmed, confirmed ones it lacks are sent again |
+| `groups/view` | `group`, `device`, `endpoint` | — ; `group_view` event |
+| `groups/identify` | `group`, `time_s` (default 10) | — ; Identify groupcast |
+| `scenes/store` | `group`, `scene` (optional), `name` (optional) | group record |
+| `scenes/recall` | `group`, `scene`, `transition` (s, optional) | — |
+| `scenes/remove` | `group`, `scene` | — |
+| `scenes/update` | `group`, `scene`, `name` | group record |
+| `scenes/view` | `group`, `scene`, `device`, `endpoint` | — ; `scene_view` event |
+| `bindings/list` | `device` (optional) | binding records |
+| `bindings/read` | `device` | binding record (`reading: true`) |
+| `bindings/create` | `device`, `endpoint`, `clusters` (list, or `cluster`), `target`: `{device, endpoint}`, `{group}` or `{hub: true}` | binding record |
+| `bindings/delete` | same as create | binding record |
+
+Group record: `{id, name, device, hub_member, hub_error, deleting, entity,
+members: [{device, endpoint, state, queued, error}], scenes: [{id, name, uid,
+results}]}`. Binding record: `{device, read_at, total, reading, error,
+table: [{endpoint, cluster, target}], pending: [{endpoint, cluster, target,
+op (bind/unbind), state (pending/queued/failed), error}]}`; a target is
+`{device, endpoint}`, `{group}` or `{hub: true, endpoint}`.
+
+Topic `groups` (subscribe; the snapshot carries `groups` and `bindings`):
+`group_updated` `{group}`, `group_removed` `{group: id}`,
+`bindings_updated` (a binding record), `group_membership` `{device,
+endpoint, capacity, groups}`, `group_view` `{device, endpoint, group, name,
+status}`, `scene_view` `{device, endpoint, group, scene, status,
+transition_s, name, extension_fields: [{cluster, data}]}`, `group_error`
+`{device, error}`.
+
+**Persistence and backup.** Groups are stored in the host store as
+`grp/<4 hex>` (the record without runtime fields), binding records as
+`bnd/<device id>` (the last read table and the unconfirmed requests).
+`network/backup` puts the groups into `metadata.internal.zigbee_rs.groups`;
+`network/restore` of a file that has them replaces the hub's groups and
+replays the hub endpoint's memberships (zigpy and Z2M ignore the field).
+
+**NCP (ZRHP) support** used: `APS_DATA_REQUEST` group addressing (7.3),
+`NWK_GROUP_MEMBERSHIP` (7.2, capability bit 17), ZDO responses (Bind_rsp,
+Unbind_rsp, Mgmt_Bind_rsp) forwarded unchanged (7.4), group-addressed
+indications (`dst_mode` 0x01) for the hub endpoint's groups. Known gaps of
+the NCP side: no read-back of its APS group table and no group record in
+`BKP_EXPORT_*` (9.2), so the hub replays the memberships at every session
+start; `SYS_NEGOTIATE` does not report capacities 9/10 (`group_table`,
+`binding_table`; 16 groups × 8 endpoints on the ESP32 NCP), so a full table
+is only seen as `NO_SPACE` (`hub_error`).
+
+Known limits: one group entity per group (a group of lights and plain
+switches gets a light); group entities carry no `last_seen`; the
+coordinator's own binding table (bindings with the hub as source) is not
+managed; scene names are not written to the devices.
+
 ## 15. Boundary to a Home Assistant integration
 
 A later HA custom integration (far future, not part of this work) should be a
@@ -2564,6 +2691,7 @@ is designed so that it can be:
 | Orphaned entities | `orphaned: true` | mark unavailable; HA's own "remove entity" UI deletes them via `entities/delete` |
 | Diagnostics | `devices/diagnostics` | HA diagnostics download |
 | Hub automations (14.8) | `automations/list`, topic `automations` | a `switch` per rule (enabled; `automations/enable`/`disable`) and a `button` (`automations/run`) on the hub device |
+| Zigbee groups (14.9) | group devices `grp:<id>` with a `light`/`switch` and `scene` entities | ordinary devices and entities (HA `scene` platform); deleting the device deletes the group |
 | Repairs | `resolution_changed` with orphaned entities, catalog update failures | optional repair issues |
 
 Requirements this places on the hub API (all covered above): stable `uid`s;

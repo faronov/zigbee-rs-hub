@@ -26,6 +26,7 @@ GP bindings). `std`, sans-IO, host-tested without hardware.
 | `commands` | HA service names → ZCL commands / attribute writes / Tuya DPs / hub options, per platform | 4.3, 4.5 |
 | `tuya`, `tuya_rt` | EF00 frames and DPs; dispatch, de-dup, time sync, gateway status, MCU version, queries | 10 |
 | `gp` | GP events, commissioning, generic GP tier, GP reports 0xA0–0xA3, GP definitions, GP bindings (on-device and hub-side) | 13 |
+| `hub::zgroups` | Zigbee groups (ZCL Groups, hub endpoint via `NWK_GROUP_MEMBERSHIP`), group devices/entities with aggregated state and groupcast commands, scenes (ZCL Scenes), bindings (Bind/Unbind/Mgmt_Bind), persistence records | 14.9 |
 | `api` | WebSocket JSON message model and a transport-free `ApiServer` (auth, subscriptions with snapshot + `seq`, handlers) | 14 |
 | `transport` | `ZigbeeTransport` trait (the boundary to the ZRHP host core) and `MockTransport` | 2 |
 | `persist` | `DeviceSnapshot`: what of a device survives a restart (no measured values), `Hub::snapshot_device` / `restore_device`; stored by `hub-app`'s registry | 3, 16.1 |
@@ -39,7 +40,7 @@ everything incoming is a method call with the current time.
 |---|---|
 | `aps_send(ApsRequest)` | `APS_DATA_REQUEST` through `Client::start` (non-blocking); `Hub::send_aps` blocks on the confirm, so an adapter must run it off the engine thread or use `start` |
 | `gp_request(GpRequest) -> Option<zcl_tsn>` | `Client::call(&GpPairingConfiguration / GpTranslationUpdate / GpTranslationRequest / GpRemoteSinkTableRequest / GpRemoteProxyTableRequest / GpSinkCommissioning / GpSinkRemove / GpSinkConfig)`, `zcl_tsn` from `GpRemoteRsp` (0x0A08–0x0A0D are in the pinned `zigbee-zrhp`) |
-| `group_add(ep, group)` | `NWK_GROUP_MEMBERSHIP` (no `hub-ncp` helper yet) |
+| `group_add(ep, group)`, `group_remove(ep, group)` | `NWK_GROUP_MEMBERSHIP` op 1 / 2 (`Hub::group_membership`) |
 | `remove_device(ieee)` | `NWK_REMOVE_DEVICE` (no helper yet) |
 | `permit_join(duration, target)` | `Hub::permit_join(secs)` (whole network; per-router targets are not in phase1) |
 | `Hub::on_aps_indication` | `EVT_APS_DATA_INDICATION` from `Hub::subscribe()` |

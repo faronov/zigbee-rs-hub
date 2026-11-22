@@ -85,6 +85,11 @@ progress{width:12em}
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
 <section class="devs" id="devs"></section>
 </div>
+<div data-tab="groups" data-title="Groups" class="tab">
+<section class="card"><h2>Groups</h2><form id="gcf" class="row"><input id="gcn" placeholder="name" required><input id="gci" class="num" placeholder="ID: auto"><button class="p">Create</button></form>
+<p class="mut">Members join with ZCL Add Group; a group with lights or switches gets its own device and entity, one groupcast per command. A sleepy device is asked when it next wakes: press one of its buttons.</p></section>
+<section class="devs" id="grps"></section>
+</div>
 <div data-tab="gp" data-title="Green Power" class="tab">
 <section class="card"><h2>Commissioning</h2>
 <div class="row"><select id="gpdu"><option value="60">1 min</option><option value="180" selected>3 min</option><option value="600">10 min</option></select>
@@ -210,7 +215,7 @@ function onMsg(m,tok){
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();if(hub.automations){call("subscribe",{topics:["automations"]}).catch(()=>{});if($("#aul").offsetParent)onTab.auto()}}).catch(()=>{});
-  call("subscribe",{topics:["devices","entities","network","gp","catalog"]}).catch(e=>toast(e.message));
+  call("subscribe",{topics:["devices","entities","network","gp","catalog","groups"]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
@@ -224,8 +229,14 @@ function onEvent(e){
   if(e.entities){ents={};for(const x of e.entities)ents[x.uid]=x}
   if(e.states){states={};for(const s of e.states)states[s.uid]=s}
   if(e.network)setNet(e.network);
-  renderAll();renderNet();gpForm();break;
- case"device_added":case"device_updated":if(e.device){const n=!devs[e.device.id];devSet(e.device);renderDev(e.device.id);if(n)cnt()}break;
+  if(e.groups){grps={};for(const g of e.groups)grps[g.id]=g;binds={};for(const b of e.bindings)binds[b.device]=b}
+  renderAll();renderNet();gpForm();renderGroups();break;
+ case"group_updated":grps[e.group.id]=e.group;renderGroups();break;
+ case"group_removed":delete grps[e.group];renderGroups();break;
+ case"bindings_updated":binds[e.device]=e;if(bOpen.has(e.device))renderDev(e.device);break;
+ case"group_membership":toast(gpNm(e.device)+" ep "+e.endpoint+" groups: "+(e.groups.map(g=>hex(g,4)).join(", ")||"none"));break;
+ case"group_error":toast(gpNm(e.device)+": "+e.error);break;
+ case"device_added":case"device_updated":if(e.device){geps=null;const n=!devs[e.device.id];devSet(e.device);renderDev(e.device.id);if(n)cnt()}break;
  case"device_removed":delete devs[e.id];for(const u in ents)if(ents[u].device==e.id)delete ents[u];renderAll();cnt();break;
  case"interview_progress":if(devs[e.device]){devs[e.device].interview="in_progress";devs[e.device].step=e.step;renderDev(e.device)}break;
  case"entity_added":case"entity_updated":if(e.entity){ents[e.entity.uid]=e.entity;renderDev(e.entity.device);if(e.topic=="entity_added")cnt()}break;
@@ -262,8 +273,8 @@ function pjTick(){
 $("#pj").onclick=()=>{const d=+$("#pjd").value;act("network/permit_join",{duration_s:d}).then(()=>{pjEnd=Date.now()+d*1000;pjTick()}).catch(()=>{})};
 $("#pjc").onclick=()=>act("network/permit_join",{duration_s:0}).then(()=>{pjEnd=0;pjTick()}).catch(()=>{});
 function ago(t){if(!t)return"never";const s=Math.max(0,Date.now()/1000+skew-t);return s<60?Math.round(s)+" s ago":s<3600?Math.round(s/60)+" min ago":s<86400?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"}
-function renderAll(){const box=$("#devs");box.textContent="";const ids=Object.keys(devs).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));for(const id of ids)box.append(devCard(id));$("#nd").textContent="("+ids.length+")";if(!ids.length)box.append(el("p",{class:"mut"},"No devices yet. Permit join and pair a device."));if($("#zd").offsetParent)onTab.zcl()}
-function renderDev(id){const old=document.getElementById("d-"+id);if(!devs[id]){if(old)old.remove();return}const c=devCard(id);if(old)old.replaceWith(c);else renderAll()}
+function renderAll(){const box=$("#devs");box.textContent="";const ids=Object.keys(devs).filter(i=>devs[i].group==null).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));for(const id of ids)box.append(devCard(id));$("#nd").textContent="("+ids.length+")";if(!ids.length)box.append(el("p",{class:"mut"},"No devices yet. Permit join and pair a device."));if($("#zd").offsetParent)onTab.zcl()}
+function renderDev(id){if(/^grp:/.test(id))return renderGroups();const old=document.getElementById("d-"+id);if(!devs[id]){if(old)old.remove();return}const c=devCard(id);if(old)old.replaceWith(c);else renderAll()}
 // Device pictures: the Zigbee2MQTT site's image of the resolved definition's
 // herdsman model (white label first, then its base model; their file name
 // rule replaces / : ' and space by -). Loaded by the browser, never by the
@@ -289,8 +300,9 @@ function devCard(id){
  const acts=el("div",{class:"row acts"},
   el("button",{onclick:()=>{const n=prompt("Device name",d.name||"");if(n!=null)act("devices/update",{device:id,name:n.trim()}).catch(()=>{})}},"Rename"),
   el("button",{onclick:()=>act("devices/reinterview",{device:id}).catch(()=>{})},"Re-interview"),
+  d.ieee?el("button",{onclick:()=>{bOpen.has(id)?bOpen.delete(id):bOpen.add(id);gEps().then(()=>renderDev(id),()=>{})}},"Bindings"):"",
   el("button",{class:"d",onclick:()=>{if(confirm("Remove "+(d.name||id)+" from the network?"))act("devices/remove",{device:id}).catch(()=>{})}},"Remove"));
- return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},pic(d),el("b",{},d.name||id),iv,av),info,ids,q,ul,acts);
+ return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},pic(d),el("b",{},d.name||id),iv,av),info,ids,q,ul,acts,bOpen.has(id)?bindPanel(id):"");
 }
 function fmt(e,s){
  if(!s||s.state==null)return"–";let v=s.state;
@@ -527,7 +539,7 @@ $("#zds").onclick=()=>{const t=$("#zdt").value,v=$("#zdv").value.trim();zReq("tu
 function zEps(){call("devices/diagnostics",{device:zDev}).then(d=>{const eps=(d.fingerprint||{}).endpoints||[],e=$("#ze"),c=$("#zc");e.textContent="";for(const x of eps)e.append(el("option",{value:x.ep},"ep "+x.ep));
  const cl=()=>{c.textContent="";const x=eps.find(x=>x.ep==e.value)||{};for(const k of x.in_clusters||[])c.append(el("option",{value:k},zX(k)));for(const k of x.out_clusters||[])c.append(el("option",{value:k},zX(k)+" (client)"))};e.onchange=cl;cl();
  zFr.length=0;for(const f of d.frames||[])zFr.push({time:f.time,dir:"rx",cluster:parseInt(f.cluster,16),hex:f.hex});zDraw()}).catch(()=>{})}
-onTab.zcl=()=>{const s=$("#zd"),v=s.value||zDev;s.textContent="";for(const id of Object.keys(devs).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value!=zDev||!$("#ze").options.length){zDev=s.value;if(zDev)zEps()}zDraw();zDpDraw()};
+onTab.zcl=()=>{const s=$("#zd"),v=s.value||zDev;s.textContent="";for(const id of Object.keys(devs).filter(i=>devs[i].group==null).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value!=zDev||!$("#ze").options.length){zDev=s.value;if(zDev)zEps()}zDraw();zDpDraw()};
 $("#zd").onchange=()=>{zDev=$("#zd").value;for(const k in zDps)delete zDps[k];zEps();zDpDraw()};
 // Live frames: an own subscription to `frames` while the box is ticked.
 $("#zl").onchange=e=>{if(e.target.checked){zSub=++rid;pend[zSub]={ok:()=>{},no:x=>toast(x.message)};ws.send(JSON.stringify({id:zSub,type:"subscribe",topics:["frames"]}))}else if(zSub){call("unsubscribe",{subscription:zSub}).catch(()=>{});zSub=0}};
@@ -626,13 +638,60 @@ $("#gbf").onsubmit=e=>{
 function gpCfg(c){V("gsl",c.security_level);V("gcm",c.communication_mode);$("#gcx").textContent=c.source+", group "+hex(c.group,4);const w=$("#gcw");w.textContent=c.warning;w.classList.toggle("hide",!c.warning)}
 $("#gcs").onclick=()=>{const l=+V("gsl");if(!l||confirm("Reject GPDs below level "+l+"?"))act("gp/config",{security_level:l,communication_mode:+V("gcm")}).then(gpCfg,()=>{})};
 // ---- end of Green Power tab ----
+// ---- Groups tab, bindings in the device cards (device-support 14.9) ----
+let grps={},binds={},geps=null;const bOpen=new Set,CLN={5:"Scenes",6:"On/Off",8:"Level",768:"Color",258:"Cover"};
+const gEps=()=>geps?Promise.resolve(geps):call("groups/endpoints").then(l=>geps=l);
+const gName=g=>grps[g]?grps[g].name:"group "+hex(g,4),clN=c=>CLN[c]||hex(c,4);
+onTab.groups=()=>{if(authed)gEps().then(renderGroups,()=>{})};
+const bt=(t,f,c)=>el("button",{class:c,onclick:()=>f().catch(()=>{})},t);
+function renderGroups(){const box=$("#grps");box.textContent="";const l=Object.values(grps);if(!l.length)box.append(el("p",{class:"mut"},"No groups yet."));for(const g of l)box.append(grpCard(g))}
+function grpCard(g){
+ const ul=el("ul",{class:"ents"}),mem=el("ul",{class:"ents"}),sc=el("ul",{class:"ents"}),id=g.id;
+ for(const u of Object.keys(ents).filter(u=>ents[u].device==g.device&&ents[u].platform!="scene"))ul.append(entRow(ents[u]));
+ for(const m of g.members)mem.append(el("li",{},el("span",{class:"n"},gpNm(m.device)+" ep "+m.endpoint),
+  el("span",{class:"badge"+(m.state=="ok"?" ok":m.state=="failed"?" bad":""),title:m.error||""},m.queued?m.state+": until it wakes":m.state),
+  bt("Remove",()=>act("groups/remove_member",{group:id,device:m.device,endpoint:m.endpoint}))));
+ const sel=el("select",{});sel.append(el("option",{value:""},"add member…"));
+ for(const e of geps||[])if(e.in.includes(4)&&!g.members.some(m=>m.device==e.device&&m.endpoint==e.endpoint))sel.append(el("option",{value:e.device+"|"+e.endpoint},gpNm(e.device)+" ep "+e.endpoint));
+ sel.onchange=()=>{const[d,p]=sel.value.split("|");if(d)act("groups/add_member",{group:id,device:d,endpoint:+p}).catch(()=>{})};
+ for(const s of g.scenes){const r=Object.values(s.results||{}),bad=r.find(x=>x!="ok"&&x!="pending");
+  sc.append(el("li",{},el("span",{class:"n"},s.name),r.length?el("span",{class:"badge"+(bad?" bad":" ok")},bad||(r.includes("pending")?"storing…":"stored")):"",
+   bt("Recall",()=>act("scenes/recall",{group:id,scene:s.id})),bt("Capture",()=>act("scenes/store",{group:id,scene:s.id})),bt("×",()=>act("scenes/remove",{group:id,scene:s.id}),"d")))}
+ const sn=el("input",{placeholder:"scene name",size:12});
+ return el("article",{class:"card dev"},el("div",{class:"top"},el("b",{},g.name),el("span",{class:"mut"},hex(id,4)),g.deleting?el("span",{class:"badge"},"deleting"):"",g.hub_error?el("span",{class:"badge bad",title:g.hub_error},"hub not in group"):""),
+  ul,el("h3",{},"Members"),mem,el("div",{class:"row acts"},sel),el("h3",{},"Scenes"),sc,
+  el("div",{class:"row acts"},sn,bt("Store current state",()=>act("scenes/store",{group:id,name:sn.value||undefined}))),
+  el("div",{class:"row acts"},bt("Rename",()=>{const n=prompt("Group name",g.name);return n?act("groups/update",{group:id,name:n}):Promise.resolve()}),
+   bt("Identify",()=>act("groups/identify",{group:id})),bt("Delete",()=>confirm("Delete "+g.name+"?")?act("groups/delete",{group:id}):Promise.resolve(),"d")));
+}
+$("#gcf").onsubmit=e=>{e.preventDefault();const i=V("gci");act("groups/create",{name:V("gcn"),group:i?(/^0x/i.test(i)?i:+i):undefined}).then(()=>$("#gcf").reset(),()=>{})};
+// Presets: remote → light.
+const BPR=[["6","On/Off"],["6,8","On/Off + Level"],["6,8,768","On/Off + Level + Color"]];
+function bindPanel(id){
+ const b=binds[id]||{table:[],pending:[]},eps=(geps||[]).filter(e=>e.device==id),tg=t=>t.group!=null?gName(t.group):t.hub?"hub":gpNm(t.device)+" ep "+t.endpoint;
+ const ul=el("ul",{class:"ents"}),line=(x,p)=>el("li",{},el("span",{class:"n"},"ep "+x.endpoint+" "+clN(x.cluster)+" → "+tg(x.target)),
+  p?el("span",{class:"badge"+(p.state=="failed"?" bad":""),title:p.error||""},p.op+" "+(p.state=="queued"?"until it wakes":p.state)):"",
+  bt("×",()=>act("bindings/delete",{device:id,endpoint:x.endpoint,cluster:x.cluster,target:x.target})));
+ for(const x of b.table)ul.append(line(x));for(const p of b.pending)ul.append(line(p,p));
+ if(!ul.firstChild)ul.append(el("li",{class:"mut"},b.read_at?"No bindings.":"Not read yet."));
+ const src=el("select",{}),pre=el("select",{}),cus=el("input",{class:"num",placeholder:"clusters"}),dst=el("select",{});
+ for(const e of eps)src.append(el("option",{value:e.endpoint},"ep "+e.endpoint));
+ for(const[v,t]of BPR)pre.append(el("option",{value:v},t));pre.append(el("option",{value:""},"clusters…"));
+ for(const e of geps||[])if(e.device!=id)dst.append(el("option",{value:e.device+"|"+e.endpoint},gpNm(e.device)+" ep "+e.endpoint));
+ for(const g of Object.values(grps))dst.append(el("option",{value:"#"+g.id},g.name+" (group)"));
+ const go=()=>{const v=dst.value,cl=(pre.value||cus.value).split(/[ ,]+/).filter(Boolean).map(c=>/^0x/i.test(c)?parseInt(c,16):+c),[d,p]=v.split("|");
+  return act("bindings/create",{device:id,endpoint:+src.value,clusters:cl,target:v[0]=="#"?{group:+v.slice(1)}:{device:d,endpoint:+p}})};
+ return el("div",{},el("h3",{},"Bindings"+(b.reading?" (reading…)":"")+(b.error?" · "+b.error:"")),ul,
+  el("div",{class:"row acts"},src,pre,cus,"→",dst,bt("Bind",go,"p")),
+  el("div",{class:"row acts"},bt("Read from device",()=>act("bindings/read",{device:id})),bt("Read groups",()=>act("groups/membership",{device:id}))));
+}
 // ---- Converters and catalog tabs (device-support 9, 14.4) ----
 let zc,cvDev,cvDef,ct={config:{}};
 async function zdefc(){if(zc)return zc;try{const m=await import("/zdefc/zdefc_wasm.js");await m.default({module_or_path:"/zdefc/zdefc_wasm_bg.wasm"});return zc=m}catch(e){throw new Error("definition compiler not installed (Catalog: update)")}}
 const b64=u=>{let s="";for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)};
 const unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const kvAdd=(kv,k,v)=>{if(v!=null&&v!=="")kv.append(el("dt",{},k),el("dd",{},String(v)))};
-onTab.conv=()=>{const s=$("#cvd"),v=s.value||cvDev;s.textContent="";for(const id of Object.keys(devs).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value)cvLoad(s.value)};
+onTab.conv=()=>{const s=$("#cvd"),v=s.value||cvDev;s.textContent="";for(const id of Object.keys(devs).filter(i=>devs[i].group==null).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value)cvLoad(s.value)};
 $("#cvd").onchange=e=>cvLoad(e.target.value);
 async function cvLoad(id){
  cvDev=id;const d=await act("devices/get",{device:id}),r=d.resolution||{},kv=$("#cvl");kv.textContent="";

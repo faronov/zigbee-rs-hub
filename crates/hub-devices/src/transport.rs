@@ -157,6 +157,12 @@ pub trait ZigbeeTransport {
     /// `NWK_GROUP_MEMBERSHIP` add for one hub endpoint.
     fn group_add(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError>;
 
+    /// `NWK_GROUP_MEMBERSHIP` remove for one hub endpoint.
+    fn group_remove(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
+        let _ = (endpoint, group);
+        Err(TransportError::Status(0x05))
+    }
+
     /// Removes a device from the network (`NWK_REMOVE_DEVICE`).
     fn remove_device(&mut self, ieee: u64) -> Result<(), TransportError>;
 
@@ -185,6 +191,8 @@ pub enum Sent {
     Gp(GpRequest, Option<u8>),
     /// Group membership.
     Group(u8, u16),
+    /// Group membership removed.
+    GroupRemove(u8, u16),
     /// Device removal.
     Remove(u64),
     /// Permit join.
@@ -247,6 +255,11 @@ impl ZigbeeTransport for MockTransport {
 
     fn group_add(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
         self.sent.push(Sent::Group(endpoint, group));
+        Ok(())
+    }
+
+    fn group_remove(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
+        self.sent.push(Sent::GroupRemove(endpoint, group));
         Ok(())
     }
 

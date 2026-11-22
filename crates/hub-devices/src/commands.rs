@@ -25,7 +25,7 @@ pub struct CommandAck {
 }
 
 #[derive(Debug, Clone)]
-enum Action {
+pub(crate) enum Action {
     Write {
         ep: u8,
         cluster: u16,
@@ -47,9 +47,9 @@ enum Action {
     },
 }
 
-struct Plan {
-    actions: Vec<Action>,
-    optimistic: Vec<(Option<String>, Value)>,
+pub(crate) struct Plan {
+    pub(crate) actions: Vec<Action>,
+    pub(crate) optimistic: Vec<(Option<String>, Value)>,
     reset_after_s: Option<u64>,
 }
 
@@ -178,7 +178,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             .ok_or_else(|| bad(format!("{name}: integer expected")))
     }
 
-    fn plan(
+    #[inline(never)]
+    pub(crate) fn plan(
         &self,
         d: &Device,
         ent: &crate::device::Entity,
@@ -706,6 +707,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         params: &J,
         now: Millis,
     ) -> Result<CommandAck, ApiError> {
+        if uid.starts_with("grp:") {
+            return self.group_command(uid, command, params, now);
+        }
         let did = device_of_uid(uid).to_string();
         let d = self
             .devices

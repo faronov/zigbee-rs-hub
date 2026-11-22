@@ -24,8 +24,13 @@ has, and the integration maps them 1:1 onto HA platforms.
   **Channel**; its hardware version shows the NCP board and firmware.
 - Entities for all platforms the hub serves: `sensor`, `binary_sensor`,
   `switch`, `light`, `number`, `select`, `button`, `text`, `event`, `cover`,
-  `climate`, `lock`, `fan`, `siren`, `valve` (`update` is not served by the
-  hub yet).
+  `climate`, `lock`, `fan`, `siren`, `valve`, `scene` (`update` is not
+  served by the hub yet).
+- Zigbee groups of the hub (device-support 14.9): a device per group with
+  members (`grp:<id>`, model "Zigbee group"), its `light` (or `switch`) with
+  the aggregated state, commands sent as one groupcast, and its scenes as HA
+  scenes (`scene.turn_on` → Recall Scene, with `transition`). Deleting the
+  group device deletes the group on the hub.
 - Services: `zigbee_rs_hub.permit_join` (duration, Green Power window, a
   router to join through), `zigbee_rs_hub.reinterview_device`,
   `zigbee_rs_hub.reconfigure_device`, `zigbee_rs_hub.update_catalog`.
@@ -115,6 +120,7 @@ delete the entry, then the directory, then restart.
 | HA service call | `entities/command {uid, command, params}` with HA's service and parameter names (`turn_on {brightness, transition, color_temp_kelvin, xy_color, hs_color}`, `set_value {value}`, `select_option {option}`, `press`, `set_temperature`, `set_cover_position`, …); hub errors become `HomeAssistantError` |
 | `network/permit_join` | Permit join button (254 s, Green Power included) and the `permit_join` service |
 | `devices/remove`, `devices/reinterview`, `devices/reconfigure`, `devices/diagnostics` | Delete device, services, device diagnostics |
+| group devices `grp:<id>` and their entities (14.9) | ordinary devices and entities; platform `scene` → HA `scene` (`activate`) |
 | `catalog/status`, `catalog/upload_chunk`, `catalog/commit`, events `definition_needed`, `catalog_*` | `update_catalog` service, automatic checks, **Catalog version** sensor |
 | `automations/list`, topic `automations` (`automation_added`/`_updated`/`_removed`/`_run`) (API 1.3) | per rule: `switch` `<entry>_automation_<id>` (enabled), `button` `<entry>_automation_<id>_run`; `automations/enable`, `disable`, `run` |
 

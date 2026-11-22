@@ -38,3 +38,5 @@ pub use platform::{LogRing, Platform};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_groups;

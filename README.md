@@ -810,6 +810,17 @@ decoded. A live frame tail (topic `frames`, filter by cluster) and a Tuya
 EF00 datapoint viewer (DP, type, value; send DP) follow the device; read
 attributes and seen DPs can be copied as definition snippets
 (device-support 14.7).
+
+The **Groups** tab (`#/groups`) creates, renames and deletes Zigbee groups,
+adds and removes member endpoints (ZCL Groups, with their state: pending,
+ok, failed, or waiting for a sleepy device to wake), switches the group's
+light or switch entity (one groupcast per command), stores the members'
+current state as a scene, recalls, re-captures and removes scenes, and
+identifies the group; each device card has a **Bindings** section: the
+device's binding table (read with Mgmt_Bind_req), pending requests, and
+bind/unbind of a source endpoint's clusters (presets remote → light: On/Off,
+Level, Color) to a device endpoint or a group (topic `groups`,
+device-support 14.9).
 It asks for the API token
 once (console `token`; a link ending in `#token=…` stores it too) and keeps
 it in the browser. `build.rs` minifies the page line by line (indentation,
@@ -1027,7 +1038,10 @@ Zigbee/GP device, entities created from the hub's entity model (device-support
 section 4) with live state pushed by the hub, commands through
 `entities/command`, permit join (button and service), device removal,
 diagnostics. It identifies the hub by `hub/info` (`coordinator_ieee`, added for
-it; minor API addition). Installation, tests and the API mapping:
+it; minor API addition). Zigbee groups of the hub appear as devices with a
+group light or switch and their scenes as HA scenes (device-support 14.9);
+deleting a group device in HA deletes the group. Installation, tests and the
+API mapping:
 [integrations/home-assistant/README.md](integrations/home-assistant/README.md).
 
 The integration is also a catalog client: since the hub downloads nothing,

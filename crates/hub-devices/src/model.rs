@@ -35,6 +35,8 @@ pub enum Platform {
     Siren,
     Valve,
     Update,
+    /// Group scenes (14.9); not in definitions (no CBOR value).
+    Scene,
 }
 
 impl Platform {
@@ -77,6 +79,7 @@ impl Platform {
             Self::Siren => "siren",
             Self::Valve => "valve",
             Self::Update => "update",
+            Self::Scene => "scene",
         }
     }
 

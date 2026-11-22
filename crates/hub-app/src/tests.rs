@@ -480,7 +480,7 @@ fn job(app: &App, sid: u64, rx: &Receiver<String>, id: u64, body: J) -> J {
     job_with(app, sid, rx, id, body, &mut Vec::new())
 }
 
-fn ok(f: &J) -> &J {
+pub(crate) fn ok(f: &J) -> &J {
     assert_eq!(f["success"], true, "{f}");
     &f["result"]
 }
@@ -490,7 +490,7 @@ fn err_code(f: &J) -> String {
     f["error"]["code"].as_str().unwrap().to_string()
 }
 
-fn form(app: &App, sid: u64, rx: &Receiver<String>, channel: u8) -> J {
+pub(crate) fn form(app: &App, sid: u64, rx: &Receiver<String>, channel: u8) -> J {
     let f = call(app, sid, rx, 900, json!({"type": "network/reset", "confirm": "RESET", "channel": channel}));
     ok(&f).clone()
 }

@@ -26,6 +26,8 @@ use crate::zcl::{
 };
 use crate::zdo::{self, ZdoMessage};
 
+pub mod zgroups;
+
 /// Hub configuration.
 #[derive(Debug, Clone)]
 pub struct HubConfig {
@@ -165,6 +167,15 @@ pub enum HubEvent {
     Frame(J),
     /// Network topic events (`permit_join` …), from the host core.
     Network(J),
+    /// Groups topic events (14.9): `group_updated`, `group_removed`,
+    /// `bindings_updated`, `group_membership`, `group_view`, `scene_view`,
+    /// `group_error`.
+    Groups {
+        /// Event name.
+        kind: String,
+        /// Body.
+        body: J,
+    },
     /// GP topic events (13.7).
     Gp {
         /// `gp/commissioning`, `gp/pending`, `gp/commissioned`, `gp/failed`, `gp/binding`.
@@ -197,6 +208,8 @@ pub enum Purpose {
         /// Cluster-specific command sent.
         cluster_answer: bool,
     },
+    /// A groups, scenes or bindings request (14.9).
+    Group(zgroups::ZgOp),
     /// No answer expected/tracked.
     None,
 }
@@ -362,6 +375,8 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) gp_last_frame: Option<(GpdId, u8, Vec<u8>)>,
     /// Features advertised and accepted (8.5).
     pub features: Vec<&'static str>,
+    /// Groups, scenes and bindings (14.9).
+    pub zg: zgroups::ZgState,
 }
 
 /// The ExprEnv of one device.
@@ -441,6 +456,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             gp: Default::default(),
             gp_last_frame: None,
             features: HUB_FEATURES.to_vec(),
+            zg: Default::default(),
         }
     }
 
@@ -993,6 +1009,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.pending.insert((true, msg.tsn()), p);
             return;
         }
+        if let Purpose::Group(op) = p.purpose {
+            self.zg_zdo(id, op, ind, now);
+            return;
+        }
         let Purpose::Interview(step) = p.purpose else {
             if let Purpose::Configure(key) = p.purpose {
                 let ok = matches!(msg, ZdoMessage::Status { status: 0, .. });
@@ -1228,6 +1248,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         let msg = e.state_msg(d.available);
         self.emit(HubEvent::EntityState(msg));
+        self.zg_member_changed(uid);
     }
 
     // ------------------------------------------------------------------
@@ -1478,6 +1499,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                         self.send_zcl(id, ep, cl::IAS_ZONE, f, Purpose::None, now);
                         true
                     }
+                    cl::GROUPS | cl::SCENES
+                        if h.direction == Direction::ServerToClient
+                            && self.zg_zcl(id, ind.cluster, h.tsn, cmd, &frame.payload) =>
+                    {
+                        needs_default_rsp = false;
+                        true
+                    }
                     cl::POLL_CONTROL if cmd == 0x00 => {
                         needs_default_rsp = false;
                         self.check_in(id, ep, h.tsn, now);
@@ -1597,6 +1625,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 now,
             ),
             Purpose::Configure(key) => self.configure_done(id, &key, true, st.name().into(), now),
+            Purpose::Group(op) => self.zg_status(id, op, st),
             _ => {}
         }
     }
@@ -2157,6 +2186,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         self.gp_tick(now);
         self.gp_window_tick(now);
+        self.zg_tick(now);
     }
 
     fn fail_purpose(&mut self, id: &str, purpose: &Purpose, err: ApiError, now: Millis) {
@@ -2187,6 +2217,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 result: Err(err),
             }),
             Purpose::GpProbe(nwk) => self.gp_probe_result(*nwk, &[], now),
+            Purpose::Group(op) => self.zg_failed(id, op.clone(), err),
             _ => {}
         }
     }

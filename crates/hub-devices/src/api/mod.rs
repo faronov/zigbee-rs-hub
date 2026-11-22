@@ -228,6 +228,23 @@ impl ApiServer {
                 ],
             };
         }
+        // Groups, scenes and bindings (14.9): parsed from the JSON value.
+        if text.contains("groups/") || text.contains("scenes/") || text.contains("bindings/") {
+            if let Ok(raw) = serde_json::from_str::<J>(text)
+                && let (Some(id), Some(kind)) = (raw["id"].as_u64(), raw["type"].as_str())
+                && (kind.starts_with("groups/")
+                    || kind.starts_with("scenes/")
+                    || kind.starts_with("bindings/"))
+            {
+                return vec![
+                    match hub.zg_request(kind, &raw, now) {
+                        Ok(v) => ServerMessage::ok(id, v),
+                        Err(e) => ServerMessage::err(id, e),
+                    }
+                    .to_text(),
+                ];
+            }
+        }
         // An extension may take a request from its text (uploads: no copy
         // of the payload in a `Value`).
         let mut ext = ext;
@@ -396,21 +413,33 @@ impl ApiServer {
             self.seq
         ));
         if has("devices") {
-            list(&mut s, "devices", hub.devices().map(|d| d.record()));
+            list(
+                &mut s,
+                "devices",
+                hub.devices()
+                    .map(|d| d.record())
+                    .chain(hub.zg_device_records()),
+            );
         }
         if has("entities") {
             list(
                 &mut s,
                 "entities",
                 hub.devices()
-                    .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id))),
+                    .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id)))
+                    .chain(hub.zg_entity_records()),
             );
             list(
                 &mut s,
                 "states",
                 hub.devices()
-                    .flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available))),
+                    .flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available)))
+                    .chain(hub.zg_states()),
             );
+        }
+        if has("groups") {
+            list(&mut s, "groups", hub.groups_list().into_iter());
+            list(&mut s, "bindings", hub.bindings_list(None).into_iter());
         }
         if has("gp") {
             list(
@@ -490,7 +519,14 @@ impl ApiServer {
                 }
                 J::Null
             }
-            R::DevicesList => hub.devices().map(|d| d.record()).collect(),
+            R::DevicesList => hub
+                .devices()
+                .map(|d| d.record())
+                .chain(hub.zg_device_records())
+                .collect(),
+            R::DevicesGet { id } if id.starts_with("grp:") => {
+                hub.zg_device_record(&id).ok_or_else(|| missing(&id))?
+            }
             R::DevicesGet { id } => {
                 let d = hub.device(&id).ok_or_else(|| missing(&id))?;
                 let mut r = d.record();
@@ -525,6 +561,12 @@ impl ApiServer {
                 hub.events.push(HubEvent::DeviceUpdated(id));
                 r
             }
+            R::DevicesRemove { id, force } if id.starts_with("grp:") => {
+                let g = u16::from_str_radix(id.get(4..8).unwrap_or(""), 16)
+                    .map_err(|_| missing(&id))?;
+                hub.group_delete(g, force, now)?;
+                J::Null
+            }
             R::DevicesRemove { id, force } => {
                 hub.remove_device(&id, force, now)?;
                 J::Null
@@ -547,12 +589,21 @@ impl ApiServer {
                 .devices()
                 .filter(|d| device.as_ref().is_none_or(|x| *x == d.id))
                 .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id)))
+                .chain(
+                    hub.zg_entity_records()
+                        .into_iter()
+                        .filter(|e| device.as_ref().is_none_or(|x| e["device"] == **x)),
+                )
                 .collect(),
             R::EntitiesStates { uids } => hub
                 .devices()
                 .flat_map(|d| d.entities.iter().map(move |e| (d, e)))
                 .filter(|(_, e)| uids.as_ref().is_none_or(|u| u.contains(&e.uid)))
                 .map(|(d, e)| e.state_msg(d.available))
+                .chain(hub.zg_states().into_iter().filter(|s| {
+                    uids.as_ref()
+                        .is_none_or(|u| u.iter().any(|x| s["uid"] == **x))
+                }))
                 .collect(),
             R::EntitiesRefresh { uid } => {
                 hub.refresh(&uid, now)?;
@@ -990,11 +1041,11 @@ impl ApiServer {
             let (topic, body) = match ev {
                 HubEvent::DeviceAdded(id) => (
                     "devices",
-                    json!({"topic": "device_added", "device": hub.device(&id).map(|d| d.record())}),
+                    json!({"topic": "device_added", "device": hub.device(&id).map(|d| d.record()).or_else(|| hub.zg_device_record(&id))}),
                 ),
                 HubEvent::DeviceUpdated(id) => (
                     "devices",
-                    json!({"topic": "device_updated", "device": hub.device(&id).map(|d| d.record())}),
+                    json!({"topic": "device_updated", "device": hub.device(&id).map(|d| d.record()).or_else(|| hub.zg_device_record(&id))}),
                 ),
                 HubEvent::DeviceRemoved(id) => {
                     ("devices", json!({"topic": "device_removed", "id": id}))
@@ -1014,11 +1065,11 @@ impl ApiServer {
                 ),
                 HubEvent::EntityAdded(uid) => (
                     "entities",
-                    json!({"topic": "entity_added", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id))}),
+                    json!({"topic": "entity_added", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id)).or_else(|| hub.zg_entity_record(&uid))}),
                 ),
                 HubEvent::EntityUpdated(uid) => (
                     "entities",
-                    json!({"topic": "entity_updated", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id))}),
+                    json!({"topic": "entity_updated", "entity": hub.entity(&uid).map(|(d, e)| e.record(&d.id)).or_else(|| hub.zg_entity_record(&uid))}),
                 ),
                 HubEvent::EntityRemoved(uid) => {
                     ("entities", json!({"topic": "entity_removed", "uid": uid}))
@@ -1044,6 +1095,10 @@ impl ApiServer {
                         body["topic"] = "network".into();
                     }
                     ("network", body)
+                }
+                HubEvent::Groups { kind, mut body } => {
+                    body["topic"] = kind.into();
+                    ("groups", body)
                 }
                 HubEvent::Gp { kind, mut body } => {
                     if let Some(o) = body.as_object_mut() {

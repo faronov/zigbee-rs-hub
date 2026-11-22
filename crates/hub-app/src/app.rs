@@ -333,6 +333,8 @@ struct Runner {
     jobs: Sender<Input>,
     /// NCP cookie `hub/info` `maintenance` was computed for.
     maintenance_for: Option<u32>,
+    /// NCP cookie the hub endpoint's group memberships were replayed in.
+    groups_for: Option<u32>,
     /// The catalog store and its downloads.
     catalog: Option<CatalogService>,
     /// Local automations.
@@ -505,6 +507,7 @@ impl Runner {
             admin,
             jobs,
             maintenance_for: None,
+            groups_for: None,
             catalog: service,
             automations: Automations::default(),
             automation_requests: 0,
@@ -693,6 +696,10 @@ impl Runner {
                     }
                 }
                 JobOut::Event(body) => self.engine.network_event(body),
+                JobOut::Groups(list) => {
+                    self.engine.zg_replace_groups(&list);
+                    info!("app: {} groups from the restored backup", self.engine.zg.groups.len());
+                }
                 JobOut::Reimport => {
                     self.imported_in = None;
                     self.import_retry = None;
@@ -788,6 +795,14 @@ impl Runner {
         if self.ncp.client().state() == SessionState::Ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
             self.api.set_info("maintenance", self.admin.features(&self.ncp).into());
+        }
+        // Group memberships of the hub endpoint, once per NCP session.
+        if self.registered && self.ncp.client().state() == SessionState::Ready && self.groups_for != cookie {
+            self.groups_for = cookie;
+            let n = self.engine.groups_resync();
+            if n > 0 {
+                info!("app: hub endpoint joined {n} groups");
+            }
         }
         if self.registered && self.cfg.import_ncp_devices {
             self.import_ncp_devices(now);
