@@ -48,7 +48,10 @@ details in the zigbee-rs book, "Web Flasher").
   the S3's USB-Serial-JTAG: switch first with the page's button (1200 bps
   touch on the second, console port) or the console command `s3 usj`. After
   the install the S3 starts in bridge mode; `mode hub` and
-  `wifi set <ssid> <password>` on the console make it a hub.
+  `wifi set <ssid> <password>` on the console make it a hub. The browser
+  console <https://faronov.github.io/zigbee-rs/flasher/console/> does this
+  with a form (*Set up Wi-Fi*: credentials, hub mode, address and API token
+  as a link to the web UI) and is a terminal for the second (console) port.
 - The 8 MB images have not run on an 8 MB board yet (only the 4 MB sample
   so far).
 
