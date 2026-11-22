@@ -1,7 +1,7 @@
 # Applied after firmware/bridge/sdkconfig.defaults (same board, same USB
 # identity, so the bridge mode looks exactly like tbr-bridge to the host).
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="tbr-hub-0.1.8"
+CONFIG_APP_PROJECT_VER="tbr-hub-0.1.9"
 
 # WebSocket JSON API (esp_http_server).
 CONFIG_HTTPD_WS_SUPPORT=y
@@ -45,3 +45,11 @@ CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
 
 # Per-task CPU use for the `hub cpu` console command.
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+
+# Size, no feature lost: C printf family from ROM ("nano": no 64-bit
+# integer or float conversions; only ESP-IDF's own UART0 log lines use the
+# C formatter, Rust formats its own), −27 KB; no IPv6 (the hub never gets
+# an IPv6 address: no link-local is created, no SLAAC), −20 KB and 1.5 KB
+# of RAM.
+CONFIG_LIBC_NEWLIB_NANO_FORMAT=y
+CONFIG_LWIP_IPV6=n

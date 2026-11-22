@@ -8,6 +8,9 @@ rustflags = ["--cfg", "espidf_time64"]
 [unstable]
 build-std = ["std", "panic_abort"]
 # No backtrace symbolisation (gimli/addr2line); panic messages stay.
+# Not `optimize_for_size`: its stable sort is inlined into every caller
+# with a 4 KiB stack buffer (the app thread used 13 KB more stack and the
+# hub crashed at start-up), although it saves 63 KB of sort code.
 build-std-features = []
 
 [env]
@@ -17,3 +20,4 @@ ESP_IDF_VERSION = "v5.5.1"
 # The workspace root has no [package]; tell esp-idf-sys whose metadata
 # (sdkconfig.defaults, esp_tinyusb component) to use.
 ESP_IDF_SYS_ROOT_CRATE = "tbr-hub"
+

@@ -699,5 +699,7 @@ fn main() {
         }
     }
     stage(9);
-    tbr_bridge::park()
+    tbr_bridge::wait_usb_mount();
+    // Returning ends the main task: ESP-IDF frees its stack
+    // (CONFIG_ESP_MAIN_TASK_STACK_SIZE of internal RAM); the threads keep running.
 }
