@@ -600,7 +600,7 @@ impl ApiServer {
                         json!({
                             "device": dev,
                             "added": now_uids.iter().filter(|u| !old.contains(u)).collect::<Vec<_>>(),
-                            "orphaned": old.iter().filter(|u| !now_uids.contains(u)).collect::<Vec<_>>(),
+                            "removed": old.iter().filter(|u| !now_uids.contains(u)).collect::<Vec<_>>(),
                         })
                     })
                     .collect();
@@ -913,7 +913,7 @@ impl ApiServer {
             "layers": res.layers,
             "added": new.iter().filter(|u| !old.contains(u)).collect::<Vec<_>>(),
             "changed": changed,
-            "orphaned": old.iter().filter(|u| !new.contains(u)).collect::<Vec<_>>(),
+            "removed": old.iter().filter(|u| !new.contains(u)).collect::<Vec<_>>(),
         }))
     }
 
@@ -988,9 +988,10 @@ impl ApiServer {
                     device,
                     added,
                     orphaned,
+                    removed,
                 } => (
                     "devices",
-                    json!({"topic": "resolution_changed", "device": device, "added": added, "orphaned": orphaned, "layers": hub.device(&device).map(|d| d.resolution.layers.clone())}),
+                    json!({"topic": "resolution_changed", "device": device, "added": added, "orphaned": orphaned, "removed": removed, "layers": hub.device(&device).map(|d| d.resolution.layers.clone())}),
                 ),
                 HubEvent::EntityAdded(uid) => (
                     "entities",

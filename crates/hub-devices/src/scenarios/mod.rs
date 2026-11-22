@@ -3,6 +3,7 @@
 
 mod bank;
 mod gp;
+mod merge;
 mod plain;
 mod props;
 mod tuya_trv;

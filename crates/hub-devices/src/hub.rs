@@ -103,8 +103,10 @@ pub enum HubEvent {
         device: String,
         /// New uids.
         added: Vec<String>,
-        /// Orphaned uids.
+        /// Orphaned uids (gone after a fingerprint change).
         orphaned: Vec<String>,
+        /// Removed uids (gone after a definition change).
+        removed: Vec<String>,
     },
     /// `entity_added`.
     EntityAdded(String),
@@ -495,12 +497,17 @@ impl<T: ZigbeeTransport> Hub<T> {
                 continue;
             }
             let new_uids = live(d);
+            let (removed, orphaned): (Vec<&String>, Vec<&String>) = old_uids
+                .iter()
+                .filter(|u| !new_uids.contains(u))
+                .partition(|u| d.entity_index(u).is_none());
             report.push(serde_json::json!({
                 "device": id,
                 "from": from,
                 "to": layer_ids(d),
-                                "added": new_uids.iter().filter(|u| !old_uids.contains(u)).collect::<Vec<_>>(),
-                "orphaned": old_uids.iter().filter(|u| !new_uids.contains(u)).collect::<Vec<_>>(),
+                "added": new_uids.iter().filter(|u| !old_uids.contains(u)).collect::<Vec<_>>(),
+                "orphaned": orphaned,
+                "removed": removed,
             }));
             self.redo_configure(&id, now);
         }
@@ -1084,8 +1091,19 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
+        // With the same fingerprint an entity vanishes because the
+        // definitions changed (a catalog installed, a user definition, a
+        // pin): it is gone for good, so it is removed (HA drops it). After a
+        // re-interview that changed the fingerprint it is kept as an orphan
+        // (its endpoint may come back).
+        let same_fp = d.fp_hash == Some(d.fp.hash());
         let mut orphaned = Vec::new();
+        let mut removed = Vec::new();
         for (uid, mut e) in old {
+            if same_fp && !e.orphaned {
+                removed.push(uid);
+                continue;
+            }
             if !e.orphaned {
                 e.orphaned = true;
                 orphaned.push(uid.clone());
@@ -1104,11 +1122,15 @@ impl<T: ZigbeeTransport> Hub<T> {
         for u in updated.iter().chain(&orphaned) {
             self.emit(HubEvent::EntityUpdated(u.clone()));
         }
-        if !added.is_empty() || !orphaned.is_empty() || layers_changed {
+        for u in &removed {
+            self.emit(HubEvent::EntityRemoved(u.clone()));
+        }
+        if !added.is_empty() || !orphaned.is_empty() || !removed.is_empty() || layers_changed {
             self.emit(HubEvent::ResolutionChanged {
                 device: id.to_string(),
                 added: added.clone(),
                 orphaned,
+                removed,
             });
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }

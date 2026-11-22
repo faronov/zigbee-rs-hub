@@ -199,12 +199,12 @@ function onEvent(e){
   if(e.entities){ents={};for(const x of e.entities)ents[x.uid]=x}
   if(e.states){states={};for(const s of e.states)states[s.uid]=s}
   if(e.network)setNet(e.network);
-  renderAll();gpForm();break;
- case"device_added":case"device_updated":if(e.device){devs[e.device.id]=e.device;renderDev(e.device.id)}break;
- case"device_removed":delete devs[e.id];for(const u in ents)if(ents[u].device==e.id)delete ents[u];renderAll();break;
+  renderAll();renderNet();gpForm();break;
+ case"device_added":case"device_updated":if(e.device){const n=!devs[e.device.id];devs[e.device.id]=e.device;renderDev(e.device.id);if(n)cnt()}break;
+ case"device_removed":delete devs[e.id];for(const u in ents)if(ents[u].device==e.id)delete ents[u];renderAll();cnt();break;
  case"interview_progress":if(devs[e.device]){devs[e.device].interview="in_progress";devs[e.device].step=e.step;renderDev(e.device)}break;
- case"entity_added":case"entity_updated":if(e.entity){ents[e.entity.uid]=e.entity;renderDev(e.entity.device)}break;
- case"entity_removed":{const x=ents[e.uid];delete ents[e.uid];if(x)renderDev(x.device)}break;
+ case"entity_added":case"entity_updated":if(e.entity){ents[e.entity.uid]=e.entity;renderDev(e.entity.device);if(e.topic=="entity_added")cnt()}break;
+ case"entity_removed":{const x=ents[e.uid];delete ents[e.uid];if(x)renderDev(x.device);cnt()}break;
  case"entity_state":states[e.uid]=e;{const x=ents[e.uid];if(x)renderEnt(x)}break;
  case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
@@ -213,6 +213,8 @@ function onEvent(e){
  default:if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
  }
 }
+// Counters (Network card, Settings › Hub) follow joins, removals and re-resolution.
+function cnt(){renderNet();clearTimeout(cnt.h);cnt.h=setTimeout(()=>{if($("#ssys").offsetParent)loadSys()},500)}
 function setNet(n){net=n||{};if(net.time)skew=net.time-Date.now()/1000;if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();renderSNet();pjTick()}
 function renderNet(){
  const n=net,c=n.ncp||{},kv=$("#net");kv.textContent="";
@@ -224,7 +226,7 @@ function renderNet(){
  add("NCP firmware",c.fw&&(c.fw+(c.protocol?" · ZRHP "+c.protocol:"")));
  add("NCP IEEE",c.ieee);add("NCP board",c.board);
  if(c.baud)add("NCP link",c.baud+" baud"+(c.flow_control?", RTS/CTS":""));
- if(hub.api_version)add("Hub API",hub.api_version+" · "+(hub.devices??0)+" devices, "+(hub.entities??0)+" entities");
+ if(hub.api_version)add("Hub API",hub.api_version+" · "+Object.keys(devs).length+" devices, "+Object.values(ents).filter(x=>!x.orphaned).length+" entities");
 }
 function pjTick(){
  clearTimeout(pjTick.h);const left=Math.max(0,Math.round((pjEnd-Date.now())/1000));
@@ -273,10 +275,10 @@ function entRow(e){
   t.onclick=()=>cmd(e,st=="on"?"turn_off":"turn_on");li.append(t);break}
  case"number":{
   const i=el("input",{type:"number",class:"num",min:caps.native_min_value,max:caps.native_max_value,step:caps.native_step||"any"});
-  if(st!=null)i.value=st;i.onchange=()=>cmd(e,"set_value",{value:+i.value});li.append(i);if(e.unit)li.append(el("span",{class:"mut"},e.unit));break}
+  if(st!=null)i.value=st;else i.placeholder="unknown";i.onchange=()=>cmd(e,"set_value",{value:+i.value});li.append(i);if(e.unit)li.append(el("span",{class:"mut"},e.unit));break}
  case"select":{
-  const sel=el("select",{});for(const o of caps.options||[])sel.append(el("option",{value:o},o));
-  if(st!=null)sel.value=st;sel.onchange=()=>cmd(e,"select_option",{option:sel.value});li.append(sel);break}
+  const sel=el("select",{});if(st==null)sel.append(el("option",{value:""},"unknown"));for(const o of caps.options||[])sel.append(el("option",{value:o},o));
+  sel.value=st??"";sel.onchange=()=>cmd(e,"select_option",{option:sel.value});li.append(sel);break}
  case"button":li.append(el("button",{onclick:()=>cmd(e,"press")},"Press"));break;
  default:li.append(el("span",{class:"v"},fmt(e,s)));
  }
@@ -554,7 +556,7 @@ async function cvCompile(){const z=await zdefc(),src=$("#cvt").value,c=JSON.pars
  return{src,cbor:z.compile(src,"yaml"),c}}
 const cvErr=e=>toast(e.message);
 $("#cvk").onclick=()=>cvCompile().then(({c})=>$("#cvo").textContent="ok · "+c.size+" B · "+c.content_hash.slice(0,12)+(c.requires.length?" · requires "+c.requires.join(", "):"")).catch(cvErr);
-$("#cvv").onclick=()=>cvCompile().then(x=>act("definitions/preview",{device:cvDev,cbor:b64(x.cbor)})).then(p=>$("#cvo").textContent=p.matches?["layers: "+p.layers.map(l=>l.id).join(" < "),"added: "+p.added.join(", "),"changed: "+p.changed.join(", "),"orphaned: "+p.orphaned.join(", ")].join("\n"):"does not match this device").catch(cvErr);
+$("#cvv").onclick=()=>cvCompile().then(x=>act("definitions/preview",{device:cvDev,cbor:b64(x.cbor)})).then(p=>$("#cvo").textContent=p.matches?["layers: "+p.layers.map(l=>l.id).join(" < "),"added: "+p.added.join(", "),"changed: "+p.changed.join(", "),"removed: "+p.removed.join(", ")].join("\n"):"does not match this device").catch(cvErr);
 $("#cvu").onclick=()=>cvCompile().then(x=>act("definitions/upload",{cbor:b64(x.cbor),source:x.src,source_format:"yaml"})).then(r=>{toast("uploaded "+r.id);if(cvDev)cvLoad(cvDev)}).catch(cvErr);
 $("#cvx").onclick=()=>{if(cvDev&&cvDef&&confirm("Delete the user definition "+cvDef+"?"))act("definitions/delete",{definition:cvDef}).then(()=>cvLoad(cvDev)).catch(()=>{})};
 onTab.catalog=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.installed,m=s.manifest,w=s.wants||{};kv.textContent="";

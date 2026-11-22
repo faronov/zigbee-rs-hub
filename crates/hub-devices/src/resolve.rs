@@ -783,14 +783,36 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         .iter()
         .flat_map(|(d, _)| d.endpoints.clone())
         .collect();
-    res.entities = order
+    let mut entities: Vec<ResolvedEntity> = order
         .into_iter()
         .filter_map(|k| merged.remove(&k).map(|b| *b))
-        .map(|mut r| {
-            r.ep_name = ep_names.get(&r.ep).cloned();
-            r
-        })
         .collect();
+    // One generic Identify button per device (the lowest endpoint that has
+    // the cluster), not one per endpoint; a definition that declares its
+    // own per-endpoint identify keeps them.
+    if let Some(first) = entities
+        .iter()
+        .filter(|r| r.source == LayerSource::Generic && r.def.key == "identify")
+        .map(|r| r.ep)
+        .min()
+    {
+        entities.retain(|r| {
+            !(r.source == LayerSource::Generic && r.def.key == "identify" && r.ep != first)
+        });
+    }
+    // An endpoint name disambiguates a key that the device has on several
+    // endpoints; a key on one endpoint keeps its plain name (herdsman's
+    // endpoint maps name every endpoint, even single-use ones).
+    for i in 0..entities.len() {
+        let (ep, key) = (entities[i].ep, entities[i].def.key.clone());
+        let shared = ep != 0
+            && entities
+                .iter()
+                .any(|o| o.ep != ep && o.ep != 0 && o.def.key == key);
+        entities[i].ep_name =
+            shared.then(|| ep_names.get(&ep).cloned().unwrap_or_else(|| ep.to_string()));
+    }
+    res.entities = entities;
     res.device = device;
     res.power = Some(power);
     res.diagnostics = skipped;

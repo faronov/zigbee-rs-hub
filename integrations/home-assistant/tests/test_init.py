@@ -175,6 +175,53 @@ async def test_entity_added_updated_removed(
     await wait_for(hass, lambda: hass.states.get(hum_id) is None)
 
 
+async def test_entity_renamed_by_a_new_resolution(
+    hass: HomeAssistant, fake_hub: FakeHub, setup_entry: MockConfigEntry
+) -> None:
+    uid = f"{SENSOR_DEV}:1:high_temperature"
+    rec = entity(uid, "number", name="high temperature 1", unit="°C")
+    await fake_hub.push("entities", {"topic": "entity_added", "entity": rec})
+    await fake_hub.push_state(uid, 30)
+    registry = er.async_get(hass)
+    await wait_for(hass, lambda: registry.async_get_entity_id("number", DOMAIN, uid) is not None)
+    ent_id = eid(hass, "number", uid)
+    await wait_for(hass, lambda: hass.states.get(ent_id) is not None)
+    assert hass.states.get(ent_id).attributes["friendly_name"].endswith("High temperature 1")
+
+    # Re-resolved without the endpoint suffix: the name follows.
+    await fake_hub.push(
+        "entities", {"topic": "entity_updated", "entity": dict(rec, name="high temperature")}
+    )
+    await wait_for(
+        hass,
+        lambda: hass.states.get(ent_id).attributes["friendly_name"].endswith("High temperature"),
+    )
+
+
+async def test_snapshot_drops_entities_removed_while_away(
+    hass: HomeAssistant, fake_hub: FakeHub, setup_entry: MockConfigEntry
+) -> None:
+    registry = er.async_get(hass)
+    temp_id = eid(hass, "sensor", TEMP_UID)
+    lqi_id = eid(hass, "sensor", LQI_UID)
+    port = fake_hub.port
+    await fake_hub.stop()
+    # A catalog definition replaced the temperature entity while HA was away;
+    # the link quality entity became an orphan (kept).
+    del fake_hub.entities[TEMP_UID]
+    fake_hub.states.pop(TEMP_UID, None)
+    fake_hub.entities[LQI_UID] = dict(fake_hub.entities[LQI_UID], orphaned=True)
+    await fake_hub.start(port)
+    await wait_for(hass, lambda: registry.async_get_entity_id("sensor", DOMAIN, TEMP_UID) is None)
+    await wait_for(hass, lambda: hass.states.get(temp_id) is None)
+    assert registry.async_get(lqi_id) is not None
+    # Hub-level entities are not the hub's device entities.
+    assert any(
+        e.unique_id.endswith("_connected")
+        for e in er.async_entries_for_config_entry(registry, setup_entry.entry_id)
+    )
+
+
 async def test_device_added_at_runtime(
     hass: HomeAssistant, fake_hub: FakeHub, setup_entry: MockConfigEntry
 ) -> None:

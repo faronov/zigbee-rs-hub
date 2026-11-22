@@ -74,6 +74,10 @@ class ZigbeeRsEntity(Entity):
         self._apply_state(self.state_msg)
 
     def _set_name(self, record: dict[str, Any]) -> None:
+        # Back to the class defaults first: a renamed record (a definition
+        # resolved, a user name) may drop the name for a translation key.
+        for attr in ("_attr_name", "_attr_translation_key"):
+            self.__dict__.pop(attr, None)
         platform = record.get("platform", "")
         key = record.get("key", "")
         name = record.get("name")
@@ -127,6 +131,7 @@ class ZigbeeRsEntity(Entity):
             self.async_write_ha_state()
             return
         self.record = self.hub.entities[self.uid]
+        self._set_name(self.record)
         self._apply_record(self.record)
         self._apply_state(self.state_msg)
         self.async_write_ha_state()

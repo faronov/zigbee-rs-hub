@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "tbr-hub"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "embedded-svc",
  "embuild",
