@@ -283,8 +283,9 @@ newer than the running one; the image inside is what the product's
 - By hand: `hubctl --sim --sim-ota serve` with `hubctl ota-stream` and the
   web UI's Updates tab.
 
-**Hardware: not done yet** (procedure below). The store needs an 8 MB
-board (host tests only so far).
+**Hardware: streaming fails on the 4 MB board without PSRAM** (2026-11-22,
+procedure and results below: the hub runs out of internal heap during the
+download). The store needs an 8 MB board (host tests only so far).
 
 ## Hardware test
 
@@ -361,3 +362,55 @@ reaches the hub over Wi-Fi. `<hub>` is the hub's IP, `<t>` its API token
 download, number of WAIT_FOR_DATA / reruns, minimum free heap vs step 3,
 any NCP errors, the Match_Desc result of step 4, the outcome of steps
 7–10.
+
+## Hardware results
+
+2026-11-22, lab BR board (S3 without PSRAM, 4 MB dev layout), H2 NCP 0.1.0
+(zigbee-rs master 67fcb086, caps 0xD683B8, `max_asdu` 82), C6 sensor
+(`esp32c6-sensor` 0.1.0, light-sleep SED, firmware from before 0x6D6B) as
+child 0x93B2 of PAN 0x1C06 on channel 17. Home Assistant's integration stayed
+connected (one more API session). **Result: FAIL**, the hub runs out of heap.
+
+| Step | Result |
+|---|---|
+| 2. Image | `zigbee-ota` 6b98dad, `tbr-hub` 0.1.2 + OTA, 2 638 896 B, app only at 0x10000 (`nvs`, `hubdata` kept) |
+| 3. Boot | no reset loop, network resumed, C6 kept reporting; `ota` = `{"store": false, "stream": true, "stream_chunk": 4096}`; heap 48.4 KB free (largest block 31.7 KB) |
+| 4. Identity | `check` → `sleepy: true`; the C6's next query 1.5 min later: `manufacturer_code` 0x1234, `image_type` 1, `current_version` 1, `hw_version` 1 |
+| 4. Match_Desc | not exercised: the zigbee-rs client sends no Match_Desc for 0x0019 (it answers the Image Notify), so the NCP's Match_Desc answer is still unverified |
+| 5. File | zigbee-rs master bd91d015, `create-esp32-ota.py 2 … --chip esp32c6 --features light-sleep --legacy-manufacturer`: 406 978 B, 0x1234 / 0x0001 / version 2, hardware 1..1 |
+| 6. Stream | `notified`, the download started at the C6's next poll (2.5 min); 8 KiB later the hub panicked (t = 576 s: 20.5 KB free, minimum 4.6 KB, a 5 464-B allocation failed, the base64 text of a 4 KiB chunk). Rerun after the restart: resumed at 1 %, panic again 20 s into the download (t = 296 s: 33 KB free, minimum 10 KB, a 4 096-B allocation failed). 2 of 2 runs |
+| 7. Client away 60 s | (1 KiB build below) `running download, notified again`, continued at 20 % |
+| 8. Client away 150 s | (1 KiB build) after the grace time the stream was dropped (`available` gone, job `image` null) but the job stayed `downloading`, not `aborted`; the C6 kept working. The rerun before it continued at 25 % |
+| 9. Hub restart | covered by the 4 panics: the job survived each restart, the rerun printed `running download, notified again` and the C6 continued from its saved offset every time |
+| 10. Done | not reached: the C6 still runs version 1 (best 27 %, offset 112 608) |
+
+Experiment, **not part of this branch**: the same commit with
+`hub_ota::stream::CHUNK` = 1024 (clients follow `len`). The download ran
+for 8 minutes: 74 752 B in 455 s = 164 B/s (3.4 × 48-B blocks per s, the
+whole file in about 41 min). Heap: 50.7 KB at boot, 39.2 KB after 4 min,
+38.0 KB after 8 min (largest block 10.7 KB, minimum 14.6 KB). Then the hub
+panicked about a minute after the step-7 rerun (t = 661 s: 21 KB free,
+minimum 7.6 KB) and, after the next rerun, 50 s into the download
+(t = 580 s: 12.5 KB free, minimum 3.0 KB). Smaller chunks only delay the
+exhaustion.
+
+Other findings:
+
+- NCP: `last_error` null throughout, APS 0 failed (1 541 accepted in 8 min),
+  no `TOO_LARGE`/`UNSUPPORTED` for the 48-B block responses.
+- WAIT_FOR_DATA responses are not counted in the API, so the run could not
+  report them.
+- `hubctl ota-stream` does not notice a hub reset: without a ping or read
+  timeout it hangs silently and has to be stopped and run again by hand.
+- Crash streak 2 after two panics within 10 minutes of boot: a few more
+  would put the hub into the bridge's safe mode.
+
+Needed before this works on the 4 MB board without PSRAM: find the second
+heap consumer (the 1 KiB run still drained about 17 KB within a minute
+after a client reconnect; candidates are the per-session send queues of up
+to 32 frames and Wi-Fi/lwIP receive buffers), parse `ota/block_data`
+without a `serde_json::Value` copy and decode into the chunk buffer, a heap
+guard that answers WAIT_FOR_DATA instead of allocating below a threshold
+(like the job guard of #31), a smaller chunk, and a ping/read timeout in
+`hubctl`. Retest on top of main 0.1.4+ (#36, lighter snapshots and
+uploads); this branch does not contain it and conflicts with main.
