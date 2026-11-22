@@ -46,13 +46,13 @@ pub struct LastValues {
 
 impl LastValues {
     /// Puts the kept values back (after the registry restored the devices).
+    #[inline(never)]
     pub fn load<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &mut Engine<T>, now: Millis) {
         let recs: Vec<(String, Vec<u8>)> =
             ncp.with_store(|s| s.kv_prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect());
         for (id, v) in recs {
-            match std::str::from_utf8(&v) {
-                Ok(t) => self.restored += engine.restore_last_values(&id, t, now),
-                Err(_) => warn!("last values: {id}: not text"),
+            if let Ok(t) = std::str::from_utf8(&v) {
+                self.restored += engine.restore_last_values(&id, t, now);
             }
         }
         self.last_save = now;
@@ -63,6 +63,7 @@ impl LastValues {
     }
 
     /// Notes engine events (before they go to the API).
+    #[inline(never)]
     pub fn note<T: ZigbeeTransport>(&mut self, events: &[HubEvent], engine: &Engine<T>) {
         for ev in events {
             match ev {
@@ -90,6 +91,7 @@ impl LastValues {
     }
 
     /// Writes the changed devices every [`SAVE_MS`] (`force`: now).
+    #[inline(never)]
     pub fn flush<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &Engine<T>, now: Millis, force: bool) {
         let slow = force || now.saturating_sub(self.last_slow) >= SLOW_MS;
         if !slow && now.saturating_sub(self.last_save) < SAVE_MS {
@@ -99,7 +101,9 @@ impl LastValues {
         let mut ids = std::mem::take(&mut self.dirty);
         if slow {
             self.last_slow = now;
-            ids.append(&mut self.slow);
+            for id in std::mem::take(&mut self.slow) {
+                ids.insert(id);
+            }
         } else {
             self.slow.retain(|id| !ids.contains(id));
         }

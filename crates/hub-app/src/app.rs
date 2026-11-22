@@ -568,7 +568,8 @@ impl Runner {
                 "imported": a.imported,
                 "registry_writes": a.registry_writes,
                 "registry_errors": a.registry_errors,
-                "last_values": {"restored": a.last_values.0, "writes": a.last_values.1, "bytes": a.last_values.2, "errors": a.last_values.3},
+                // Kept last values: [states restored, records written, bytes, errors].
+                "last_values": [a.last_values.0, a.last_values.1, a.last_values.2, a.last_values.3],
                 "aps": {"accepted": a.aps.accepted, "busy": a.aps.busy, "failed": a.aps.failed,
                     "delivered": a.aps.delivered, "not_delivered": a.aps.not_delivered, "unconfirmed": a.aps.unconfirmed},
             })

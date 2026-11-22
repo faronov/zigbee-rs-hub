@@ -1044,6 +1044,6 @@ fn last_values_are_kept_over_a_restart() {
     let dev = call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": "zb:00158d0001a2b3c4"}));
     assert_eq!(dev["result"]["lqi"], 177, "{dev}");
     let sys = call(&app, sid, &rx, 2, json!({"type": "hub/system"}));
-    assert!(sys["result"]["app"]["last_values"]["writes"].is_u64(), "{sys}");
+    assert!(sys["result"]["app"]["last_values"][1].is_u64(), "{sys}");
     app.shutdown();
 }

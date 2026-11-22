@@ -40,24 +40,19 @@ impl<T: ZigbeeTransport> Hub<T> {
                 o.insert("v".into(), s.value.to_json());
             }
             if !s.parts.is_empty() {
-                o.insert(
-                    "p".into(),
-                    s.parts
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_json()))
-                        .collect::<Map<_, _>>()
-                        .into(),
-                );
+                // Inserted one by one: a collected map pulls a sort into the firmware.
+                let mut p = Map::new();
+                for (k, v) in &s.parts {
+                    p.insert(k.clone(), v.to_json());
+                }
+                o.insert("p".into(), p.into());
             }
             for (k, t) in [("c", s.last_changed), ("r", s.last_reported)] {
                 if let Some(t) = unix(t) {
                     o.insert(k.into(), t);
                 }
             }
-            let key = e
-                .uid
-                .strip_prefix(&d.id)
-                .map_or(e.uid.as_str(), |k| k.trim_start_matches(':'));
+            let key = e.uid.get(d.id.len() + 1..).unwrap_or(&e.uid);
             es.insert(key.into(), o.into());
         }
         let mut v = Map::new();
@@ -117,10 +112,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             s.value = o.get("v").map_or(Value::Null, Value::from_json);
             if let Some(J::Object(p)) = o.get("p") {
-                s.parts = p
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::from_json(v)))
-                    .collect();
+                for (k, v) in p {
+                    s.parts.insert(k.clone(), Value::from_json(v));
+                }
             }
             s.last_changed = engine_ms(o.get("c"), now);
             s.last_reported = engine_ms(o.get("r"), now);
