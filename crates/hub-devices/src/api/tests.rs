@@ -349,12 +349,8 @@ fn definitions_validate_upload_preview_scaffold() {
         json!({"type": "definitions/delete", "definition": "efekta/co2-smart-monitor"}),
     );
     assert_eq!(r["success"], true);
-    assert!(
-        hub.entity(&format!("{dev}:1:temperature_offset"))
-            .unwrap()
-            .1
-            .orphaned
-    );
+    // Same fingerprint, definition gone: its entities are removed.
+    assert!(hub.entity(&format!("{dev}:1:temperature_offset")).is_none());
     let r = call(
         &mut api,
         &mut hub,

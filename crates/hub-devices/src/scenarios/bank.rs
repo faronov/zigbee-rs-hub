@@ -221,7 +221,8 @@ fn engine_on_a_bank_store_catalog() {
     assert_eq!(report[0]["device"], ID);
     assert_eq!(report[0]["from"], json!(["philips/sml001"]));
     assert_eq!(report[0]["to"], json!([]));
-    assert!(!report[0]["orphaned"].as_array().unwrap().is_empty());
+    assert!(!report[0]["removed"].as_array().unwrap().is_empty());
+    assert!(report[0]["orphaned"].as_array().unwrap().is_empty());
 }
 
 #[test]

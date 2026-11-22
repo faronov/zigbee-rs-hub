@@ -290,8 +290,16 @@ class ZigbeeRsHub:
             s["uid"]: s for s in snap.get("states") or [] if isinstance(s, dict) and s.get("uid")
         }
         self.devices = devices
-        # Entities that vanished while disconnected stay in HA (unavailable);
-        # only explicit removal events delete them.
+        # The hub keeps orphans (fingerprint changed) in the snapshot with
+        # `orphaned: true`; an entity of a listed device that is missing was
+        # removed (a definition changed) while HA was not listening.
+        reg = er.async_get(self.hass)
+        for ent in er.async_entries_for_config_entry(reg, self.entry.entry_id):
+            uid = ent.unique_id
+            if uid.count(":") >= 3 and uid.rsplit(":", 2)[0] in devices and uid not in entities:
+                self._created.discard(uid)
+                self.states.pop(uid, None)
+                reg.async_remove(ent.entity_id)
         self.entities = entities
         self.states = states
         if isinstance(net := snap.get("network"), dict):

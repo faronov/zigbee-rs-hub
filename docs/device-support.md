@@ -297,9 +297,16 @@ OTA, user upload), a better match appears (new catalog), the fingerprint
 changed, the self-description hash changed, or the user asks. Effects:
 
 - entities with unchanged key keep their unique ID and state;
-- new keys appear; vanished keys become **orphaned**: kept in the registry
-  with `available: false` and `orphaned: true` until the user deletes them
-  (HA does the same with entities no longer provided by an integration);
+- new keys appear. A key that vanishes while the fingerprint stayed the
+  same (a catalog installed or updated, a user definition uploaded or
+  deleted, a pin) is **removed**: `entity_removed`, and HA deletes it. A key
+  that vanishes because the fingerprint changed (re-interview, firmware
+  update) becomes **orphaned**: kept with `available: false` and
+  `orphaned: true` until the user deletes it (its endpoint may come back);
+- a generic Identify button exists once per device (the lowest endpoint
+  with the cluster) unless a definition declares per-endpoint ones; an
+  endpoint name is added to an entity's name only when the same key exists
+  on several endpoints (herdsman endpoint maps name every endpoint);
 - configure (binds, reporting) is redone only if the configure hash (the
   canonical CBOR of all binds, reporting configs and configure ops) changed.
 
@@ -2165,7 +2172,7 @@ code feels familiar:
 
 Events (topic `devices`): `device_added`, `device_updated` (any registry field,
 availability, `last_seen` at most once per minute), `device_removed`,
-`interview_progress`, `resolution_changed` (layers, added/orphaned entities).
+`interview_progress`, `resolution_changed` (layers, added/removed/orphaned entities; removed ones also get `entity_removed`).
 
 Events (topic `network`, API 1.1): `permit_join` (`remaining_s`, when joining
 opens, is re-opened, closes or expires — whoever changed it: the API, the
@@ -2210,12 +2217,12 @@ size, content_hash, requires}`, `decompile(cbor, format)`,
 | `definitions/delete` | `id` | user definitions only; affected devices re-resolve |
 | `definitions/list` | `source` (catalog, fetched, user, self_description), `device` (only those matching it) | `{id, revision, vendor, model, source, content_hash, size, requires}` |
 | `definitions/get` | `id` or `content_hash`, `format` (`cbor` base64, or `json`: the decoded CBOR with symbolic keys) | the definition |
-| `definitions/preview` | `device`, `cbor` | the resolution the device *would* get: entities added/changed/orphaned, configure diff; nothing applied |
+| `definitions/preview` | `device`, `cbor` | the resolution the device *would* get: entities added/changed/removed, configure diff; nothing applied |
 | `definitions/scaffold` | `device` | the material for a starter definition (JSON): identity, a match clause, every attribute and Tuya DP seen with its type and last value, the generic entities; the UI renders it as YAML |
 | `definitions/fetch` | `device` | `{device, shards}`: the shards (numbers) a client fetches from the mirror and uploads (target `shard`) for this device (9.3) |
 | `catalog/status` | — | `installed` (generation, date, serial, definitions, signing kid, size), `active_slot`, `manifest` (version, date, serial, zhc), `wants` {`bank`, `web`: {name, size, sha256} or null}, `missing` [{`device`, `shards`}], `upload` {`target`, `written`}, `web_tools`, `local` (fetched definitions, bytes used/size), `slot_size`, `config`, `warnings`, `engine` |
 | `catalog/upload_chunk` | `target` (`manifest`, `bank`, `web`, `shard`), `offset`, `data` (base64 of ≤ 4 KiB: without PSRAM the hub holds the frame, the parsed request and the decoded bytes at once); at offset 0 optionally `size`, `sha256` | `{written}`; offset 0 starts a new upload (and drops an unfinished one of the same target; another target's upload that advanced in the last 30 s makes it fail with `busy`) |
-| `catalog/commit` | `target`; `shard` (0–255) for shards, `device` (optional) ; `force` (bank anti-rollback) | manifest: `{version, catalog_date, catalog_serial, wants}`; bank: `{sha256, generation, definitions, devices: [{device, from, to, added, orphaned}]}`; web: `{size, files}`; shard: `{definitions, skipped, devices}`. `verification_failed` for a wrong signature, hash, version or decode |
+| `catalog/commit` | `target`; `shard` (0–255) for shards, `device` (optional) ; `force` (bank anti-rollback) | manifest: `{version, catalog_date, catalog_serial, wants}`; bank: `{sha256, generation, definitions, devices: [{device, from, to, added, removed, orphaned}]}`; web: `{size, files}`; shard: `{definitions, skipped, devices}`. `verification_failed` for a wrong signature, hash, version or decode |
 | `catalog/abort` | — | drops an upload |
 | `catalog/config` | `base_url` (the mirror), `auto_update`, `auto_fetch` (each optional) | the settings clients follow (stored in the journal, `cfg/catalog`) |
 

@@ -112,6 +112,11 @@ impl Registry {
                     device.clone()
                 }
                 HubEvent::EntityAdded(uid) | HubEvent::EntityUpdated(uid) => device_of_uid(uid).to_string(),
+                // An entity of a kept device (re-resolution, `entities/delete`);
+                // a removed device's entities go with it.
+                HubEvent::EntityRemoved(uid) if !self.removed.contains(device_of_uid(uid)) => {
+                    device_of_uid(uid).to_string()
+                }
                 HubEvent::DeviceRemoved(id) => {
                     self.dirty.remove(id);
                     self.removed.insert(id.clone());
