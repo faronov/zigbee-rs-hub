@@ -149,8 +149,22 @@ pub fn stream(url: &str, token: &str, path: &str, device: Option<String>) -> Res
     let session = o["session"].clone();
     println!("stream session {session}, for {}", o["devices"]);
     if let Some(d) = &device {
-        call(&mut ws, &mut id, json!({"type": "ota/start", "device": d, "image": session}))?;
-        println!("{d}: notified");
+        // A running download (this command run again, e.g. after a hub
+        // restart, whose ABORT made the device wait for a notify): notify
+        // again; the device resumes from its own offset.
+        let start = json!({"type": "ota/start", "device": d, "image": session});
+        match call(&mut ws, &mut id, start.clone()) {
+            Err(e) if e.contains("busy") => {
+                let mut again = start;
+                again["force"] = true.into();
+                call(&mut ws, &mut id, again)?;
+                println!("{d}: running download, notified again");
+            }
+            r => {
+                r?;
+                println!("{d}: notified");
+            }
+        }
     }
     let mut served = 0usize;
     let mut last = String::new();
