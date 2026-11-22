@@ -958,10 +958,12 @@ downloads at once; abort; progress events; resumable after a hub restart.
 Home Assistant: one `update` entity per device (upload to the store or
 streaming). Host tests: simulated OTA client behind the simulated NCP,
 Home Assistant end to end with `hubctl --sim --sim-ota`; not on hardware
-yet. Cost vs main: 8 MB (store + streaming) +119 200 B, 4 MB (streaming
-only) +89 552 B app image; no static RAM. Open: hub self-OTA must take the
-app-slot lock; zigbee-rs devices still advertise OTA manufacturer code
-0x1234 (0x6D6B in zigbee-rs PR).
+yet (procedure: [docs/ota.md](docs/ota.md#hardware-test)). Cost vs main:
+8 MB (store + streaming) +119 328 B, 4 MB (streaming only) +89 184 B app
+image (4 MB: 2 638 896 B, 87.5 % of the 2 944 KiB slot); no static RAM.
+Open: hub self-OTA must take the app-slot lock. zigbee-rs devices
+advertise OTA manufacturer code 0x6D6B (devices on older firmware: one
+transition file with 0x1234).
 
 ## Home Assistant integration
 

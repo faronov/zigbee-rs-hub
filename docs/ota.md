@@ -224,11 +224,15 @@ zigbee-rs's client (`zigbee-runtime` `OtaManager`/`OtaSession`,
   hardware range must include it.
 
 **OTA identity**: the zigbee-rs products advertise manufacturer code
-**0x1234** in their OTA client (ESP32 devkit image types 0x0001 C6, 0x0002
-H2, 0x0003 C5; H2 thermometer 0x0012; BL702 0x0702; EFR32MG22 0x0022;
-ZBT-1 0x2101), not 0x6D6B (device-support: the zigbee-rs manufacturer
-code). Images must carry the pair the device sends; moving the OTA clients
-to 0x6D6B is a zigbee-rs change (later).
+**0x6D6B** in their OTA client since faronov/zigbee-rs#6 (ESP32 devkit
+image types 0x0001 C6, 0x0002 H2, 0x0003 C5; H2 thermometer 0x0012; BL702
+0x0702; EFR32MG22 0x0022; ZBT-1 0x2101; table and conventions in the
+zigbee-rs book, OTA chapter). Images must carry the pair the device sends:
+a device still running firmware from before that change sends 0x1234 and
+needs one transition file with 0x1234 in its header
+(`create-esp32-ota.py --legacy-manufacturer`, `bl702_ota.py release
+--legacy-manufacturer`, `zrs_boot_ota.py release --header-manufacturer
+0x1234`).
 
 **Building an OTA file** for a zigbee-rs device:
 
@@ -237,7 +241,7 @@ to 0x6D6B is a zigbee-rs change (later).
 cd ~/zboss_opensource/zigbee-rs-fork
 tools/create-esp32-ota.py 0x00020001 out/ --chip esp32c6     # --sign-key KEY.pem for signed-ota
 # any other firmware image: wrap it (one upgrade-image sub-element)
-hubctl ota-make app.bin app.ota --manufacturer 0x1234 --image-type 0x0001 \
+hubctl ota-make app.bin app.ota --manufacturer 0x6D6B --image-type 0x0001 \
   --version 0x00020001 --label "zigbee-rs C6 0.2.1" --hw 1-1
 # upload to the hub (continue with the same command after a drop)
 hubctl ota-upload ws://<hub>/api --token <token> out/*.ota
@@ -279,13 +283,81 @@ newer than the running one; the image inside is what the product's
 - By hand: `hubctl --sim --sim-ota serve` with `hubctl ota-stream` and the
   web UI's Updates tab.
 
-**Hardware: not done yet.** The overnight BR-board slot was skipped: this
-session had no hwlab MCP tools. Plan: the lab's 4 MB board needs no
-special build — the standard 4 MB dev image (streaming only) or the
-default image (its store stays off on 4 MB) — and the C6 sensor with a
-zigbee-rs image: `hubctl ota-stream ws://<hub>/api … c6.ota --device
-zb:<c6>` from the Mac, the download while the C6 sleeps, Upgrade End,
-reboot, confirmation by query/CurrentFileVersion, a hub reboot in the
-middle (the stream comes back within two minutes), Match_Desc for 0x0019,
-heap (`hub/system`). The store needs an 8 MB board (host tests only so
-far).
+**Hardware: not done yet** (procedure below). The store needs an 8 MB
+board (host tests only so far).
+
+## Hardware test
+
+The lab's 4 MB BR board with the **standard 4 MB dev image of this
+branch** (streaming only; no special build, no layout change) and the
+zigbee-rs **ESP32-C6 sensor** (`products/esp32-zigbee-devkit`, image type
+0x0001, hardware version 1) joined to it. The Mac runs `hubctl` and
+reaches the hub over Wi-Fi. `<hub>` is the hub's IP, `<t>` its API token
+(hub console `token`), `<c6>` the C6's `zb:<ieee>`.
+
+1. **Lock and record.** Take the BR-board lock (queue protocol). Note the
+   hub's current app image and the C6's firmware (build features,
+   version) — both are restored at the end.
+2. **Build.** In this branch: `cargo build -p hubctl --release`; hub image:
+   ```sh
+   . ~/export-esp.sh
+   (cd firmware/hub && cargo build --release --no-default-features --features app)
+   cp target/xtensa-esp32s3-espidf/release/tbr-hub /tmp/hub-4mb.elf
+   FLASH_SIZE=4MB MAX_APP_BYTES=3014656 ELF=/tmp/hub-4mb.elf \
+     tools/make-app-image.sh release /tmp/hub-4mb.bin tbr-hub
+   ```
+   (or the `thread-br-s3-hub-4mb-dev` app image of the PR's CI/release
+   build). Flash **only the app** at 0x10000 (`factory`); do not erase
+   `nvs` or `hubdata` (network, registry and OTA records stay).
+3. **Boot.** S3 log: no panic or reset loop; the hub forms/resumes its
+   network, the C6 stays joined (entities update). Then
+   `hubctl ws-call ws://<hub>/api --token <t> '{"id":1,"type":"hub/info"}'`:
+   `ota` has `"stream": true`, `"store": false`. Note the free heap from
+   `{"id":2,"type":"hub/system"}` (baseline).
+4. **The C6's identity.** `{"id":3,"type":"ota/devices/check","device":"<c6>"}`
+   sends an Image Notify (query jitter; a sleepy C6 gets it at its next
+   poll). Within a few minutes `{"id":4,"type":"ota/devices/list"}` shows
+   the C6 with `manufacturer_code`, `image_type` 1, `current_version`,
+   `hw_version` 1 and `last_query`. **Finding if not:** the C6 does not
+   find the server (Match_Desc for 0x0019 answered by the NCP from its
+   endpoint registry) — capture the S3/NCP logs and stop here.
+5. **The OTA file.** In zigbee-rs master (with faronov/zigbee-rs#6):
+   ```sh
+   tools/create-esp32-ota.py <V> /tmp/c6ota --chip esp32c6 [--legacy-manufacturer] [--sign-key KEY.pem]
+   ```
+   `<V>` = `current_version` + 1. `--legacy-manufacturer` when step 4
+   showed `manufacturer_code` 0x1234 (firmware from before 0x6D6B);
+   `--sign-key` only if the C6 runs a `signed-ota` build (then a key it
+   trusts). The tool prints manufacturer, image type and version: they
+   must match step 4 (version newer).
+6. **Stream.** `hubctl ota-stream ws://<hub>/api --token <t> /tmp/c6ota/<file>.ota --device <c6>`.
+   Expected: the header line, `stream session 65536…`, `<c6>: notified`,
+   then `downloading N %` lines, `installing`, `done`, exit 0. About
+   370 KB in 48-B blocks: expect 30–45 min (ZHA took 43 min). Every
+   5 min note `hub/system` free heap; the S3 log must show no NCP
+   `TOO_LARGE`/`UNSUPPORTED` for the block responses.
+7. **Client away, back in time** (at ~20 %): Ctrl-C `hubctl`, wait 60 s,
+   run the same command again. Expected: `running download, notified
+   again`, progress continues from where it was (not from 0 %).
+8. **Client away too long** (at ~40 %): Ctrl-C, wait 150 s. Expected:
+   `ota/devices/list` shows the job `aborted` (stream gone), the C6 keeps
+   working. Run the command again: progress continues from the C6's saved
+   offset.
+9. **Hub restart** (at ~60 %): reset the S3 (keep `hubctl` stopped), and
+   once the hub is back run the command again. Expected: the C6 got ABORT
+   while no stream was offered; after the rerun (`notified again`) it
+   continues from its saved offset.
+10. **Done.** After `done` the C6 reboots into `<V>`, rejoins and
+    reports; `ota/devices/list` shows `current_version` = `<V>` and the job
+    `done`; Basic SWBuildID shows the new version.
+11. **Optional, web UI:** tab **Updates** → "Install from this tab" with a
+    file `<V+1>`, keep the tab open: progress in the device row, the
+    keep-open badge; closing the tab mid-download ends like step 8.
+12. **Restore and release.** Flash the recorded standard hub image and,
+    if the standard state needs it, the C6's recorded firmware; check the
+    C6 is joined; release the lock, write the done marker.
+
+**Report:** hub image (commit), C6 versions before/after, duration of the
+download, number of WAIT_FOR_DATA / reruns, minimum free heap vs step 3,
+any NCP errors, the Match_Desc result of step 4, the outcome of steps
+7–10.
