@@ -322,27 +322,35 @@ type Task = Box<dyn FnOnce() + Send>;
 /// thread also left about 300 B behind. Jobs run here; only a job that
 /// starts while another one runs gets a thread of its own.
 pub struct Worker {
-    tx: Mutex<std::sync::mpsc::Sender<Task>>,
+    /// The next task and the worker's wake-up (no channel: its generic
+    /// code would cost more flash than this).
+    slot: Arc<(Mutex<Option<Task>>, std::sync::Condvar)>,
     busy: Arc<AtomicBool>,
 }
 
 impl Worker {
     /// Start the worker thread (None when even that fails).
     pub fn start(stack: usize) -> Option<Worker> {
-        let (tx, rx) = std::sync::mpsc::channel::<Task>();
+        let slot: Arc<(Mutex<Option<Task>>, std::sync::Condvar)> = Arc::default();
         let busy = Arc::new(AtomicBool::new(false));
-        let b = busy.clone();
-        std::thread::Builder::new()
-            .name("hub-job".into())
-            .stack_size(stack)
-            .spawn(move || {
-                for task in rx {
-                    task();
-                    b.store(false, Ordering::Release);
-                }
-            })
-            .ok()?;
-        Some(Worker { tx: Mutex::new(tx), busy })
+        let (s, b) = (slot.clone(), busy.clone());
+        let main: Task = Box::new(move || {
+            loop {
+                let task = {
+                    let mut g = s.0.lock().unwrap();
+                    loop {
+                        if let Some(t) = g.take() {
+                            break t;
+                        }
+                        g = s.1.wait(g).unwrap();
+                    }
+                };
+                task();
+                b.store(false, Ordering::Release);
+            }
+        });
+        spawn_task("hub-job", stack, main).ok()?;
+        Some(Worker { slot, busy })
     }
 
     /// Hand `task` to the worker if it is idle; else give it back.
@@ -350,10 +358,9 @@ impl Worker {
         if self.busy.swap(true, Ordering::AcqRel) {
             return Err(task);
         }
-        self.tx.lock().unwrap().send(task).map_err(|e| {
-            self.busy.store(false, Ordering::Release);
-            e.0
-        })
+        *self.slot.0.lock().unwrap() = Some(task);
+        self.slot.1.notify_one();
+        Ok(())
     }
 
     /// A job is running on the worker.
@@ -428,8 +435,12 @@ pub fn run(
         },
         None => task,
     };
-    let spawned = std::thread::Builder::new().name("hub-job2".into()).stack_size(exec.stack).spawn(task);
-    spawned.map(drop).map_err(|e| ApiError::new("failed", format!("job thread: {e}")))
+    spawn_task("hub-job2", exec.stack, task).map_err(|e| ApiError::new("failed", format!("job thread: {e}")))
+}
+
+/// The one thread entry for jobs (one generic instance in the firmware).
+fn spawn_task(name: &str, stack: usize, task: Task) -> std::io::Result<()> {
+    std::thread::Builder::new().name(name.into()).stack_size(stack).spawn(task).map(drop)
 }
 
 #[cfg(test)]
