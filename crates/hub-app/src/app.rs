@@ -26,6 +26,7 @@ use hub_ncp::{Hub as Ncp, Message, SessionState};
 use log::{info, warn};
 
 use crate::admin::{self, Admin, JobOut};
+use crate::automations::{self, Automations, Clock, World};
 use crate::catalog::data::SharedFlash;
 use crate::catalog::service::{CONFIG_KEY, CatalogService, load_config};
 use crate::catalog::store::CatalogStore;
@@ -334,6 +335,87 @@ struct Runner {
     maintenance_for: Option<u32>,
     /// The catalog store and its downloads.
     catalog: Option<CatalogService>,
+    /// Local automations.
+    automations: Automations,
+    /// Last request ID of the automations' internal session.
+    automation_requests: u64,
+}
+
+/// The session automations send their `request` actions through.
+const AUTOMATIONS_SESSION: SessionId = 1 << 40;
+
+/// The wall clock once it is set (SNTP): anything before 2024 is a clock
+/// that still counts from its power-on.
+fn wall_s() -> Option<i64> {
+    let s = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    (s >= 1_704_067_200).then_some(s)
+}
+
+/// What the automations act on: the engine, and the API for their
+/// commands and `request` actions (group commands, scenes) through an
+/// internal session whose deferred results come back as frames.
+struct AppWorld<'a> {
+    engine: &'a mut Engine<NcpTransport>,
+    api: &'a mut ApiServer,
+    now: Millis,
+    next_id: &'a mut u64,
+}
+
+/// A result frame of the internal session.
+fn reply(frame: &str) -> Option<(u64, Result<serde_json::Value, hub_devices::hub::ApiError>)> {
+    let r: serde_json::Value = serde_json::from_str(frame).ok()?;
+    let id = r["id"].as_u64().filter(|_| r["type"] == "result")?;
+    Some((
+        id,
+        match r["success"].as_bool() {
+            Some(true) => Ok(r["result"].clone()),
+            _ => Err(hub_devices::hub::ApiError::new(
+                r["error"]["code"].as_str().unwrap_or("failed"),
+                r["error"]["message"].as_str().unwrap_or(""),
+            )),
+        },
+    ))
+}
+
+impl AppWorld<'_> {
+    /// Sends `req` on the internal session: its ID, and the result unless
+    /// it follows later.
+    fn call(&mut self, mut req: serde_json::Value) -> (u64, Option<Result<serde_json::Value, hub_devices::hub::ApiError>>) {
+        *self.next_id += 1;
+        let id = *self.next_id;
+        req["id"] = id.into();
+        let frames = self.api.handle_text(self.engine, AUTOMATIONS_SESSION, &req.to_string(), self.now);
+        (id, frames.first().and_then(|f| reply(f)).map(|(_, r)| r))
+    }
+}
+
+impl World for AppWorld<'_> {
+    fn state(&self, uid: &str) -> Option<serde_json::Value> {
+        self.engine.state_of(uid)
+    }
+
+    fn available(&self, device: &str) -> Option<bool> {
+        self.engine.device(device).map(|d| d.available)
+    }
+
+    fn command(
+        &mut self,
+        uid: &str,
+        command: &str,
+        params: &serde_json::Value,
+    ) -> Result<(u64, &'static str), hub_devices::hub::ApiError> {
+        let req = serde_json::json!({"type": "entities/command", "uid": uid, "command": command, "params": params});
+        match self.call(req) {
+            (id, None) => Ok((id, "pending")),
+            (id, Some(Ok(r))) => Ok((id, if r["status"] == "queued" { "queued" } else { "ok" })),
+            (_, Some(Err(e))) => Err(e),
+        }
+    }
+
+    fn request(&mut self, req: &serde_json::Value) -> Result<serde_json::Value, hub_devices::hub::ApiError> {
+        // A deferred result (a device command): sent.
+        self.call(req.clone()).1.unwrap_or(Ok(serde_json::Value::Null))
+    }
 }
 
 /// Opens the catalog store in `hubdata` and its service.
@@ -424,6 +506,8 @@ impl Runner {
             jobs,
             maintenance_for: None,
             catalog: service,
+            automations: Automations::default(),
+            automation_requests: 0,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -434,12 +518,71 @@ impl Runner {
         let mut last = std::mem::take(&mut r.last);
         last.load(&r.ncp, &mut r.engine, now);
         r.last = last;
+        let records: Vec<(String, Vec<u8>)> = r
+            .ncp
+            .with_store(|s| s.kv_prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
+        let n = r.automations.load(records);
+        if n > 0 {
+            info!("automations: {n} rules restored");
+        }
+        let _ = r.api.connect_as(AUTOMATIONS_SESSION);
+        let auth = serde_json::json!({"type": "auth", "token": r.cfg.api_token}).to_string();
+        let _ = r.api.handle_text(&mut r.engine, AUTOMATIONS_SESSION, &auth, now);
+        r.api.set_info(
+            "automations",
+            serde_json::json!({"format": automations::rule::FORMAT, "max_rules": automations::rule::MAX_RULES}),
+        );
         let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
         r.engine.transport.nwk.extend(known);
         // Restored devices produce added events; nobody is subscribed yet,
         // and their snapshots are what the store holds.
         let _ = r.engine.drain_events();
+        r.automations.prime(&AppWorld { engine: &mut r.engine, api: &mut r.api, now, next_id: &mut 0 });
         r
+    }
+
+    fn clock(&self) -> Clock {
+        Clock {
+            mono_ms: self.t0.elapsed().as_millis() as u64,
+            now_ms: self.now(),
+            wall_s: wall_s(),
+            // The hub's time zone (hub/time/set), DST included; the admin's
+            // clock tick keeps it current.
+            tz_offset_s: self.engine.cfg.tz_offset_s,
+        }
+    }
+
+    /// Runs `f` on the automations with the engine as their world.
+    fn with_automations<R>(&mut self, f: impl FnOnce(&mut Automations, &mut AppWorld, &Clock) -> R) -> R {
+        let clk = self.clock();
+        let mut w =
+            AppWorld { engine: &mut self.engine, api: &mut self.api, now: clk.now_ms, next_id: &mut self.automation_requests };
+        f(&mut self.automations, &mut w, &clk)
+    }
+
+    /// Changed rules to the store, automation events to subscribers.
+    fn pump_automations(&mut self) {
+        let dirty = std::mem::take(&mut self.automations.dirty);
+        if !dirty.is_empty() {
+            let a = &self.automations;
+            self.ncp.with_store(|s| {
+                for id in &dirty {
+                    let k = format!("{}{id}", automations::PREFIX);
+                    let r = match a.rule(id) {
+                        Some(rule) => s.kv_put(&k, rule.src.as_bytes()),
+                        None => s.kv_delete(&k),
+                    };
+                    if let Err(e) = r {
+                        warn!("automations: {k}: {e}");
+                    }
+                }
+            });
+        }
+        for e in std::mem::take(&mut self.automations.events) {
+            for (sid, frame) in self.api.publish("automations", e) {
+                self.send(sid, &frame);
+            }
+        }
     }
 
     fn now(&self) -> Millis {
@@ -449,7 +592,9 @@ impl Runner {
     fn run(mut self, rx: Receiver<Input>, stopped: Arc<AtomicBool>) {
         let mut next_tick = Instant::now();
         loop {
-            let wait = next_tick.saturating_duration_since(Instant::now());
+            // An automation's delay may end before the next tick.
+            let due = self.automations.next_wake().map(|ms| self.t0 + Duration::from_millis(ms));
+            let wait = due.map_or(next_tick, |d| d.min(next_tick)).saturating_duration_since(Instant::now());
             match rx.recv_timeout(wait) {
                 Ok(Input::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(input) => self.handle(input),
@@ -507,6 +652,23 @@ impl Runner {
                     for frame in self.admin_request(sid, &head, now) {
                         self.send(sid, &frame);
                     }
+                    return;
+                }
+                if self.api.is_authed(sid)
+                    && text.contains("\"automations/")
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+                    && let (Some(id), Some(kind)) = (v["id"].as_u64(), v["type"].as_str())
+                    && let Some(r) = {
+                        self.automations.free_heap = self.cfg.platform.as_ref().and_then(|p| p.data_heap_free());
+                        self.with_automations(|a, w, clk| a.request(kind, &v, w, clk))
+                    }
+                {
+                    let m = match r {
+                        Ok(v) => hub_devices::api::ServerMessage::ok(id, v),
+                        Err(e) => hub_devices::api::ServerMessage::err(id, e),
+                    };
+                    self.send(sid, &m.to_text());
+                    self.pump_automations();
                     return;
                 }
                 let ext = self.catalog.as_mut().map(|c| c as &mut dyn ApiExtension<NcpTransport>);
@@ -589,6 +751,13 @@ impl Runner {
     }
 
     fn send(&mut self, sid: SessionId, frame: &str) {
+        if sid == AUTOMATIONS_SESSION {
+            // A command result that followed later.
+            if let Some((id, r)) = reply(frame) {
+                self.automations.command_result(id, r.map(|_| ()));
+            }
+            return;
+        }
         if let Some(sink) = self.sinks.get_mut(&sid)
             && !sink.send(frame)
         {
@@ -611,6 +780,9 @@ impl Runner {
         }
         if !self.registered && self.ncp.client().state() == SessionState::Ready {
             self.register();
+            if self.registered {
+                self.with_automations(|a, w, clk| a.started(w, clk));
+            }
         }
         let cookie = self.ncp.client().session().map(|s| s.link.peer_cookie);
         if self.ncp.client().state() == SessionState::Ready && self.maintenance_for != cookie {
@@ -636,6 +808,7 @@ impl Runner {
         // Confirms first: the tick fails undeliverable requests at once.
         self.engine.transport.poll();
         self.engine.tick(now);
+        self.with_automations(|a, w, clk| a.tick(w, clk));
         if let Some(c) = self.catalog.as_mut()
             && self.registered
         {
@@ -741,12 +914,23 @@ impl Runner {
         if self.catalog.as_ref().is_some_and(|c| c.config_dirty || !c.events.is_empty()) {
             self.pump_catalog();
         }
-        let events = self.engine.drain_events();
-        self.registry.note(&events, now);
-        self.last.note(&events, &self.engine);
-        for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
-            self.send(sid, &frame);
+        self.with_automations(|a, w, clk| a.resume(w, clk));
+        // Automations act on the events; what their commands change follows
+        // in the next round (a few rounds here, the rest at the next input
+        // or tick).
+        for _ in 0..4 {
+            let events = self.engine.drain_events();
+            if events.is_empty() {
+                break;
+            }
+            self.registry.note(&events, now);
+            self.last.note(&events, &self.engine);
+            self.with_automations(|a, w, clk| a.observe(&events, w, clk));
+            for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
+                self.send(sid, &frame);
+            }
         }
+        self.pump_automations();
         self.registry.flush(&self.ncp, &self.engine, now, false);
         self.last.flush(&self.ncp, &self.engine, now, false);
         let mut st = self.status.lock().unwrap();

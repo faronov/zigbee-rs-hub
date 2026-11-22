@@ -143,6 +143,10 @@ impl hub_app::Platform for S3 {
         let caps = sys::MALLOC_CAP_INTERNAL;
         Some(unsafe { (sys::heap_caps_get_free_size(caps), sys::heap_caps_get_largest_free_block(caps)) })
     }
+    fn data_heap_free(&self) -> Option<usize> {
+        // Internal RAM and, on modules with it, the PSRAM Rust data prefer.
+        Some(unsafe { sys::heap_caps_get_free_size(sys::MALLOC_CAP_8BIT) })
+    }
     fn stack_high_water(&self) -> Option<usize> {
         // ESP-IDF counts the stack in bytes.
         Some(unsafe { sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()) } as usize)

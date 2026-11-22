@@ -132,6 +132,17 @@ progress{width:12em}
 <p class="mut">The coordinator's tables, then every router asked for its neighbours (Mgmt_Lqi) and routes. Lines: LQI as each side reports it (A/B when they differ), green ≥ 150, orange ≥ 80, red below, thicker is better; dashed: an end device and its parent. Tap a device for its links and routes.</p>
 <div id="mp"></div><div id="mpd"></div><div id="mpl"></div></section>
 </div>
+<div data-tab="auto" data-title="Automations" class="tab">
+<section class="card"><h2>Automations</h2><p id="aut" class="mut"></p><ul class="ents" id="aul"></ul></section>
+<section class="card"><h2 id="auh">New automation</h2>
+<div class="row"><input id="anm" placeholder="name" size="24"><select id="amd"><option>single</option><option>restart</option></select></div>
+<div class="row acts"><b>When</b><select id="att"><option value="state">state of</option><option value="event">event of</option><option value="availability">device</option><option value="time">time</option><option value="start">hub start</option></select><select id="atu"></select><select id="ato"><option>changed</option><option>equals</option><option>above</option><option>below</option></select><input id="atv" size="10" placeholder="value"></div>
+<div class="row acts"><b>If</b><select id="act"><option value="">always</option><option value="state">state of</option><option value="time">time between</option></select><select id="acu"></select><select id="aco"><option>equals</option><option>not_equals</option><option>above</option><option>below</option></select><input id="acv" size="10" placeholder="value"></div>
+<div class="row acts"><b>Then</b><select id="aat"><option value="command">command</option><option value="notify">notify</option></select><select id="aau"></select><select id="aac"></select><input id="aav" size="10" placeholder="value"><label>after <input id="aad" class="num" placeholder="s"> s</label><select id="aa2"></select></div>
+<details id="ajd"><summary class="mut">JSON (all triggers, conditions and actions; device-support 14.8)</summary><textarea id="auj" rows="14" spellcheck="false"></textarea></details>
+<div class="row acts"><button class="p" id="aus">Save</button><button id="aux">Test run</button><button id="aun">New</button><button class="d hide" id="aud">Delete</button><span id="aum" class="mut"></span></div></section>
+<section class="card"><h2>Run history</h2><ul class="ents" id="aur"></ul><pre id="aurd" class="hide"></pre></section>
+</div>
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
 <div class="row acts"><label>Channel <select id="ch"></select></label><button id="chb">Change channel</button></div>
@@ -198,7 +209,7 @@ function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
-  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate()}).catch(()=>{});
+  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();if(hub.automations){call("subscribe",{topics:["automations"]}).catch(()=>{});if($("#aul").offsetParent)onTab.auto()}}).catch(()=>{});
   call("subscribe",{topics:["devices","entities","network","gp","catalog"]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
@@ -225,7 +236,7 @@ function onEvent(e){
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
- default:if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
+ default:if(/^automation_/.test(e.topic))auEv(e);else if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
  }
 }
 // Counters (Network card, Settings › Hub) follow joins, removals and re-resolution.
@@ -685,6 +696,65 @@ $("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r
  if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
 function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctSerial(()=>ctShards(e.shards));if($("#ctl").offsetParent)onTab.catalog()}
 // ---- end of converters and catalog tabs ----
+// ---- automations tab (device-support 14.8) ----
+let au={rules:{}},auId=null;
+const CMDS={switch:"turn_on turn_off toggle",light:"turn_on turn_off toggle",fan:"turn_on turn_off toggle",siren:"turn_on turn_off",cover:"open_cover close_cover stop_cover set_cover_position",valve:"open_valve close_valve",lock:"lock unlock",number:"set_value",select:"select_option",button:"press",climate:"set_hvac_mode set_temperature"};
+const PK={set_value:"value",select_option:"option",set_cover_position:"position",set_temperature:"temperature",set_hvac_mode:"hvac_mode",turn_on:"brightness"};
+const eName=u=>{const e=ents[u];if(!e)return u;const d=devs[e.device];return(d&&(d.name||d.model)||e.device)+" · "+(e.name||e.key.replace(/_/g," "))};
+const num=v=>v!==""&&!isNaN(v)?+v:v=="true"?true:v=="false"?false:v;
+function auEnts(f){return Object.values(ents).filter(e=>!e.orphaned&&f(e)).map(e=>[e.uid,eName(e.uid)]).sort((a,b)=>a[1]<b[1]?-1:1)}
+function auForm(){
+ const t=V("att");
+ gpOpts("atu",t=="availability"?Object.values(devs).map(d=>[d.id,d.name||d.model||d.id]):auEnts(e=>t=="event"?e.platform=="event":e.platform!="event"&&e.platform!="button"));
+ $("#atu").classList.toggle("hide",t=="time"||t=="start");$("#ato").classList.toggle("hide",t!="state");$("#atv").classList.toggle("hide",t=="start");
+ $("#atv").placeholder=t=="time"?"07:30 or cron":t=="event"?"event type":t=="availability"?"unavailable":"value";
+ const c=V("act");gpOpts("acu",auEnts(e=>e.platform!="event"&&e.platform!="button"));$("#acu").classList.toggle("hide",c!="state");$("#aco").classList.toggle("hide",c!="state");$("#acv").classList.toggle("hide",!c);$("#acv").placeholder=c=="time"?"22:00-06:00":"value";
+ const n=V("aat")=="notify";gpOpts("aau",auEnts(e=>CMDS[e.platform]));const p=(ents[V("aau")]||{}).platform;
+ gpOpts("aac",(CMDS[p]||"").split(" ").map(x=>[x,x]));gpOpts("aa2",[["","…"],...(CMDS[p]||"").split(" ").map(x=>[x,x])]);
+ for(const i of["aau","aac","aad","aa2"])$("#"+i).parentElement.tagName=="LABEL"?$("#"+i).parentElement.classList.toggle("hide",n):$("#"+i).classList.toggle("hide",n);
+ $("#aav").placeholder=n?"message":PK[V("aac")]||"";
+}
+function auBuild(){
+ const t=V("att"),tv=V("atv").trim(),r={name:V("anm")||undefined,mode:V("amd"),triggers:[],conditions:[],actions:[]};
+ if(auId)r.id=auId;
+ if(t=="state")r.triggers.push({type:t,uid:V("atu"),op:V("ato"),value:V("ato")=="changed"?undefined:num(tv)});
+ else if(t=="event")r.triggers.push({type:t,uid:V("atu"),event_type:tv||undefined});
+ else if(t=="availability")r.triggers.push({type:t,device:V("atu"),to:tv||undefined});
+ else if(t=="time"){const m=/^(\d\d?):(\d\d)$/.exec(tv);r.triggers.push({type:t,cron:m?+m[2]+" "+ +m[1]+" * * *":tv})}
+ else r.triggers.push({type:t});
+ const c=V("act"),cv=V("acv").trim();
+ if(c=="state")r.conditions.push({type:c,uid:V("acu"),op:V("aco"),value:num(cv)});
+ else if(c=="time"){const[a,b]=cv.split("-");r.conditions.push({type:c,after:a||undefined,before:b||undefined})}
+ const v=V("aav").trim(),cmd=(x,val)=>{const k=PK[x],o={type:"command",uid:V("aau"),command:x};if(k&&val!=="")o.params={[k]:num(val)};return o};
+ if(V("aat")=="notify")r.actions.push({type:"notify",message:v});
+ else{r.actions.push(cmd(V("aac"),v));if(V("aa2")){r.actions.push({type:"delay",s:+V("aad")||0},cmd(V("aa2"),""))}}
+ V("auj",JSON.stringify(r,null,1));
+}
+function auEdit(id){
+ auId=id;const r=id&&au.rules[id];$("#auh").textContent=r?"Edit "+(r.name||id):"New automation";$("#aud").classList.toggle("hide",!r);
+ if(r){const x={};for(const k of["id","name","enabled","mode","max_per_min","triggers","conditions","actions"])x[k]=r[k];V("auj",JSON.stringify(x,null,1));$("#ajd").open=true;V("anm",r.name||"")}
+ else{V("anm","");$("#ajd").open=false;auBuild()}
+}
+const auSum=r=>(r.triggers||[]).map(t=>t.type=="state"?eName(t.uid)+" "+t.op+(t.value!=null?" "+t.value:""):t.type=="event"?eName(t.uid)+(t.event_type?" "+t.event_type:""):t.type=="time"?"at "+t.cron:t.type=="availability"?t.device+" "+(t.to||"availability"):t.type).join(", ")||"manual";
+function auRender(){
+ const ul=$("#aul");ul.textContent="";$("#aut").textContent=hub.automations?(au.time_synced?"Local time "+au.local_time+". ":"The hub's clock is not set yet: schedules and time conditions wait for it. ")+"Rules run on the hub, without Home Assistant.":"This hub has no automations.";
+ for(const r of Object.values(au.rules)){
+  const tg=el("button",{class:"tg"+(r.enabled?" on":""),title:r.enabled?"enabled":"disabled",onclick:()=>act("automations/"+(r.enabled?"disable":"enable"),{automation:r.id}).catch(()=>{})});
+  ul.append(el("li",{},tg,el("span",{class:"n"},el("b",{},r.name||r.id)," ",el("span",{class:"mut"},auSum(r)),r.suspended?el("div",{class:"warn"},r.suspended):null),
+   el("span",{class:"mut"},r.last_result?r.last_result+", "+ago(r.last_run):""),el("button",{onclick:()=>act("automations/run",{automation:r.id}).then(auTr).catch(()=>{})},"Run"),el("button",{onclick:()=>auEdit(r.id)},"Edit")))
+ }
+}
+function auTr(){call("automations/traces",{limit:15}).then(ts=>{const ul=$("#aur");ul.textContent="";
+ for(const t of ts)ul.append(el("li",{onclick:()=>{const p=$("#aurd");p.textContent=JSON.stringify(t,null,1);p.classList.remove("hide")}},el("span",{class:"n"},(au.rules[t.automation]||{}).name||t.automation," ",el("span",{class:"mut"},t.trigger.type+(t.count>1?" ×"+t.count:""))),el("span",{class:"badge "+(t.result=="done"?"ok":/running|conditions/.test(t.result)?"":"bad")},t.result),el("span",{class:"mut"},ago(t.time))))}).catch(()=>{})}
+onTab.auto=()=>{if(!authed||!hub.automations)return auRender();call("automations/list").then(l=>{au.time_synced=l.time_synced;au.local_time=l.local_time;au.rules={};for(const r of l.rules)au.rules[r.id]=r;auRender();auForm();if(!$("#auj").value)auEdit(null)}).catch(()=>{});auTr()};
+function auEv(e){const r=e.automation;if(e.topic=="automation_removed")delete au.rules[r];else if(r&&r.id)au.rules[r.id]=r;else if(e.topic=="automation_run"&&au.rules[r])Object.assign(au.rules[r],{last_result:e.result,last_run:e.time});if($("#aul").offsetParent){auRender();if(e.topic=="automation_run")auTr()}}
+for(const i of["att","act","aat","aau","aac"])$("#"+i).onchange=()=>{auForm();auBuild()};
+for(const i of["anm","amd","atu","ato","atv","acu","aco","acv","aav","aad","aa2"])$("#"+i).onchange=auBuild;
+const auSrc=()=>{try{return JSON.parse(V("auj"))}catch(x){toast("JSON: "+x.message);throw x}};
+$("#aus").onclick=()=>{const r=auSrc();act(auId?"automations/update":"automations/create",auId?{automation:auId,rule:r}:{rule:r}).then(x=>{au.rules[x.id]=x;auEdit(x.id);auRender();$("#aum").textContent="saved"}).catch(()=>{})};
+$("#aux").onclick=()=>{if(!auId)return toast("Save first");act("automations/run",{automation:auId}).then(x=>{$("#aum").textContent=x.trace?x.trace.result:"";auTr()}).catch(()=>{})};
+$("#aun").onclick=()=>auEdit(null);
+$("#aud").onclick=()=>{if(auId&&confirm("Delete "+auId+"?"))act("automations/delete",{automation:auId}).then(()=>{delete au.rules[auId];auEdit(null);auRender()}).catch(()=>{})};
 connect();
 </script>
 </body>

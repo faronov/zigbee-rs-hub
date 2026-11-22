@@ -680,6 +680,7 @@ The device engine (`hub-devices`) runs on the ZRHP host core (`hub-ncp`):
 | `jobs` | The job board: running jobs per lane, progress (time estimate, measured passes, the NCP's optional `EVT_SCAN_PROGRESS`), cancellation, the last result of each kind for clients that connect later |
 | `ocb` | `zigpy/open-coordinator-backup` v1 ⇄ ZRHP record streams (byte orders and Z2M/zigpy quirks of ZRHP 9.1); the export is written as text, not a JSON tree (RAM) |
 | `topology` | Network map: the coordinator's `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN`, then Mgmt_Lqi_req/Mgmt_Rtg_req to every router found, breadth first |
+| `automations` | Local automations (API 1.3, device-support 14.8): rules of triggers (entity state equals/not equals/above/below/changed, entity events incl. remotes and GP commands, device availability, a cron schedule, hub start), conditions (state, local time window, weekday, and/or/not) and actions (entity command, any allowed API request for groups/scenes, delay, notify, enable/disable a rule) on the app thread, sans-IO through a `World`; bounded (rules, runs, traces, runs per minute) with self-trigger loops stopped through a causal chain; delays on the monotonic clock, schedules wait for a synchronised wall clock; rules in the journal as `auto/<id>` (compact JSON, format `v` 1) |
 | `platform` | `Platform` (what the app needs from the S3 or the desktop) and `LogRing` (a fixed-size ring of recent log lines) |
 
 `hub-devices` gained `persist` (`snapshot_device` / `restore_device`) and
@@ -859,6 +860,36 @@ mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
 are hidden (`maintenance` in `hub/info`); the page stays usable while a
 scan runs, and a page opened meanwhile follows it. The page is 21.9 KB minified and gzipped
 with the other tabs (Green Power included; 23.3 KB without the minification).
+
+**Automations (API 1.3).** Rules that run on the hub itself, without Home
+Assistant or the internet (device-support 14.8): `automations/list`, `get`,
+`validate`, `create`, `update`, `delete`, `enable`, `disable`, `run` (a test
+run) and `traces` (the last 20 runs: trigger, conditions evaluated, each
+action's result, also results that arrive later), events on the
+`automations` topic, `automations` in `hub/info`. A rule is triggers →
+conditions → actions (example: motion after 18:00 → light on, 90 s, off;
+`mode` single or restart; `max_per_min`). Runs are deterministic and
+bounded: 64 rules, 16 actions each, 16 runs waiting in delays, a rate limit
+per rule, and a rule that would trigger itself (directly or through other
+rules, within 10 s of its command) is stopped as a loop. Delays use the
+monotonic clock; `time` triggers (cron) and time/weekday conditions wait
+until the wall clock is synchronised (the list says so: `time_synced`,
+`suspended`). Rules are journaled in `hubdata` and restored at start;
+`start` triggers run once the NCP session is up. The web UI has an
+**Automations** tab (the rules with an enable toggle, Run and Edit, a form
+for a simple rule — one trigger, an optional condition, a command or
+notification and an optional delayed second command —, the JSON of the
+whole rule for everything else, run history with the trace of each run);
+the Home Assistant integration shows each rule as a switch (enabled) and a
+Run button on the hub device. `hubctl --sim --sim-devices serve` adds two
+simulated On/Off plugs and a temperature sensor (the engine's device
+simulator answering interview, reads and commands) for trying them on a
+desktop; `tools/hubctl/tests/automations_e2e.rs` drives a rule chain, a
+loop, a delay and a hard restart through it. Cost on the S3: app image +62.5 KB (2 568 464 → 2 630 992 B: code +55.5 KB, read-only
+data +7.0 KB, of which the web page +2.7 KB, now 25.5 KB gzipped), no static
+RAM; heap about 1.2 KB per rule and as much per trace with its waiting run
+(nothing without rules); a hub with less than 48 KiB of free data heap takes
+no new rules.
 
 **RAM.** Until hub 0.1.3 the hwlab board's S3 ran **without PSRAM** (its
 N4R8 module has 8 MB of octal PSRAM, which the quad-only builds did not

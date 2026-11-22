@@ -46,6 +46,14 @@ has, and the integration maps them 1:1 onto HA platforms.
   per device). A **Catalog version** diagnostic sensor on the hub device
   shows `catalog_date.serial` of the installed bank (`none` without one),
   the manifest, missing definitions and the last check's error.
+- Hub automations (API 1.3 hubs, `automations` in `hub/info`): the rules
+  that run on the hub itself (device-support 14.8) appear on the hub device
+  as an **Automation …** switch each (on = enabled; `automations/enable` /
+  `disable`; attributes: ID, last run and result, run count, why a schedule
+  is suspended) and a **Run …** button (`automations/run`, a test run of
+  the actions). They follow the hub's `automations` topic: created, renamed
+  and removed at run time, re-listed after every reconnect. The rules are
+  edited in the hub's web UI or over the API, not in HA.
 - HA's **Delete device** removes the device from the network
   (`devices/remove`); devices removed on the hub disappear from HA.
 - Diagnostics (entry and device; the device download includes the hub's
@@ -108,6 +116,7 @@ delete the entry, then the directory, then restart.
 | `network/permit_join` | Permit join button (254 s, Green Power included) and the `permit_join` service |
 | `devices/remove`, `devices/reinterview`, `devices/reconfigure`, `devices/diagnostics` | Delete device, services, device diagnostics |
 | `catalog/status`, `catalog/upload_chunk`, `catalog/commit`, events `definition_needed`, `catalog_*` | `update_catalog` service, automatic checks, **Catalog version** sensor |
+| `automations/list`, topic `automations` (`automation_added`/`_updated`/`_removed`/`_run`) (API 1.3) | per rule: `switch` `<entry>_automation_<id>` (enabled), `button` `<entry>_automation_<id>_run`; `automations/enable`, `disable`, `run` |
 
 ## Development and tests
 
@@ -120,8 +129,9 @@ availability, commands on every platform, runtime entities and devices,
 reconnect with resync, the keepalive, services, device removal,
 diagnostics and the catalog client (with a local HTTP mirror; the fake hub
 refuses chunks over 4 KiB). `tests/test_e2e_hubctl.py` runs against the
-real API server, `hubctl --sim serve` (simulated NCP), when `HUBCTL` names
-a hubctl binary; its catalog test also needs `zdefc` (next to hubctl, or
+real API server, `hubctl --sim serve` (simulated NCP; with
+`--sim-devices` simulated plugs for the automations test), when `HUBCTL`
+names a hubctl binary; its catalog test also needs `zdefc` (next to hubctl, or
 `ZDEFC`) to build and sign a test release.
 
 ```sh

@@ -13,7 +13,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, PRIMARY_KEYS, TRANSLATED_KEYS
-from .hub import ZigbeeRsHub
+from .hub import ZigbeeRsHub, automation_key
 
 # Platforms whose device classes have names in HA's own translations.
 _DEVICE_CLASS_NAMED = frozenset({"sensor", "binary_sensor", "number", "button"})
@@ -176,3 +176,61 @@ class HubEntity(Entity):
     @callback
     def _hub_update(self) -> None:
         self.async_write_ha_state()
+
+
+def setup_automations(
+    entry: ConfigEntry,
+    platform: str,
+    async_add_entities: AddEntitiesCallback,
+    factory: Callable[[ZigbeeRsHub, str], Entity],
+) -> None:
+    """One entity per hub automation, now and whenever the hub adds one."""
+    hub: ZigbeeRsHub = entry.runtime_data
+
+    @callback
+    def add(rule_ids: list[str]) -> None:
+        async_add_entities([factory(hub, r) for r in rule_ids])
+
+    hub.register_automation_platform(platform, add)
+
+
+class AutomationEntity(Entity):
+    """An entity of one of the hub's local automations (on the hub device)."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, hub: ZigbeeRsHub, rule_id: str, suffix: str = "") -> None:
+        """Entity of automation `rule_id`."""
+        self.hub = hub
+        self.rule_id = rule_id
+        self._attr_unique_id = f"{hub.entry.entry_id}_automation_{rule_id}{suffix}"
+        self._attr_device_info = hub_device_info(hub)
+        self._attr_translation_placeholders = {"name": self._rule_name}
+
+    @property
+    def rule(self) -> dict[str, Any]:
+        """The hub's record of the automation (empty once removed)."""
+        return self.hub.automations.get(self.rule_id) or {}
+
+    @property
+    def _rule_name(self) -> str:
+        return str(self.rule.get("name") or self.rule_id)
+
+    @property
+    def available(self) -> bool:
+        """Connected, and the hub still has the automation."""
+        return self.hub.connected and self.rule_id in self.hub.automations
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the automation's record and the connection."""
+        self.async_on_remove(self.hub.add_listener(automation_key(self.rule_id), self._update))
+
+    @callback
+    def _update(self) -> None:
+        if self.rule and self._attr_translation_placeholders.get("name") != self._rule_name:
+            self._attr_translation_placeholders = {"name": self._rule_name}
+            # HA caches the name it built from the placeholders.
+            self.__dict__.pop("name", None)
+        if self.hass is not None and self.entity_id:
+            self.async_write_ha_state()

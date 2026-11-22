@@ -70,6 +70,12 @@ pub trait Platform: Send + Sync {
     /// The local time's offset east of UTC changed (log times), s.
     fn set_utc_offset(&self, _offset_s: i32) {}
 
+    /// Free bytes of the heap the application's data come from (PSRAM
+    /// included where it holds them); None where it does not matter.
+    fn data_heap_free(&self) -> Option<usize> {
+        None
+    }
+
     /// The least free stack the calling thread had so far, in bytes
     /// (job threads log it when they end).
     fn stack_high_water(&self) -> Option<usize> {

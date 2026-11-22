@@ -212,3 +212,72 @@ async def test_hubctl_catalog_update(hass: HomeAssistant, tmp_path: Path) -> Non
     finally:
         await hub.stop()
         await release.stop()
+
+
+PLUG1 = "zb:5a52530000000001:1:switch"
+PLUG2 = "zb:5a52530000000002:1:switch"
+
+
+async def test_hubctl_automations(hass: HomeAssistant) -> None:
+    """A hub automation on simulated plugs, its switch and run button in HA."""
+    hub = Hubctl(_free_port(), "--sim-devices")
+    await hub.start()
+    try:
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="hubctl",
+            data={
+                CONF_HOST: "127.0.0.1",
+                CONF_PORT: hub.port,
+                CONF_TOKEN: "e2e",
+                CONF_PATH: "/api",
+            },
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        reg = er.async_get(hass)
+        await _wait(hass, lambda: reg.async_get_entity_id("switch", DOMAIN, PLUG2) is not None)
+        plug1 = reg.async_get_entity_id("switch", DOMAIN, PLUG1)
+        plug2 = reg.async_get_entity_id("switch", DOMAIN, PLUG2)
+        await _wait(hass, lambda: hass.states.get(plug2).state == STATE_OFF)
+
+        # Plug 2 follows plug 1, on the hub.
+        await entry.runtime_data.async_request(
+            "automations/create",
+            rule={
+                "id": "follow",
+                "name": "Follow",
+                "triggers": [{"type": "state", "uid": PLUG1, "op": "changed"}],
+                "actions": [{"type": "command", "uid": PLUG2, "command": "toggle"}],
+            },
+        )
+        uid = f"{entry.entry_id}_automation_follow"
+        await _wait(hass, lambda: reg.async_get_entity_id("switch", DOMAIN, uid) is not None)
+        auto = reg.async_get_entity_id("switch", DOMAIN, uid)
+        await _wait(hass, lambda: (s := hass.states.get(auto)) is not None and s.state == STATE_ON)
+        await hass.services.async_call("switch", "turn_on", {"entity_id": plug1}, blocking=True)
+        await _wait(hass, lambda: hass.states.get(plug2).state == STATE_ON)
+        await _wait(hass, lambda: hass.states.get(auto).attributes["last_result"] == "done")
+
+        # Disabled from HA: plug 2 stays.
+        await hass.services.async_call("switch", "turn_off", {"entity_id": auto}, blocking=True)
+        listed = await entry.runtime_data.async_request("automations/get", automation="follow")
+        assert listed["enabled"] is False
+        await hass.services.async_call("switch", "turn_off", {"entity_id": plug1}, blocking=True)
+        await _wait(hass, lambda: hass.states.get(plug1).state == STATE_OFF)
+        await asyncio.sleep(0.5)
+        assert hass.states.get(plug2).state == STATE_ON
+
+        # The run button: a test run toggles plug 2 even while disabled.
+        run = reg.async_get_entity_id("button", DOMAIN, f"{uid}_run")
+        await hass.services.async_call("button", "press", {"entity_id": run}, blocking=True)
+        await _wait(hass, lambda: hass.states.get(plug2).state == STATE_OFF)
+
+        await entry.runtime_data.async_request("automations/delete", automation="follow")
+        await _wait(hass, lambda: reg.async_get_entity_id("switch", DOMAIN, uid) is None)
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+    finally:
+        await hub.stop()

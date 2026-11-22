@@ -43,7 +43,7 @@ pub mod zdo;
 
 #[cfg(test)]
 mod scenarios;
-#[cfg(test)]
+#[cfg(any(test, feature = "sim"))]
 pub mod testutil;
 
 pub use hub::{ApiError, Hub, HubConfig, HubEvent};
