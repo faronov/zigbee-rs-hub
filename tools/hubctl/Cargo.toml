@@ -15,6 +15,9 @@ hub-app = { workspace = true }
 hub-devices = { workspace = true, features = ["sim"] }
 zigbee-zrhp = { workspace = true, features = ["std"] }
 hub-web = { workspace = true }
+hub-mqtt = { workspace = true }
+# `--sim-devices`: the engine's device simulator behind the simulated NCP.
+hub-devices = { workspace = true, features = ["sim"] }
 serde_json = "1"
 # `catalog-push`: the catalog mirror over HTTPS.
 ureq = "3"
