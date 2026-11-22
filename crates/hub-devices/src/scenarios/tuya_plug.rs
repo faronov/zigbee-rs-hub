@@ -147,3 +147,45 @@ fn plug_command_without_answer_times_out_with_an_error() {
     // Two retries, then the error: about 3 × 8 s.
     assert!(t - T0 - 1000 <= 30_000, "{}", t - T0);
 }
+
+#[test]
+fn plug_command_fails_fast_when_not_delivered() {
+    use crate::transport::ApsFailure;
+    let (mut hub, mut sim) = joined();
+    let sw = format!("{ID}:1:switch");
+    sim.dev(IEEE).responsive = false;
+    hub.transport.take();
+    hub.drain_events();
+    let ack = hub
+        .entity_command(&sw, "turn_on", &json!({}), T0 + 1000)
+        .unwrap();
+    let fail = |hub: &mut Hub<MockTransport>| {
+        let sent = hub.transport.aps().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(sent.len(), 1);
+        hub.transport.take();
+        hub.transport.failures.push(ApsFailure {
+            req: sent[0].clone(),
+            zb_status: Some(0xD0),
+            legacy_codes: false,
+        });
+    };
+    // The first failure retries at once, the second fails the command.
+    fail(&mut hub);
+    hub.tick(T0 + 1500);
+    assert_eq!(result_of(&hub.drain_events(), ack.ticket), None);
+    fail(&mut hub);
+    hub.tick(T0 + 2000);
+    let e = result_of(&hub.drain_events(), ack.ticket)
+        .expect("failed fast")
+        .unwrap_err();
+    assert_eq!(e.code, "not_delivered");
+    assert!(e.message.contains("no route"), "{}", e.message);
+    // A failure of a request nobody waits for any more is ignored.
+    hub.transport.failures.push(ApsFailure {
+        req: sim.aps()[0].clone(),
+        zb_status: Some(0xA7),
+        legacy_codes: false,
+    });
+    hub.tick(T0 + 2500);
+    assert!(hub.transport.aps().is_empty());
+}

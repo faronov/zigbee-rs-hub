@@ -119,6 +119,31 @@ fn api_session_endpoint_and_interview_start() {
     r.sim.stop();
 }
 
+/// `EVT_APS_DATA_CONFIRM` outcomes: delivered ones counted, a failure
+/// reaches the engine at once (the interview moves on instead of waiting
+/// for its response timeout).
+#[test]
+fn aps_confirms_are_counted_and_failures_reach_the_engine() {
+    let r = rig(Store::volatile());
+    r.sim.with(|s| s.undeliverable.push((0x1234, 0xA8)));
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    join(&r.sim);
+    // Node_Desc_req (and its immediate retry) fail; the interview goes on
+    // to the next steps long before the 8 s response timeout.
+    assert!(app.wait(Duration::from_secs(4), |s| s.aps.not_delivered >= 3), "{:?}", app.status().aps);
+    assert_eq!(app.status().aps.delivered, 0);
+    // Reachable again: a re-interview's requests are confirmed delivered.
+    r.sim.with(|s| s.undeliverable.clear());
+    let (sid, rx) = session(&app);
+    let re = call(&app, sid, &rx, 1, json!({"type": "devices/reinterview", "device": "zb:00158d0001a2b3c4"}));
+    assert_eq!(re["success"], true, "{re}");
+    assert!(app.wait(T, |s| s.aps.delivered > 0));
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 #[test]
 fn registry_survives_an_app_restart() {
     let flash: Box<dyn hub_ncp::store::Flash> = Box::new(MemFlash::new(32, 4096));

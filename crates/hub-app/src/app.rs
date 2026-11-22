@@ -556,7 +556,8 @@ impl Runner {
                 "imported": a.imported,
                 "registry_writes": a.registry_writes,
                 "registry_errors": a.registry_errors,
-                "aps": {"accepted": a.aps.accepted, "busy": a.aps.busy, "failed": a.aps.failed},
+                "aps": {"accepted": a.aps.accepted, "busy": a.aps.busy, "failed": a.aps.failed,
+                    "delivered": a.aps.delivered, "not_delivered": a.aps.not_delivered, "unconfirmed": a.aps.unconfirmed},
             })
         };
         let jobs = Mutex::new(self.jobs.clone());
@@ -617,8 +618,9 @@ impl Runner {
         for ev in self.admin.progress_events() {
             self.engine.network_event(ev);
         }
-        self.engine.tick(now);
+        // Confirms first: the tick fails undeliverable requests at once.
         self.engine.transport.poll();
+        self.engine.tick(now);
         if let Some(c) = self.catalog.as_mut()
             && self.registered
         {

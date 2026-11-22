@@ -102,6 +102,9 @@ pub struct SimState {
     pub neighbors: Option<Vec<SimNeighbor>>,
     /// No `EVT_PERMIT_JOIN_STATE` (as the zigbee-rs NCP image).
     pub silent_permit_join: bool,
+    /// `(dst_nwk, zb_status)`: `APS_DATA_REQUEST`s to these addresses are
+    /// confirmed as not delivered.
+    pub undeliverable: Vec<(u16, u8)>,
     /// Requests answered `UNSUPPORTED_COMMAND` (to mimic an NCP image that
     /// lacks them, e.g. `NWK_ENERGY_SCAN`).
     pub unsupported: Vec<u16>,
@@ -201,6 +204,7 @@ impl SimNcp {
             children: None,
             neighbors: None,
             silent_permit_join: false,
+            undeliverable: Vec::new(),
             unsupported: Vec::new(),
             nwk_update_id: 0,
             tx_power: 8,
@@ -766,9 +770,11 @@ impl SimNcp {
                     zigbee_zrhp::msg::data::ApsDst::Nwk(n) => n,
                     _ => 0xFFFF,
                 };
+                let zb_status = s.undeliverable.iter().find(|u| u.0 == dst).map_or(0, |u| u.1);
+                let (st, flags) = if zb_status == 0 { (0, 1) } else { (1, 0) };
                 actions.push((
                     Duration::from_millis(10),
-                    event(&EvtApsDataConfirm { req_tid: tid, status: 0, zb_status: 0, aps_counter: 7, dst_nwk: dst, flags: 1, elapsed_ms: 10 }),
+                    event(&EvtApsDataConfirm { req_tid: tid, status: st, zb_status, aps_counter: 7, dst_nwk: dst, flags, elapsed_ms: 10 }),
                 ));
                 if req.profile == 0
                     && let Some(rsp) = s.remotes.iter().find(|r| r.nwk == dst).and_then(|r| remote_zdo(r, req.cluster, req.asdu))

@@ -1,17 +1,21 @@
 //! The engine's [`ZigbeeTransport`] on the ZRHP host core.
 //!
 //! APS data goes out through [`hub_ncp::Client::start`] without blocking
-//! (requests are held across an NCP resume by the driver); the outcomes are
-//! collected on [`NcpTransport::poll`] for the failure counters. GP,
+//! (requests are held across an NCP resume by the driver), each waiting for
+//! its `EVT_APS_DATA_CONFIRM`; the outcomes are collected on
+//! [`NcpTransport::poll`]: counters, and failures for the engine
+//! ([`ZigbeeTransport::take_failures`]), which then fails a command at once
+//! with the Zigbee status instead of after its response timeout. GP,
 //! group, removal and permit-join requests are rare and answered by the NCP
 //! itself, so they are blocking calls, refused at once when the NCP session
 //! is not ready (the engine retries or reports the error).
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use hub_devices::gp::types::GpRequest;
-use hub_devices::transport::{ApsRequest, TransportError, ZigbeeTransport};
-use hub_ncp::driver::{CallOpts, Error, Ticket};
+use hub_devices::transport::{ApsFailure, ApsRequest, TransportError, ZigbeeTransport};
+use hub_ncp::driver::{CallOpts, Confirm, Error, Ticket};
 use hub_ncp::{Hub as Ncp, SessionState};
 use log::debug;
 use zigbee_zrhp::msg::ids;
@@ -26,16 +30,28 @@ pub struct ApsCounters {
     pub accepted: u64,
     /// Refused with `BUSY`.
     pub busy: u64,
-    /// Refused otherwise, timed out or lost in a reset.
+    /// Refused otherwise, or lost in a reset.
     pub failed: u64,
+    /// Confirmed delivered (APS ACK for acknowledged unicasts).
+    pub delivered: u64,
+    /// Confirmed not delivered (no APS ACK, no route, …).
+    pub not_delivered: u64,
+    /// Accepted, but no confirm within [`CONFIRM_TIMEOUT`].
+    pub unconfirmed: u64,
 }
+
+/// How long an accepted request waits for its confirm. The NCP holds a
+/// sleepy child's frame until its next expected poll; past this the
+/// outcome is only counted (the engine's response timeout decides).
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The transport.
 pub struct NcpTransport {
     ncp: Ncp,
     /// IEEE → NWK of known devices (for `NWK_REMOVE_DEVICE`).
     pub nwk: BTreeMap<u64, u16>,
-    inflight: Vec<Ticket>,
+    inflight: Vec<(Ticket, ApsRequest)>,
+    failures: Vec<ApsFailure>,
     /// APS outcome counters.
     pub counters: ApsCounters,
 }
@@ -51,7 +67,7 @@ fn transport_error(e: Error) -> TransportError {
 impl NcpTransport {
     /// A transport on `ncp`.
     pub fn new(ncp: Ncp) -> Self {
-        Self { ncp, nwk: BTreeMap::new(), inflight: Vec::new(), counters: ApsCounters::default() }
+        Self { ncp, nwk: BTreeMap::new(), inflight: Vec::new(), failures: Vec::new(), counters: ApsCounters::default() }
     }
 
     fn ready(&self) -> Result<(), TransportError> {
@@ -63,25 +79,58 @@ impl NcpTransport {
 
     /// Collects finished APS requests.
     pub fn poll(&mut self) {
-        let counters = &mut self.counters;
-        self.inflight.retain(|t| match t.try_wait() {
-            None => true,
-            Some(Ok(o)) => {
-                match o.reply.status() {
-                    Status::Success => counters.accepted += 1,
-                    Status::Busy => counters.busy += 1,
-                    s => {
-                        debug!("APS_DATA_REQUEST tid {}: {s:?}", t.tid);
-                        counters.failed += 1;
+        if self.inflight.is_empty() {
+            return;
+        }
+        // zigbee-rs NCP images up to 0.1.1 number APS statuses off by one.
+        let legacy_codes =
+            self.ncp.client().session().is_some_and(|s| hub_devices::transport::legacy_zb_status(&s.negotiated.fw));
+        let (counters, failures) = (&mut self.counters, &mut self.failures);
+        self.inflight.retain(|(t, req)| {
+            let Some(r) = t.try_wait() else { return true };
+            let failed = match r {
+                Ok(o) => match (o.reply.status(), o.confirm.as_ref().and_then(|c| c.payload.get(2..4))) {
+                    (Status::Success, Some(&[0, _])) => {
+                        counters.accepted += 1;
+                        counters.delivered += 1;
+                        None
                     }
+                    (Status::Success, Some(&[_, zb])) => {
+                        debug!("APS_DATA_REQUEST tid {} to {:?}: not delivered, zb_status 0x{zb:02X}", t.tid, req.dst);
+                        counters.accepted += 1;
+                        counters.not_delivered += 1;
+                        Some(Some(zb))
+                    }
+                    (Status::Success, _) => {
+                        counters.accepted += 1;
+                        None
+                    }
+                    (s, _) => {
+                        debug!("APS_DATA_REQUEST tid {}: {s:?}", t.tid);
+                        if s == Status::Busy {
+                            counters.busy += 1;
+                        } else {
+                            counters.failed += 1;
+                        }
+                        Some(None)
+                    }
+                },
+                // Accepted but no confirm in time (a long-polling child).
+                Err(Error::Timeout) => {
+                    counters.accepted += 1;
+                    counters.unconfirmed += 1;
+                    None
                 }
-                false
+                Err(e) => {
+                    debug!("APS_DATA_REQUEST tid {}: {e}", t.tid);
+                    counters.failed += 1;
+                    None
+                }
+            };
+            if let Some(zb_status) = failed {
+                failures.push(ApsFailure { req: req.clone(), zb_status, legacy_codes });
             }
-            Some(Err(e)) => {
-                debug!("APS_DATA_REQUEST tid {}: {e}", t.tid);
-                counters.failed += 1;
-                false
-            }
+            false
         });
     }
 }
@@ -92,9 +141,14 @@ impl ZigbeeTransport for NcpTransport {
             return Err(TransportError::LinkDown);
         }
         let payload = convert::aps_request(&req).map_err(transport_error)?;
-        let ticket = self.ncp.client().start(ids::APS_DATA_REQUEST, payload, CallOpts::default()).map_err(transport_error)?;
-        self.inflight.push(ticket);
+        let opts = CallOpts { confirm: Some(Confirm::aps(CONFIRM_TIMEOUT)), ..CallOpts::default() };
+        let ticket = self.ncp.client().start(ids::APS_DATA_REQUEST, payload, opts).map_err(transport_error)?;
+        self.inflight.push((ticket, req));
         Ok(())
+    }
+
+    fn take_failures(&mut self) -> Vec<ApsFailure> {
+        std::mem::take(&mut self.failures)
     }
 
     fn gp_request(&mut self, req: GpRequest) -> Result<Option<u8>, TransportError> {

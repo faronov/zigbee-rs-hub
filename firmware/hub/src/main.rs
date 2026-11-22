@@ -137,7 +137,7 @@ fn status_text(hub: &Hub) -> String {
     if let Some(app) = APP.get() {
         let a = app.status();
         out += &format!(
-            "app: {} devices ({} restored, {} imported), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {}, endpoint {}\r\n",
+            "app: {} devices ({} restored, {} imported), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {} delivered {} not delivered {} unconfirmed {}, endpoint {}\r\n",
             a.devices,
             a.restored,
             a.imported,
@@ -147,6 +147,9 @@ fn status_text(hub: &Hub) -> String {
             a.aps.accepted,
             a.aps.busy,
             a.aps.failed,
+            a.aps.delivered,
+            a.aps.not_delivered,
+            a.aps.unconfirmed,
             if a.endpoint_registered { "registered" } else { "pending" }
         );
     }
