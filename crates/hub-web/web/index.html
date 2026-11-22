@@ -125,13 +125,13 @@ progress{width:12em}
 <div data-tab="ota" data-title="Updates" data-need="ota" class="tab">
 <p id="otk" class="badge bad hide"></p>
 <section class="card"><h2>Device firmware <span id="otn" class="mut"></span></h2>
-<p class="mut">Zigbee OTA (cluster 0x0019). <b>manual</b>: a device updates after Update only; <b>auto</b>: by itself, inside the window. A sleepy device takes the request when it next wakes up.</p>
+<p class="mut"><b>manual</b>: after Update; <b>auto</b>: inside the window. Sleepy devices start when they wake up.</p>
 <ul class="ents" id="otd"></ul></section>
 <section class="card"><h2>Images <span id="otu" class="mut"></span></h2><ul class="ents" id="oti"></ul>
 <div class="row acts otst"><input id="otf" type="file"><button class="p" id="otb">Upload to the hub</button><span id="otp" class="mut"></span></div>
 <div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div>
-<p class="mut">Install from this tab: the hub stores nothing, this tab serves the image while the device downloads it — keep it open until the update is done.</p></section>
-<section class="card"><h2>Online index</h2><p class="mut">The browser fetches the index and the images: the hub downloads nothing itself.</p>
+<p class="mut">The hub stores nothing: this tab serves the image — keep it open until done.</p></section>
+<section class="card"><h2>Online index <span class="mut">(fetched by this browser)</span></h2>
 <div class="row"><input id="otx" size="48"><button id="otc">Find updates</button><span id="ots" class="mut"></span></div><ul class="ents" id="otr"></ul></section>
 <section class="card"><h2>Settings</h2><div class="row"><label>Policy <select id="otpo"><option>manual</option><option>auto</option><option>off</option></select></label><label>Window <input id="otw1" size="5" placeholder="02:00">–<input id="otw2" size="5" placeholder="05:00"></label><label>At once <input id="otmc" type="number" class="num" min="1" max="8"></label><label>Blocks/s <input id="otbs" type="number" class="num" min="0"></label><label>Block period <input id="otbp" type="number" class="num" min="0"> ms</label><button id="otsv">Apply</button></div><p class="mut" id="ota"></p></section>
 </div>
@@ -672,7 +672,7 @@ function otFind(){const box=$("#otr");box.textContent="";let n=0;
   const have=otI.some(i=>i.manufacturer_code==c.manufacturerCode&&i.image_type==c.imageType&&i.file_version==c.fileVersion);
   box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||d.device),el("br"),el("span",{class:"mut"},ver(d.current_version)+" → "+ver(c.fileVersion)+" · "+kb(c.fileSize)+" · "+c.fileName)),
    have?el("span",{class:"mut"},"on the hub"):el("button",{class:"p",onclick:e=>{const st=hub.ota&&hub.ota.store,mt={min_file_version:c.minFileVersion,max_file_version:c.maxFileVersion};busy(e.target,fetch(c.url).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.arrayBuffer()}).then(b=>otSha(b,c.sha512).then(()=>st?otUp(b,c.fileName,mt):otStream(b,c.fileName,mt,d.device))).then(otFind).catch(x=>toast(x.message)))}},hub.ota&&hub.ota.store?"Download to hub":"Install from this tab")))}
- $("#ots").textContent=otIdx.length+" images in the index, "+n+" for your devices"+(crypto.subtle?"":" (SHA-512 not checked: not a secure context)")}
+ $("#ots").textContent=otIdx.length+" images in the index, "+n+" for your devices"+(crypto.subtle?"":" (no SHA-512 check)")}
 function otSha(b,want){if(!want||!crypto.subtle)return Promise.resolve();return crypto.subtle.digest("SHA-512",b).then(h=>{if(bytes([...new Uint8Array(h)])!=want.toLowerCase())throw new Error("SHA-512 mismatch")})}
 function otSet(s){if(!s)return;otS=s;V("otx",s.index_url||"");V("otpo",s.policy);V("otw1",s.window?s.window.start:"");V("otw2",s.window?s.window.end:"");V("otmc",s.max_concurrent);V("otbs",s.blocks_per_s);V("otbp",s.min_block_period_ms)}
 $("#otsv").onclick=e=>{const a=V("otw1"),b=V("otw2");busy(e.target,act("ota/settings/set",{policy:V("otpo"),window:a&&b?{start:a,end:b}:null,max_concurrent:+V("otmc"),blocks_per_s:+V("otbs"),min_block_period_ms:+V("otbp")}).then(otSet,()=>{}))};
