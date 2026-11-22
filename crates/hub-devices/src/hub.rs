@@ -1968,8 +1968,50 @@ impl<T: ZigbeeTransport> Hub<T> {
     // ------------------------------------------------------------------
     // Tick: timeouts, availability, timers.
 
+    /// Delivery failures reported by the transport: one immediate retry
+    /// (the NCP already retried at APS level; a sleepy device's request
+    /// waits for its next frame), then the request fails with
+    /// `not_delivered` instead of waiting for the response timeout.
+    fn delivery_failures(&mut self, now: Millis) {
+        for f in self.transport.take_failures() {
+            let Some(k) = self
+                .pending
+                .iter()
+                .find(|(_, p)| p.req == f.req)
+                .map(|(k, _)| *k)
+            else {
+                continue; // answered meanwhile, or nothing waits for it
+            };
+            let Some(mut p) = self.pending.remove(&k) else {
+                continue;
+            };
+            let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
+            if sleepy {
+                if let Some(d) = self.devices.get_mut(&p.device) {
+                    d.queue.push_back(Queued {
+                        req: p.req,
+                        purpose: p.purpose,
+                        tsn: k.1,
+                    });
+                }
+                continue;
+            }
+            if p.retries == 0 && p.purpose != Purpose::Check {
+                p.retries = 1;
+                p.sent_at = now;
+                if self.transport.aps_send(p.req.clone()).is_ok() {
+                    self.pending.insert(k, p);
+                    continue;
+                }
+            }
+            let dev = p.device.clone();
+            self.fail_purpose(&dev, &p.purpose, not_delivered(f.zb_status), now);
+        }
+    }
+
     /// Advances timers.
     pub fn tick(&mut self, now: Millis) {
+        self.delivery_failures(now);
         // Request timeouts.
         let expired: Vec<(bool, u8)> = self
             .pending
@@ -2686,4 +2728,18 @@ impl<T: ZigbeeTransport> Hub<T> {
             "interview_partial": d.interview_partial,
         }))
     }
+}
+
+/// The error of an undeliverable request. Zigbee statuses as the zigbee-rs
+/// NCP reports them: `0xA7` APS NO_ACK after the ACK retries, `0xA6`
+/// (its other NWK failures) and `0xA8` (route error or route discovery
+/// failed) from its APS status numbering.
+fn not_delivered(zb_status: Option<u8>) -> ApiError {
+    let message = match zb_status {
+        None => "the NCP refused the request (queue full or network down)".to_string(),
+        Some(s @ (0xA6 | 0xA7)) => format!("not delivered: no APS ACK (zb_status 0x{s:02X})"),
+        Some(s @ 0xA8) => format!("not delivered: no route to the device (zb_status 0x{s:02X})"),
+        Some(s) => format!("not delivered (zb_status 0x{s:02X})"),
+    };
+    ApiError::new("not_delivered", message)
 }

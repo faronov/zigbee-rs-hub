@@ -2152,8 +2152,16 @@ code feels familiar:
   misses a change between "list" and "subscribe".
 - Errors: `unauthorized`, `not_found`, `invalid_format`, `invalid_value`,
   `unsupported`, `busy`, `timeout`, `device_unavailable`, `no_space`,
-  `verification_failed`, plus the ZCL/ZRHP status for device commands
+  `verification_failed`, `not_delivered`, plus the ZCL/ZRHP status for device commands
   (`{"code": "zcl_status", "zcl_status": "UNSUPPORTED_ATTRIBUTE"}`).
+- Delivery: every `APS_DATA_REQUEST` waits for its `EVT_APS_DATA_CONFIRM`
+  (up to 60 s). A confirmed failure retries once at once (a sleepy device's
+  request waits for its next frame), then fails the request with
+  `not_delivered` and the Zigbee status in the message ("no APS ACK",
+  "no route to the device"), instead of the 3 × 8 s response timeout;
+  `timeout` remains for delivered requests without a response.
+  `hub/system` `app.aps` counts `delivered`, `not_delivered`,
+  `unconfirmed` next to `accepted`, `busy`, `failed` (refused).
 
 ### 14.2 Devices and network
 

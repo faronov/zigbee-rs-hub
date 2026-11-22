@@ -21,6 +21,16 @@ pub enum ApsDst {
     Group(u16),
 }
 
+/// An `APS_DATA_REQUEST` the NCP could not deliver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApsFailure {
+    /// The request as the engine sent it.
+    pub req: ApsRequest,
+    /// `EVT_APS_DATA_CONFIRM.zb_status` (no APS ACK, no route, …); `None`:
+    /// the NCP refused the request (queue full, network down).
+    pub zb_status: Option<u8>,
+}
+
 /// `APS_DATA_REQUEST.tx_options` subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct TxOptions {
@@ -122,6 +132,12 @@ pub trait ZigbeeTransport {
     fn network_info(&mut self) -> Option<serde_json::Value> {
         None
     }
+
+    /// Requests that failed since the last call (`EVT_APS_DATA_CONFIRM`
+    /// with a failure, or a refusal after [`Self::aps_send`] returned).
+    fn take_failures(&mut self) -> Vec<ApsFailure> {
+        Vec::new()
+    }
 }
 
 /// Something the mock recorded.
@@ -150,6 +166,8 @@ pub struct MockTransport {
     pub fail: Option<TransportError>,
     /// What `network_info` returns.
     pub network: Option<serde_json::Value>,
+    /// Delivery failures `take_failures` returns.
+    pub failures: Vec<ApsFailure>,
 }
 
 impl MockTransport {
@@ -208,5 +226,9 @@ impl ZigbeeTransport for MockTransport {
 
     fn network_info(&mut self) -> Option<serde_json::Value> {
         self.network.clone()
+    }
+
+    fn take_failures(&mut self) -> Vec<ApsFailure> {
+        std::mem::take(&mut self.failures)
     }
 }
