@@ -2392,6 +2392,44 @@ follows its `job_progress` events; the job does not depend on the session
 that started it. The application thread never waits for the NCP here: it
 only reads the job board once a second.
 
+### 14.7 ZCL console (API 1.2, backward compatible)
+
+Raw requests to one device endpoint, for writing and debugging
+definitions (web UI tab **ZCL**). They take the normal send path (queued
+for a sleeping device, APS confirm, retries, `timeout` / `not_delivered`),
+and the device's answer is also processed as usual (a read updates entity
+states). Like `entities/command`, the result follows when the device
+answers; a sleeping device first gets `{status: "queued", ticket}`, then the
+final result with the same `id`.
+
+Common parameters: `device`, `endpoint` (default 1), `cluster`,
+`manufacturer` (optional code). `data_type` is a ZCL type code (a number
+or `"0x21"`; the web UI also takes definition type names such as `u16`);
+`type` is the request type.
+
+| Type | Parameters | Result (decoded answer) |
+|---|---|---|
+| `zcl/read` | `attributes` | `records: [{attribute, status, type, value}]` |
+| `zcl/write` | `attribute`, `value`, `data_type` (optional when the resolved definition binds the attribute) | `records: [{status, attribute?}]` |
+| `zcl/configure_reporting` | `attribute`, `data_type` (as for write), `min`, `max`, `change` (analog types) | `records: [{status, attribute?}]` |
+| `zcl/read_reporting` | `attributes` | `records: [{status, attribute, direction, type, min, max, change \| timeout}]` |
+| `zcl/discover` | `what`: `attributes` (default), `commands_received`, `commands_generated`; `start`, `max_results` | `complete`, `records: [{attribute, type}]` or `[command]` |
+| `zcl/command` | `command`, `payload` (hex), `global` (foundation frame), `to_client`, `disable_default_response` | the answer frame: a Default Response (`for_command`, `status`) or the cluster response with the same TSN |
+| `tuya/send` | `dps: [{dp, type, value}]` (type `raw`, `bool`, `value`, `string`, `enum`, `bitmap`; hex string for raw) | `{status: "ok"}` once the device reported every DP (15 s, 10 min for a sleeping device) |
+
+Every result also has `tsn`, `frame` (`global`/`cluster`), `command`,
+`manufacturer` and `payload` (hex) of the answer. Argument errors
+(`invalid_value`) answer at once, e.g. a write of an attribute whose type
+is not known.
+
+Topic **`frames`** (subscribe to it explicitly; the hub taps frames only
+while a session is subscribed): `frame` {`device`, `dir` (`rx`/`tx`),
+`endpoint` (the device's), `profile`, `cluster`, `hex`, `lqi` (rx), `time`,
+`zcl` {`frame`, `command`, `manufacturer`, `tsn`, `to_client`}, `tuya`
+{`seq`, `dps: [{dp, type, value, data}]`} for EF00 data frames}. The
+snapshot of the topic is empty; `devices/diagnostics` keeps the last 50
+received frames. Retransmissions after a response timeout are not tapped.
+
 ## 15. Boundary to a Home Assistant integration
 
 A later HA custom integration (far future, not part of this work) should be a

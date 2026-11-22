@@ -317,13 +317,19 @@ impl ApiServer {
                 ServerMessage::err(id, ApiError::new("not_found", "no subscription"))
             }];
         }
-        if let Request::EntitiesCommand {
-            uid,
-            command,
-            params,
-        } = &env.request
-        {
-            return match hub.entity_command(uid, command, params, now) {
+        let console = match &env.request {
+            Request::EntitiesCommand {
+                uid,
+                command,
+                params,
+            } => Some(hub.entity_command(uid, command, params, now)),
+            Request::TuyaSend(a) => Some(crate::console::parse_dps(a).and_then(|dps| {
+                hub.tuya_send_dps(a["device"].as_str().unwrap_or_default(), &dps, now)
+            })),
+            r => crate::console::request(r).map(|c| c.and_then(|c| hub.console(c, now))),
+        };
+        if let Some(res) = console {
+            return match res {
                 Ok(ack) if ack.status == "ok" => {
                     vec![ServerMessage::ok(id, json!({"status": "ok"}))]
                 }
@@ -437,7 +443,16 @@ impl ApiServer {
     ) -> Result<J, ApiError> {
         use Request as R;
         Ok(match req {
-            R::Subscribe { .. } | R::Unsubscribe { .. } | R::EntitiesCommand { .. } => J::Null,
+            R::Subscribe { .. }
+            | R::Unsubscribe { .. }
+            | R::EntitiesCommand { .. }
+            | R::ZclRead(_)
+            | R::ZclWrite(_)
+            | R::ZclConfigureReporting(_)
+            | R::ZclReadReporting(_)
+            | R::ZclDiscover(_)
+            | R::ZclCommand(_)
+            | R::TuyaSend(_) => J::Null,
             R::HubInfo => {
                 let mut r = json!({
                     "name": self.hub_name,
@@ -954,20 +969,24 @@ impl ApiServer {
         hub: &mut Hub<T>,
         events: Vec<HubEvent>,
     ) -> Vec<(SessionId, String)> {
+        // Frames are tapped only while someone listens.
+        hub.frame_tap = self
+            .sessions
+            .values()
+            .any(|s| s.subs.values().any(|t| t.contains("frames")));
         let mut out = Vec::new();
         for ev in events {
-            if let HubEvent::CommandResult { ticket, result } = &ev {
-                for (sid, sess) in &mut self.sessions {
-                    if let Some(rid) = sess.tickets.remove(ticket) {
-                        let m = match result {
-                            Ok(_) => ServerMessage::ok(rid, json!({"status": "ok"})),
-                            Err(e) => ServerMessage::err(rid, e.clone()),
-                        };
-                        out.push((*sid, m.to_text()));
-                    }
+            let ev = match ev {
+                HubEvent::CommandResult { ticket, result } => {
+                    self.deliver(ticket, result.map(|_| json!({"status": "ok"})), &mut out);
+                    continue;
                 }
-                continue;
-            }
+                HubEvent::ConsoleResult { ticket, result } => {
+                    self.deliver(ticket, result, &mut out);
+                    continue;
+                }
+                ev => ev,
+            };
             let (topic, body) = match ev {
                 HubEvent::DeviceAdded(id) => (
                     "devices",
@@ -1034,11 +1053,32 @@ impl ApiServer {
                     }
                     ("gp", body)
                 }
-                HubEvent::CommandResult { .. } => continue,
+                HubEvent::CommandResult { .. } | HubEvent::ConsoleResult { .. } => continue,
+                HubEvent::Frame(body) => ("frames", body),
             };
             out.extend(self.publish(topic, body));
         }
         out
+    }
+
+    /// The deferred result of a ticket to the request that started it.
+    #[inline(never)]
+    fn deliver(
+        &mut self,
+        ticket: u64,
+        result: Result<J, ApiError>,
+        out: &mut Vec<(SessionId, String)>,
+    ) {
+        for (sid, sess) in &mut self.sessions {
+            if let Some(rid) = sess.tickets.remove(&ticket) {
+                let m = match result {
+                    Ok(r) => ServerMessage::ok(rid, r),
+                    Err(e) => ServerMessage::err(rid, e),
+                };
+                out.push((*sid, m.to_text()));
+                return;
+            }
+        }
     }
 
     /// An event on `topic` for its subscribers (next `seq`), e.g. from a

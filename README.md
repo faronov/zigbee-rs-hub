@@ -799,6 +799,16 @@ bindings (create, edit, delete, verify; target probe; executor auto, device
 or hub; per-target state) and the sink's security level and communication
 mode (topic `gp`); API 1.2 added `gp/commissioning/status` and
 `gp/config/get` for it.
+The **ZCL** tab (`#/zcl`) is a console for writing and debugging
+definitions: per device, endpoint and cluster (or any cluster ID) with an
+optional manufacturer code it reads and writes attributes (the type comes
+from a read or the resolved definition, or is given), configures and reads
+reporting, discovers attributes and received/generated commands and sends
+any cluster or foundation command with a hex payload; answers are shown
+decoded. A live frame tail (topic `frames`, filter by cluster) and a Tuya
+EF00 datapoint viewer (DP, type, value; send DP) follow the device; read
+attributes and seen DPs can be copied as definition snippets
+(device-support 14.7).
 It asks for the API token
 once (console `token`; a link ending in `#token=…` stores it too) and keeps
 it in the browser. `build.rs` minifies the page line by line (indentation,
