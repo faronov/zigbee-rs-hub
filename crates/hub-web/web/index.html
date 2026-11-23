@@ -143,9 +143,9 @@ progress{width:12em}
 <section class="card"><h2>Automations</h2><p id="aut" class="mut"></p><ul class="ents" id="aul"></ul></section>
 <section class="card"><h2 id="auh">New automation</h2>
 <div class="row"><input id="anm" placeholder="name" size="24"><select id="amd"><option>single</option><option>restart</option></select></div>
-<div class="row acts"><b>When</b><select id="att"><option value="state">state of</option><option value="event">event of</option><option value="availability">device</option><option value="time">time</option><option value="start">hub start</option></select><select id="atu"></select><select id="ato"><option>changed</option><option>equals</option><option>above</option><option>below</option></select><input id="atv" size="10" placeholder="value"></div>
-<div class="row acts"><b>If</b><select id="act"><option value="">always</option><option value="state">state of</option><option value="time">time between</option></select><select id="acu"></select><select id="aco"><option>equals</option><option>not_equals</option><option>above</option><option>below</option></select><input id="acv" size="10" placeholder="value"></div>
-<div class="row acts"><b>Then</b><select id="aat"><option value="command">command</option><option value="notify">notify</option></select><select id="aau"></select><select id="aac"></select><input id="aav" size="10" placeholder="value"><label>after <input id="aad" class="num" placeholder="s"> s</label><select id="aa2"></select></div>
+<div class="row acts"><b>When</b><select id="att"><option value="state">state of</option><option value="event">event of</option><option value="availability">device</option><option value="time">time</option><option value="start">hub start</option></select><select id="atd"></select><select id="atu"></select><select id="ato"><option>changed</option><option>equals</option><option>above</option><option>below</option></select><input id="atv" size="10" placeholder="value"></div>
+<div class="row acts"><b>If</b><select id="act"><option value="">always</option><option value="state">state of</option><option value="time">time between</option></select><select id="acd"></select><select id="acu"></select><select id="aco"><option>equals</option><option>not_equals</option><option>above</option><option>below</option></select><input id="acv" size="10" placeholder="value"></div>
+<div class="row acts"><b>Then</b><select id="aat"><option value="command">command</option><option value="notify">notify</option></select><select id="aaD"></select><select id="aau"></select><select id="aac"></select><input id="aav" size="10" placeholder="value"><label>after <input id="aad" class="num" placeholder="s"> s</label><select id="aa2"></select></div>
 <details id="ajd"><summary class="mut">JSON (all triggers, conditions and actions; device-support 14.8)</summary><textarea id="auj" rows="14" spellcheck="false"></textarea></details>
 <div class="row acts"><button class="p" id="aus">Save</button><button id="aux">Test run</button><button id="aun">New</button><button class="d hide" id="aud">Delete</button><span id="aum" class="mut"></span></div></section>
 <section class="card"><h2>Run history</h2><ul class="ents" id="aur"></ul><pre id="aurd" class="hide"></pre></section>
@@ -498,8 +498,14 @@ function drawMap(m){
  const loose=m.nodes.filter(n=>lvl[n.nwk]==null);const maxl=Math.max(1,...Object.values(lvl))+(loose.length?1:0);
  const W=640,C=W/2,R=(C-60)/maxl,pos={0:[C,C]};
  const kids=u=>order.filter(v=>par[v]==u);
- const place=(u,a0,a1)=>{const k=kids(u);k.forEach((v,i)=>{const a=k.length==1&&u?a0+(a1-a0)/2:a0+(a1-a0)*(i+.5)/k.length;pos[v]=[C+R*lvl[v]*Math.cos(a),C+R*lvl[v]*Math.sin(a)];const w=(a1-a0)/k.length;place(v,a-w/2,a+w/2)})};
- place(0,-Math.PI/2,1.5*Math.PI);
+ // Each child in its share of the parent's sector; a lone child a little to
+ // the side, alternating by ring, so a chain is not one straight line.
+ const at=(v,a,w)=>{pos[v]=[C+R*lvl[v]*Math.cos(a),C+R*lvl[v]*Math.sin(a)];place(v,a-w/2,a+w/2)};
+ const place=(u,a0,a1)=>{const k=kids(u),w=(a1-a0)/(k.length||1);k.forEach((v,i)=>at(v,a0+w*(i+.5)+(k.length==1?w*(lvl[v]%2?.2:-.2):0),w))};
+ // Up to three coordinator neighbours 120° apart (two halves of the circle
+ // put them and the coordinator on one line).
+ const k0=kids(0),st=2*Math.PI/3;
+ if(k0.length>1&&k0.length<4)k0.forEach((v,i)=>at(v,-Math.PI/2+(i-(k0.length-1)/2)*st,st));else place(0,-Math.PI/2,1.5*Math.PI);
  loose.forEach((n,i)=>{const a=2*Math.PI*i/loose.length;pos[n.nwk]=[C+R*maxl*Math.cos(a),C+R*maxl*Math.sin(a)]});
  const svg=mkSvg(W,W),ns=svg.namespaceURI;
  const add=(t,a,txt)=>{const x=document.createElementNS(ns,t);for(const k in a)x.setAttribute(k,a[k]);if(txt!=null)x.textContent=txt;svg.append(x);return x};
@@ -784,18 +790,27 @@ function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctSerial(
 let au={rules:{}},auId=null;
 const CMDS={switch:"turn_on turn_off toggle",light:"turn_on turn_off toggle",fan:"turn_on turn_off toggle",siren:"turn_on turn_off",cover:"open_cover close_cover stop_cover set_cover_position",valve:"open_valve close_valve",lock:"lock unlock",number:"set_value",select:"select_option",button:"press",climate:"set_hvac_mode set_temperature"};
 const PK={set_value:"value",select_option:"option",set_cover_position:"position",set_temperature:"temperature",set_hvac_mode:"hvac_mode",turn_on:"brightness"};
-const eName=u=>{const e=ents[u];if(!e)return u;const d=devs[e.device];return(d&&(d.name||d.model)||e.device)+" · "+(e.name||e.key.replace(/_/g," "))};
+// Device labels told apart: identical devices (two TS011F plugs) get the end of their IEEE address.
+function dLabel(id){const d=devs[id];if(!d)return id;const n=d.name||d.model||id,same=Object.values(devs).filter(x=>(x.name||x.model||x.id)==n).length;
+ return same>1?n+" ("+(d.ieee||d.src_id||d.id).toString().slice(-4)+")":n}
+const enName=e=>(e.name||e.key.replace(/_/g," "))+(Object.values(ents).some(x=>x!==e&&x.device==e.device&&x.key==e.key&&!x.orphaned)?" (ep "+e.ep+")":"");
+const eName=u=>{const e=ents[u];if(!e)return u;return dLabel(e.device)+" · "+enName(e)};
 const num=v=>v!==""&&!isNaN(v)?+v:v=="true"?true:v=="false"?false:v;
-function auEnts(f){return Object.values(ents).filter(e=>!e.orphaned&&f(e)).map(e=>[e.uid,eName(e.uid)]).sort((a,b)=>a[1]<b[1]?-1:1)}
+// Device first, then its entities or events (device-support 14.8 form).
+const bySort=(a,b)=>a[1]<b[1]?-1:1;
+function auPick(dv,ev,f){const ok=Object.values(ents).filter(e=>!e.orphaned&&f(e));
+ gpOpts(dv,[...new Set(ok.map(e=>e.device))].map(d=>[d,dLabel(d)]).sort(bySort));
+ const d=V(dv);gpOpts(ev,ok.filter(e=>e.device==d).map(e=>[e.uid,enName(e)]).sort(bySort))}
 function auForm(){
  const t=V("att");
- gpOpts("atu",t=="availability"?Object.values(devs).map(d=>[d.id,d.name||d.model||d.id]):auEnts(e=>t=="event"?e.platform=="event":e.platform!="event"&&e.platform!="button"));
- $("#atu").classList.toggle("hide",t=="time"||t=="start");$("#ato").classList.toggle("hide",t!="state");$("#atv").classList.toggle("hide",t=="start");
+ if(t=="availability")gpOpts("atu",Object.keys(devs).map(d=>[d,dLabel(d)]).sort(bySort));
+ else auPick("atd","atu",e=>t=="event"?e.platform=="event":e.platform!="event"&&e.platform!="button");
+ $("#atd").classList.toggle("hide",t=="time"||t=="start"||t=="availability");$("#atu").classList.toggle("hide",t=="time"||t=="start");$("#ato").classList.toggle("hide",t!="state");$("#atv").classList.toggle("hide",t=="start");
  $("#atv").placeholder=t=="time"?"07:30 or cron":t=="event"?"event type":t=="availability"?"unavailable":"value";
- const c=V("act");gpOpts("acu",auEnts(e=>e.platform!="event"&&e.platform!="button"));$("#acu").classList.toggle("hide",c!="state");$("#aco").classList.toggle("hide",c!="state");$("#acv").classList.toggle("hide",!c);$("#acv").placeholder=c=="time"?"22:00-06:00":"value";
- const n=V("aat")=="notify";gpOpts("aau",auEnts(e=>CMDS[e.platform]));const p=(ents[V("aau")]||{}).platform;
+ const c=V("act");auPick("acd","acu",e=>e.platform!="event"&&e.platform!="button");$("#acd").classList.toggle("hide",c!="state");$("#acu").classList.toggle("hide",c!="state");$("#aco").classList.toggle("hide",c!="state");$("#acv").classList.toggle("hide",!c);$("#acv").placeholder=c=="time"?"22:00-06:00":"value";
+ const n=V("aat")=="notify";auPick("aaD","aau",e=>CMDS[e.platform]);const p=(ents[V("aau")]||{}).platform;
  gpOpts("aac",(CMDS[p]||"").split(" ").map(x=>[x,x]));gpOpts("aa2",[["","…"],...(CMDS[p]||"").split(" ").map(x=>[x,x])]);
- for(const i of["aau","aac","aad","aa2"])$("#"+i).parentElement.tagName=="LABEL"?$("#"+i).parentElement.classList.toggle("hide",n):$("#"+i).classList.toggle("hide",n);
+ for(const i of["aaD","aau","aac","aad","aa2"])$("#"+i).parentElement.tagName=="LABEL"?$("#"+i).parentElement.classList.toggle("hide",n):$("#"+i).classList.toggle("hide",n);
  $("#aav").placeholder=n?"message":PK[V("aac")]||"";
 }
 function auBuild(){
@@ -832,7 +847,7 @@ function auTr(){call("automations/traces",{limit:15}).then(ts=>{const ul=$("#aur
  for(const t of ts)ul.append(el("li",{onclick:()=>{const p=$("#aurd");p.textContent=JSON.stringify(t,null,1);p.classList.remove("hide")}},el("span",{class:"n"},(au.rules[t.automation]||{}).name||t.automation," ",el("span",{class:"mut"},t.trigger.type+(t.count>1?" ×"+t.count:""))),el("span",{class:"badge "+(t.result=="done"?"ok":/running|conditions/.test(t.result)?"":"bad")},t.result),el("span",{class:"mut"},ago(t.time))))}).catch(()=>{})}
 onTab.auto=()=>{if(!authed||!hub.automations)return auRender();call("automations/list").then(l=>{au.time_synced=l.time_synced;au.local_time=l.local_time;au.rules={};for(const r of l.rules)au.rules[r.id]=r;auRender();auForm();if(!$("#auj").value)auEdit(null)}).catch(()=>{});auTr()};
 function auEv(e){const r=e.automation;if(e.topic=="automation_removed")delete au.rules[r];else if(r&&r.id)au.rules[r.id]=r;else if(e.topic=="automation_run"&&au.rules[r])Object.assign(au.rules[r],{last_result:e.result,last_run:e.time});if($("#aul").offsetParent){auRender();if(e.topic=="automation_run")auTr()}}
-for(const i of["att","act","aat","aau","aac"])$("#"+i).onchange=()=>{auForm();auBuild()};
+for(const i of["att","atd","act","acd","aat","aaD","aau","aac"])$("#"+i).onchange=()=>{auForm();auBuild()};
 for(const i of["anm","amd","atu","ato","atv","acu","aco","acv","aav","aad","aa2"])$("#"+i).onchange=auBuild;
 const auSrc=()=>{try{return JSON.parse(V("auj"))}catch(x){toast("JSON: "+x.message);throw x}};
 $("#aus").onclick=()=>{const r=auSrc();act(auId?"automations/update":"automations/create",auId?{automation:auId,rule:r}:{rule:r}).then(x=>{au.rules[x.id]=x;auEdit(x.id);auRender();$("#aum").textContent="saved"}).catch(()=>{})};
