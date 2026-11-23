@@ -501,6 +501,7 @@ impl D<'_, '_, '_> {
                 53 => set(&mut c.stack_version, self.range()?),
                 54 => set(&mut c.hw_version, self.range()?),
                 55 => set(&mut c.sw_build, self.name_match(false)?),
+                190 => set(&mut c.date_code, self.name_match(false)?),
                 56 => {
                     let mut eps = self.keys()?;
                     while let Some(ep) = self.key(&mut eps, "endpoints")? {
@@ -1708,6 +1709,9 @@ impl E<'_> {
         }
         if let Some(n) = &c.sw_build {
             self.name_match(m.put(55), n, false);
+        }
+        if let Some(n) = &c.date_code {
+            self.name_match(m.put(190), n, false);
         }
         if !c.endpoints.is_empty() {
             let w = m.put(56);

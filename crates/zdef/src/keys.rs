@@ -92,12 +92,16 @@ table!(SUB, sub_key, sub_name, {
     187 => "hue",
     188 => "saturation",
     189 => "command",
+    190 => "date_code",
 });
 
 /// Named optional extensions of the top-level map (source key `x-<name>`).
 pub const TOP_EXT: &[(u16, &str)] = &[(64, "x-partial")];
 /// Named optional extensions of a match clause.
-pub const CLAUSE_EXT: &[(u16, &str)] = &[(64, "x-priority")];
+/// `x-white-label: true`: the clause only lists white-label manufacturer
+/// names (spec 8.4) and scores as if it had none (zhc: white labels rename
+/// a definition, they do not select it).
+pub const CLAUSE_EXT: &[(u16, &str)] = &[(64, "x-priority"), (65, "x-white-label")];
 
 /// Part names usable as keys of `parts` (a subset of [`SUB`]).
 pub const PART_NAMES: &[&str] = &[

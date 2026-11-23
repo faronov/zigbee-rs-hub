@@ -254,6 +254,9 @@ pub mod score {
     pub const GP_WEAK: u16 = 100;
     pub const EXTRA: u16 = 10;
     pub const EXTRA_MAX: u16 = 50;
+    /// Tie-break penalty, below one extra constraint (a model ID equal only
+    /// after normalization; endpoints not exactly the device's).
+    pub const TIE: u16 = 1;
 }
 
 fn level(m: &Option<NameMatch>) -> u8 {
@@ -306,6 +309,12 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
                 }
                 extra += 1;
             }
+            if let Some(m) = &c.date_code {
+                if !names_match(m, fp.date_code.as_deref()) {
+                    return None;
+                }
+                extra += 1;
+            }
             if let Some(t) = c.logical_type {
                 if fp.logical_type != Some(t.code()) {
                     return None;
@@ -326,7 +335,17 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
                     }
                 }
             }
-            let base = match (level(&c.manufacturer), level(&c.model)) {
+            // CBOR `true` under `x-white-label` (keys::CLAUSE_EXT).
+            let white_label_only = c
+                .ext
+                .iter()
+                .any(|(k, v)| *k == 65 && v.as_slice() == [0xF5]);
+            let mfr_level = if white_label_only {
+                0
+            } else {
+                level(&c.manufacturer)
+            };
+            let base = match (mfr_level, level(&c.model)) {
                 (2, 2) => score::NAMES_EXACT,
                 (1, 2) | (2, 1) => score::MODEL_EXACT_MFR_PREFIX,
                 (0, 2) => score::MODEL_EXACT,
@@ -345,7 +364,30 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
             if !c.endpoints.is_empty() && base != score::FINGERPRINT {
                 extra += 1;
             }
-            Some(base + (extra * score::EXTRA).min(score::EXTRA_MAX))
+            // Ties (zhc semantics): one point less for a model ID equal only
+            // after normalization, and for endpoints that are not exactly
+            // the device's (zhc compares the endpoint list as a whole).
+            let mut tie = 0;
+            if let Some(v) = fp.model_id.as_deref() {
+                let raw = |s: &str| s.trim_end_matches('\0') == v.trim_end_matches('\0');
+                let normalized_only = match &c.model {
+                    Some(NameMatch::Exact(s)) => !raw(s),
+                    Some(NameMatch::Any(l)) => !l.iter().any(|s| raw(s)),
+                    _ => false,
+                };
+                if normalized_only {
+                    tie += score::TIE;
+                }
+            }
+            let exact_endpoints = c.endpoints.len() == fp.endpoints.len()
+                && fp
+                    .endpoints
+                    .iter()
+                    .all(|e| c.endpoints.iter().any(|(ep, _)| *ep == e.ep));
+            if !c.endpoints.is_empty() && !exact_endpoints {
+                tie += score::TIE;
+            }
+            Some(base + (extra * score::EXTRA).min(score::EXTRA_MAX) - tie)
         }
         Identity::Gp(g) => {
             let gm = c.gp.as_ref()?;
@@ -624,6 +666,7 @@ pub fn clause_keys(c: &MatchClause) -> Result<Vec<(IndexKey<'_>, u8)>, NotIndexa
         || c.stack_version.is_some()
         || c.hw_version.is_some()
         || c.sw_build.is_some()
+        || c.date_code.is_some()
         || c.power.is_some()
         || !c.endpoints.is_empty();
     let rf = if extra { key_flags::RECHECK } else { 0 };

@@ -210,6 +210,8 @@ pub struct MatchClause {
     pub stack_version: Option<VersionRange>,
     pub hw_version: Option<VersionRange>,
     pub sw_build: Option<NameMatch>,
+    /// Basic DateCode (zhc fingerprint `dateCode`).
+    pub date_code: Option<NameMatch>,
     pub power: Option<Power>,
     pub logical_type: Option<LogicalType>,
     pub endpoints: Vec<(u8, EpMatch)>,

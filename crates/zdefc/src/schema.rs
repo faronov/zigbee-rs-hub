@@ -296,9 +296,17 @@ pub fn schema() -> Node {
                     obj(vec![("prefix", ty("string"))], &["prefix"]),
                 ]),
             ),
+            (
+                "date_code",
+                one_of(vec![
+                    ty("string"),
+                    obj(vec![("prefix", ty("string"))], &["prefix"]),
+                ]),
+            ),
             ("power", enum_of(&["mains", "battery"])),
             ("logical_type", enum_all!(zdef::enums::LogicalType)),
             ("x-priority", ty("integer")),
+            ("x-white-label", ty("boolean")),
             (
                 "endpoints",
                 int_keyed(obj(

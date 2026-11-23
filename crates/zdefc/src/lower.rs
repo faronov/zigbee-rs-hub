@@ -337,11 +337,13 @@ impl L {
                 "stack_version",
                 "hw_version",
                 "sw_build",
+                "date_code",
                 "power",
                 "logical_type",
                 "endpoints",
                 "gp",
                 "x-priority",
+                "x-white-label",
             ],
         )?;
         let mut c = MatchClause::default();
@@ -363,6 +365,12 @@ impl L {
                     c.sw_build = self.name_match(v, &p);
                     if matches!(c.sw_build, Some(NameMatch::Any(_))) {
                         self.e(v, &p, "sw_build is a string or {prefix}");
+                    }
+                }
+                "date_code" => {
+                    c.date_code = self.name_match(v, &p);
+                    if matches!(c.date_code, Some(NameMatch::Any(_))) {
+                        self.e(v, &p, "date_code is a string or {prefix}");
                     }
                 }
                 "power" => {

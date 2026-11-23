@@ -121,6 +121,9 @@ impl R<'_> {
         if let Some(n) = &c.sw_build {
             e.push(("sw_build", self.name_match(n)));
         }
+        if let Some(n) = &c.date_code {
+            e.push(("date_code", self.name_match(n)));
+        }
         if let Some(p) = c.power {
             e.push(("power", s(p.as_str())));
         }

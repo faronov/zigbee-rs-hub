@@ -228,6 +228,10 @@ pub fn compute_requires(d: &Definition) -> Vec<u16> {
     if d.gp.is_some() || d.match_.iter().any(|c| c.gp.is_some()) {
         add(&mut f, Feature::Gp as u16);
     }
+    // Hubs before it would ignore no clause field: they skip the definition.
+    if d.match_.iter().any(|c| c.date_code.is_some()) {
+        add(&mut f, Feature::MatchDateCode as u16);
+    }
     for t in &d.templates {
         add(&mut f, t.name.feature());
     }

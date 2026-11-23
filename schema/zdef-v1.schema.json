@@ -76,6 +76,23 @@
               }
             ]
           },
+          "date_code": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "prefix": {
+                    "type": "string"
+                  }
+                },
+                "required": ["prefix"]
+              }
+            ]
+          },
           "power": {
             "enum": ["mains", "battery"]
           },
@@ -84,6 +101,9 @@
           },
           "x-priority": {
             "type": "integer"
+          },
+          "x-white-label": {
+            "type": "boolean"
           },
           "endpoints": {
             "type": "object",
@@ -243,6 +263,7 @@
           "codec.ascii",
           "codec.utf16be_hex",
           "codec.bitmap_flags",
+          "match.date_code",
           "template.hue_light",
           "template.lumi",
           "template.tuya",

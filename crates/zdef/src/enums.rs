@@ -490,6 +490,7 @@ str_enum!(
         CodecTuyaScheduleWeek = 6 => "codec.tuya_schedule_week", CodecBcdTime = 7 => "codec.bcd_time",
         CodecHhmm = 8 => "codec.hhmm", CodecAscii = 9 => "codec.ascii",
         CodecUtf16beHex = 10 => "codec.utf16be_hex", CodecBitmapFlags = 11 => "codec.bitmap_flags",
+        MatchDateCode = 12 => "match.date_code",
         TemplateHueLight = 20 => "template.hue_light", TemplateLumi = 21 => "template.lumi",
         TemplateTuya = 22 => "template.tuya", TemplateTuyaMeteringZeroDebounce = 23 => "template.tuya_metering_zero_debounce",
         Wasm = 60 => "wasm",
@@ -505,7 +506,7 @@ impl HubFeatures {
     pub const fn v1() -> Self {
         let mut bits = 0u128;
         let mut i = 1;
-        while i <= 11 {
+        while i <= 12 {
             bits |= 1 << i;
             i += 1;
         }

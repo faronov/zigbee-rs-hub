@@ -23,6 +23,7 @@ pub const HUB_FEATURES: &[&str] = &[
     "codec.ascii",
     "codec.utf16be_hex",
     "codec.bitmap_flags",
+    "match.date_code",
 ];
 
 /// A source of definitions (bank + fetched cache, or user uploads). The
