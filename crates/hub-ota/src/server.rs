@@ -11,12 +11,20 @@
 //! automatically inside the schedule window (`auto`). Every other Query
 //! Next Image is answered NO_IMAGE_AVAILABLE, but the image is recorded as
 //! available. Block requests carry the whole image identity and offset, so
-//! a download continues after a hub restart from the persisted job.
+//! a download continues after a hub restart from the persisted job. `off`
+//! approves nothing: `ota/start` is refused and a running job ends
+//! `aborted`. Upgrade End without an approving job (aborted, `off`, never
+//! started) gets Default Response ABORT, not the go-ahead.
 //!
 //! Pacing: block responses leave at most `blocks_per_s` per second over
 //! all devices and not faster than `min_block_period_ms` per device; a
 //! response that would wait longer than [`MAX_HOLD_MS`] becomes
-//! WAIT_FOR_DATA. At most `max_concurrent` devices download at once; others
+//! WAIT_FOR_DATA. A device has at most one block response queued: a new
+//! request supersedes it. An Image Page Request is answered one block at a
+//! time as each falls due ([`MAX_PAGE_BLOCKS`] at most, spaced by the
+//! request's ResponseSpacing and at least `min_block_period_ms`), so a page
+//! holds no buffers and takes the shared pacing slots in turn with the
+//! other devices. At most `max_concurrent` devices download at once; others
 //! are told NO_IMAGE_AVAILABLE and notified when a slot frees.
 
 use std::collections::BTreeMap;
@@ -94,6 +102,12 @@ pub const MAX_HOLD_MS: u64 = 3_000;
 pub const STREAM_WAIT_S: u32 = 1;
 /// Largest page served by an Image Page Request.
 pub const MAX_PAGE: u32 = 4096;
+/// Most block responses one Image Page Request gets (a page of tiny blocks
+/// is cut short; the device asks again for the rest).
+pub const MAX_PAGE_BLOCKS: u32 = 128;
+/// A page whose streamed data is not here for this long is dropped (the
+/// device asks again).
+pub const PAGE_WAIT_MS: u64 = 2_000;
 
 /// Default OTA image index the clients (web UI, Home Assistant) fetch:
 /// Koenkk/zigbee-OTA (CORS open on raw.githubusercontent.com).
@@ -102,6 +116,9 @@ pub const DEFAULT_INDEX: &str =
 
 /// Seconds from 1970 to the Zigbee epoch (2000-01-01).
 const ZIGBEE_EPOCH: u64 = 946_684_800;
+
+/// The error of a job ended by the `off` policy.
+const POLICY_OFF: &str = "the device's OTA policy is off";
 
 /// When a device may be offered an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +590,28 @@ pub struct Command<'a> {
     pub default_rsp: bool,
 }
 
+/// An Image Page Request being answered: its blocks are read when they
+/// fall due, none is made ahead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Page {
+    ep: u8,
+    tsn: u8,
+    ident: Ident,
+    id: u32,
+    /// The request: offset, page size, MaxDataSize (repeats are ignored).
+    req: (u32, u16, u8),
+    /// Next offset and the end of what is served.
+    next: u32,
+    end: u32,
+    block: usize,
+    /// ResponseSpacing, at least the MinimumBlockPeriod, ms.
+    spacing: u64,
+    /// When the next block may leave.
+    at: Millis,
+    /// Since when a streamed block is awaited.
+    waiting: Option<Millis>,
+}
+
 /// API errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiErr {
@@ -600,6 +639,8 @@ pub struct Server {
     pub asdu_max: usize,
     /// Paced actions.
     due: Vec<(Millis, Action)>,
+    /// Image Page Requests being answered, per device.
+    pages: BTreeMap<String, Page>,
     /// When the last block response leaves (global pacing).
     next_slot: Millis,
     last_tick: Millis,
@@ -642,6 +683,35 @@ impl Server {
             .get(id)
             .and_then(|d| d.policy)
             .unwrap_or(self.settings.policy)
+    }
+
+    /// Policy `off`: the device's running job ends `aborted`. `None`: the
+    /// policy is not `off`; else whether a job ended.
+    fn off(&mut self, id: &str, now: Millis) -> Option<bool> {
+        if self.policy_of(id) != Policy::Off {
+            return None;
+        }
+        let job = self
+            .devices
+            .get_mut(id)
+            .and_then(|d| d.job.as_mut())
+            .filter(|j| j.state.active());
+        let ended = job.is_some();
+        if let Some(j) = job {
+            j.state = JobState::Aborted;
+            j.error = Some(POLICY_OFF.into());
+            j.updated = now;
+            self.drop_queued(id);
+        }
+        Some(ended)
+    }
+
+    /// Drops the device's queued block responses and its page.
+    fn drop_queued(&mut self, id: &str) {
+        self.due.retain(
+            |(_, a)| !matches!(a, Action::Send { device, cmd: cmd::IMAGE_BLOCK_RSP, .. } if device == id),
+        );
+        self.pages.remove(id);
     }
 
     /// Minutes until the window opens (0 = open), `None` = clock unknown.
@@ -828,6 +898,11 @@ impl Server {
             }
             return;
         }
+        if self.off(&dev.id, now).is_some() {
+            out.push(self.query_rsp(dev, c, None));
+            self.changed(out, &dev.id, true);
+            return;
+        }
         let st = self.devices[&dev.id].clone();
         let policy = self.policy_of(&dev.id);
         let job = st.job.clone().filter(|j| {
@@ -959,7 +1034,7 @@ impl Server {
             out.push(wait_for_data(dev, c, now, 0, want));
             return;
         }
-        let rsp = match self.block_rsp(dev, c.ep, c.tsn, ident, id, offset, n, images, now) {
+        let rsp = match self.block_rsp(&dev.id, c.ep, c.tsn, ident, id, offset, n, images, now) {
             Ok(rsp) => rsp,
             // Streamed and not here yet: the client was asked for it.
             Err(Fetch::Wait) => {
@@ -978,6 +1053,8 @@ impl Server {
             return;
         }
         self.progress(&dev.id, offset + n as u32, now, out);
+        // A repeated or newer request supersedes what is still queued.
+        self.drop_queued(&dev.id);
         if at > now {
             self.due.push((at, rsp));
         } else {
@@ -1014,43 +1091,137 @@ impl Server {
             return;
         };
         let n = usize::from(max).min(self.block_cap());
-        if n == 0 || offset >= size {
+        if n == 0 || page == 0 || offset >= size {
             if c.default_rsp {
                 out.push(default_rsp(dev, c, status::MALFORMED_COMMAND));
             }
             return;
         }
+        // The same request again while its page is being sent (a client's
+        // retry): the page goes on.
+        if self
+            .pages
+            .get(&dev.id)
+            .is_some_and(|pg| pg.ident == ident && pg.req == (offset, page, max))
+        {
+            return;
+        }
+        let want = self.settings.min_block_period_ms;
+        let auto = self.devices[&dev.id]
+            .job
+            .as_ref()
+            .is_some_and(|j| !j.manual);
+        if auto && let Some(w) = self.window_wait(now).filter(|w| *w > 0) {
+            self.drop_queued(&dev.id);
+            out.push(wait_for_data(dev, c, now, w * 60, want));
+            return;
+        }
         let end = offset
             .saturating_add(u32::from(page).min(MAX_PAGE))
-            .min(size);
-        let mut at = offset;
-        let mut t = now;
-        while at < end {
-            let len = (n as u32).min(end - at) as usize;
-            let rsp = match self.block_rsp(dev, c.ep, c.tsn, ident, id, at, len, images, now) {
-                Ok(rsp) => rsp,
-                // The rest of a streamed page is not here yet: the device
-                // asks again for what it misses.
-                Err(Fetch::Wait) if at == offset => {
-                    out.push(wait_for_data(
-                        dev,
-                        c,
-                        now,
-                        STREAM_WAIT_S,
-                        self.settings.min_block_period_ms,
-                    ));
-                    return;
-                }
-                Err(_) => break,
-            };
-            t = self.pace(&dev.id, t).max(t);
-            if at > offset {
-                t += u64::from(spacing);
+            .min(size)
+            .min(offset.saturating_add(n as u32 * MAX_PAGE_BLOCKS));
+        // A new page supersedes the device's queued responses.
+        self.drop_queued(&dev.id);
+        // The first block like a block request's; the rest as they fall due.
+        let len = (n as u32).min(end - offset) as usize;
+        let rsp = match self.block_rsp(&dev.id, c.ep, c.tsn, ident, id, offset, len, images, now) {
+            Ok(rsp) => rsp,
+            Err(Fetch::Wait) => {
+                out.push(wait_for_data(dev, c, now, STREAM_WAIT_S, want));
+                return;
             }
-            self.due.push((t, rsp));
-            at += len as u32;
+            Err(_) => {
+                out.push(block_status(dev, c, status::ABORT));
+                return;
+            }
+        };
+        let at = self.pace(&dev.id, now);
+        if at.saturating_sub(now) > MAX_HOLD_MS {
+            let s = (at - now).div_ceil(1000) as u32;
+            out.push(wait_for_data(dev, c, now, s, want));
+            return;
         }
-        self.progress(&dev.id, at, now, out);
+        self.progress(&dev.id, offset + len as u32, now, out);
+        if at > now {
+            self.due.push((at, rsp));
+        } else {
+            out.push(rsp);
+        }
+        let next = offset + len as u32;
+        if next < end {
+            let spacing = u64::from(spacing).max(u64::from(want));
+            self.pages.insert(
+                dev.id.clone(),
+                Page {
+                    ep: c.ep,
+                    tsn: c.tsn,
+                    ident,
+                    id,
+                    req: (offset, page, max),
+                    next,
+                    end,
+                    block: n,
+                    spacing,
+                    at: at + spacing,
+                    waiting: None,
+                },
+            );
+        }
+    }
+
+    /// The next blocks of the pages being sent, as they fall due: each
+    /// takes the next pacing slot (shared with the other devices), and the
+    /// one after it is read once this one has left.
+    fn pump_pages(&mut self, images: &mut dyn Images, now: Millis, out: &mut Vec<Action>) {
+        let due: Vec<String> = self
+            .pages
+            .iter()
+            .filter(|(_, pg)| pg.at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            let Some(mut pg) = self.pages.remove(&id) else {
+                continue;
+            };
+            let downloading = self
+                .devices
+                .get(&id)
+                .and_then(|d| d.job.as_ref())
+                .is_some_and(|j| j.state == JobState::Downloading && j.target == Some(pg.ident));
+            if !downloading {
+                continue;
+            }
+            let len = (pg.block as u32).min(pg.end - pg.next) as usize;
+            match self.block_rsp(
+                &id, pg.ep, pg.tsn, pg.ident, pg.id, pg.next, len, images, now,
+            ) {
+                Ok(rsp) => {
+                    let at = self.pace(&id, now);
+                    if at > now {
+                        self.due.push((at, rsp));
+                    } else {
+                        out.push(rsp);
+                    }
+                    pg.next += len as u32;
+                    pg.waiting = None;
+                    self.progress(&id, pg.next, now, out);
+                    if pg.next < pg.end {
+                        pg.at = at + pg.spacing;
+                        self.pages.insert(id, pg);
+                    }
+                }
+                // The stream was asked for it: try again shortly, then
+                // leave the rest to the device's next request.
+                Err(Fetch::Wait) => {
+                    let since = *pg.waiting.get_or_insert(now);
+                    if now.saturating_sub(since) < PAGE_WAIT_MS {
+                        pg.at = now + 100;
+                        self.pages.insert(id, pg);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     /// The image a block or page request may get (ID, size), creating or
@@ -1063,6 +1234,12 @@ impl Server {
         now: Millis,
         out: &mut Vec<Action>,
     ) -> Option<(u32, u32)> {
+        if let Some(ended) = self.off(&dev.id, now) {
+            if ended {
+                self.changed(out, &dev.id, true);
+            }
+            return None;
+        }
         let img = images.find(ident)?;
         let id = img.id;
         let size = img.size;
@@ -1130,7 +1307,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     fn block_rsp(
         &self,
-        dev: &Device,
+        device: &str,
         ep: u8,
         tsn: u8,
         ident: Ident,
@@ -1154,7 +1331,7 @@ impl Server {
             f => return Err(f),
         }
         Ok(Action::Send {
-            device: dev.id.clone(),
+            device: device.to_string(),
             ep,
             tsn: Some(tsn),
             cmd: cmd::IMAGE_BLOCK_RSP,
@@ -1222,6 +1399,7 @@ impl Server {
                 });
                 j.updated = now;
             }
+            self.drop_queued(&dev.id);
             if c.default_rsp {
                 out.push(default_rsp(dev, c, status::SUCCESS));
             }
@@ -1229,16 +1407,36 @@ impl Server {
             self.notify_queued(now, out);
             return;
         }
-        if !known && job.is_none() {
-            if c.default_rsp {
-                out.push(default_rsp(dev, c, status::NOT_AUTHORIZED));
+        // The go-ahead needs a job that approves this image: a running one,
+        // or `auto` inside the window. An aborted job, the `off` policy or
+        // no approval: Default Response ABORT, the cluster's "do not
+        // upgrade" (sent even when the client disabled default responses:
+        // an error status).
+        let running = job.is_some();
+        let aborted = d
+            .job
+            .as_ref()
+            .is_some_and(|j| j.target == Some(ident) && j.state == JobState::Aborted);
+        let policy = self.policy_of(&dev.id);
+        let auto = policy == Policy::Auto && known && self.window_wait(now) == Some(0);
+        if let Some(ended) = self.off(&dev.id, now) {
+            out.push(default_rsp(dev, c, status::ABORT));
+            if ended {
+                self.changed(out, &dev.id, true);
+                self.notify_queued(now, out);
             }
             return;
         }
-        let j = d
-            .job
-            .get_or_insert_with(|| Job::new(Some(ident), 0, false, false, now));
-        j.target = Some(ident);
+        if aborted || !(running || auto) {
+            out.push(default_rsp(dev, c, status::ABORT));
+            return;
+        }
+        self.drop_queued(&dev.id);
+        let d = self.devices.get_mut(&dev.id).unwrap();
+        if !running {
+            d.job = Some(Job::new(Some(ident), 0, false, false, now));
+        }
+        let j = d.job.as_mut().unwrap();
         j.offset = j.size;
         j.state = JobState::Installing;
         j.installing_since = now;
@@ -1339,6 +1537,10 @@ impl Server {
                 "the device has no OTA client (cluster 0x0019)",
             )
         })?;
+        if self.policy_of(&dev.id) == Policy::Off {
+            return Err(api_err("invalid_value", POLICY_OFF));
+        }
+        let st = self.devices.get_mut(&dev.id).unwrap();
         if st
             .job
             .as_ref()
@@ -1415,6 +1617,7 @@ impl Server {
         j.state = JobState::Aborted;
         j.error = Some("aborted".into());
         j.updated = now;
+        self.pages.remove(id);
         self.due
             .retain(|(_, a)| !matches!(a, Action::Send { device, .. } if device == id));
         let mut out = Vec::new();
@@ -1447,6 +1650,7 @@ impl Server {
             })
             .collect();
         for id in &ids {
+            self.pages.remove(id);
             self.due
                 .retain(|(_, a)| !matches!(a, Action::Send { device, .. } if device == id));
             self.changed(&mut out, id, true);
@@ -1479,18 +1683,26 @@ impl Server {
         ])
     }
 
-    /// The next paced action's time.
-    pub fn next_due(&self) -> Option<Millis> {
-        self.due.iter().map(|(t, _)| *t).min()
+    /// Responses made and queued ahead, and pages being sent (tests).
+    #[cfg(all(test, feature = "store"))]
+    pub(crate) fn queued(&self) -> (usize, usize) {
+        (self.due.len(), self.pages.len())
     }
 
-    /// Paced actions due, and once a second the housekeeping: stalled
-    /// downloads, queued and waiting devices, version reads of installing
-    /// devices, the `auto` policy.
+    /// The next paced action's time (a queued response or a page's next
+    /// block).
+    pub fn next_due(&self) -> Option<Millis> {
+        let pages = self.pages.values().map(|pg| pg.at);
+        self.due.iter().map(|(t, _)| *t).chain(pages).min()
+    }
+
+    /// Paced actions due, the next blocks of pages, and once a second the
+    /// housekeeping: stalled downloads, queued and waiting devices, version
+    /// reads of installing devices, the `off` and `auto` policies.
     /// `ieee` gives a device's IEEE (`None`: not a Zigbee device any more).
     pub fn poll(
         &mut self,
-        images: &dyn Images,
+        images: &mut dyn Images,
         ieee: &dyn Fn(&str) -> Option<u64>,
         now: Millis,
     ) -> Vec<Action> {
@@ -1502,17 +1714,30 @@ impl Server {
             self.due = later;
             out.extend(ready.into_iter().map(|(_, a)| a));
         }
+        if self.pages.values().any(|pg| pg.at <= now) {
+            self.pump_pages(images, now, &mut out);
+        }
         if now.saturating_sub(self.last_tick) < 1000 {
             return out;
         }
         self.last_tick = now;
         let stall = u64::from(self.settings.stall_s) * 1000;
         let window_open = self.window_wait(now) == Some(0);
+        let global = self.settings.policy;
         let mut changed = Vec::new();
+        let mut ended = Vec::new();
         for (id, d) in self.devices.iter_mut() {
             let Some(ep) = d.ep else { continue };
+            let off = d.policy.unwrap_or(global) == Policy::Off;
             let Some(j) = d.job.as_mut() else { continue };
             match j.state {
+                // The policy was set to `off` while the job ran.
+                s if off && s.active() => {
+                    j.state = JobState::Aborted;
+                    j.error = Some(POLICY_OFF.into());
+                    j.updated = now;
+                    ended.push(id.clone());
+                }
                 JobState::Downloading
                     if now.saturating_sub(j.updated) >= stall && j.error.is_none() =>
                 {
@@ -1551,7 +1776,10 @@ impl Server {
                 _ => {}
             }
         }
-        for id in changed {
+        for id in &ended {
+            self.drop_queued(id);
+        }
+        for id in changed.into_iter().chain(ended) {
             self.changed(&mut out, &id, true);
         }
         self.notify_queued(now, &mut out);

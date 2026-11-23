@@ -341,8 +341,8 @@ impl Ota {
         }
         let out = {
             let e: &Engine<T> = engine;
-            let v = view!(self);
-            self.server.poll(&v, &|id| e.device(id)?.ieee(), now)
+            let mut src = sources!(self);
+            self.server.poll(&mut src, &|id| e.device(id)?.ieee(), now)
         };
         self.exec(engine, out, now);
         // CurrentFileVersion answers land in the engine's attribute cache.

@@ -130,8 +130,8 @@ fn a_streamed_download_holds_a_fixed_window() {
             started = true;
         }
         {
-            let src = Sources::new(&mut streams);
-            out.extend(srv.poll(&src, &|_| Some(1), now));
+            let mut src = Sources::new(&mut streams);
+            out.extend(srv.poll(&mut src, &|_| Some(1), now));
         }
         for a in out {
             if let Action::Send { cmd, payload, .. } = a {

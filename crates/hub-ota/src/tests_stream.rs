@@ -134,8 +134,7 @@ impl Net {
                 store: None,
                 streams: &mut self.streams,
             };
-            let out = self.srv.poll(&src, &|_| Some(1), self.now);
-            let _ = &mut src;
+            let out = self.srv.poll(&mut src, &|_| Some(1), self.now);
             self.device_gets(out);
             let mut f = std::mem::take(&mut self.inflight);
             f.extend(self.client.tick(self.now));
@@ -248,4 +247,31 @@ fn without_a_client_the_device_is_aborted_after_the_grace_time() {
     assert!(n.client.aborted, "ABORT once the stream is gone");
     assert_eq!(n.state(), "aborted", "the job ends with the stream");
     assert_eq!(n.client.version, 0x0001_0000);
+}
+
+#[test]
+fn a_streamed_image_is_downloaded_in_pages() {
+    let mut n = Net::new();
+    n.client.page_size = 1024;
+    let id = n.offer();
+    let q = n.client.query();
+    n.hub_gets(vec![q]);
+    let src = Sources {
+        #[cfg(feature = "store")]
+        store: None,
+        streams: &mut n.streams,
+    };
+    let out = n
+        .srv
+        .start(&n.dev, None, Some(id), false, &src, n.now)
+        .unwrap();
+    n.device_gets(out);
+    n.run(60_000);
+    assert_eq!(n.client.upgrades, 1);
+    assert_eq!(n.state(), "done");
+    // Pages read the stream's window block by block as they fall due.
+    assert_eq!(
+        n.streams.memory(),
+        56 + crate::stream::SLOTS * crate::stream::CHUNK as usize
+    );
 }

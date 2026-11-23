@@ -78,8 +78,8 @@ deleted when the job is done.
 |---|---|
 | Query Next Image Request (0x01) | Records manufacturer code, image type, current file version and hardware version (persisted). Answers SUCCESS with the image when the device is approved (an `ota/start`, or the `auto` policy inside the window) and a download slot is free; otherwise NO_IMAGE_AVAILABLE (0x98) — the newer image is still shown as `available`. A query with the version a job installed completes the job (`done`) |
 | Image Block Request (0x03) | Answers any offset of a stored or streamed image the device's job is for (so a download continues after a hub restart, after a device reset, from any offset the device asks for); WAIT_FOR_DATA (1 s) while a streamed block is fetched from the client; ABORT (0x95) for unknown or aborted images, a stream whose client did not come back, and devices that are not approved. Block = min(the device's MaxDataSize, `block_max` (48), NCP `max_asdu` − 17) |
-| Image Page Request (0x04) | Serves up to 4 KiB as Image Block Responses spaced by the request's ResponseSpacing, through the same pacing |
-| Upgrade End Request (0x06) | SUCCESS: Upgrade End Response with upgrade time 0/0 ("now"; `upgrade_delay_s` > 0 sets a time), job `installing`; the hub then reads CurrentFileVersion (0x0002 of the client) every minute from 30 s on, and the device's next query also confirms; not confirmed within 30 min → `failed`. Other status (INVALID_IMAGE, REQUIRE_MORE_IMAGE, ABORT) → job `failed` with the reason, Default Response SUCCESS |
+| Image Page Request (0x04) | Serves up to 4 KiB, at most 128 blocks, as Image Block Responses spaced by the request's ResponseSpacing (at least `min_block_period_ms`), through the same pacing. Each block is read when it falls due and takes the next shared pacing slot, so a page holds no buffers and other devices keep their turn; the same request repeated while its page runs is ignored, a new page or block request of the device replaces it. A streamed block not here within 2 s ends the page early (the device asks again) |
+| Upgrade End Request (0x06) | SUCCESS from a device whose job for this image runs (or under `auto` inside the window): Upgrade End Response with upgrade time 0/0 ("now"; `upgrade_delay_s` > 0 sets a time), job `installing`; an aborted job, the `off` policy or no approval: Default Response ABORT (sent even if the client disabled default responses), never the go-ahead; the hub then reads CurrentFileVersion (0x0002 of the client) every minute from 30 s on, and the device's next query also confirms; not confirmed within 30 min → `failed`. Other status (INVALID_IMAGE, REQUIRE_MORE_IMAGE, ABORT) → job `failed` with the reason, Default Response SUCCESS |
 | Query Device Specific File (0x08) | NO_IMAGE_AVAILABLE |
 | anything else / manufacturer-specific | Default Response UNSUP_CLUSTER_COMMAND / 0x83 |
 
@@ -94,7 +94,10 @@ deleted when the job is done.
   ZHA). `auto` offers updates inside the schedule window (local time,
   `HH:MM`–`HH:MM`, may wrap midnight) and needs a synchronised clock; an
   automatic download outside the window is told WAIT_FOR_DATA until it
-  opens. `manual` jobs ignore the window.
+  opens. `manual` jobs ignore the window. `off`: never — `ota/start` is
+  refused (`invalid_value`), queries get NO_IMAGE_AVAILABLE, block, page
+  and Upgrade End requests ABORT, and a job running when the policy (the
+  device's or the default) becomes `off` ends `aborted` within a second.
 - **Concurrency**: `max_concurrent` (2) devices download at once; a device
   approved beyond that is `queued`, told NO_IMAGE_AVAILABLE and notified
   when a slot frees. A download without a block request for `stall_s`
@@ -102,7 +105,9 @@ deleted when the job is done.
 - **Pacing**: block responses leave at most `blocks_per_s` (20) per second
   over all devices and per device not faster than `min_block_period_ms`
   (0), told once with WAIT_FOR_DATA's MinimumBlockPeriod; a response that
-  would wait over 3 s becomes WAIT_FOR_DATA. Responses to a sleepy device
+  would wait over 3 s becomes WAIT_FOR_DATA. A device has at most one
+  response queued (a repeated or new request replaces it) and at most one
+  page being sent. Responses to a sleepy device
   go out at once: it fast-polls during the download and the request woke
   the engine's sleepy queue.
 - **Abort** (`ota/abort`): the next block request gets ABORT.

@@ -6,7 +6,9 @@ use std::collections::VecDeque;
 use hub_ncp::store::MemFlash;
 
 use crate::file::build;
-use crate::server::{Action, Command, Device, Millis, Policy, Server, Settings, cmd, status};
+use crate::server::{
+    Action, Command, Device, MAX_PAGE_BLOCKS, Millis, Policy, Server, Settings, cmd, status,
+};
 use crate::sim::SimClient;
 use crate::store::{ImageStore, UploadMeta};
 
@@ -151,7 +153,7 @@ impl Net {
                 .map(|(d, _)| (d.id.clone(), d.ieee))
                 .collect();
             let out = self.srv.poll(
-                &self.store,
+                &mut self.store,
                 &|id| ids.iter().find(|x| x.0 == id).map(|x| x.1),
                 self.now,
             );
@@ -176,6 +178,33 @@ impl Net {
                 }
             }
         }
+    }
+
+    /// A command from client `i`, answered by the server but not delivered.
+    fn send(&mut self, i: usize, c: u8, payload: &[u8], default_rsp: bool) -> Vec<Action> {
+        let d = self.clients[i].0.clone();
+        let out = self.srv.on_command(
+            &d,
+            &Command {
+                ep: 1,
+                tsn: 0x40,
+                cmd: c,
+                payload,
+                default_rsp,
+            },
+            &mut self.store,
+            self.now,
+        );
+        self.log.extend(out.iter().cloned());
+        out
+    }
+
+    /// `ota/start` for client `i`, its Image Notify not delivered.
+    fn approve(&mut self, i: usize) {
+        let d = self.clients[i].0.clone();
+        self.srv
+            .start(&d, Some(1), None, false, &self.store, self.now)
+            .unwrap();
     }
 
     fn job_state(&self, i: usize) -> Option<&'static str> {
@@ -781,4 +810,251 @@ fn settings_round_trip_and_validation() {
         t,
         "failed applies change nothing"
     );
+}
+
+fn ident_payload(first: u8, version: u32) -> Vec<u8> {
+    let mut p = vec![first];
+    p.extend(MFR.to_le_bytes());
+    p.extend(TYPE.to_le_bytes());
+    p.extend(version.to_le_bytes());
+    p
+}
+
+fn page_req(version: u32, offset: u32, max: u8, page: u16, spacing: u16) -> Vec<u8> {
+    let mut p = ident_payload(0, version);
+    p.extend(offset.to_le_bytes());
+    p.push(max);
+    p.extend(page.to_le_bytes());
+    p.extend(spacing.to_le_bytes());
+    p
+}
+
+fn block_req(version: u32, offset: u32, max: u8) -> Vec<u8> {
+    let mut p = ident_payload(0, version);
+    p.extend(offset.to_le_bytes());
+    p.push(max);
+    p
+}
+
+fn sends(out: &[Action], c: u8) -> Vec<&Vec<u8>> {
+    out.iter()
+        .filter_map(|a| match a {
+            Action::Send { cmd, payload, .. } if *cmd == c => Some(payload),
+            _ => None,
+        })
+        .collect()
+}
+
+fn default_rsps(out: &[Action]) -> Vec<u8> {
+    out.iter()
+        .filter_map(|a| match a {
+            Action::DefaultRsp { status, .. } => Some(*status),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn upgrade_end_without_an_approving_job_gets_abort() {
+    const V: u32 = 0x0001_0100;
+    let end = ident_payload(status::SUCCESS, V);
+    // Aborted by the user, the image still stored: no go-ahead, even to a
+    // client that disabled default responses (ABORT is an error status).
+    let mut n = Net::new(fast(), 1);
+    n.upload(&image(V, 4000));
+    n.query(0);
+    n.approve(0);
+    n.send(0, cmd::IMAGE_BLOCK_REQ, &block_req(V, 0, 48), true);
+    assert_eq!(n.job_state(0), Some("downloading"));
+    let d = n.clients[0].0.clone();
+    n.srv.abort(&d.id, n.now).unwrap();
+    let out = n.send(0, cmd::UPGRADE_END_REQ, &end, false);
+    assert_eq!(default_rsps(&out), vec![status::ABORT]);
+    assert!(sends(&out, cmd::UPGRADE_END_RSP).is_empty());
+    assert_eq!(n.job_state(0), Some("aborted"));
+    // Never started (`manual`): ABORT, and no job is made up.
+    let mut n = Net::new(fast(), 1);
+    n.upload(&image(V, 4000));
+    n.query(0);
+    let out = n.send(0, cmd::UPGRADE_END_REQ, &end, true);
+    assert_eq!(default_rsps(&out), vec![status::ABORT]);
+    assert!(sends(&out, cmd::UPGRADE_END_RSP).is_empty());
+    assert_eq!(n.job_state(0), None);
+    // Policy `off` while the job runs: ABORT, the job ends; ota/start is refused.
+    let mut n = Net::new(fast(), 1);
+    n.upload(&image(V, 4000));
+    n.query(0);
+    n.approve(0);
+    n.send(0, cmd::IMAGE_BLOCK_REQ, &block_req(V, 0, 48), true);
+    n.srv.devices.get_mut(&d.id).unwrap().policy = Some(Policy::Off);
+    let out = n.send(0, cmd::UPGRADE_END_REQ, &end, true);
+    assert_eq!(default_rsps(&out), vec![status::ABORT]);
+    assert!(sends(&out, cmd::UPGRADE_END_RSP).is_empty());
+    assert_eq!(n.job_state(0), Some("aborted"));
+    assert_eq!(
+        n.record(0)["job"]["error"],
+        "the device's OTA policy is off"
+    );
+    let e = n
+        .srv
+        .start(&d, Some(1), None, false, &n.store, n.now)
+        .unwrap_err();
+    assert_eq!(e.code, "invalid_value");
+    // ... and its block requests get ABORT.
+    let out = n.send(0, cmd::IMAGE_BLOCK_REQ, &block_req(V, 0, 48), true);
+    assert_eq!(
+        sends(&out, cmd::IMAGE_BLOCK_RSP),
+        vec![&vec![status::ABORT]]
+    );
+    // A running job, and `auto` inside its window, still get the go-ahead.
+    let mut n = Net::new(fast(), 1);
+    n.upload(&image(V, 4000));
+    n.query(0);
+    n.approve(0);
+    n.send(0, cmd::IMAGE_BLOCK_REQ, &block_req(V, 0, 48), true);
+    let out = n.send(0, cmd::UPGRADE_END_REQ, &end, true);
+    assert_eq!(sends(&out, cmd::UPGRADE_END_RSP).len(), 1);
+    assert_eq!(n.job_state(0), Some("installing"));
+    let mut n = Net::new(
+        Settings {
+            policy: Policy::Auto,
+            ..fast()
+        },
+        1,
+    );
+    n.upload(&image(V, 4000));
+    let out = n.send(0, cmd::UPGRADE_END_REQ, &end, true);
+    assert_eq!(sends(&out, cmd::UPGRADE_END_RSP).len(), 1);
+    assert_eq!(n.job_state(0), Some("installing"));
+}
+
+#[test]
+fn setting_the_policy_off_ends_a_running_job() {
+    let mut n = Net::new(fast(), 1);
+    n.upload(&image(0x0001_0100, 4000));
+    n.query(0);
+    n.approve(0);
+    let d = n.clients[0].0.clone();
+    n.srv.devices.get_mut(&d.id).unwrap().policy = Some(Policy::Off);
+    n.run(1_100);
+    assert_eq!(n.job_state(0), Some("aborted"));
+    // Its query is recorded, not answered with an image.
+    n.query(0);
+    assert_eq!(
+        sends(&n.log, cmd::QUERY_NEXT_IMAGE_RSP).last(),
+        Some(&&vec![status::NO_IMAGE_AVAILABLE])
+    );
+}
+
+#[test]
+fn a_hostile_page_request_is_bounded_and_other_devices_keep_their_turn() {
+    const V: u32 = 0x0001_0100;
+    let mut n = Net::new(
+        Settings {
+            blocks_per_s: 20,
+            ..Settings::default()
+        },
+        2,
+    );
+    n.upload(&image(V, 8000));
+    for i in 0..2 {
+        n.query(i);
+    }
+    n.approve(0);
+    // MaxDataSize 1, PageSize 4096, no spacing: one block now, none made
+    // ahead.
+    let req = page_req(V, 0, 1, 4096, 0);
+    let out = n.send(0, cmd::IMAGE_PAGE_REQ, &req, true);
+    let first = sends(&out, cmd::IMAGE_BLOCK_RSP);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].len(), 15, "status, ident, offset, 1 data byte");
+    assert_eq!(n.srv.queued(), (0, 1));
+    // The same request again (a retry) adds nothing.
+    for _ in 0..50 {
+        let out = n.send(0, cmd::IMAGE_PAGE_REQ, &req, true);
+        assert!(sends(&out, cmd::IMAGE_BLOCK_RSP).is_empty());
+    }
+    assert_eq!(n.srv.queued(), (0, 1));
+    // Another device downloads at the same time.
+    let d1 = n.clients[1].0.clone();
+    let out = n
+        .srv
+        .start(&d1, Some(1), None, false, &n.store, n.now)
+        .unwrap();
+    n.deliver(out);
+    let mut t = 0;
+    while n.clients[1].1.upgrades == 0 && t < 60_000 {
+        n.run(100);
+        t += 100;
+        let (due, pages) = n.srv.queued();
+        assert!(due <= 2 && pages <= 1, "{due} queued, {pages} pages");
+    }
+    assert_eq!(n.clients[1].1.upgrades, 1, "starved by the page");
+    // 8000 B in 48-B blocks: 167 of the 20 per second, shared with the page.
+    assert!(t < 20_000, "{t} ms");
+    let to_0 = n
+        .log
+        .iter()
+        .filter(|a| matches!(a, Action::Send { device, cmd: cmd::IMAGE_BLOCK_RSP, .. } if *device == n.clients[0].0.id))
+        .count();
+    assert_eq!(
+        to_0 as u32, MAX_PAGE_BLOCKS,
+        "the page is cut at {MAX_PAGE_BLOCKS} blocks"
+    );
+    assert_eq!(n.srv.queued().1, 0);
+}
+
+#[test]
+fn page_blocks_keep_the_minimum_block_period() {
+    const V: u32 = 0x0001_0100;
+    let mut n = Net::new(
+        Settings {
+            blocks_per_s: 0,
+            min_block_period_ms: 250,
+            ..Settings::default()
+        },
+        1,
+    );
+    n.upload(&image(V, 4000));
+    n.query(0);
+    n.approve(0);
+    let mut times = vec![n.now];
+    let out = n.send(0, cmd::IMAGE_PAGE_REQ, &page_req(V, 0, 48, 480, 20), true);
+    assert_eq!(sends(&out, cmd::IMAGE_BLOCK_RSP).len(), 1);
+    let ids: Vec<(String, u64)> = vec![(n.clients[0].0.id.clone(), 1)];
+    for _ in 0..500 {
+        n.now += 10;
+        let out = n.srv.poll(
+            &mut n.store,
+            &|id| ids.iter().find(|x| x.0 == id).map(|x| x.1),
+            n.now,
+        );
+        for _ in sends(&out, cmd::IMAGE_BLOCK_RSP) {
+            times.push(n.now);
+        }
+    }
+    assert_eq!(times.len(), 10, "480 B in 48-B blocks");
+    assert!(times.windows(2).all(|w| w[1] - w[0] >= 250), "{times:?}");
+    assert_eq!(n.job_state(0), Some("downloading"));
+    assert_eq!(n.record(0)["job"]["offset"], 480);
+}
+
+#[test]
+fn a_repeated_block_request_replaces_the_queued_response() {
+    const V: u32 = 0x0001_0100;
+    let mut n = Net::new(
+        Settings {
+            blocks_per_s: 1,
+            ..Settings::default()
+        },
+        1,
+    );
+    n.upload(&image(V, 4000));
+    n.query(0);
+    n.approve(0);
+    n.send(0, cmd::IMAGE_BLOCK_REQ, &block_req(V, 0, 48), true);
+    for _ in 0..3 {
+        n.send(0, cmd::IMAGE_BLOCK_REQ, &block_req(V, 0, 48), true);
+        assert_eq!(n.srv.queued(), (1, 0));
+    }
 }
