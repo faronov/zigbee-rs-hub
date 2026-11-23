@@ -1011,10 +1011,10 @@ pub enum StrMatch {
 impl StrMatch {
     /// Matches a device string.
     pub fn matches(&self, v: &str) -> bool {
-        let v = v.trim_end_matches(['\0', ' ']);
+        let v = zdef::matching::trim_name(v);
         match self {
-            Self::Exact(s) => s == v,
-            Self::Any(l) => l.iter().any(|s| s == v),
+            Self::Exact(s) => zdef::matching::trim_name(s) == v,
+            Self::Any(l) => l.iter().any(|s| zdef::matching::trim_name(s) == v),
             Self::Prefix(p) => v.starts_with(p.as_str()),
         }
     }
@@ -1094,6 +1094,22 @@ pub struct WhiteLabel {
     pub model: String,
     /// Manufacturer names that select it.
     pub manufacturer: Vec<String>,
+    /// Basic ModelIdentifiers that select it.
+    pub model_id: Vec<String>,
+}
+
+impl WhiteLabel {
+    /// Whether a device with these Basic names is this white label (every
+    /// list given contains its name, at least one list given).
+    pub fn selects(&self, manufacturer_name: Option<&str>, model_id: Option<&str>) -> bool {
+        use zdef::matching::trim_name;
+        let has = |list: &[String], v: Option<&str>| {
+            list.is_empty() || v.is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
+        };
+        (!self.manufacturer.is_empty() || !self.model_id.is_empty())
+            && has(&self.manufacturer, manufacturer_name)
+            && has(&self.model_id, model_id)
+    }
 }
 
 /// `self_description:` (3.3).

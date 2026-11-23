@@ -121,6 +121,9 @@ impl R<'_> {
         if let Some(n) = &c.sw_build {
             e.push(("sw_build", self.name_match(n)));
         }
+        if let Some(n) = &c.date_code {
+            e.push(("date_code", self.name_match(n)));
+        }
         if let Some(p) = c.power {
             e.push(("power", s(p.as_str())));
         }
@@ -720,6 +723,12 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
                     b.push((
                         "manufacturer",
                         flow(seq(w.manufacturer.iter().map(|x| s(x)).collect())),
+                    ));
+                }
+                if !w.model_id.is_empty() {
+                    b.push((
+                        "model_id",
+                        flow(seq(w.model_id.iter().map(|x| s(x)).collect())),
                     ));
                 }
                 flow(map(b))

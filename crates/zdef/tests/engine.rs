@@ -104,19 +104,19 @@ fn tuya_match_with_packed_names() {
         "case-sensitive"
     );
     assert_eq!(
-        d.display_identity(Some("_TZE284_o3x45p96")),
+        d.display_identity(Some("_TZE284_o3x45p96"), Some("TS0601")),
         (Some("AVATTO"), Some("TRV06_1"))
     );
     assert_eq!(
-        d.display_identity(Some("_TZE200_ow09xlxm")),
+        d.display_identity(Some("_TZE200_ow09xlxm"), Some("TS0601")),
         (Some("THALEOS"), Some("TRV06-AT"))
     );
     assert_eq!(
-        d.display_identity(Some("_TZE200_d3z1ukqw\0")),
+        d.display_identity(Some("_TZE200_d3z1ukqw\0"), Some("TS0601")),
         (Some("Echos"), Some("Eco-4160"))
     );
     assert_eq!(
-        d.display_identity(Some("other")),
+        d.display_identity(Some("other"), Some("TS0601")),
         (Some("Tuya"), Some("TS0601_thermostat_3"))
     );
 }

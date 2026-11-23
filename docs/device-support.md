@@ -253,8 +253,15 @@ Precedence rules:
   any other names-only combination (model prefix, manufacturer only) = 250;
   a GP clause without DeviceID and without manufacturer + model ID = 100. Extra
   constraints (+10 each, at most +50): `mfr_code` (part of the base for
-  fingerprint-only clauses), each version range, `sw_build`, `power`,
-  `logical_type`, and `endpoints` when names are present. GP clauses take
+  fingerprint-only clauses), each version range, `sw_build`, `date_code`,
+  `power`, `logical_type`, and `endpoints` when names are present. One point
+  less (a tie-break, below any extra constraint) for a model ID that equals
+  the clause only after name normalization (6.2), and for `endpoints` that
+  are not exactly the device's endpoint list: zigbee-herdsman-converters
+  looks the raw model ID up first and compares endpoint lists as a whole. A
+  clause marked `x-white-label` scores as if it had no manufacturer (it only
+  carries white-label names, 8.4; white labels rename a definition, they
+  do not select it). GP clauses take
   the table of 13.3 without extras (the FlowerX clause, DeviceID +
   manufacturer + masked model, scores 600). A clause without any field never
   matches.
@@ -262,6 +269,14 @@ Precedence rules:
   Ties: the higher explicit `priority` field, then the user source over the
   catalog, then the newer `revision`. A definition may be **pinned** per device
   (layer 5) to override scoring.
+
+  Parity with zigbee-herdsman-converters is measured, not assumed: the
+  ignored test `hub-devices/tests/zhc_parity.rs` resolves the vectors of
+  the definitions repository (`tools/conformance/zhc-vectors.cjs`: zhc's
+  `findByDevice` choice for every fingerprint, zigbeeModel and white-label
+  fingerprint) against all shard records of a built catalog. zhc 26.130.0:
+  5,703 of the 5,726 vectors whose definition this hub can load pick zhc's
+  definition and white label; 1,833 more need features the hub lacks.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
@@ -654,7 +669,7 @@ in `definitions/examples/`.
 | `vendor`, `model` | string | yes | display identity (HA device manufacturer/model) |
 | `description` | string | no | stripped from catalog banks (fetched with the UI help) |
 | `match` | list | yes | match clauses, OR-ed (6.2) |
-| `white_label` | list | no | `{vendor, model, manufacturer: [names]}`; selects the display identity by the device's manufacturer name |
+| `white_label` | list | no | `{vendor, model, manufacturer: [names], model_id: [names]}`; the first entry whose lists all contain the device's Basic names (at least one list given) sets the display identity |
 | `requires` | list | no | hub features needed (8.5); computed by the compiler, may be written |
 | `priority` | int | no | tie-break between equal scores (3.3) |
 | `device` | map | no | `power` (mains/battery/energy_harvesting), `sleepy`, `battery` (`voltage_to_percent: [min_mV, max_mV]` linear, or a named curve `3V_2100`, `3V_1500_2800`, `CR2032`), `checkin_s`, `availability` (`timeout_s`), `ota` (bool) |
@@ -675,11 +690,12 @@ any clause matches (OR).
 
 | Field | Value | Compared with |
 |---|---|---|
-| `manufacturer` | string, `{any: [...]}`, `{prefix: "..."}` | Basic 0x0004, exact, case-sensitive, trailing NULs and spaces trimmed |
+| `manufacturer` | string, `{any: [...]}`, `{prefix: "..."}` | Basic 0x0004, exact, case-sensitive, after normalization: cut at the first NUL that follows text, then trimmed (zhc `normalizeModelID`; a name that starts with a NUL only loses trailing NULs), clause and device strings alike, also for index keys |
 | `model` | same forms | Basic 0x0005 |
 | `mfr_code` | int | Node descriptor manufacturer code |
 | `app_version`, `stack_version`, `hw_version` | `{min, max}` | Basic 0x0001 / 0x0002 / 0x0003 |
 | `sw_build` | string or `{prefix}` | Basic 0x4000 |
+| `date_code` | string or `{prefix}` | Basic 0x0006; needs feature `match.date_code` |
 | `power` | mains / battery | Basic 0x0007 / Node descriptor |
 | `logical_type` | coordinator / router / end_device | Node descriptor logical type |
 | `endpoints` | `{<ep>: {profile, device_id, in: [...], out: [...]}}`; `in`/`out` must be subsets | Simple descriptors |
@@ -1132,13 +1148,19 @@ fan_mode 171, percentage 172, direction 173, oscillating 174,
 target_temperature_low 175, target_temperature_high 176,
 current_humidity 177, target_humidity 178, swing_mode 179, tone 180,
 volume 181, duration 182, valve_position 183, running_state 184,
-color_x 185, color_y 186, hue 187, saturation 188, command 189`. Keys
+color_x 185, color_y 186, hue 187, saturation 188, command 189`, then
+`date_code 190`. Keys
 24–255 all take two bytes, so the gap costs nothing.
 
 Named optional extensions (source key `x-<name>`, value any JSON, stored as
 canonical CBOR with text keys): top level `64 x-partial` (the generator's
 "partially translated" marker), match clause `64 x-priority` (zhc's
-definition priority). Other keys 64–127 have no source form; the decoder
+definition priority) and `65 x-white-label` (`true`: the clause only lists
+white-label manufacturer names and scores as if it had none, 3.3). A
+white-label entry's `model_id` list is key 64 of its map, in the extension
+range, so hubs before it skip it (they select the white label by
+manufacturer name only) instead of rejecting the definition. Other
+keys 64–127 have no source form; the decoder
 keeps them (top level, match clause, entity) so a decode/encode round trip
 is lossless, and ignores them otherwise.
 
@@ -1222,6 +1244,8 @@ without that device class or unit) and is reported in diagnostics.
   `4 struct.zcl_tagged`, `5 codec.tuya_schedule_day`,
   `6 codec.tuya_schedule_week`, `7 codec.bcd_time`, `8 codec.hhmm`,
   `9 codec.ascii`, `10 codec.utf16be_hex`, `11 codec.bitmap_flags`,
+  `12 match.date_code` (a match clause with `date_code`: hubs before it skip
+  the definition instead of matching it without the date),
   `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
   `23 template.tuya_metering_zero_debounce` (vendor templates, C tier 17.4:
   `templates: [{name, params}]`, `params` free-form, key 21 at the top
