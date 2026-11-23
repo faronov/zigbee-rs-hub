@@ -64,6 +64,9 @@
       },
       "identify": {
         "name": "Identify"
+      },
+      "automation_run": {
+        "name": "Run {name}"
       }
     },
     "event": {
@@ -177,6 +180,11 @@
             "name": "Last error"
           }
         }
+      }
+    },
+    "switch": {
+      "automation": {
+        "name": "Automation {name}"
       }
     }
   },

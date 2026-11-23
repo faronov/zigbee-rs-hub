@@ -64,6 +64,9 @@
       },
       "identify": {
         "name": "Идентификация"
+      },
+      "automation_run": {
+        "name": "Запустить {name}"
       }
     },
     "event": {
@@ -177,6 +180,11 @@
             "name": "Последняя ошибка"
           }
         }
+      }
+    },
+    "switch": {
+      "automation": {
+        "name": "Автоматизация {name}"
       }
     }
   },

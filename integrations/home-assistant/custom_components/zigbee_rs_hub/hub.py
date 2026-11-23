@@ -31,6 +31,7 @@ SNAPSHOT_TIMEOUT = 15.0
 type Listener = Callable[[], None]
 type EventListener = Callable[[dict[str, Any]], None]
 type PlatformAdder = Callable[[list[dict[str, Any]]], None]
+type AutomationAdder = Callable[[list[str]], None]
 
 _HAS_VIA_DEVICE_ID = (
     "via_device_id" in inspect.signature(dr.DeviceRegistry.async_get_or_create).parameters
@@ -77,6 +78,11 @@ def api_at_least(version: Any, major: int, minor: int) -> bool:
 _EPOCH_FLOOR = 1e9
 
 
+def automation_key(rule_id: str) -> str:
+    """Listener key of an automation's entities (never an entity uid)."""
+    return f"automation/{rule_id}"
+
+
 def hub_version(name: str | None) -> str | None:
     """Firmware version from a hub name such as `zigbee-rs-hub 0.2.4`."""
     if not name:
@@ -121,6 +127,10 @@ class ZigbeeRsHub:
         self._ha_removed: set[str] = set()
         self._stopping = False
         self._hub_device_id: str | None = None
+        # Local automations of the hub (API 1.3), by rule ID.
+        self.automations: dict[str, dict[str, Any]] = {}
+        self._automation_adders: dict[str, AutomationAdder] = {}
+        self._automations_created: set[tuple[str, str]] = set()
         self.catalog = CatalogUpdater(hass, self, session)
 
     # Identity
@@ -134,6 +144,11 @@ class ZigbeeRsHub:
     def supports_network(self) -> bool:
         """API 1.1: network/info and the `network` topic."""
         return api_at_least(self.info.get("api_version"), 1, 1)
+
+    @property
+    def supports_automations(self) -> bool:
+        """Local automations on the hub (API 1.3: `automations` in hub/info)."""
+        return isinstance(self.info.get("automations"), dict)
 
     @property
     def coordinator_ieee(self) -> str | None:
@@ -159,6 +174,8 @@ class ZigbeeRsHub:
             topics = list(TOPICS)
             if self.supports_network:
                 topics.append("network")
+            if self.supports_automations:
+                topics.append("automations")
             await client.subscribe(topics, self._on_event)
             async with asyncio.timeout(SNAPSHOT_TIMEOUT):
                 waits = {
@@ -172,6 +189,8 @@ class ZigbeeRsHub:
                         w.cancel()
             if not self._snapshot.is_set():
                 raise CannotConnect("connection closed before the snapshot")
+            if self.supports_automations:
+                await self._load_automations(client)
             await self.catalog.async_connected(client)
         except TimeoutError as err:
             await client.close()
@@ -277,6 +296,20 @@ class ZigbeeRsHub:
             uid = event.get("uid")
             for cb in list(self._event_listeners.get(uid, [])):
                 cb(event)
+        elif topic in ("automation_added", "automation_updated"):
+            rule = event.get("automation")
+            if isinstance(rule, dict) and isinstance(rule.get("id"), str):
+                self.automations[rule["id"]] = rule
+                self._create_automation_entities([rule["id"]])
+                self._notify(automation_key(rule["id"]))
+        elif topic == "automation_removed":
+            self._remove_automation(str(event.get("automation")))
+        elif topic == "automation_run":
+            rule = self.automations.get(str(event.get("automation")))
+            if rule is not None:
+                rule["last_result"] = event.get("result")
+                rule["last_run"] = event.get("time")
+                self._notify(automation_key(rule["id"]))
 
     @callback
     def _apply_snapshot(self, snap: dict[str, Any]) -> None:
@@ -311,6 +344,57 @@ class ZigbeeRsHub:
         for dev in devices.values():
             self._sync_device(dev)
         self._create_entities(list(entities.values()))
+
+    # Automations
+
+    async def _load_automations(self, client: HubClient) -> None:
+        try:
+            result = await client.request("automations/list")
+        except HubError as err:
+            _LOGGER.debug("automations/list failed: %s", err)
+            return
+        rules = result.get("rules") if isinstance(result, dict) else None
+        if not isinstance(rules, list):
+            return
+        fresh = {r["id"]: r for r in rules if isinstance(r, dict) and isinstance(r.get("id"), str)}
+        for rule_id in set(self.automations) - set(fresh):
+            self._remove_automation(rule_id)
+        self.automations = fresh
+        self._create_automation_entities(list(fresh))
+        for rule_id in fresh:
+            self._notify(automation_key(rule_id))
+
+    @callback
+    def register_automation_platform(self, platform: str, adder: AutomationAdder) -> None:
+        """`platform` creates one entity per automation through `adder`."""
+        self._automation_adders[platform] = adder
+        self._create_automation_entities(list(self.automations))
+
+    @callback
+    def _create_automation_entities(self, rule_ids: list[str]) -> None:
+        for platform, adder in self._automation_adders.items():
+            new = [r for r in rule_ids if (platform, r) not in self._automations_created]
+            self._automations_created.update((platform, r) for r in new)
+            if new:
+                adder(new)
+
+    @callback
+    def _remove_automation(self, rule_id: str) -> None:
+        self.automations.pop(rule_id, None)
+        self._notify(automation_key(rule_id))
+        reg = er.async_get(self.hass)
+        for platform, suffix in (("switch", ""), ("button", "_run")):
+            self._automations_created.discard((platform, rule_id))
+            unique_id = f"{self.entry.entry_id}_automation_{rule_id}{suffix}"
+            if entity_id := reg.async_get_entity_id(platform, DOMAIN, unique_id):
+                reg.async_remove(entity_id)
+
+    async def async_automation(self, request: str, rule_id: str) -> None:
+        """`automations/<request>` (enable, disable, run) for one rule."""
+        result = await self.async_request(f"automations/{request}", automation=rule_id)
+        if request != "run" and isinstance(result, dict) and result.get("id") == rule_id:
+            self.automations[rule_id] = result
+            self._notify(automation_key(rule_id))
 
     # Device registry
 

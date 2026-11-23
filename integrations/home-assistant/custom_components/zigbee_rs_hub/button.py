@@ -10,7 +10,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import ZigbeeRsHubConfigEntry
 from .const import PERMIT_JOIN_DEFAULT
-from .entity import ZigbeeRsEntity, enum_or_none, hub_device_info, setup_platform
+from .entity import (
+    AutomationEntity,
+    ZigbeeRsEntity,
+    enum_or_none,
+    hub_device_info,
+    setup_automations,
+    setup_platform,
+)
 from .hub import ZigbeeRsHub
 
 
@@ -19,9 +26,10 @@ async def async_setup_entry(
     entry: ZigbeeRsHubConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Buttons."""
+    """Buttons; one per hub automation (run it now)."""
     async_add_entities([PermitJoinButton(entry.runtime_data)])
     setup_platform(entry, "button", async_add_entities, ZigbeeRsButton)
+    setup_automations(entry, "button", async_add_entities, AutomationRunButton)
 
 
 class ZigbeeRsButton(ZigbeeRsEntity, ButtonEntity):
@@ -60,3 +68,17 @@ class PermitJoinButton(ButtonEntity):
     async def async_press(self) -> None:
         """Permit joining for the default duration."""
         await self.hub.async_permit_join(PERMIT_JOIN_DEFAULT, include_gp=True)
+
+
+class AutomationRunButton(AutomationEntity, ButtonEntity):
+    """Runs one of the hub's local automations now (its actions, a test run)."""
+
+    _attr_translation_key = "automation_run"
+
+    def __init__(self, hub: ZigbeeRsHub, rule_id: str) -> None:
+        """Run button of automation `rule_id`."""
+        super().__init__(hub, rule_id, "_run")
+
+    async def async_press(self) -> None:
+        """`automations/run`."""
+        await self.hub.async_automation("run", self.rule_id)

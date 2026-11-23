@@ -3,11 +3,22 @@
     "button": {
       "permit_join": {
         "default": "mdi:link-plus"
+      },
+      "automation_run": {
+        "default": "mdi:play"
       }
     },
     "sensor": {
       "catalog_version": {
         "default": "mdi:book-open-variant"
+      }
+    },
+    "switch": {
+      "automation": {
+        "default": "mdi:robot",
+        "state": {
+          "off": "mdi:robot-off"
+        }
       }
     }
   },

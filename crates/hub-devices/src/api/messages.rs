@@ -13,7 +13,14 @@ pub const API_VERSION: &str = "1.3";
 
 /// Topics of `subscribe`.
 pub const TOPICS: &[&str] = &[
-    "devices", "entities", "events", "gp", "network", "catalog", "frames",
+    "devices",
+    "entities",
+    "events",
+    "gp",
+    "network",
+    "catalog",
+    "frames",
+    "automations",
 ];
 
 /// The first frame from the client.

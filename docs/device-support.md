@@ -2143,7 +2143,7 @@ code feels familiar:
 {"id": 17, "type": "result", "success": false,
  "error": {"code": "not_found", "message": "no device zb:00…"}}
 
-{"id": 18, "type": "subscribe", "topics": ["devices", "entities", "events", "gp", "network"]}
+{"id": 18, "type": "subscribe", "topics": ["devices", "entities", "events", "gp", "network", "automations"]}
 {"id": 18, "type": "event", "seq": 1042, "event": {"topic": "entity_state", …}}
 ```
 
@@ -2158,7 +2158,9 @@ code feels familiar:
   the whole batch) added `hub/time`, `hub/time/set`, `time_utc` and
   `time_synced` in `network/info` and `hub/system`; restored states
   (`attributes.restored`) and `app.last_values` in `hub/system`; the ZCL
-  console (14.7: `zcl/*` requests, topic `frames`).
+  console (14.7: `zcl/*` requests, topic `frames`); the local
+  automations of 14.8 (`automations/*`, the `automations` topic,
+  `automations` in `hub/info`).
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2431,6 +2433,117 @@ while a session is subscribed): `frame` {`device`, `dir` (`rx`/`tx`),
 snapshot of the topic is empty; `devices/diagnostics` keeps the last 50
 received frames. Retransmissions after a response timeout are not tapped.
 
+### 14.8 Local automations (API 1.3)
+
+Rules that run on the hub itself, without Home Assistant or the internet:
+**triggers → conditions → actions**, schedules included. The evaluator
+(`hub-app` `automations`) runs on the application thread, sans-IO like the
+engine: it sees the engine's events, the 1 s tick and the requests below,
+and never blocks (a `delay` suspends the run until a monotonic deadline;
+the thread wakes for it). Rules are evaluated in ID order, deterministically.
+
+**Rule** (the JSON of `automations/create` and of every result; unknown
+top-level fields are dropped, `v` is the format version, 1):
+
+```json
+{"v": 1, "id": "stairs", "name": "Stairs light", "enabled": true,
+ "mode": "single", "max_per_min": 20,
+ "triggers": [{"type": "state", "uid": "zb:00158d0001a2b3c4:1:occupancy", "op": "equals", "value": true}],
+ "conditions": [{"type": "time", "after": "18:00", "before": "07:00"}],
+ "actions": [{"type": "command", "uid": "zb:0017880100aabbcc:11:light", "command": "turn_on", "params": {"brightness": 120}},
+             {"type": "delay", "s": 90},
+             {"type": "command", "uid": "zb:0017880100aabbcc:11:light", "command": "turn_off"}]}
+```
+
+| Field | Values |
+|---|---|
+| `id` | `[a-z0-9_-]`, 1–32; `r<N>` when `create` has none |
+| `name` | ≤ 64 bytes (default: the ID) |
+| `mode` | `single` (a trigger while a run waits in a delay is dropped: trace `already_running`), `restart` (the waiting run is cancelled, a new one starts) |
+| `max_per_min` | 1–60 runs per rule per minute (default 20); more are dropped (trace `rate_limited`) |
+
+Triggers (any of them starts a run):
+
+| `type` | Fields | Fires |
+|---|---|---|
+| `state` | `uid`, `attribute` (optional: an attribute of the state message instead of `state`), `op` (`equals`, `not_equals`, `above`, `below`, `changed`), `value` | `changed`: on a change between two known values (unknown → value is not a change; a repeated report is not either); the comparisons when they start to hold (from not holding or unknown). Numbers compare by value (`"21.5"` = 21.5), `true` = `"on"`, `false` = `"off"` |
+| `event` | `uid`, `event_type` (optional) | an `entity_event` (buttons, remotes, GP commands, 4.7) |
+| `availability` | `device`, `to` (`available`/`unavailable`, optional) | the device's availability changed |
+| `time` | `cron`: `minute hour day month weekday` (numbers, `*`, `a-b`, lists, `/step`; weekday 0–7 or `sun`…`sat`, months `jan`…`dec`; day and weekday both restricted = either) | once per local minute (the hub's fixed UTC offset); nothing is caught up after a clock step |
+| `start` | — | once, when the hub's NCP session is first up |
+
+Conditions (all must hold; evaluated in order up to the first that
+fails): `state` (`uid`, `attribute`, `op` without `changed`, `value`),
+`time` (`after`/`before` `HH:MM`, local; wraps midnight when
+`after` > `before`), `weekday` (`days`: `mon`…`sun` or 1–7), `and`, `or`,
+`not` (`conditions`: a list; `not` = none holds), nested at most 3 deep.
+
+Actions (in order; a failing action is recorded and the run goes on):
+
+| `type` | Fields | Does |
+|---|---|---|
+| `command` | `uid`, `command` (HA service name), `params` | `entities/command` (4.5): on/off/toggle, brightness and colour, numbers, selects, covers, … |
+| `request` | `request`: an API request object | group commands, scene recalls and other device control through the API: types starting with `entities/command`, `entities/refresh`, `groups/`, `scenes/`, `network/permit_join`, `gp/commissioning/` (never maintenance or `automations/`) |
+| `delay` | `s` (0–86 400, fractions allowed) | waits (monotonic clock) |
+| `notify` | `message`, `data`, `webhook` | an `automation_notify` event; `webhook` is accepted and reported as not sent yet (a placeholder) |
+| `enable`, `disable` | `automation` | enables or disables a rule (disabling cancels its waiting runs; the run that disables its own rule finishes) |
+
+**Bounds.** 64 rules, 8 triggers, 16 condition nodes and 16 actions per
+rule, 4 KiB of JSON per rule and 16 KiB for all together, 16 runs waiting
+at once on the hub (more: trace `busy`), the last 20 traces, 64 pending
+command results. RAM (measured on the host, `hub-app`
+`tests/automations_heap.rs`): about 1.2 KB per rule (the rule is kept as
+its JSON plus its triggers; conditions and actions are parsed when it
+fires) and as much per trace with its waiting run. A new or changed rule
+is refused with `no_space` (`low memory (N KB free)`) while the hub's data
+heap has less than 48 KiB free (an S3 without PSRAM); rules already stored
+still run. **Loops:** a
+command action marks its entity as caused by the rule (and the rules that
+led to it) for 10 s; a state change or event of that entity triggers
+further rules with that chain, and a rule already in the chain is not run
+(trace `loop`, a warning in the log); a chain of more than 4 rules stops
+too (`too_deep`). With `max_per_min` this bounds every cycle, also the
+ones through devices that answer late.
+
+**Time.** Delays and rate limits use the monotonic clock. Schedules
+(`time` triggers) and `time`/`weekday` conditions use the wall clock and
+wait for it: until the hub's clock is synchronised (SNTP; before that the
+clock counts from power-on), `time` triggers do not fire, the conditions
+do not hold (trace note `time not synchronised`), and `automations/list`
+reports `time_synced: false` with a `suspended` reason on every scheduled
+rule.
+
+**Storage.** Each rule is a host store journal record `auto/<id>` (16.1)
+holding its compact JSON, written when it changes (create, update,
+enable/disable, delete); they are restored at start. Runs in progress (a
+pending delay) and traces are not persisted.
+
+| Type | Parameters | Result |
+|---|---|---|
+| `automations/list` | — | `time_synced`, `local_time` (`YYYY-MM-DD HH:MM` or null), `rules`: [rule + `running`, `runs`, `last_run` (s), `last_result`, `suspended`] |
+| `automations/get` | `automation` | the rule with the same runtime fields |
+| `automations/validate` | `rule` | `{ok, errors: [message]}`, nothing stored |
+| `automations/create` | `rule` | the rule; `invalid_value` (with the path, e.g. `rule.triggers[0]: …`), `no_space` (64 rules, 4 KiB, 16 KiB together, low memory), `unsupported` (a newer `v`) |
+| `automations/update` | `automation`, `rule` (the whole rule) | the rule; its waiting runs are cancelled |
+| `automations/delete` | `automation` | — |
+| `automations/enable`, `automations/disable` | `automation` | the rule |
+| `automations/run` | `automation`, `conditions` (bool, default false: skip them) | `{run, trace}`: a test run of the actions now (also of a disabled rule; no rate limit), `run` null when a guard stopped it |
+| `automations/traces` | `automation` (optional), `limit` | traces, newest first: `run`, `automation`, `time`, `trigger` (`type` and what fired: `uid`, `from`, `to`; `event_type`; `device`, `available`; `local`), `chain`, `conditions` [{`i`, `result`, `value` or `local`, `note`}], `actions` [{`i`, `type`, `result` (`ok`, `pending`, `queued`, `error` with `error`), `note`}], `result` (`running`, `done`, `error`, `cancelled`, `conditions_failed`, `already_running`, `rate_limited`, `loop`, `too_deep`, `busy`), `count` (repeats of the same outcome counted on one trace) |
+
+Events (topic `automations`): `automation_added`, `automation_updated`
+(`automation`: the rule), `automation_removed` (`automation`: the ID),
+`automation_run` {`run`, `automation`, `result`, `trigger`, `time`} when a
+run ends or is stopped by a guard, `automation_notify` {`automation`,
+`run`, `message`, `data`, `time`}. The topic has no snapshot fields:
+subscribers call `automations/list`. `hub/info` carries `automations`
+{`format`, `max_rules`} on hubs that have them (clients test for it before
+subscribing). Command results that arrive later (a device's confirmation,
+a timeout) update the action's entry in the trace.
+
+Not yet: sunrise/sunset triggers, `for` durations on state triggers,
+templates, webhooks; groups and scenes are reached through `request` once
+their API exists.
+
 ## 15. Boundary to a Home Assistant integration
 
 A later HA custom integration (far future, not part of this work) should be a
@@ -2450,6 +2563,7 @@ is designed so that it can be:
 | Events / device triggers | `event` entities + `event_types` | event entities; device triggers generated from `event_types` |
 | Orphaned entities | `orphaned: true` | mark unavailable; HA's own "remove entity" UI deletes them via `entities/delete` |
 | Diagnostics | `devices/diagnostics` | HA diagnostics download |
+| Hub automations (14.8) | `automations/list`, topic `automations` | a `switch` per rule (enabled; `automations/enable`/`disable`) and a `button` (`automations/run`) on the hub device |
 | Repairs | `resolution_changed` with orphaned entities, catalog update failures | optional repair issues |
 
 Requirements this places on the hub API (all covered above): stable `uid`s;
@@ -2470,7 +2584,7 @@ API.
 
 | Area | Offset | Size | Content |
 |---|---:|---:|---|
-| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/ntp`), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8) |
+| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/ntp`), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8), automations (`auto/`, 14.8) |
 | Catalog state | 0x020000 | 8 KiB | active-bank record, two 4 KiB slots (9.1) |
 | Manifest | 0x022000 | 24 KiB | the installed, verified `manifest.cose` (9.3; 9 KB today) |
 | Converter bank A | 0x028000 | 256 KiB | catalog bank (9.1) |

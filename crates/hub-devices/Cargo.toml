@@ -21,6 +21,11 @@ zdef = { path = "../zdef", features = ["std"] }
 # (shared with the zigbee-rs NCP/sink), spec 13.2 and 13.8; workspace rev.
 zigbee-gp = { workspace = true }
 
+[features]
+# The device simulator of the host tests (`testutil::sim`), for
+# `hubctl --sim-devices`.
+sim = []
+
 [dev-dependencies]
 zdefc = { path = "../zdefc" }
 heapless = "0.9"

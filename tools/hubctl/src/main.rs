@@ -17,6 +17,7 @@
 mod platform;
 mod push;
 mod serve;
+mod simdev;
 
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -35,7 +36,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-unsupported ID,…]) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices] [--sim-unsupported ID,…]) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -62,6 +63,9 @@ commands:
 simulated NCP:
   --sim-demo                form on channel 15 and add a small mesh (routers
                             answering Mgmt_Lqi/Mgmt_Rtg) for the network map
+  --sim-devices             two On/Off plugs and a temperature sensor that
+                            answer the hub (interview, reads, commands; the
+                            sensor reports every 15 s), e.g. for automations
   --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.
                             0x0106,0x0108 (no energy scan / TX power, like the
                             current NCP image)
@@ -667,6 +671,7 @@ fn main() -> ExitCode {
     };
     let sim = args.flag("--sim");
     let demo = args.flag("--sim-demo");
+    let sim_devices = args.flag("--sim-devices");
     let serial = args.value("--serial");
     let baud = args
         .value("--baud")
@@ -727,10 +732,14 @@ fn main() -> ExitCode {
         eprint!("{USAGE}");
         return ExitCode::from(2);
     };
-    let result = match sim_ncp.as_ref().filter(|_| demo) {
-        Some(sim) => platform::sim_demo(&hub, sim).and_then(|()| run(&hub, args)),
-        None => run(&hub, args),
+    let mut result = match sim_ncp.as_ref().filter(|_| demo) {
+        Some(sim) => platform::sim_demo(&hub, sim),
+        None => Ok(()),
     };
+    if let Some(sim) = sim_ncp.as_ref().filter(|_| sim_devices && result.is_ok()) {
+        result = simdev::start(&hub, sim);
+    }
+    let result = result.and_then(|()| run(&hub, args));
     let c = hub.client().counters();
     log::info!(
         "host link: tx {} retx {} rx {} bad {} dup {} rto {}",

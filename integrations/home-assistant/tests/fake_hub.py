@@ -385,6 +385,8 @@ class FakeHub:
         self.hang_after_connect = False
         # `None`: a hub without the catalog API.
         self.catalog: FakeCatalog | None = None
+        # `None`: a hub without local automations (before API 1.3).
+        self.automations: dict[str, dict[str, Any]] | None = None
         self.devices, self.entities, self.states = default_model()
         self.requests: list[dict[str, Any]] = []
         self.command_errors: dict[str, dict[str, str]] = {}
@@ -519,6 +521,11 @@ class FakeHub:
                     "coordinator_ieee": COORDINATOR_IEEE,
                     "ncp_board": "esp32h2",
                     "ncp_product": "zigbee-rs NCP",
+                    **(
+                        {"automations": {"format": 1, "max_rules": 64}}
+                        if self.automations is not None
+                        else {}
+                    ),
                 }
             )
         elif kind == "subscribe":
@@ -528,6 +535,8 @@ class FakeHub:
                 known.add("catalog")
             if self.api_version >= "1.1":
                 known.add("network")
+            if self.automations is not None:
+                known.add("automations")
             if topics - known:
                 await err("invalid_value", f"unknown topics {sorted(topics - known)}")
                 return
@@ -565,8 +574,40 @@ class FakeHub:
             await ok({"frames": [], "gp_data": {"key": "00112233445566778899aabbccddeeff"}})
         elif kind in ("devices/reinterview", "devices/reconfigure"):
             await ok({"started": True})
+        elif kind.startswith("automations/") and self.automations is not None:
+            await self._answer_automations(req, ok, err)
         elif kind.startswith(("catalog/", "definitions/")) and self.catalog is not None:
             await self._answer_catalog(ws, req, ok, err)
+        else:
+            await err("invalid_format", f"unknown variant `{kind}`")
+
+    async def _answer_automations(self, req: dict[str, Any], ok, err) -> None:
+        rules = self.automations
+        assert rules is not None
+        kind = req["type"]
+        if kind == "automations/list":
+            await ok({"time_synced": True, "rules": copy.deepcopy(list(rules.values()))})
+            return
+        rule = rules.get(req.get("automation", ""))
+        if rule is None:
+            await err("not_found", f"no automation {req.get('automation')}")
+        elif kind in ("automations/enable", "automations/disable"):
+            rule["enabled"] = kind == "automations/enable"
+            await ok(copy.deepcopy(rule))
+            await self.push("automations", {"topic": "automation_updated", "automation": rule})
+        elif kind == "automations/run":
+            rule["runs"] = rule.get("runs", 0) + 1
+            await ok({"run": rule["runs"], "trace": {"result": "done"}})
+            await self.push(
+                "automations",
+                {
+                    "topic": "automation_run",
+                    "automation": rule["id"],
+                    "run": rule["runs"],
+                    "result": "done",
+                    "time": 4100.0,
+                },
+            )
         else:
             await err("invalid_format", f"unknown variant `{kind}`")
 

@@ -212,7 +212,8 @@ impl SimDevice {
         )
     }
 
-    fn answer(&mut self, req: &ApsRequest) -> Vec<ApsIndication> {
+    /// The device's answers to one request from the hub.
+    pub fn answer(&mut self, req: &ApsRequest) -> Vec<ApsIndication> {
         if !self.responsive {
             return Vec::new();
         }
