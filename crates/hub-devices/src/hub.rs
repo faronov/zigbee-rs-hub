@@ -2608,7 +2608,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             .filter(|d| crate::resolve::score(&def, &d.fp).is_some())
             .map(|d| d.id.clone())
             .collect();
-        self.user.insert(def);
+        // A user definition of the same model under another ID is replaced.
+        for old in self.user.insert(def) {
+            self.user_sources.remove(&old);
+        }
         for id in &matching {
             self.resolve_device(id, now);
             self.redo_configure(id, now);

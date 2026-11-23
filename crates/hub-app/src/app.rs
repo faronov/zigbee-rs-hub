@@ -230,7 +230,9 @@ pub fn builtin_catalog() -> MemoryCatalog {
         "tuya-ts0601-trv-me167"
     ) {
         match hub_devices::zdef_adapter::load_cbor(cbor, hub_devices::model::LayerSource::Catalog) {
-            Ok(d) => cat.insert(d),
+            Ok(d) => {
+                cat.insert(d);
+            }
             Err(e) => warn!("builtin catalog: {name}: {e:?}"),
         }
     }
