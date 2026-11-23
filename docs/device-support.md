@@ -2157,7 +2157,8 @@ code feels familiar:
   `tx_power_requested` in `network/info`. 1.3 (hub 0.2.0, one bump for
   the whole batch) added `hub/time`, `hub/time/set`, `time_utc` and
   `time_synced` in `network/info` and `hub/system`; restored states
-  (`attributes.restored`) and `app.last_values` in `hub/system`.
+  (`attributes.restored`) and `app.last_values` in `hub/system`; the ZCL
+  console (14.7: `zcl/*` requests, topic `frames`).
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2392,7 +2393,7 @@ follows its `job_progress` events; the job does not depend on the session
 that started it. The application thread never waits for the NCP here: it
 only reads the job board once a second.
 
-### 14.7 ZCL console (API 1.2, backward compatible)
+### 14.7 ZCL console (API 1.3)
 
 Raw requests to one device endpoint, for writing and debugging
 definitions (web UI tab **ZCL**). They take the normal send path (queued
