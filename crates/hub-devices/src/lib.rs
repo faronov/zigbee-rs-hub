@@ -22,6 +22,7 @@ pub mod bankcat;
 pub mod codec;
 pub mod commands;
 pub mod configure;
+pub mod console;
 pub mod device;
 pub mod expr;
 pub mod fingerprint;

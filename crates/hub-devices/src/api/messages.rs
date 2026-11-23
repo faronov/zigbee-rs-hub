@@ -12,7 +12,9 @@ use crate::hub::ApiError;
 pub const API_VERSION: &str = "1.3";
 
 /// Topics of `subscribe`.
-pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp", "network", "catalog"];
+pub const TOPICS: &[&str] = &[
+    "devices", "entities", "events", "gp", "network", "catalog", "frames",
+];
 
 /// The first frame from the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +255,23 @@ pub enum Request {
     },
     #[serde(rename = "gp/targets/probe")]
     GpTargetsProbe { device: String },
+
+    // ZCL console (14.7): the arguments stay JSON (parsed by
+    // `console::request`; a derived struct costs ~9 KB of flash).
+    #[serde(rename = "zcl/read")]
+    ZclRead(J),
+    #[serde(rename = "zcl/write")]
+    ZclWrite(J),
+    #[serde(rename = "zcl/configure_reporting")]
+    ZclConfigureReporting(J),
+    #[serde(rename = "zcl/read_reporting")]
+    ZclReadReporting(J),
+    #[serde(rename = "zcl/discover")]
+    ZclDiscover(J),
+    #[serde(rename = "zcl/command")]
+    ZclCommand(J),
+    #[serde(rename = "tuya/send")]
+    TuyaSend(J),
 }
 
 mod double_option {

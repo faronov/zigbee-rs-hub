@@ -47,7 +47,8 @@ mod tests {
     fn embedded_page_is_the_minified_source_and_small() {
         let src = include_str!("../web/index.html");
         assert_eq!(page(), super::minify::minify(src).unwrap().into_bytes());
-        assert!(INDEX_HTML_GZ.len() <= 25 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
+        // Budget (approved for hub 0.2.0): 32 KiB; it counts in the firmware image.
+        assert!(INDEX_HTML_GZ.len() <= 32 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
     }
 
     /// The page's scripts, minified and not, parse (when Node is installed).

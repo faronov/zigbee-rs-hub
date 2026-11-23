@@ -2,6 +2,7 @@
 //! (interview → resolution → entities → configure → states → commands).
 
 mod bank;
+mod console;
 mod gp;
 mod merge;
 mod plain;

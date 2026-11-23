@@ -154,6 +154,15 @@ pub enum HubEvent {
         /// `Ok("ok")` or the error.
         result: Result<String, ApiError>,
     },
+    /// Deferred result of a ZCL console request (14.7): the decoded answer.
+    ConsoleResult {
+        /// Ticket.
+        ticket: u64,
+        /// The answer or the error.
+        result: Result<J, ApiError>,
+    },
+    /// A frame to or from a device (topic `frames`, only while subscribed).
+    Frame(J),
     /// Network topic events (`permit_join` …), from the host core.
     Network(J),
     /// GP topic events (13.7).
@@ -180,6 +189,14 @@ pub enum Purpose {
     Refresh,
     /// A GP target capability probe.
     GpProbe(u16),
+    /// A ZCL console request; `cluster_answer`: a cluster-specific frame
+    /// with its TSN answers it too.
+    Console {
+        /// Ticket.
+        ticket: u64,
+        /// Cluster-specific command sent.
+        cluster_answer: bool,
+    },
     /// No answer expected/tracked.
     None,
 }
@@ -269,16 +286,16 @@ pub enum OpKind {
 }
 
 #[derive(Debug, Clone)]
-struct Pending {
-    device: String,
-    purpose: Purpose,
+pub(crate) struct Pending {
+    pub(crate) device: String,
+    pub(crate) purpose: Purpose,
     sent_at: Millis,
     retries: u8,
     req: ApsRequest,
 }
 
 #[derive(Debug, Clone, Default)]
-struct Ticket {
+pub(crate) struct Ticket {
     remaining: u32,
     error: Option<ApiError>,
     optimistic: Vec<(String, Option<String>, Value)>,
@@ -331,9 +348,12 @@ pub struct Hub<T: ZigbeeTransport> {
     nwk_index: BTreeMap<u16, String>,
     zcl_tsn: u8,
     zdo_tsn: u8,
-    pending: BTreeMap<(bool, u8), Pending>,
-    tickets: BTreeMap<u64, Ticket>,
-    next_ticket: u64,
+    pub(crate) pending: BTreeMap<(bool, u8), Pending>,
+    pub(crate) tickets: BTreeMap<u64, Ticket>,
+    /// Emit [`HubEvent::Frame`] for every frame (set while the API has
+    /// `frames` subscribers).
+    pub frame_tap: bool,
+    pub(crate) next_ticket: u64,
     pub(crate) events: Vec<HubEvent>,
     schema_decoder: Option<Box<dyn SchemaDecoder>>,
     pub(crate) schema_cache: BTreeMap<Vec<u8>, Arc<Definition>>,
@@ -413,6 +433,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             zdo_tsn: 0,
             pending: BTreeMap::new(),
             tickets: BTreeMap::new(),
+            frame_tap: false,
             next_ticket: 1,
             events: Vec::new(),
             schema_decoder: None,
@@ -629,6 +650,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             );
             return;
         }
+        self.tap_tx(dev_id, &req, now);
         if purpose != Purpose::None {
             self.pending.insert(
                 (zdo, tsn),
@@ -1226,6 +1248,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         let Some(id) = id else { return };
+        self.tap_rx(&id, &ind, now);
         self.seen(&id, Some(ind.lqi), Some(ind.rssi), now);
         if let Some(d) = self.devices.get_mut(&id) {
             d.awake_until = now + AWAKE_AFTER_RX_MS;
@@ -1313,6 +1336,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             return;
         };
+        self.console_answer(id, &frame);
         let h = frame.header;
         let ep = ind.src_ep;
         let mut needs_default_rsp = !h.disable_default_response && ind.group.is_none();
@@ -2158,6 +2182,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             Purpose::Configure(key) => self.configure_done(id, key, false, err.code.clone(), now),
             Purpose::Command(t) => self.ticket_part_done(*t, Some(err), now),
+            Purpose::Console { ticket, .. } => self.emit(HubEvent::ConsoleResult {
+                ticket: *ticket,
+                result: Err(err),
+            }),
             Purpose::GpProbe(nwk) => self.gp_probe_result(*nwk, &[], now),
             _ => {}
         }

@@ -320,6 +320,25 @@ impl SimDevice {
                     zf::configure_reporting_rsp(&fails),
                 ))
             }
+            // Discover Attributes: the simulated attributes of the cluster.
+            (FrameType::Global, 0x0C) => {
+                let start = u16::from_le_bytes([f.payload[0], f.payload[1]]);
+                let mut list: Vec<(u16, u8)> = self
+                    .attrs
+                    .iter()
+                    .filter(|((e, c, a, m), _)| {
+                        *e == ep && *c == req.cluster && *a >= start && *m == h.mfr
+                    })
+                    .map(|((_, _, a, _), v)| (*a, v.ty.0))
+                    .collect();
+                list.sort_unstable();
+                let mut p = vec![1];
+                for (a, t) in list {
+                    p.extend_from_slice(&a.to_le_bytes());
+                    p.push(t);
+                }
+                Some(rsp(FrameType::Global, 0x0D, p))
+            }
             (FrameType::Global, _) => None,
             (FrameType::Cluster, cmd) => {
                 self.commands
