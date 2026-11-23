@@ -19,6 +19,7 @@ pub const TOPICS: &[&str] = &[
     "gp",
     "network",
     "catalog",
+    #[cfg(feature = "advanced")]
     "frames",
     "automations",
     "groups",

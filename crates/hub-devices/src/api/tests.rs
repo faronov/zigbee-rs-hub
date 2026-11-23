@@ -47,6 +47,118 @@ fn light() -> SimDevice {
 }
 
 #[test]
+#[cfg(not(feature = "advanced"))]
+fn basic_image_refuses_manual_console_without_sending_to_devices() {
+    let mut hub = hub_with(&[]);
+    let mut api = ApiServer::new("basic", "secret");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type":"auth","token":"secret"}"#, T0);
+    for (n, kind) in [
+        "zcl/read",
+        "zcl/write",
+        "zcl/configure_reporting",
+        "zcl/read_reporting",
+        "zcl/discover",
+        "zcl/command",
+        "tuya/send",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = call(&mut api, &mut hub, s, n as u64, json!({"type": kind}));
+        assert_eq!(
+            response["error"]["code"], "unsupported",
+            "{kind}: {response}"
+        );
+    }
+    let response = call(
+        &mut api,
+        &mut hub,
+        s,
+        20,
+        json!({"type":"subscribe","topics":["frames"]}),
+    );
+    assert_eq!(response["error"]["code"], "unsupported");
+    let info = call(&mut api, &mut hub, s, 21, json!({"type":"hub/info"}));
+    assert_eq!(info["result"]["advanced"], false);
+    assert!(hub.transport.sent.is_empty());
+}
+
+fn dimmer(ieee: u64, nwk: u16) -> SimDevice {
+    SimDevice::new(ieee, nwk, LogicalType::Router, true, 0x100B)
+        .endpoint(11, 0x0104, 0x0101, &[0x0000, 0x0003, 0x0006, 0x0008], &[])
+        .basic("ACME", "Dimmer", 0x01)
+}
+
+/// A hub with two joined dimmers, an authenticated session and the frames
+/// of a subscription to every snapshot topic.
+fn subscribed() -> (Hub<MockTransport>, ApiServer, Vec<Frame>) {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    for (ieee, nwk) in [(0x0017880100aabbcc, 0x2001), (0x0017880100aabbcd, 0x2002)] {
+        sim.devices.push(dimmer(ieee, nwk));
+        sim.join(&mut hub, ieee, T0);
+    }
+    let mut api = ApiServer::new("hub", "secret");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type":"auth","token":"secret"}"#, T0);
+    let sub =
+        r#"{"id":5,"type":"subscribe","topics":["devices","entities","groups","gp","network"]}"#;
+    let frames = api.handle_text_frames(&mut hub, s, sub, T0, None);
+    (hub, api, frames)
+}
+
+#[test]
+fn snapshot_pieces_concatenate_to_the_whole_message() {
+    let (mut hub, _api, mut frames) = subscribed();
+    assert_eq!(frames.len(), 2);
+    let Frame::Snapshot(snap) = frames.pop().unwrap() else {
+        panic!("no snapshot frame")
+    };
+    let whole = snap.clone().render(&mut hub, T0);
+    let v: J = serde_json::from_str(&whole).unwrap();
+    assert_eq!(v["event"]["topic"], "snapshot");
+    assert_eq!(v["event"]["devices"].as_array().unwrap().len(), 2);
+    assert!(!v["event"]["entities"].as_array().unwrap().is_empty());
+    for size in [1, 64, 700, 1 << 20] {
+        let mut snap = snap.clone();
+        let mut pieces = Vec::new();
+        while let Some(p) = snap.next_piece(&mut hub, T0, size) {
+            pieces.push(p);
+        }
+        assert!(
+            pieces.iter().rev().skip(1).all(|(_, last)| !last),
+            "size {size}"
+        );
+        assert!(pieces.last().unwrap().1, "size {size}");
+        let text: String = pieces.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(text, whole, "size {size}");
+        if size <= 700 {
+            assert!(pieces.len() > 2, "size {size}: {} pieces", pieces.len());
+        }
+    }
+}
+
+#[test]
+fn a_device_removed_while_its_snapshot_is_sent_leaves_valid_json() {
+    let (mut hub, _api, mut frames) = subscribed();
+    let Frame::Snapshot(mut snap) = frames.pop().unwrap() else {
+        panic!("no snapshot frame")
+    };
+    let (mut text, last) = snap.next_piece(&mut hub, T0, 1).unwrap();
+    assert!(!last);
+    let ids: Vec<String> = hub.devices().map(|d| d.id.clone()).collect();
+    hub.remove_device(&ids[1], true, T0).unwrap();
+    while let Some((piece, _)) = snap.next_piece(&mut hub, T0, 64) {
+        text.push_str(&piece);
+    }
+    let v: J = serde_json::from_str(&text).unwrap();
+    let devices = v["event"]["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["id"], ids[0].as_str());
+}
+
+#[test]
 fn auth_subscribe_snapshot_deltas_and_commands() {
     let mut hub = hub_with(&["innr-sp120"]);
     let mut api = ApiServer::new("zrs-hub-7cdfa1", "secret");

@@ -8,6 +8,8 @@
 extern crate std;
 #[cfg(test)]
 mod minify;
+#[cfg(test)]
+mod variant;
 
 /// The page, gzip-compressed at build time (`Content-Encoding: gzip`).
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
@@ -46,7 +48,8 @@ mod tests {
     #[test]
     fn embedded_page_is_the_minified_source_and_small() {
         let src = include_str!("../web/index.html");
-        assert_eq!(page(), super::minify::minify(src).unwrap().into_bytes());
+        let selected = super::variant::select(src, cfg!(feature = "advanced")).unwrap();
+        assert_eq!(page(), super::minify::minify(&selected).unwrap().into_bytes());
         // Budget (approved for hub 0.2.0): 32 KiB; it counts in the firmware image.
         assert!(INDEX_HTML_GZ.len() <= 32 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
     }
@@ -59,8 +62,11 @@ mod tests {
             let a = html.find("<script>").unwrap() + "<script>".len();
             html[a..a + html[a..].find("</script>").unwrap()].to_string()
         };
-        let min = super::minify::minify(src).unwrap();
-        for js in [script(src), script(&min)] {
+        let plain = super::variant::select(src, false).unwrap();
+        let advanced = super::variant::select(src, true).unwrap();
+        let min_plain = super::minify::minify(&plain).unwrap();
+        let min_advanced = super::minify::minify(&advanced).unwrap();
+        for js in [script(&plain), script(&advanced), script(&min_plain), script(&min_advanced)] {
             use std::io::Write;
             let Ok(mut node) = std::process::Command::new("node")
                 .args(["-e", "new Function(require('fs').readFileSync(0,'utf8'))"])
@@ -72,6 +78,21 @@ mod tests {
             node.stdin.take().unwrap().write_all(js.as_bytes()).unwrap();
             assert!(node.wait().unwrap().success(), "script does not parse");
         }
+    }
+
+    #[test]
+    fn basic_page_omits_manual_console_but_keeps_normal_device_controls() {
+        let src = include_str!("../web/index.html");
+        let plain = super::variant::select(src, false).unwrap();
+        let advanced = super::variant::select(src, true).unwrap();
+        for item in ["data-tab=\"zcl\"", "zcl/read", "tuya/send", "zFrame(", "onTab.zcl"] {
+            assert!(!plain.contains(item), "{item} remains in the basic page");
+            assert!(advanced.contains(item), "{item} missing from the advanced page");
+        }
+        for item in ["entities/command", "data-tab=\"groups\"", "data-tab=\"conv\""] {
+            assert!(plain.contains(item), "normal functionality lost: {item}");
+        }
+        assert!(super::variant::select("// advanced:start\nx\n", false).is_err());
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hub_devices::api::{ApiExtension, ApiServer, SessionId};
+use hub_devices::api::{ApiExtension, ApiServer, Frame, SessionId};
 use hub_devices::bankcat::StoreCatalog;
 use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubConfig};
@@ -61,6 +61,51 @@ pub trait SessionSink: Send {
     fn keepalive(&mut self) -> bool {
         true
     }
+
+    /// Sinks that send one message as several WebSocket fragments: a
+    /// subscription snapshot then goes piece by piece, each made once the
+    /// sink's backlog allows it. `None`: whole messages only.
+    fn pieces(&self) -> Option<Pieces> {
+        None
+    }
+
+    /// Bytes queued and not sent yet (sinks with [`pieces`](Self::pieces)).
+    fn backlog(&self) -> usize {
+        0
+    }
+
+    /// One piece of a message: `first` opens it, `last` ends it.
+    fn send_piece(&mut self, text: String, first: bool, last: bool) -> bool {
+        let _ = (text, first, last);
+        false
+    }
+}
+
+/// How a sink takes a message in pieces ([`SessionSink::pieces`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pieces {
+    /// Size of one piece.
+    pub size: usize,
+    /// The next piece is made while the sink's backlog is at most this.
+    pub backlog: usize,
+    /// Bytes of other frames held until the snapshot is complete (they
+    /// cannot go between its pieces); more drops the session, whose client
+    /// then subscribes again.
+    pub held: usize,
+}
+
+/// Frames of a session behind a snapshot that goes piece by piece.
+#[derive(Default)]
+struct Outbox {
+    items: std::collections::VecDeque<Queued>,
+    held: usize,
+    /// The front snapshot's first piece has been sent.
+    started: bool,
+}
+
+enum Queued {
+    Frame(String),
+    Snapshot(hub_devices::api::SnapshotStream),
 }
 
 /// Requests served by a service outside the engine (the MQTT bridge's
@@ -80,7 +125,7 @@ pub trait RequestHook: Send {
 /// hook lacks them: such requests answer `unsupported`, not
 /// `invalid_format`.
 const OPTIONAL_SERVICES: &[(&str, &str)] =
-    &[("mqtt/", "the MQTT bridge is not in this firmware build (8 MB images only)")];
+    &[("mqtt/", "the MQTT bridge is not enabled in this firmware build")];
 
 /// The `unsupported` result of a request for an optional service this
 /// build does not have.
@@ -359,6 +404,8 @@ struct Runner {
     engine: Engine<NcpTransport>,
     api: ApiServer,
     sinks: BTreeMap<SessionId, Box<dyn SessionSink>>,
+    /// Sessions whose snapshot is being sent piece by piece.
+    outboxes: BTreeMap<SessionId, Outbox>,
     registry: Registry,
     last: crate::laststate::LastValues,
     status: Arc<Mutex<AppStatus>>,
@@ -541,6 +588,7 @@ impl Runner {
             engine,
             api,
             sinks: BTreeMap::new(),
+            outboxes: BTreeMap::new(),
             registry: Registry::default(),
             last: Default::default(),
             status,
@@ -646,7 +694,11 @@ impl Runner {
         loop {
             // An automation's delay may end before the next tick.
             let due = self.automations.next_wake().map(|ms| self.t0 + Duration::from_millis(ms));
-            let wait = due.map_or(next_tick, |d| d.min(next_tick)).saturating_duration_since(Instant::now());
+            let mut wait = due.map_or(next_tick, |d| d.min(next_tick)).saturating_duration_since(Instant::now());
+            // A snapshot waits for its sink to send the previous pieces.
+            if !self.outboxes.is_empty() {
+                wait = wait.min(Duration::from_millis(10));
+            }
             match rx.recv_timeout(wait) {
                 Ok(Input::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(input) => self.handle(input),
@@ -746,26 +798,16 @@ impl Runner {
                     return;
                 }
                 let ext = self.catalog.as_mut().map(|c| c as &mut dyn ApiExtension<NcpTransport>);
-                for frame in self.api.handle_text_ext(&mut self.engine, sid, &text, now, ext) {
-                    self.send(sid, &frame);
+                for frame in self.api.handle_text_frames(&mut self.engine, sid, &text, now, ext) {
+                    self.deliver(sid, frame, now);
                 }
                 if text.contains("\"definitions/upload\"") || text.contains("\"definitions/delete\"") {
                     self.registry.definitions_changed(now);
                 }
             }
-            Input::Disconnect(sid) => {
-                self.sinks.remove(&sid);
-                self.api.disconnect(sid);
-            }
+            Input::Disconnect(sid) => self.drop_session(sid),
             Input::Admin(out) => match out {
-                JobOut::Reply(sid, frame) => {
-                    if let Some(sink) = self.sinks.get_mut(&sid)
-                        && !sink.send_owned(frame)
-                    {
-                        self.sinks.remove(&sid);
-                        self.api.disconnect(sid);
-                    }
-                }
+                JobOut::Reply(sid, frame) => self.send_owned(sid, frame),
                 JobOut::Event(body) => self.engine.network_event(body),
                 JobOut::Groups(list) => {
                     self.engine.zg_replace_groups(&list);
@@ -861,12 +903,107 @@ impl Runner {
             }
             return;
         }
-        if let Some(sink) = self.sinks.get_mut(&sid)
+        if self.outboxes.contains_key(&sid) {
+            self.hold(sid, frame.to_string());
+        } else if let Some(sink) = self.sinks.get_mut(&sid)
             && !sink.send(frame)
         {
-            self.sinks.remove(&sid);
-            self.api.disconnect(sid);
+            self.drop_session(sid);
         }
+    }
+
+    /// [`send`](Self::send) of a frame the caller no longer needs.
+    fn send_owned(&mut self, sid: SessionId, frame: String) {
+        if self.outboxes.contains_key(&sid) {
+            self.hold(sid, frame);
+        } else if let Some(sink) = self.sinks.get_mut(&sid)
+            && !sink.send_owned(frame)
+        {
+            self.drop_session(sid);
+        }
+    }
+
+    fn deliver(&mut self, sid: SessionId, frame: Frame, now: Millis) {
+        match frame {
+            Frame::Text(t) => self.send_owned(sid, t),
+            Frame::Snapshot(snap) => {
+                if self.sinks.get(&sid).is_some_and(|s| s.pieces().is_some()) {
+                    self.outboxes.entry(sid).or_default().items.push_back(Queued::Snapshot(snap));
+                    self.pump_outboxes(now);
+                } else {
+                    let text = snap.render(&mut self.engine, now);
+                    self.send_owned(sid, text);
+                }
+            }
+        }
+    }
+
+    /// A frame behind a snapshot still being sent.
+    fn hold(&mut self, sid: SessionId, frame: String) {
+        let limit = self.sinks.get(&sid).and_then(|s| s.pieces()).map_or(0, |p| p.held);
+        let Some(out) = self.outboxes.get_mut(&sid) else { return };
+        out.held += frame.len();
+        if out.held > limit {
+            warn!("api: session {sid}: {} B held behind its snapshot, dropping it", out.held);
+            self.drop_session(sid);
+            return;
+        }
+        out.items.push_back(Queued::Frame(frame));
+    }
+
+    /// Sends what the sinks of snapshots in progress can take now.
+    fn pump_outboxes(&mut self, now: Millis) {
+        let sids: Vec<SessionId> = self.outboxes.keys().copied().collect();
+        for sid in sids {
+            let (Some(sink), Some(out)) = (self.sinks.get_mut(&sid), self.outboxes.get_mut(&sid)) else {
+                self.drop_session(sid);
+                continue;
+            };
+            let Some(p) = sink.pieces() else {
+                self.drop_session(sid);
+                continue;
+            };
+            let mut ok = true;
+            while ok {
+                match out.items.front_mut() {
+                    None => break,
+                    Some(Queued::Frame(_)) => {
+                        let Some(Queued::Frame(f)) = out.items.pop_front() else { unreachable!() };
+                        out.held -= f.len();
+                        ok = sink.send_owned(f);
+                    }
+                    Some(Queued::Snapshot(snap)) => {
+                        if sink.backlog() > p.backlog {
+                            break;
+                        }
+                        match snap.next_piece(&mut self.engine, now, p.size) {
+                            Some((piece, last)) => {
+                                ok = sink.send_piece(piece, !out.started, last);
+                                out.started = !last;
+                                if last {
+                                    out.items.pop_front();
+                                }
+                            }
+                            None => {
+                                out.items.pop_front();
+                                out.started = false;
+                            }
+                        }
+                    }
+                }
+            }
+            if !ok {
+                self.drop_session(sid);
+            } else if out.items.is_empty() {
+                self.outboxes.remove(&sid);
+            }
+        }
+    }
+
+    fn drop_session(&mut self, sid: SessionId) {
+        self.sinks.remove(&sid);
+        self.outboxes.remove(&sid);
+        self.api.disconnect(sid);
     }
 
     fn tick(&mut self) {
@@ -878,8 +1015,7 @@ impl Runner {
             .filter_map(|(sid, s)| (!s.alive() || (probe && !s.keepalive())).then_some(*sid))
             .collect();
         for sid in dead {
-            self.sinks.remove(&sid);
-            self.api.disconnect(sid);
+            self.drop_session(sid);
         }
         if !self.registered && self.ncp.client().state() == SessionState::Ready {
             self.register();
@@ -1022,6 +1158,9 @@ impl Runner {
     fn after_input(&mut self) {
         self.observe_permit();
         let now = self.now();
+        if !self.outboxes.is_empty() {
+            self.pump_outboxes(now);
+        }
         if self.catalog.as_ref().is_some_and(|c| c.config_dirty || !c.events.is_empty()) {
             self.pump_catalog();
         }

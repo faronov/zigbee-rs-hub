@@ -11,3 +11,6 @@ zdef-signing*
 /target-opi
 /target-8mb
 /target-8mb-opi
+
+# Python bytecode of the tools
+__pycache__/

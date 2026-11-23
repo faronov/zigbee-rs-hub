@@ -117,22 +117,18 @@ fn stack_free() -> usize {
 }
 
 /// Starts the service (the bridge thread only when enabled).
-pub fn start(app: &hub_app::App, psram: bool) -> hub_mqtt::MqttService {
+pub fn start(app: &hub_app::App, r: &hub_core::resources::Resources) -> hub_mqtt::MqttService {
     let mut seed = [0u8; 3];
     (crate::esp::rng())(&mut seed);
     let svc = ServiceConfig {
         stack_size: 16 * 1024,
         // Without PSRAM the queue and `bridge/devices` stay small.
-        limits: if psram {
-            Limits { queue_bytes: 64 * 1024, devices_bytes: 256 * 1024 }
-        } else {
-            Limits { queue_bytes: 12 * 1024, devices_bytes: 16 * 1024 }
-        },
+        limits: Limits { queue_bytes: r.mqtt_queue_bytes, devices_bytes: r.mqtt_devices_bytes },
         client_suffix: seed.iter().map(|b| format!("{b:02x}")).collect(),
         stack_free: Some(stack_free),
         // Without PSRAM the Rust heap is internal RAM, shared with Wi-Fi and
         // the engine: the bridge starts only with room to spare.
-        heap_free: (!psram).then_some(internal_free as fn() -> usize),
+        heap_free: r.heap_guard.then_some(internal_free as fn() -> usize),
         min_free: 64 * 1024,
     };
     #[cfg(not(feature = "mqtt-lite"))]

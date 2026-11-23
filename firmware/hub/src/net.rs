@@ -173,14 +173,18 @@ fn close_after(req: *mut esp_idf_svc::sys::httpd_req_t) {
 }
 
 fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
+    let r = crate::resources::get();
     let mut server =
         EspHttpServer::new(&server::Configuration {
             stack_size: 8192,
-            // The web UI (page + WebSocket) and integrations at once; the
-            // least recently used socket is purged when they run out, so
-            // page requests close their socket (`close_after`). 7 + the
-            // server's 3 = CONFIG_LWIP_MAX_SOCKETS.
-            max_open_sockets: 7,
+            // The web UI (page + WebSocket) and integrations at once; page
+            // requests close their socket (`close_after`). With PSRAM the
+            // least recently used socket is purged when they run out;
+            // without it a new connection is refused instead, so Home
+            // Assistant keeps its session. 7 + the server's 3 =
+            // CONFIG_LWIP_MAX_SOCKETS.
+            max_open_sockets: r.http_sockets,
+            lru_purge_enable: r.http_lru_purge,
             // Peers that vanished without a FIN.
             keep_alive: Some(server::KeepAlive { idle_secs: 30, interval_secs: 5, probe_count: 3 }),
             ..Default::default()

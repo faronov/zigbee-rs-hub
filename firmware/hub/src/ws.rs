@@ -9,17 +9,29 @@
 //! come to our handler, which reads every frame completely and closes the
 //! socket on a protocol error.
 //!
-//! Frames to a client are queued to the httpd thread (`httpd_queue_work`)
+//! Frames to a client go into one outbox drained by the httpd thread,
 //! without waiting, so a slow client never holds up the app; the httpd
 //! thread also runs the handshakes: a send to a socket number that has been
 //! closed and handed to a new connection meanwhile is dropped there, by the
-//! connection generation.
+//! connection generation. `httpd_queue_work` is called only when the outbox
+//! was idle: every call is a UDP datagram to esp_http_server's loopback
+//! control socket, whose mailbox holds 6 (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`),
+//! so a call per frame lost frames, or failed and dropped sessions, as soon
+//! as a few clients had events queued at once. lwIP drops a datagram to a
+//! full mailbox without an error, so a drain queued too long ago is queued
+//! again.
+//!
+//! What is queued is bounded in bytes, per client and for all clients
+//! ([`Resources`](hub_core::resources::Resources)); a client behind its
+//! budget is closed and subscribes again. A subscription snapshot goes as
+//! the fragments of one message, each made once the earlier ones are sent
+//! (`hub_app::Pieces`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::http::server::EspHttpServer;
@@ -34,14 +46,33 @@ use esp_idf_svc::sys::{
     httpd_ws_type_t_HTTPD_WS_TYPE_PONG, httpd_ws_type_t_HTTPD_WS_TYPE_TEXT, lwip_setsockopt,
     timeval,
 };
-use hub_app::{App, SessionSink};
+use hub_app::{App, Pieces, SessionSink};
 use log::{info, warn};
 
 /// Largest API frame accepted from a client.
 const MAX_FRAME: usize = 16 * 1024;
 
-/// Frames a client may be behind before its connection is closed.
-const MAX_INFLIGHT: u32 = 32;
+/// Bytes a queued frame costs besides its payload (job, box, header).
+const FRAME_OVERHEAD: usize = 64;
+
+/// Frames one outbox run sends before it yields to the httpd thread's
+/// other work (incoming frames, handshakes); it queues itself again.
+const PUMP_BATCH: usize = 16;
+
+/// A drain queued this long ago without running was lost.
+const PUMP_LOST_MS: u32 = 1000;
+
+/// Frames for every client, in order, and whether (since when) a drain is
+/// queued.
+static OUTBOX: Mutex<VecDeque<Box<Job>>> = Mutex::new(VecDeque::new());
+static PUMP_QUEUED: AtomicBool = AtomicBool::new(false);
+static PUMP_SINCE_MS: AtomicU32 = AtomicU32::new(0);
+/// Bytes queued to all clients.
+static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+fn now_ms() -> u32 {
+    (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000) as u32
+}
 
 /// Socket → generation of the WebSocket connection on it; only the httpd
 /// thread changes it.
@@ -225,8 +256,8 @@ struct WsSink {
 struct SinkState {
     /// A send failed or the client fell behind.
     dead: AtomicBool,
-    /// Frames queued to the httpd thread and not sent yet.
-    inflight: AtomicU32,
+    /// Bytes queued to the httpd thread and not sent yet.
+    queued: AtomicUsize,
 }
 
 /// A frame for the httpd thread.
@@ -235,19 +266,64 @@ struct Job {
     fd: i32,
     generation: u32,
     kind: httpd_ws_type_t,
+    /// A fragment of a message; `last` is its final one.
+    fragment: bool,
+    last: bool,
     payload: Vec<u8>,
     state: Arc<SinkState>,
 }
 
-unsafe extern "C" fn run_job(arg: *mut c_void) {
-    // SAFETY: `arg` is the `Box<Job>` leaked by `WsSink::queue`.
-    let mut job = unsafe { Box::from_raw(arg as *mut Job) };
+impl Job {
+    fn cost(&self) -> usize {
+        self.payload.len() + FRAME_OVERHEAD
+    }
+}
+
+/// Queues a drain of [`OUTBOX`] on the httpd thread unless one is queued.
+fn schedule(hd: httpd_handle_t) {
+    let now = now_ms();
+    let queued = PUMP_QUEUED.swap(true, Ordering::AcqRel);
+    if queued && now.wrapping_sub(PUMP_SINCE_MS.load(Ordering::Acquire)) < PUMP_LOST_MS {
+        return;
+    }
+    if queued {
+        warn!("api: outbox drain lost, queuing it again");
+    }
+    PUMP_SINCE_MS.store(now, Ordering::Release);
+    if unsafe { httpd_queue_work(hd, Some(pump), hd.cast()) } != ESP_OK {
+        // Retried with the next frame (at the latest the 30 s keepalive).
+        PUMP_QUEUED.store(false, Ordering::Release);
+    }
+}
+
+/// Drains [`OUTBOX`] on the httpd thread, [`PUMP_BATCH`] frames at a time.
+unsafe extern "C" fn pump(arg: *mut c_void) {
+    for _ in 0..PUMP_BATCH {
+        let job = OUTBOX.lock().unwrap().pop_front();
+        match job {
+            Some(job) => run_job(job),
+            None => {
+                PUMP_QUEUED.store(false, Ordering::Release);
+                // A frame queued between the pop and the store.
+                if !OUTBOX.lock().unwrap().is_empty() {
+                    schedule(arg.cast());
+                }
+                return;
+            }
+        }
+    }
+    PUMP_QUEUED.store(false, Ordering::Release);
+    schedule(arg.cast());
+}
+
+fn run_job(mut job: Box<Job>) {
     let hd = job.hd as httpd_handle_t;
     let current = is_current(hd, job.fd, job.generation);
     let sent = current && !job.state.dead.load(Ordering::Relaxed) && {
         let mut frame = httpd_ws_frame_t {
             type_: job.kind,
-            final_: true,
+            final_: !job.fragment || job.last,
+            fragmented: job.fragment,
             payload: job.payload.as_mut_ptr(),
             len: job.payload.len(),
             ..Default::default()
@@ -255,7 +331,9 @@ unsafe extern "C" fn run_job(arg: *mut c_void) {
         let err = unsafe { httpd_ws_send_frame_async(hd, job.fd, &mut frame) };
         err == ESP_OK
     };
-    job.state.inflight.fetch_sub(1, Ordering::Relaxed);
+    let cost = job.cost();
+    job.state.queued.fetch_sub(cost, Ordering::Relaxed);
+    QUEUED_BYTES.fetch_sub(cost, Ordering::Relaxed);
     if !sent && !job.state.dead.swap(true, Ordering::Relaxed) && current {
         unsafe { httpd_sess_trigger_close(hd, job.fd) };
     }
@@ -264,53 +342,76 @@ unsafe extern "C" fn run_job(arg: *mut c_void) {
 impl WsSink {
     /// Queues one frame to the httpd thread without waiting for it, so a
     /// slow or vanished client never holds up the app (and through it the
-    /// other clients). A failed send, or a client [`MAX_INFLIGHT`] frames
-    /// behind, ends the connection.
-    fn queue(&self, kind: httpd_ws_type_t, payload: Vec<u8>) -> bool {
+    /// other clients). A failed send, or a client with frames queued that
+    /// would go over its or the total byte budget, ends the connection.
+    fn queue(&self, kind: httpd_ws_type_t, fragment: bool, last: bool, payload: Vec<u8>) -> bool {
         if !self.alive() {
             return false;
         }
-        if self.state.inflight.fetch_add(1, Ordering::Relaxed) >= MAX_INFLIGHT {
-            self.state.inflight.fetch_sub(1, Ordering::Relaxed);
+        let r = crate::resources::get();
+        let job = Box::new(Job {
+            hd: self.hd,
+            fd: self.fd,
+            generation: self.generation,
+            kind,
+            fragment,
+            last,
+            payload,
+            state: self.state.clone(),
+        });
+        let cost = job.cost();
+        let mine = self.state.queued.fetch_add(cost, Ordering::Relaxed);
+        let total = QUEUED_BYTES.fetch_add(cost, Ordering::Relaxed);
+        // A message to a client with nothing queued always goes.
+        if mine > 0 && (mine + cost > r.ws_client_bytes || total + cost > r.ws_total_bytes) {
+            self.state.queued.fetch_sub(cost, Ordering::Relaxed);
+            QUEUED_BYTES.fetch_sub(cost, Ordering::Relaxed);
             warn!(
-                "api: socket {} is {MAX_INFLIGHT} frames behind, closing",
+                "api: socket {} is {mine} B behind ({total} B queued in all), closing",
                 self.fd
             );
             self.state.dead.store(true, Ordering::Relaxed);
             unsafe { httpd_sess_trigger_close(self.hd as httpd_handle_t, self.fd) };
             return false;
         }
-        let job = Box::new(Job {
-            hd: self.hd,
-            fd: self.fd,
-            generation: self.generation,
-            kind,
-            payload,
-            state: self.state.clone(),
-        });
-        let arg = Box::into_raw(job) as *mut c_void;
-        if unsafe { httpd_queue_work(self.hd as httpd_handle_t, Some(run_job), arg) } != ESP_OK {
-            // SAFETY: not queued, so still ours.
-            drop(unsafe { Box::from_raw(arg as *mut Job) });
-            self.state.inflight.fetch_sub(1, Ordering::Relaxed);
-            return false;
-        }
+        OUTBOX.lock().unwrap().push_back(job);
+        schedule(self.hd as httpd_handle_t);
         true
+    }
+
+    fn text(&self, payload: Vec<u8>) -> bool {
+        self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_TEXT, false, true, payload)
     }
 }
 
 impl SessionSink for WsSink {
     fn send(&mut self, text: &str) -> bool {
-        self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_TEXT, text.as_bytes().to_vec())
+        self.text(text.as_bytes().to_vec())
     }
     fn send_owned(&mut self, text: String) -> bool {
-        self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_TEXT, text.into_bytes())
+        self.text(text.into_bytes())
     }
     fn alive(&self) -> bool {
         !self.state.dead.load(Ordering::Relaxed)
             && is_current(self.hd as httpd_handle_t, self.fd, self.generation)
     }
     fn keepalive(&mut self) -> bool {
-        self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_PING, Vec::new())
+        // A control frame may go between the fragments of a message.
+        self.queue(httpd_ws_type_t_HTTPD_WS_TYPE_PING, false, true, Vec::new())
+    }
+    fn pieces(&self) -> Option<Pieces> {
+        let r = crate::resources::get();
+        Some(Pieces {
+            size: r.snapshot_chunk_bytes,
+            backlog: r.ws_client_bytes / 2 - r.snapshot_chunk_bytes,
+            held: r.ws_client_bytes,
+        })
+    }
+    fn backlog(&self) -> usize {
+        self.state.queued.load(Ordering::Relaxed)
+    }
+    fn send_piece(&mut self, text: String, first: bool, last: bool) -> bool {
+        let kind = if first { httpd_ws_type_t_HTTPD_WS_TYPE_TEXT } else { httpd_ws_type_t_HTTPD_WS_TYPE_CONTINUE };
+        self.queue(kind, true, last, text.into_bytes())
     }
 }

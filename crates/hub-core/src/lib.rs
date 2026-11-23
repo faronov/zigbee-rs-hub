@@ -15,3 +15,4 @@ pub use zigbee_zrhp as zrhp;
 pub mod board;
 pub mod layout;
 pub mod lines;
+pub mod resources;

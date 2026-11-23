@@ -349,6 +349,88 @@ fn permit_join_events_without_ncp_reports() {
     r.sim.stop();
 }
 
+/// A WebSocket-like sink that takes messages in pieces; `busy` stands for
+/// bytes the socket has not sent yet.
+struct PieceSink {
+    tx: mpsc::Sender<(String, Option<(bool, bool)>)>,
+    busy: Arc<std::sync::atomic::AtomicUsize>,
+    held: usize,
+}
+
+impl crate::SessionSink for PieceSink {
+    fn send(&mut self, text: &str) -> bool {
+        self.tx.send((text.to_string(), None)).is_ok()
+    }
+    fn pieces(&self) -> Option<crate::Pieces> {
+        Some(crate::Pieces { size: 16, backlog: 0, held: self.held })
+    }
+    fn backlog(&self) -> usize {
+        self.busy.load(Ordering::SeqCst)
+    }
+    fn send_piece(&mut self, text: String, first: bool, last: bool) -> bool {
+        self.tx.send((text, Some((first, last)))).is_ok()
+    }
+}
+
+#[test]
+fn snapshot_waits_for_the_sink_and_later_frames_wait_for_the_snapshot() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let (tx, rx) = mpsc::channel();
+    let busy = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let sid = app.connect(Box::new(PieceSink { tx, busy: busy.clone(), held: 64 * 1024 })).unwrap();
+    let next = || rx.recv_timeout(T).unwrap();
+    assert!(next().0.contains("auth_required"));
+    app.text(sid, json!({"type": "auth", "token": "secret"}).to_string());
+    assert!(next().0.contains("auth_ok"));
+    app.text(sid, json!({"id": 1, "type": "subscribe", "topics": ["devices", "entities", "network"]}).to_string());
+    let ok: J = serde_json::from_str(&next().0).unwrap();
+    assert_eq!((ok["id"].clone(), ok["success"].clone()), (json!(1), json!(true)));
+    app.text(sid, json!({"id": 2, "type": "hub/info"}).to_string());
+    // The socket is busy: neither a piece nor the later result goes.
+    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    busy.store(0, Ordering::SeqCst);
+    let mut text = String::new();
+    let mut pieces = 0;
+    loop {
+        let (piece, flags) = next();
+        let (first, last) = flags.expect("a whole frame between the pieces of the snapshot");
+        assert_eq!(first, pieces == 0);
+        text.push_str(&piece);
+        pieces += 1;
+        if last {
+            break;
+        }
+    }
+    assert!(pieces > 2, "{pieces} pieces");
+    let snap: J = serde_json::from_str(&text).unwrap();
+    assert_eq!(snap["event"]["topic"], "snapshot");
+    let (info, flags) = next();
+    assert!(flags.is_none());
+    assert_eq!(serde_json::from_str::<J>(&info).unwrap()["id"], 2);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+#[test]
+fn too_much_held_behind_a_stuck_snapshot_drops_the_session() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let (tx, rx) = mpsc::channel();
+    let busy = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let sid = app.connect(Box::new(PieceSink { tx, busy, held: 32 })).unwrap();
+    app.text(sid, json!({"type": "auth", "token": "secret"}).to_string());
+    app.text(sid, json!({"id": 1, "type": "subscribe", "topics": ["devices"]}).to_string());
+    assert!(app.wait(T, |s| s.sessions == 1));
+    app.text(sid, json!({"id": 2, "type": "hub/info"}).to_string());
+    assert!(app.wait(T, |s| s.sessions == 0), "{:?}", app.status());
+    drop(rx);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 /// A connection that goes away without a close notification.
 struct Vanishing(Arc<std::sync::atomic::AtomicBool>);
 

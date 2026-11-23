@@ -2,6 +2,7 @@
 //! (interview → resolution → entities → configure → states → commands).
 
 mod bank;
+#[cfg(feature = "advanced")]
 mod console;
 mod gp;
 mod groups;

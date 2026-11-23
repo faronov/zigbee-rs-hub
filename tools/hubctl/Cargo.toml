@@ -10,11 +10,11 @@ publish = false
 
 [dependencies]
 hub-ncp = { workspace = true, features = ["sim"] }
-hub-app = { workspace = true }
+hub-app = { workspace = true, features = ["advanced"] }
 # `--sim-devices`: the engine's device simulator behind the simulated NCP.
 hub-devices = { workspace = true, features = ["sim"] }
 zigbee-zrhp = { workspace = true, features = ["std"] }
-hub-web = { workspace = true }
+hub-web = { workspace = true, features = ["advanced"] }
 hub-mqtt = { workspace = true }
 serde_json = "1"
 # `catalog-push`: the catalog mirror over HTTPS.

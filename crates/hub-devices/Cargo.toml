@@ -22,6 +22,8 @@ zdef = { path = "../zdef", features = ["std"] }
 zigbee-gp = { workspace = true }
 
 [features]
+# Manual ZCL/Tuya commands and live frame tracing, not normal device support.
+advanced = []
 # The device simulator of the host tests (`testutil::sim`), for
 # `hubctl --sim-devices`.
 sim = []

@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "src/minify.rs"]
 mod minify;
+#[path = "src/variant.rs"]
+mod variant;
 
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
@@ -26,7 +28,9 @@ fn main() {
     let src = Path::new("web/index.html");
     println!("cargo:rerun-if-changed={}", src.display());
     println!("cargo:rerun-if-changed=src/minify.rs");
+    println!("cargo:rerun-if-changed=src/variant.rs");
     let html = fs::read_to_string(src).expect("web/index.html");
+    let html = variant::select(&html, cfg!(feature = "advanced")).expect("web feature sections");
     let html = minify::minify(&html).unwrap_or_else(|e| panic!("web/index.html: {e}")).into_bytes();
     let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff];
     gz.extend(miniz_oxide::deflate::compress_to_vec(&html, 10));

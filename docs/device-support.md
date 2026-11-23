@@ -2402,6 +2402,13 @@ only reads the job board once a second.
 
 ### 14.7 ZCL console (API 1.3)
 
+Selected by the `advanced` firmware feature. The standard 4 MB BR image
+omits it; the standard 8 MB image and desktop `hubctl` include it. A 4 MB
+advanced image is also buildable. `hub/info.advanced` advertises support;
+without it, `zcl/*`, `tuya/send` and subscription to `frames` answer
+`unsupported`. Normal device commands, Tuya definitions and interview
+remain available.
+
 Raw requests to one device endpoint, for writing and debugging
 definitions (web UI tab **ZCL**). They take the normal send path (queued
 for a sleeping device, APS confirm, retries, `timeout` / `not_delivered`),
@@ -2676,7 +2683,7 @@ switches gets a light); group entities carry no `last_seen`; the
 coordinator's own binding table (bindings with the hub as source) is not
 managed; scene names are not written to the devices.
 
-### 14.10 MQTT bridge (Zigbee2MQTT-compatible; API 1.3, 8 MB builds)
+### 14.10 MQTT bridge (Zigbee2MQTT-compatible; API 1.3)
 
 `crates/hub-mqtt` publishes the hub's devices on an MQTT broker with
 Zigbee2MQTT's topics and payloads, so tools written for Zigbee2MQTT
@@ -2686,9 +2693,9 @@ authenticates itself, `App::connect_trusted`), so it sees exactly what the
 web UI and the HA integration see. **Plain MQTT 3.1.1 over TCP**: the hub
 does no TLS (the esp-mqtt SSL and WebSocket transports are compiled out),
 so the broker belongs on the LAN; user name and password are optional.
-Firmware feature `mqtt`, in the 8 MB images only; a build without it
-answers `mqtt/*` with `unsupported` (the 4 MB dev images). The bridge runs
-only when enabled in its settings.
+Firmware feature `mqtt`, selected by standard 4 MB and 8 MB BR images.
+A build without it answers `mqtt/*` with `unsupported`. The bridge runs
+only when enabled in its settings. Release 0.2.0 predates the 4 MB MQTT profile.
 
 Requests (authenticated sessions; `hub/info` `maintenance` lists `mqtt`):
 

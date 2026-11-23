@@ -21,6 +21,9 @@ hub-core = { workspace = true }
 sha2 = "0.10"
 base64 = "0.22"
 
+[features]
+advanced = ["hub-devices/advanced"]
+
 [dev-dependencies]
 zdefc = { path = "../zdefc" }
 base64 = "0.22"

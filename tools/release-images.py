@@ -47,9 +47,9 @@ LAYOUTS = [
         "app_partition": "ota_0",
         "max_app": 3 * 1024 * 1024,
         "target": "target-8mb",
-        "features": ["mqtt"],
+        "features": ["mqtt", "advanced"],
         "note": "Production layout: two 3 MiB app slots (A/B OTA) and 1 920 KiB hubdata; "
-        "with the Zigbee2MQTT-compatible MQTT bridge.",
+        "with the Zigbee2MQTT-compatible MQTT bridge and advanced ZCL/Tuya console.",
     },
     {
         "id": "thread-br-s3-hub-4mb-dev",
@@ -60,14 +60,15 @@ LAYOUTS = [
         "app_partition": "factory",
         "max_app": 2944 * 1024,
         "target": "target",
-        "features": [],
-        "note": "Development layout: one 2 944 KiB app slot, no OTA, 1 MiB hubdata; "
-        "no MQTT bridge (its API answers unsupported).",
+        "features": ["mqtt"],
+        "note": "Development layout: one 2 944 KiB app slot, no hub A/B OTA, 1 MiB hubdata; "
+        "esp-mqtt included, advanced console omitted.",
     },
 ]
 # ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
 # variant by the chip's embedded PSRAM (eFuse PSRAM_CAP, esptool's
-# "Embedded PSRAM 8MB"); a wrong pick boots without PSRAM.
+# "Embedded PSRAM 8MB"); a wrong pick boots without PSRAM, on internal RAM
+# with reduced limits (hub/system memory_mode "internal-fallback").
 PSRAM_VARIANTS = [
     {"psram": "quad", "suffix": "", "title": "",
      "match": {"embedded_psram_mb": [0, 2, 4]},
@@ -125,6 +126,18 @@ def app_version(image: bytes) -> str:
     if image[0] != 0xE9 or int.from_bytes(image[desc:desc + 4], "little") != APP_DESC_MAGIC:
         raise ReleaseError("no esp_app_desc_t in the app image")
     return image[desc + 16:desc + 48].split(b"\0", 1)[0].decode()
+
+
+BUILD_MARKER = re.compile(rb"tbr-hub-build:features=([a-z0-9,-]*);psram=(quad|octal);")
+
+
+def build_marker(image: bytes) -> tuple[list[str], str]:
+    """Features and PSRAM mode tbr-hub marks in its image (src/resources.rs)."""
+    found = set(BUILD_MARKER.findall(image))
+    if len(found) != 1:
+        raise ReleaseError(f"expected one tbr-hub build marker in the app image, found {len(found)}")
+    features, psram = found.pop()
+    return [f for f in features.decode().split(",") if f], psram.decode()
 
 
 def idf_bootloader() -> Path:
@@ -188,6 +201,11 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     reported = app_version(app.read_bytes())
     if reported != f"tbr-hub-{version}":
         raise ReleaseError(f"app reports {reported!r}, the tag says tbr-hub-{version}")
+    features, psram = build_marker(app.read_bytes())
+    if sorted(features) != sorted(spec["features"]) or psram != spec["psram"]:
+        raise ReleaseError(f"{spec['id']}: image built with features {features} for {psram} PSRAM, "
+                           f"the board entry says {spec['features']} for {spec['psram']} "
+                           "(rebuild with tools/build-hub-firmware.sh)")
     return {
         "id": spec["id"],
         "title": spec["title"],
