@@ -10,7 +10,9 @@ publish = false
 
 [dependencies]
 hub-ncp = { workspace = true, features = ["sim"] }
-hub-app = { workspace = true, features = ["advanced"] }
+hub-app = { workspace = true, features = ["advanced", "ota-store"] }
+hub-ota = { workspace = true, features = ["store"] }
+sha2 = "0.10"
 # `--sim-devices`: the engine's device simulator behind the simulated NCP.
 hub-devices = { workspace = true, features = ["sim"] }
 zigbee-zrhp = { workspace = true, features = ["std"] }

@@ -64,11 +64,11 @@ elf.write_text(" ".join(sys.argv[1:]))
         calls = self.run_build("--locked")
         self.assertEqual(
             [self.features(c) for c in calls],
-            ["mqtt,advanced", "mqtt", "mqtt,advanced", "mqtt"],
+            ["mqtt,advanced,ota-store", "mqtt", "mqtt,advanced,ota-store", "mqtt"],
         )
         for folder in ["target-8mb", "target-8mb-opi"]:
             elf = self.root / folder / "xtensa-esp32s3-espidf/release/tbr-hub"
-            self.assertIn("mqtt,advanced", elf.read_text())
+            self.assertIn("mqtt,advanced,ota-store", elf.read_text())
 
     def test_one_psram_mode_and_extra_features_reach_cargo(self):
         calls = self.run_build("--layout", "4mb", "--psram", "octal", "--", "--features", "advanced")

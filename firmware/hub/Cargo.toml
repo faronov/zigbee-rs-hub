@@ -42,6 +42,11 @@ mqtt = ["app", "dep:hub-mqtt"]
 # esp-mqtt (which links esp-tls and the mbedtls TLS layer even for plain
 # TCP). An option, off in every image.
 mqtt-lite = ["mqtt"]
+# The devices' OTA image store in the inactive app slot of the 8 MB
+# production layout (tools/build-hub-firmware.sh enables it there only).
+# Every image serves streamed images (an API client holds the file); the
+# 4 MB dev layout has no second app slot to store images in.
+ota-store = ["app", "hub-app/ota-store"]
 
 [build-dependencies]
 embuild = "0.33"

@@ -117,6 +117,72 @@ impl Flash for Partition {
     }
 }
 
+/// The inactive app slot of the 8 MB layout: the store of the devices'
+/// OTA images (`hub_app::ota_store`). Shared with the hub's own firmware
+/// update through `hub_app::ota_store::APP_SLOT`.
+#[cfg(feature = "ota-store")]
+pub struct InactiveSlot {
+    part: *const sys::esp_partition_t,
+    sectors: u32,
+    /// The slot's otadata entry is invalid (never booted from).
+    invalidated: bool,
+}
+
+// The partition descriptor is a static ESP-IDF table entry.
+#[cfg(feature = "ota-store")]
+unsafe impl Send for InactiveSlot {}
+
+#[cfg(feature = "ota-store")]
+impl InactiveSlot {
+    /// The slot, unless the running app still waits for its confirmation
+    /// (then the slot holds the previous app for a rollback).
+    pub fn find() -> Result<Self, String> {
+        let running = unsafe { sys::esp_ota_get_running_partition() };
+        let part = unsafe { sys::esp_ota_get_next_update_partition(core::ptr::null()) };
+        if part.is_null() || part == running {
+            return Err("no inactive app slot".into());
+        }
+        let mut state: sys::esp_ota_img_states_t = 0;
+        if unsafe { sys::esp_ota_get_state_partition(running, &mut state) } == sys::ESP_OK
+            && state == sys::esp_ota_img_states_t_ESP_OTA_IMG_PENDING_VERIFY
+        {
+            return Err("the running hub firmware is not confirmed yet: the inactive slot keeps the previous one for a rollback".into());
+        }
+        let size = unsafe { (*part).size };
+        let label = unsafe { CStr::from_ptr((*part).label.as_ptr()) }.to_string_lossy().into_owned();
+        info!("OTA image store: inactive app slot {label}, {} KiB", size / 1024);
+        Ok(Self { part, sectors: size / SECTOR, invalidated: false })
+    }
+}
+
+#[cfg(feature = "ota-store")]
+impl Flash for InactiveSlot {
+    fn sector_size(&self) -> u32 {
+        SECTOR
+    }
+    fn sectors(&self) -> u32 {
+        self.sectors
+    }
+    fn read(&mut self, offset: u32, buf: &mut [u8]) -> io::Result<()> {
+        check(unsafe { sys::esp_partition_read(self.part, offset as usize, buf.as_mut_ptr().cast(), buf.len()) })
+    }
+    fn write(&mut self, offset: u32, data: &[u8]) -> io::Result<()> {
+        check(unsafe { sys::esp_partition_write(self.part, offset as usize, data.as_ptr().cast(), data.len()) })
+    }
+    fn erase(&mut self, sector: u32) -> io::Result<()> {
+        // Before the first change: the bootloader must never fall back to
+        // this slot (it no longer holds an app).
+        if !self.invalidated {
+            self.invalidated = true;
+            let e = unsafe { sys::esp_ota_invalidate_inactive_ota_data_slot() };
+            if e != sys::ESP_OK {
+                info!("OTA image store: otadata of the inactive slot: {e}");
+            }
+        }
+        check(unsafe { sys::esp_partition_erase_range(self.part, (sector * SECTOR) as usize, SECTOR as usize) })
+    }
+}
+
 /// Detected S3 flash size and the boot check of the partition table
 /// (`hub_core::layout`: 8 MB production, 4 MB dev; spec 3.4, decision N9).
 pub fn flash_layout() -> (u32, Verdict) {

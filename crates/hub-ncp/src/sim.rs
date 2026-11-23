@@ -162,6 +162,53 @@ pub type SimNeighbor = ([u8; 8], u16, u8, u8);
 
 type Injected = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 
+/// Largest unfragmented ASDU of the simulated NCP (`max_asdu`, as the
+/// zigbee-rs NCP); longer ones are refused with `TOO_LARGE`.
+pub const SIM_MAX_ASDU: usize = 82;
+
+/// One `APS_DATA_REQUEST` as a [`SimApsHook`] sees it.
+#[derive(Debug, Clone, Copy)]
+pub struct SimAps<'a> {
+    /// Destination NWK (`0xFFFF` for groups and broadcasts).
+    pub dst: u16,
+    /// Destination endpoint.
+    pub dst_ep: u8,
+    /// Source endpoint.
+    pub src_ep: u8,
+    /// Profile.
+    pub profile: u16,
+    /// Cluster.
+    pub cluster: u16,
+    /// ASDU.
+    pub asdu: &'a [u8],
+}
+
+/// A simulated remote application (a device's ZCL client, e.g. an OTA
+/// client): sees every APS data request and returns the
+/// `EVT_APS_DATA_INDICATION` payloads it answers with ([`indication`]).
+pub type SimApsHook = Box<dyn FnMut(&SimAps<'_>) -> Vec<Vec<u8>> + Send>;
+
+/// `EVT_APS_DATA_INDICATION` payload of a unicast from `src_nwk` (with its
+/// IEEE) to the coordinator.
+pub fn indication(src_nwk: u16, src_ieee: u64, src_ep: u8, dst_ep: u8, profile: u16, cluster: u16, asdu: &[u8]) -> Vec<u8> {
+    let mut p = vec![0x02, 0, 0, dst_ep];
+    p.extend(src_nwk.to_le_bytes());
+    p.extend(src_ieee.to_le_bytes());
+    p.push(src_ep);
+    p.extend(profile.to_le_bytes());
+    p.extend(cluster.to_le_bytes());
+    p.push(0x06);
+    p.push(180);
+    p.push(-60i8 as u8);
+    p.extend(src_nwk.to_le_bytes());
+    p.push(0);
+    p.push(0);
+    p.extend(0u32.to_le_bytes());
+    p.extend((asdu.len() as u16).to_le_bytes());
+    p.extend(asdu);
+    p
+}
+
 /// Handle to a running simulated NCP.
 #[derive(Clone)]
 pub struct SimNcp {
@@ -169,6 +216,7 @@ pub struct SimNcp {
     reboot: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     inject: Injected,
+    aps_hook: Arc<Mutex<Option<SimApsHook>>>,
 }
 
 impl SimNcp {
@@ -222,7 +270,13 @@ impl SimNcp {
             scan_progress: true,
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
-        let sim = Self { state, reboot: Arc::new(AtomicBool::new(false)), stop: Arc::new(AtomicBool::new(false)), inject };
+        let sim = Self {
+            state,
+            reboot: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            inject,
+            aps_hook: Arc::new(Mutex::new(None)),
+        };
         let worker = sim.clone();
         thread::Builder::new().name("sim-ncp".into()).spawn(move || worker.run(end)).expect("sim thread");
         sim
@@ -242,6 +296,11 @@ impl SimNcp {
     /// unconfirmed trial image rolls back).
     pub fn reboot(&self) {
         self.reboot.store(true, Ordering::SeqCst);
+    }
+
+    /// Install a simulated remote application ([`SimApsHook`]).
+    pub fn set_aps_hook(&self, hook: SimApsHook) {
+        *self.aps_hook.lock().unwrap() = Some(hook);
     }
 
     /// Send an event (ZIGBEE endpoint) with a raw payload, as if the
@@ -430,7 +489,8 @@ impl SimNcp {
         }
         let rsp = match m.header.msg_id {
             ids::SYS_NEGOTIATE => {
-                let capacities = [Capacity { id: 1, value: 4 }, Capacity { id: 7, value: STRIDE }];
+                let capacities =
+                    [Capacity { id: 1, value: 4 }, Capacity { id: 6, value: SIM_MAX_ASDU as u32 }, Capacity { id: 7, value: STRIDE }];
                 ok(encode!(SysNegotiateRsp {
                     major: 1,
                     minor: 0,
@@ -766,12 +826,21 @@ impl SimNcp {
             ids::APS_DATA_REQUEST => {
                 s.aps.push(m.payload.to_vec());
                 let req: ApsDataRequest = m.decode().unwrap();
+                if req.asdu.len() > SIM_MAX_ASDU {
+                    return (status(Status::TooLarge), actions);
+                }
                 let dst = match req.dst {
                     zigbee_zrhp::msg::data::ApsDst::Nwk(n) => n,
                     _ => 0xFFFF,
                 };
                 let zb_status = s.undeliverable.iter().find(|u| u.0 == dst).map_or(0, |u| u.1);
                 let (st, flags) = if zb_status == 0 { (0, 1) } else { (1, 0) };
+                if let Some(hook) = self.aps_hook.lock().unwrap().as_mut() {
+                    let a = SimAps { dst, dst_ep: req.dst_ep, src_ep: req.src_ep, profile: req.profile, cluster: req.cluster, asdu: req.asdu };
+                    for p in hook(&a) {
+                        actions.push((Duration::from_millis(5), Action::Event(ids::EVT_APS_DATA_INDICATION, p)));
+                    }
+                }
                 actions.push((
                     Duration::from_millis(10),
                     event(&EvtApsDataConfirm { req_tid: tid, status: st, zb_status, aps_counter: 7, dst_nwk: dst, flags, elapsed_ms: 10 }),

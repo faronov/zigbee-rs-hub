@@ -184,6 +184,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `crates/hub-web` | The embedded web UI: one static page (`web/index.html`), gzip-compressed by `build.rs` |
+| `crates/hub-ota` | Zigbee OTA Upgrade server (cluster 0x0019): OTA file format, streamed images, image store (inactive app slot, 8 MB), server state machine, simulated OTA client ([`docs/ota.md`](docs/ota.md)) |
 | `crates/hub-app` | Stage 2: the engine on the host core: event/request conversion, transport, device registry in the host store, app thread with the API sessions, catalog verifier (trusted keys) |
 | `crates/hub-mqtt` | Zigbee2MQTT-compatible MQTT bridge: topics, payloads and exposes from the hub's entities, HA MQTT discovery, the bridge thread with reconnects; a desktop MQTT client and a test broker |
 | `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, host store journal, simulated NCP (`sim`) |
@@ -194,6 +195,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `tools/size-report.py` | Firmware size breakdown of an ELF: bytes per ESP-IDF component / library and per Rust crate (flash code, rodata, IRAM, DRAM), largest symbols |
 | `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`); button-free S3 reflash `s3_reflash.sh IMAGE TAG [4mb-dev or 8mb]` (the app offset comes from the partition table on the device via `s3_partition.py`; a different layout is refused) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
+| `docs/ota.md` | Zigbee OTA Upgrade server: behaviour, image store, clients and the online index, NCP findings, OTA files for zigbee-rs devices |
 | `definitions/examples/` | Example device definitions (YAML source form) |
 | `tools/herdsman-coverage/` | Coverage and size measurement of zigbee-herdsman-converters definitions (Node + Python) |
 | `tools/zdefc-proto/` | Python prototype of the definition compiler (YAML → CBOR, expression bytecode) |
@@ -1147,6 +1149,37 @@ UI and the HA integration see.
   without PSRAM), the device model (3.4 KB per device measured on a 64-bit
   host, `crates/hub-mqtt/tests/heap.rs`; less on the S3) and, briefly, the
   API snapshot the bridge parses one record at a time.
+
+## Device firmware updates (Zigbee OTA)
+
+Draft (branch `zigbee-ota`, [docs/ota.md](docs/ota.md), API in
+device-support 14.11): the hub is the OTA Upgrade server (cluster 0x0019)
+of its network and downloads nothing itself. Two image sources:
+**streaming** (every build): a connected client — Home Assistant
+(preferred), a browser tab (**Updates**, "keep this tab open"), `hubctl
+ota-stream` — offers a file it holds and answers `ota/block_needed` with
+`ota/block_data`; the hub keeps at most 8 KiB per stream, answers the
+device WAIT_FOR_DATA while a chunk is on its way and ends the transfer
+cleanly when the client goes away (the device retries later). **Image
+store** (8 MB layout only, feature `ota-store`): uploads (web UI, Home
+Assistant, `hubctl ota-upload`; resumable, checked in flash: header,
+sub-elements, SHA-256) go to the **inactive app slot** (3 MiB) — locked
+against hub self-updates both ways, lost when the hub updates itself,
+re-checked at boot. The 4 MB dev layout builds without the store. The
+Koenkk/zigbee-OTA index is fetched by the browser / Home Assistant (CORS
+is open). Per device: policy `manual` (default), `auto` (schedule window)
+or `off`; Image Notify (sleepy devices through the queue); blocks of
+min(device, 48 B, NCP `max_asdu` − 17); page requests; pacing; at most 2
+downloads at once; abort; progress events; resumable after a hub restart.
+Home Assistant: one `update` entity per device (upload to the store or
+streaming). Host tests: simulated OTA client behind the simulated NCP,
+Home Assistant end to end with `hubctl --sim --sim-ota`; not on hardware
+yet (procedure: [docs/ota.md](docs/ota.md#hardware-test)). Cost vs main:
+8 MB (store + streaming) +128 352 B, 4 MB (streaming only) +92 944 B app
+image (4 MB: 2 661 408 B, 88.3 % of the 2 944 KiB slot); no static RAM.
+Open: hub self-OTA must take the app-slot lock. zigbee-rs devices
+advertise OTA manufacturer code 0x6D6B (devices on older firmware: one
+transition file with 0x1234).
 
 ## Home Assistant integration
 

@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 hub-devices = { workspace = true }
 hub-ncp = { workspace = true }
+hub-ota = { workspace = true }
 zigbee-zrhp = { workspace = true, features = ["std"] }
 log = "0.4"
 miniz_oxide = "0.8"
@@ -22,7 +23,11 @@ sha2 = "0.10"
 base64 = "0.22"
 
 [features]
+default = ["ota-store"]
 advanced = ["hub-devices/advanced"]
+# The OTA image store (uploads into the inactive app slot of the 8 MB
+# layout). Without it the OTA server serves streamed images only (4 MB).
+ota-store = ["hub-ota/store"]
 
 [dev-dependencies]
 zdefc = { path = "../zdefc" }

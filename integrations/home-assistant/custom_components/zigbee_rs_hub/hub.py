@@ -23,6 +23,7 @@ from . import const
 from .api import CannotConnect, HubApiError, HubClient, HubError, InvalidAuth, hub_url
 from .catalog import CatalogUpdater
 from .const import COMMAND_TIMEOUT, CONF_PATH, DEFAULT_PATH, DOMAIN, TOPICS
+from .ota import OtaIndex, OtaStreams
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -132,6 +133,13 @@ class ZigbeeRsHub:
         self._automation_adders: dict[str, AutomationAdder] = {}
         self._automations_created: set[tuple[str, str]] = set()
         self.catalog = CatalogUpdater(hass, self, session)
+        # OTA Upgrade server (hub/info `ota`): ota/devices/list records.
+        self.ota: dict[str, dict[str, Any]] = {}
+        self.ota_settings: dict[str, Any] = {}
+        self.ota_index = OtaIndex(session)
+        self.ota_streams = OtaStreams(self, hass.config.path(".storage", f"{DOMAIN}_ota"))
+        self._ota_adder: Callable[[list[str]], None] | None = None
+        self._ota_created: set[str] = set()
 
     # Identity
 
@@ -151,6 +159,16 @@ class ZigbeeRsHub:
         return isinstance(self.info.get("automations"), dict)
 
     @property
+    def supports_ota(self) -> bool:
+        """The hub is an OTA Upgrade server (`ota` in hub/info)."""
+        return isinstance(self.info.get("ota"), dict)
+
+    @property
+    def ota_store(self) -> bool:
+        """The hub stores uploaded images (8 MB); else images are streamed."""
+        return self.supports_ota and self.info["ota"].get("store") is not False
+
+    @property
     def coordinator_ieee(self) -> str | None:
         """Coordinator IEEE (hub/info), if the hub tells it."""
         ieee = self.info.get("coordinator_ieee")
@@ -166,6 +184,7 @@ class ZigbeeRsHub:
     async def async_connect(self) -> None:
         """Connect, authenticate, load the identity and the snapshot."""
         client = HubClient(self._session, self.url, self.entry.data[CONF_TOKEN], self._on_closed)
+        client.on_message = self._on_message
         await client.connect()
         try:
             self.info = await async_fetch_info(client)
@@ -176,6 +195,8 @@ class ZigbeeRsHub:
                 topics.append("network")
             if self.supports_automations:
                 topics.append("automations")
+            if self.supports_ota:
+                topics.append("ota")
             await client.subscribe(topics, self._on_event)
             async with asyncio.timeout(SNAPSHOT_TIMEOUT):
                 waits = {
@@ -201,6 +222,11 @@ class ZigbeeRsHub:
             self.client = None
             raise
         self.connected = True
+        if self.supports_ota:
+            await self._async_load_ota()
+            self.entry.async_create_background_task(
+                self.hass, self.ota_streams.resume(), f"{DOMAIN} OTA streams"
+            )
         self._update_hub_device()
         _LOGGER.debug(
             "Connected to %s: %d devices, %d entities",
@@ -271,6 +297,7 @@ class ZigbeeRsHub:
                             "available": available and not rec.get("orphaned"),
                         }
                 self._notify_device(dev["id"])
+                self._notify(f"{dev['id']}:ota")
         elif topic == "device_removed":
             self._remove_device(str(event.get("id")))
         elif topic in ("entity_added", "entity_updated"):
@@ -292,6 +319,16 @@ class ZigbeeRsHub:
         elif topic == "network_state":
             self.network["state"] = event.get("state")
             self._notify_hub()
+        elif topic == "ota_device":
+            rec = event.get("device")
+            if isinstance(rec, dict) and rec.get("device"):
+                self.ota[rec["device"]] = rec
+                if (rec.get("job") or {}).get("image") in self.ota_streams.sessions:
+                    self.entry.async_create_background_task(
+                        self.hass, self.ota_streams.finished(rec), f"{DOMAIN} OTA stream end"
+                    )
+                self._create_updates()
+                self._notify(f"{rec['device']}:ota")
         elif topic == "entity_event":
             uid = event.get("uid")
             for cb in list(self._event_listeners.get(uid, [])):
@@ -447,6 +484,8 @@ class ZigbeeRsHub:
     @callback
     def _remove_device(self, device_id: str) -> None:
         self.devices.pop(device_id, None)
+        self.ota.pop(device_id, None)
+        self._ota_created.discard(device_id)
         for uid in [u for u, e in self.entities.items() if e.get("device") == device_id]:
             self._remove_entity(uid)
         if device_id in self._ha_removed:
@@ -490,6 +529,53 @@ class ZigbeeRsHub:
             by_platform.setdefault(platform, []).append(rec)
         for platform, recs in by_platform.items():
             self._adders[platform](recs)
+
+    # OTA
+
+    @callback
+    def _on_message(self, msg: dict[str, Any]) -> None:
+        if msg.get("type") == "ota/block_needed":
+            self.ota_streams.block_needed(msg)
+
+    async def _async_load_ota(self) -> None:
+        """The OTA records of all devices (`ota/devices/list`)."""
+        if self.client is None:
+            return
+        try:
+            recs = await self.client.request("ota/devices/list")
+            status = await self.client.request("ota/status")
+        except HubError as err:
+            _LOGGER.debug("ota/devices/list failed: %s", err)
+            return
+        if isinstance(status, dict) and isinstance(status.get("settings"), dict):
+            self.ota_settings = status["settings"]
+        self.ota = {
+            r["device"]: r
+            for r in recs or []
+            if isinstance(r, dict) and isinstance(r.get("device"), str)
+        }
+        self._create_updates()
+
+    async def async_refresh_ota_index(self, force: bool = False) -> None:
+        """Fetch the hub's OTA image index (at most daily unless `force`)."""
+        if await self.ota_index.refresh(self.ota_settings.get("index_url"), force):
+            for device_id in list(self.ota):
+                self._notify(f"{device_id}:ota")
+
+    @callback
+    def register_update_platform(self, adder: Callable[[list[str]], None]) -> None:
+        """The update platform creates one entity per OTA device through `adder`."""
+        self._ota_adder = adder
+        self._create_updates()
+
+    @callback
+    def _create_updates(self) -> None:
+        if self._ota_adder is None:
+            return
+        new = [d for d in self.ota if d not in self._ota_created and d in self.devices]
+        if new:
+            self._ota_created.update(new)
+            self._ota_adder(new)
 
     @callback
     def add_listener(self, uid: str, cb: Listener) -> Callable[[], None]:

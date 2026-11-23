@@ -1093,6 +1093,11 @@ impl ApiServer {
                     body["topic"] = kind.into();
                     ("groups", body)
                 }
+                HubEvent::App { topic, body } => (topic, body),
+                HubEvent::AppText { topic, text } => {
+                    out.extend(self.publish_text(topic, &text));
+                    continue;
+                }
                 HubEvent::Gp { kind, mut body } => {
                     if let Some(o) = body.as_object_mut() {
                         o.insert("topic".into(), kind.into());
@@ -1135,20 +1140,26 @@ impl ApiServer {
     /// An event on `topic` for its subscribers (next `seq`), e.g. from a
     /// service outside the engine (catalog updates).
     pub fn publish(&mut self, topic: &str, body: J) -> Vec<(SessionId, String)> {
+        self.publish_text(topic, &body.to_string())
+    }
+
+    /// [`Self::publish`] with the body as JSON text: serialized once, not
+    /// a `Value` copy per subscriber.
+    pub fn publish_text(&mut self, topic: &str, body: &str) -> Vec<(SessionId, String)> {
         let mut out = Vec::new();
         self.seq += 1;
         for (sid, sess) in &self.sessions {
             for (sub, topics) in &sess.subs {
                 if topics.contains(topic) {
-                    out.push((
-                        *sid,
-                        ServerMessage::Event {
-                            id: *sub,
-                            seq: self.seq,
-                            event: body.clone(),
-                        }
-                        .to_text(),
-                    ));
+                    let mut t = String::with_capacity(body.len() + 48);
+                    t.push_str("{\"type\":\"event\",\"id\":");
+                    t.push_str(&sub.to_string());
+                    t.push_str(",\"seq\":");
+                    t.push_str(&self.seq.to_string());
+                    t.push_str(",\"event\":");
+                    t.push_str(body);
+                    t.push('}');
+                    out.push((*sid, t));
                 }
             }
         }

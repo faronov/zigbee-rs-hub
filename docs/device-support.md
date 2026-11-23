@@ -2811,6 +2811,46 @@ work), OTA topics, `bridge/request/device/options`, `/set` responses
 (Zigbee2MQTT 2.x `…/response`), `last_seen`, `elapsed`, legacy attribute
 output.
 
+### 14.11 OTA Upgrade
+
+The hub's Zigbee OTA Upgrade server (cluster 0x0019) for the devices; the
+behaviour, streaming, the image store and the clients are in
+[ota.md](ota.md). A hub with it has `ota` in `hub/info` {`store` (bool:
+an image store, the 8 MB layout), `stream` (true), `stream_chunk`, and
+with a store `chunk_max`, `capacity`} and accepts the topic `ota`; these
+are additions for the next minor API version. Versions are the 32-bit OTA
+file versions as numbers. Image IDs: stored images 1–65535, streams
+(sessions) from 65536. Without a store, the store's requests answer
+`unsupported`.
+
+| Type | Parameters | Result |
+|---|---|---|
+| `ota/status` | — | `store`, `area` ({`capacity`, `used`, `free`, `largest_free`, `foreign`, `app_slot`} with a store, else {`capacity`: 0, `store`, `error`?}), `settings`, `block_max` (the block cap in force: setting, NCP `max_asdu` − 17), `asdu_max`, `stream_chunk`, `stream_paused` (the heap guard holds the asks), `streams` [{`session`, `name`, `file_version`, `size`, `received`, `asks`, `waits` (WAIT_FOR_DATA answers), `memory` (bytes held), `client` (bool: a client serves it)}]; with a store `chunk_max`, `upload` {`upload`, `name`, `size`, `written` (last checkpoint)} or null |
+| `ota/settings/set` | any of `policy` (`manual`, `auto`, `off`; default for devices without their own), `window` {`start`, `end`} (`HH:MM` local, may wrap midnight; null = always; `auto` only), `max_concurrent` (1–8, 2), `block_max` (16–223, 48), `min_block_period_ms` (0–60 000, 0), `blocks_per_s` (0 = unlimited, 20), `upgrade_delay_s` (0 = at once), `stall_s` (30–86 400, 300), `index_url` (the OTA image index clients fetch; empty = Koenkk/zigbee-OTA) | the settings (all or nothing; persisted) |
+| `ota/images/list` | — | stored images [{`image`, `state` (`ready`, `uploading`), `name`, `size`, `written`, `footprint`, `manufacturer_code`, `image_type`, `file_version`, `stack_version`, `label` (header string), `hw_min`, `hw_max`, `destination`, `min_file_version`, `max_file_version`, `sha256`, `added`, `warnings`, `devices` (devices this is the update for)}] and streams (`state` `streamed`, without the store-only fields) |
+| `ota/stream/offer` | `size`, `header` (base64 of the file's first bytes, at least its header, at most 512), `name`, `min_file_version`, `max_file_version` (optional) | `session`, `manufacturer_code`, `image_type`, `file_version`, `chunk` (1 024), `devices`. The same image offered again (any session) keeps its session. From then on the hub sends this session the message `ota/block_needed` with `session`, `offset`, `len` |
+| `ota/block_data` | `session`, `offset` (a multiple of 1 024), `data` (base64, 1 024 B, the last chunk shorter) | — (chunk 0 not matching the offered header closes the stream). Taken from the request text: send `data` without JSON escapes (`\/`), or it goes the slower `Value` way |
+| `ota/stream/close` | `session` | — (only the session serving it) |
+| `ota/images/delete` | `image`, `force` (while a device downloads it) | — (store) |
+| `ota/upload/begin` | `size`, `name`, `sha256` (hex, optional), `min_file_version`, `max_file_version` (optional applicability) | `upload`, `offset` (0, or where an interrupted upload of the same size and name continues), `chunk_max` (4 096). Another unfinished upload is dropped. `no_space` (with the largest free run), `busy` while a hub update has the slot (store) |
+| `ota/upload/chunk` | `upload`, `offset` (must be the bytes stored so far), `data` (base64, ≤ `chunk_max`) | `written`. The first chunk is checked as an OTA header: not one, a size mismatch or an image stored already (`exists`) drop the upload (store) |
+| `ota/upload/commit` | `upload`, `replace` (an image of the same identity) | the image record (as in the list); `verification_failed` (SHA-256), `invalid_value` (format) drop the upload (store) |
+| `ota/upload/abort` | `upload` | — (store) |
+| `ota/store/format` | `confirm` = `"FORMAT"` | `area`: every image deleted; also takes over a region holding other data (store) |
+| `ota/devices/list` | — | per device with an OTA client (0x0019 client cluster) or that queried: {`device`, `ep`, `ota_ep`, `manufacturer_code`, `image_type`, `current_version`, `hw_version` (from its last query or a CurrentFileVersion read), `policy` (own or null), `effective_policy`, `available` {`image`, `file_version`, `size`, `label`, `name`, `streamed`} (the newest stored or streamed image it qualifies for, any policy) or null, `job` {`state` (`waiting`, `queued`, `downloading`, `installing`, `done`, `failed`, `aborted`), `file_version`, `image` (null when that image is gone), `offset`, `size`, `progress` (%), `manual`, `error`, `started`, `stalled`} or null, `last_query`, `name`, `model`, `manufacturer`, `sw_version`, `sleepy`, `available_device`}; `no_space` if the text does not fit the free heap |
+| `ota/devices/check` | `device` | `sleepy`: Image Notify (type 0) and a CurrentFileVersion read; the device's query updates its record |
+| `ota/devices/policy` | `device`, `policy` (`manual`, `auto`, `off`, null) | — |
+| `ota/start` | `device`, `image` (optional: a stored image or a stream session; else the newest it qualifies for; unknown identity: the one its next query qualifies for), `force` (same or older version; restart a running job) | `sleepy`: the job is `waiting`, Image Notify sent (queued for a sleepy device) |
+| `ota/abort` | `device` | — (its next block request gets ABORT) |
+
+Events (topic `ota`): `ota_device` {`device`: the record above} on every
+change (progress at most per percent or 5 s); `ota_images` {`area`,
+`devices`, `images` (counts)} when stored or streamed images change —
+clients list them again. The snapshot's `ota` is the same summary;
+clients read `ota/devices/list` and `ota/images/list` after subscribing
+(records are written as text, never as one JSON tree, on a hub without
+PSRAM).
+
 ## 15. Boundary to a Home Assistant integration
 
 A later HA custom integration (far future, not part of this work) should be a

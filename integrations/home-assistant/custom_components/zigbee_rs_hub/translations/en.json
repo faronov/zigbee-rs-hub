@@ -186,6 +186,11 @@
       "automation": {
         "name": "Automation {name}"
       }
+    },
+    "update": {
+      "firmware": {
+        "name": "Firmware"
+      }
     }
   },
   "exceptions": {

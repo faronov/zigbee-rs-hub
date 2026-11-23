@@ -367,7 +367,7 @@ fn start_hub() {
     stage(4);
     #[cfg(feature = "app")]
     if resources::app_allowed() {
-        start_app(hub);
+        start_app(hub, verdict);
     } else {
         start_wrong_image(hub);
     }
@@ -400,8 +400,10 @@ fn catalog_keys() -> String {
         .collect()
 }
 
+/// `verdict`: the partition table check (the OTA image store needs the
+/// 8 MB production layout's inactive app slot).
 #[cfg(feature = "app")]
-fn start_app(hub: Hub) {
+fn start_app(hub: Hub, verdict: Verdict) {
     for line in catalog_keys().lines() {
         info!("{}", line.trim_end());
     }
@@ -417,7 +419,8 @@ fn start_app(hub: Hub) {
     // The example definitions take ~90 KB decoded; a flash-backed catalog
     // and generic device support remain available without them.
     let builtin_catalog = resources::get().builtin_catalog;
-    let app_cfg = hub_app::AppConfig {
+    #[allow(unused_mut)]
+    let mut app_cfg = hub_app::AppConfig {
         hub_name: format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION")),
         api_token: token,
         stack_size: APP_STACK,
@@ -431,6 +434,15 @@ fn start_app(hub: Hub) {
         flash: std::sync::Arc::new(std::sync::Mutex::new(Box::new(f) as Box<dyn hub_app::catalog::data::DataFlash>)),
         extra_keys: Vec::new(),
     });
+    #[cfg(feature = "ota-store")]
+    if verdict == Verdict::Ok(hub_core::layout::Layout::Production) {
+        match esp::InactiveSlot::find() {
+            Ok(slot) => app_cfg.ota_flash = hub_app::OtaFlash::app_slot(Box::new(slot)),
+            Err(e) => warn!("OTA image store: {e}; streamed images only"),
+        }
+    }
+    #[cfg(not(feature = "ota-store"))]
+    let _ = verdict;
     stage(5);
     let app = cpu::named(c"app", || hub_app::App::start_with(hub.clone(), app_cfg, catalog));
     let _ = APP.set(app.clone());

@@ -47,9 +47,10 @@ LAYOUTS = [
         "app_partition": "ota_0",
         "max_app": 3 * 1024 * 1024,
         "target": "target-8mb",
-        "features": ["mqtt", "advanced"],
+        "features": ["mqtt", "advanced", "ota-store"],
         "note": "Production layout: two 3 MiB app slots (A/B OTA) and 1 920 KiB hubdata; "
-        "with the Zigbee2MQTT-compatible MQTT bridge and advanced ZCL/Tuya console.",
+        "with the Zigbee2MQTT-compatible MQTT bridge, advanced ZCL/Tuya console and "
+        "the Zigbee device OTA image store in the inactive app slot.",
     },
     {
         "id": "thread-br-s3-hub-4mb-dev",
@@ -62,7 +63,8 @@ LAYOUTS = [
         "target": "target",
         "features": ["mqtt"],
         "note": "Development layout: one 2 944 KiB app slot, no hub A/B OTA, 1 MiB hubdata; "
-        "esp-mqtt included, advanced console omitted.",
+        "esp-mqtt included, advanced console omitted; Zigbee device OTA with streamed images only "
+        "(no second app slot for an image store).",
     },
 ]
 # ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
@@ -170,8 +172,14 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     table = out / f"{stem}-partition-table.bin"
     boot = out / f"{stem}-bootloader.bin"
     merged = out / f"{stem}-merged.bin"
-    run("tools/make-app-image.sh", "release", str(app), "tbr-hub",
-        env={"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])})
+    env = {"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])}
+    if "elf" in spec:
+        # In the variant's target directory (built first, see hub-release.yml).
+        elf = ROOT / spec["target"] / spec["elf"]
+        if not elf.is_file():
+            raise ReleaseError(f"{spec['id']}: {elf.relative_to(ROOT)} missing (build it first, see hub-release.yml)")
+        env["ELF"] = str(elf)
+    run("tools/make-app-image.sh", "release", str(app), "tbr-hub", env=env)
     run("tools/make-partition-table.sh", spec["csv"], str(table), size)
     # The bootloader configures the flash from its own header: give it the board's size.
     run("esptool", "--chip", "esp32s3", "merge-bin", "--flash-size", size, "-o", str(boot), "0x0", str(boot_src))

@@ -178,6 +178,10 @@ pub struct AppConfig {
     /// Stack of the maintenance job thread (network map, backup, …),
     /// started per job.
     pub admin_stack: usize,
+    /// The OTA image store's region (the inactive app slot on the hub; none:
+    /// streamed images only).
+    #[cfg(feature = "ota-store")]
+    pub ota_flash: crate::ota_store::OtaFlash,
 }
 
 impl Default for AppConfig {
@@ -202,6 +206,8 @@ impl Default for AppConfig {
             import_ncp_devices: true,
             platform: None,
             admin_stack: 16 * 1024,
+            #[cfg(feature = "ota-store")]
+            ota_flash: Default::default(),
         }
     }
 }
@@ -441,6 +447,8 @@ struct Runner {
     automation_requests: u64,
     /// Requests served outside the engine (`mqtt/*`).
     hooks: Vec<Box<dyn RequestHook>>,
+    /// The OTA Upgrade server.
+    ota: crate::ota::Ota,
 }
 
 /// The session automations send their `request` actions through.
@@ -582,7 +590,10 @@ impl Runner {
         let hub_cfg = HubConfig { tz_offset_s: cfg.tz_offset_s, ..HubConfig::default() };
         let mut engine = Engine::new(NcpTransport::new(ncp.clone()), hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
-        let api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        engine.app_clusters.push(hub_ota::server::CLUSTER);
+        let ota = crate::ota::Ota::new(&cfg);
+        let mut api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        api.set_info("ota", ota.info());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
         admin.start_worker();
@@ -613,6 +624,7 @@ impl Runner {
             automations: Automations::default(),
             automation_requests: 0,
             hooks: Vec::new(),
+            ota,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -639,6 +651,7 @@ impl Runner {
         );
         let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
         r.engine.transport.nwk.extend(known);
+        r.ota.load(&r.ncp, &r.engine, now);
         // Restored devices produce added events; nobody is subscribed yet,
         // and their snapshots are what the store holds.
         let _ = r.engine.drain_events();
@@ -700,6 +713,10 @@ impl Runner {
             // An automation's delay may end before the next tick.
             let due = self.automations.next_wake().map(|ms| self.t0 + Duration::from_millis(ms));
             let mut wait = due.map_or(next_tick, |d| d.min(next_tick)).saturating_duration_since(Instant::now());
+            // A paced OTA block response may be due before both.
+            if let Some(due) = self.ota.next_due() {
+                wait = wait.min(Duration::from_millis(due.saturating_sub(self.now())));
+            }
             // A snapshot waits for its sink to send the previous pieces.
             if !self.outboxes.is_empty() {
                 wait = wait.min(Duration::from_millis(10));
@@ -767,6 +784,23 @@ impl Runner {
                 }
             }
             Input::Text(sid, text) => {
+                if self.api.is_authed(sid)
+                    && let Some(frame) = self.ota.block_data_text(sid, &text)
+                {
+                    drop(text);
+                    self.send_owned(sid, frame);
+                    return;
+                }
+                if self.api.is_authed(sid)
+                    && let Some((id, ty, v)) = crate::ota::head(&text)
+                {
+                    let frame = match self.ota.request(&mut self.engine, &self.ncp, sid, &ty, &v, now) {
+                        Ok(r) => r.frame(id),
+                        Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),
+                    };
+                    self.send_owned(sid, frame);
+                    return;
+                }
                 if self.api.is_authed(sid)
                     && let Some(frame) = self.hook_request(&text)
                 {
@@ -1037,6 +1071,8 @@ impl Runner {
         let cookie = self.ncp.client().session().map(|s| s.link.peer_cookie);
         if self.ncp.client().state() == SessionState::Ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
+            let asdu = self.ncp.client().session().and_then(|s| s.negotiated.capacity(zigbee_zrhp::msg::system::capacity::MAX_ASDU));
+            self.ota.set_asdu(asdu);
             self.set_maintenance();
         }
         // Group memberships of the hub endpoint, once per NCP session.
@@ -1175,6 +1211,14 @@ impl Runner {
         if self.catalog.as_ref().is_some_and(|c| c.config_dirty || !c.events.is_empty()) {
             self.pump_catalog();
         }
+        self.ota.frames(&mut self.engine, now);
+        self.ota.poll(&mut self.engine, &self.ncp, now);
+        // Streams of sessions that are gone wait for a client.
+        let sinks = &self.sinks;
+        self.ota.prune(|sid| sinks.contains_key(&sid), now);
+        for (sid, frame) in self.ota.outbox() {
+            self.send_owned(sid, frame);
+        }
         self.with_automations(|a, w, clk| a.resume(w, clk));
         // Automations act on the events; what their commands change follows
         // in the next round (a few rounds here, the rest at the next input
@@ -1188,7 +1232,7 @@ impl Runner {
             self.last.note(&events, &self.engine);
             self.with_automations(|a, w, clk| a.observe(&events, w, clk));
             for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
-                self.send(sid, &frame);
+                self.send_owned(sid, frame);
             }
         }
         self.pump_automations();

@@ -51,6 +51,8 @@ enum Step {
     Close,
     /// `,"key":value`
     Field(&'static str, Field),
+    /// `,"topic":text` of a service outside the engine ([`Hub::app_snapshots`]).
+    App(&'static str),
     /// `}}`
     End,
 }
@@ -119,6 +121,11 @@ impl SnapshotStream {
         }
         if has("network") {
             steps.push_back(Step::Field("network", Field::Network));
+        }
+        for &t in hub.app_snapshots.keys() {
+            if has(t) {
+                steps.push_back(Step::App(t));
+            }
         }
         steps.push_back(Step::End);
         let per_device = has("devices") || has("entities");
@@ -214,6 +221,16 @@ impl SnapshotStream {
                     s.push_str(key);
                     s.push_str("\":");
                     s.push_str(&v.to_string());
+                    self.steps.pop_front();
+                }
+                Step::App(key) => {
+                    // Kept current by the application; gone meanwhile: left out.
+                    if let Some(text) = hub.app_snapshots.get(key) {
+                        s.push_str(",\"");
+                        s.push_str(key);
+                        s.push_str("\":");
+                        s.push_str(text);
+                    }
                     self.steps.pop_front();
                 }
                 Step::End => {

@@ -1136,6 +1136,7 @@ dependencies = [
  "hub-core",
  "hub-devices",
  "hub-ncp",
+ "hub-ota",
  "log",
  "miniz_oxide 0.8.9",
  "serde_json",
@@ -1192,6 +1193,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hub-ota"
+version = "0.1.0"
+dependencies = [
+ "hub-ncp",
+ "log",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "hub-web"
 version = "0.1.0"
 dependencies = [
@@ -1208,10 +1219,12 @@ dependencies = [
  "hub-devices",
  "hub-mqtt",
  "hub-ncp",
+ "hub-ota",
  "hub-web",
  "log",
  "serde_json",
  "serialport",
+ "sha2",
  "tungstenite",
  "ureq",
  "zigbee-zrhp",
