@@ -943,9 +943,12 @@ insertion sort, same order) instead of 8 copies of std's sort (−25 KB). Not us
 (−63 KB of sort code, but its stable sort is inlined into each caller with a
 4 KiB stack buffer: the app thread needed 13 KB more stack, and two
 start-ups crashed on the hardware), `panic_immediate_abort` (~250 KB, no panic
-messages), `-Zlocation-detail=none` (−57 KB, panics without file and line)
-and silent ESP-IDF assertions (−49 KB flash, −5 KB internal RAM, `assert`
-without its expression and location).
+messages) and `-Zlocation-detail=none` (−57 KB, panics without file and
+line). ESP-IDF's C `assert` is silent
+(`CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT`: −49 KB flash, −5 KB
+internal RAM): a failed one aborts at its PC without the expression and
+file; the UART0 backtrace and the core dump still locate it with the ELF.
+Rust panics keep their messages.
 
 **Toolchain workaround.** The Xtensa LLVM of Rust 1.90.0.0 fails
 instruction selection ("Cannot select: i32 = Constant<5376>") on the btree
