@@ -165,9 +165,11 @@ impl Ota {
     pub fn new(cfg: &crate::AppConfig) -> Self {
         let mut server = Server::new(Settings::default());
         server.settings.tz_offset_s = cfg.tz_offset_s;
+        let mut streams = Streams::default();
+        streams.set_limit(cfg.ota_streams);
         Self {
             server,
-            streams: Streams::default(),
+            streams,
             #[cfg(feature = "ota-store")]
             store: crate::ota_store::StoreState::open(&cfg.ota_flash),
             dirty: BTreeSet::new(),
@@ -686,7 +688,7 @@ impl Ota {
     /// `hub/info` `ota`.
     pub fn info(&self) -> J {
         #[allow(unused_mut)]
-        let mut v = json!({"store": self.has_store(), "stream": true, "stream_chunk": STREAM_CHUNK});
+        let mut v = json!({"store": self.has_store(), "stream": true, "stream_chunk": STREAM_CHUNK, "max_streams": self.streams.limit()});
         #[cfg(feature = "ota-store")]
         self.store.info(&mut v);
         v

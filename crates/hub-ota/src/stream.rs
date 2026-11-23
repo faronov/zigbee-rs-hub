@@ -35,7 +35,8 @@ pub const CHUNK: u32 = 1024;
 pub const SLOTS: usize = 4;
 /// Chunks fetched ahead of the one the device reads.
 pub const AHEAD: u32 = 2;
-/// Streams at once.
+/// Streams at once (at most; the hub may allow fewer, see
+/// [`Streams::set_limit`]).
 pub const MAX_STREAMS: usize = 4;
 /// A chunk asked for and not delivered is asked for again after this.
 const REASK_MS: Millis = 5_000;
@@ -103,11 +104,28 @@ pub struct Streams {
     list: Vec<Stream>,
     next: u32,
     low_heap: bool,
+    /// Streams allowed at once (0: [`MAX_STREAMS`]).
+    limit: usize,
     /// Frames for API sessions: `(session, text)`.
     pub outbox: Vec<(u64, String)>,
 }
 
 impl Streams {
+    /// Streams allowed at once, at most [`MAX_STREAMS`] (the memory the
+    /// hub has: each holds a `SLOTS × CHUNK` window once it is read).
+    pub fn set_limit(&mut self, n: usize) {
+        self.limit = n.clamp(1, MAX_STREAMS);
+    }
+
+    /// See [`Self::set_limit`].
+    pub fn limit(&self) -> usize {
+        if self.limit == 0 {
+            MAX_STREAMS
+        } else {
+            self.limit
+        }
+    }
+
     /// An offer by session `owner`: the file's first bytes (`head`, at
     /// least its header), its size and name. The same image offered again
     /// (a client reconnecting) keeps its ID.
@@ -140,8 +158,9 @@ impl Streams {
             s.pending = None;
             return Ok(s.offer.id);
         }
-        if self.list.len() >= MAX_STREAMS {
-            return Err(format!("at most {MAX_STREAMS} streamed images at once"));
+        let limit = self.limit();
+        if self.list.len() >= limit {
+            return Err(format!("at most {limit} streamed images at once"));
         }
         let id = FIRST_ID + self.next % 0xFFFF;
         self.next = self.next.wrapping_add(1);
@@ -475,6 +494,24 @@ mod tests {
         assert_eq!(s.read(id, 0, &mut b, 10), Fetch::Wait);
         assert_eq!(s.outbox.len(), 1);
         assert_eq!(s.list()[0].waits, 2);
+    }
+
+    #[test]
+    fn the_hub_may_allow_fewer_streams() {
+        let mut s = Streams::default();
+        assert_eq!(s.limit(), MAX_STREAMS);
+        s.set_limit(1);
+        let a = file();
+        let mut b = a.clone();
+        b[14] ^= 1; // another file version
+        assert!(
+            s.offer(1, &a[..100], a.len() as u32, "a", None, None)
+                .is_ok()
+        );
+        let e = s.offer(1, &b[..100], b.len() as u32, "b", None, None);
+        assert_eq!(e, Err("at most 1 streamed images at once".into()));
+        s.set_limit(99);
+        assert_eq!(s.limit(), MAX_STREAMS);
     }
 
     #[test]

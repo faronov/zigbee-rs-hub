@@ -425,6 +425,7 @@ fn start_app(hub: Hub, verdict: Verdict) {
         api_token: token,
         stack_size: APP_STACK,
         builtin_catalog,
+        ota_streams: resources::get().ota_streams,
         platform: Some(std::sync::Arc::new(platform::S3)),
         admin_stack: ADMIN_STACK,
         ..Default::default()

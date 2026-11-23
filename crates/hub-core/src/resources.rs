@@ -29,6 +29,9 @@ pub struct Resources {
     pub mqtt_devices_bytes: usize,
     /// Optional services start only with enough free internal heap.
     pub heap_guard: bool,
+    /// Zigbee OTA images streamed at once from API clients (each holds a
+    /// 4 KiB window while a device downloads it).
+    pub ota_streams: usize,
 }
 
 impl Resources {
@@ -46,6 +49,7 @@ impl Resources {
                 mqtt_queue_bytes: 12 * 1024,
                 mqtt_devices_bytes: 16 * 1024,
                 heap_guard: true,
+                ota_streams: 1,
             }
         } else {
             Self {
@@ -59,6 +63,7 @@ impl Resources {
                 mqtt_queue_bytes: 64 * 1024,
                 mqtt_devices_bytes: 256 * 1024,
                 heap_guard: false,
+                ota_streams: 4,
             }
         }
     }
@@ -89,6 +94,7 @@ mod tests {
         assert!(fallback.http_sockets >= 3 && fallback.http_sockets < normal.http_sockets);
         assert!(fallback.ws_client_bytes < normal.ws_client_bytes);
         assert!(fallback.mqtt_queue_bytes < normal.mqtt_queue_bytes);
+        assert!(fallback.ota_streams >= 1 && fallback.ota_streams < normal.ota_streams);
     }
 
     #[test]

@@ -144,6 +144,7 @@ impl hub_app::Platform for S3 {
                 "http_sockets": r.http_sockets,
                 "ws_client_bytes": r.ws_client_bytes,
                 "ws_total_bytes": r.ws_total_bytes,
+                "ota_streams": r.ota_streams,
             },
         })
     }

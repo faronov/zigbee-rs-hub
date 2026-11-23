@@ -182,6 +182,8 @@ pub struct AppConfig {
     /// streamed images only).
     #[cfg(feature = "ota-store")]
     pub ota_flash: crate::ota_store::OtaFlash,
+    /// OTA images streamed at once (`Resources::ota_streams` on the hub).
+    pub ota_streams: usize,
 }
 
 impl Default for AppConfig {
@@ -208,6 +210,7 @@ impl Default for AppConfig {
             admin_stack: 16 * 1024,
             #[cfg(feature = "ota-store")]
             ota_flash: Default::default(),
+            ota_streams: hub_ota::stream::MAX_STREAMS,
         }
     }
 }

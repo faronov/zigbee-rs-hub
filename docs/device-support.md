@@ -2840,7 +2840,9 @@ output.
 The hub's Zigbee OTA Upgrade server (cluster 0x0019) for the devices; the
 behaviour, streaming, the image store and the clients are in
 [ota.md](ota.md). A hub with it has `ota` in `hub/info` {`store` (bool:
-an image store, the 8 MB layout), `stream` (true), `stream_chunk`, and
+an image store, the 8 MB layout), `stream` (true), `stream_chunk`,
+`max_streams` (streamed images at once: 4 with PSRAM, 1 in the reduced
+limits without it), and
 with a store `chunk_max`, `capacity`} and accepts the topic `ota`; these
 are additions for the next minor API version. Versions are the 32-bit OTA
 file versions as numbers. Image IDs: stored images 1–65535, streams
