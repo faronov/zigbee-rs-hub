@@ -308,7 +308,9 @@ impl Manifest {
         if !self.source.is_empty() {
             // canonical: keys by encoded length, then bytewise
             let mut src: Vec<&(String, String)> = self.source.iter().collect();
-            src.sort_by(|a, b| (a.0.len(), a.0.as_bytes()).cmp(&(b.0.len(), b.0.as_bytes())));
+            crate::small_sort::sort_by(&mut src, |a, b| {
+                (a.0.len(), a.0.as_bytes()) < (b.0.len(), b.0.as_bytes())
+            });
             w.uint(7);
             w.map(src.len());
             for (k, v) in src {

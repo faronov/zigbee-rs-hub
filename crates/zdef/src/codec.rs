@@ -1366,7 +1366,7 @@ impl M {
         }
     }
     fn finish(mut self, w: &mut Writer) {
-        self.e.sort_by_key(|x| x.0);
+        crate::small_sort::sort_by_key(&mut self.e, |x| x.0);
         w.map(self.e.len());
         for (k, v) in self.e {
             w.uint(k);
@@ -1510,7 +1510,7 @@ impl E<'_> {
         if !d.endpoints.is_empty() {
             let w = m.put(11);
             let mut eps = d.endpoints.clone();
-            eps.sort_by_key(|e| e.0);
+            crate::small_sort::sort_by_key(&mut eps, |e| e.0);
             w.map(eps.len());
             for (ep, n) in &eps {
                 w.uint(*ep as u64);
@@ -1699,7 +1699,7 @@ impl E<'_> {
         if !c.endpoints.is_empty() {
             let w = m.put(56);
             let mut eps: Vec<&(u8, EpMatch)> = c.endpoints.iter().collect();
-            eps.sort_by_key(|e| e.0);
+            crate::small_sort::sort_by_key(&mut eps, |e| e.0);
             w.map(eps.len());
             for (ep, em) in eps {
                 w.uint(*ep as u64);
@@ -1765,7 +1765,7 @@ impl E<'_> {
                 self.entity(&mut vw, e)?;
                 entries.push((kw.buf, vw));
             }
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            crate::small_sort::sort_by(&mut entries, |a, b| a.0 < b.0);
             let w = m.put(35);
             w.map(entries.len());
             for (k, v) in entries {
@@ -1935,7 +1935,7 @@ impl E<'_> {
         for (n, e) in v {
             entries.push((self.const_index(n)?, e));
         }
-        entries.sort_by_key(|x| x.0);
+        crate::small_sort::sort_by_key(&mut entries, |x| x.0);
         w.map(entries.len());
         for (i, e) in entries {
             w.uint(i);
@@ -1979,7 +1979,7 @@ impl E<'_> {
             }
             Codec::BitmapFlags(bits) => {
                 let mut b = bits.clone();
-                b.sort_by_key(|x| x.0);
+                crate::small_sort::sort_by_key(&mut b, |x| x.0);
                 w.map(1);
                 w.uint(code);
                 w.map(b.len());
@@ -2102,7 +2102,7 @@ impl E<'_> {
         }
         if !x.parts.is_empty() {
             let mut parts: Vec<&(u16, Entity)> = x.parts.iter().collect();
-            parts.sort_by_key(|p| p.0);
+            crate::small_sort::sort_by_key(&mut parts, |p| p.0);
             let w = m.put(30);
             w.map(parts.len());
             for (k, p) in parts {
