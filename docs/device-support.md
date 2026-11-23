@@ -2146,7 +2146,9 @@ code feels familiar:
   requests of 14.6, `maintenance` in `hub/info`, the `network_updated`
   and `topology_progress` events, `gp/commissioning/status`,
   `gp/config/get`, the GP fields of 14.5, `network/active_scan` and
-  `tx_power_requested` in `network/info`.
+  `tx_power_requested` in `network/info`. 1.3 (hub 0.2.0, one bump for
+  the whole batch) added `hub/time`, `hub/time/set`, `time_utc` and
+  `time_synced` in `network/info` and `hub/system`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".

@@ -9,7 +9,7 @@ use crate::gp::bindings::{BindAction, BindTrigger, CreateBinding, ExecutorChoice
 use crate::hub::ApiError;
 
 /// API version (`major.minor`; minors only add fields and types).
-pub const API_VERSION: &str = "1.2";
+pub const API_VERSION: &str = "1.3";
 
 /// Topics of `subscribe`.
 pub const TOPICS: &[&str] = &["devices", "entities", "events", "gp", "network", "catalog"];
