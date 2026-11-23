@@ -2163,7 +2163,9 @@ code feels familiar:
   automations of 14.8 (`automations/*`, the `automations` topic,
   `automations` in `hub/info`); Zigbee groups, scenes and bindings (14.9:
   `groups/*`, `scenes/*`, `bindings/*`, the `groups` topic, group devices
-  and the `scene` platform).
+  and the `scene` platform); the MQTT bridge's `mqtt/config/get`,
+  `mqtt/config/set` and `mqtt/status` (14.10; 8 MB images, elsewhere
+  `unsupported`).
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2684,8 +2686,9 @@ authenticates itself, `App::connect_trusted`), so it sees exactly what the
 web UI and the HA integration see. **Plain MQTT 3.1.1 over TCP**: the hub
 does no TLS (the esp-mqtt SSL and WebSocket transports are compiled out),
 so the broker belongs on the LAN; user name and password are optional.
-Firmware feature `mqtt` (default on; off: `--no-default-features
---features app`); the bridge runs only when enabled in its settings.
+Firmware feature `mqtt`, in the 8 MB images only; a build without it
+answers `mqtt/*` with `unsupported` (the 4 MB dev images). The bridge runs
+only when enabled in its settings.
 
 Requests (authenticated sessions; `hub/info` `maintenance` lists `mqtt`):
 

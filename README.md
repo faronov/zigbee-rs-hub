@@ -63,7 +63,9 @@ checks the versions (also the one in the built app), builds with pinned
 tools and attaches per layout the full flash image (`…-merged.bin`, offset
 0, padded to the flash size), bootloader, partition table, blank `otadata`
 (8 MB), app, plus the `tbr-bridge` app, `release-manifest.json` and
-`SHA256SUMS`; the release notes list the esptool commands. A suffix
+`SHA256SUMS`; the release notes list the esptool commands. The 8 MB
+images carry the MQTT bridge, the 4 MB dev images do not (`features` per
+board in the manifest; `tools/build-hub-firmware.sh`). A suffix
 (`hub-v0.2.0-rc.1`) makes a pre-release. The flasher picks the release up
 within six hours, or at once when this repository has the secret
 `FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
@@ -978,13 +980,21 @@ may block an unsigned `hubctl` from reaching LAN addresses ("No route to
 host" while `curl` works): allow it in System Settings, or relay through
 `nc` on localhost.
 
-**Size.** The application is the default `tbr-hub` build; it targets the
-8 MB production layout (3 MiB slots) and the 4 MB dev layout (2 944 KiB).
+**Size.** The application targets the 8 MB production layout (3 MiB
+slots; images with the MQTT bridge, feature `mqtt`) and the 4 MB dev layout
+(2 944 KiB; without it). `tools/build-hub-firmware.sh` builds all four
+images (quad and octal PSRAM).
 
-| Build | App image | 3 MiB slot | 2 944 KiB dev slot |
+| Build (hub 0.2.0) | App image | 3 MiB slot | 2 944 KiB dev slot |
 |---|---:|---:|---:|
-| `tbr-hub` 0.1.10 (application, default; octal: +1 184 B) | 2 488 544 B | 79 % | 83 % |
-| `tbr-hub --no-default-features` (ZRHP host core only) | 568 208 B | 18 % | 19 % |
+| 8 MB image: `tbr-hub --features mqtt` (octal: +1 168 B) | 2 858 192 B | 91 % | — |
+| 4 MB dev image: `tbr-hub` (application, default; octal: +1 184 B) | 2 618 688 B | — | 87 % |
+| `tbr-hub --no-default-features` (ZRHP host core only) | 543 168 B | 17 % | 18 % |
+
+Over 0.1.10 (2 488 544 B) the 4 MB image grew 130 KB: about 179 KB for
+time, last values, the ZCL console, automations and groups, less 49 KB of
+silent ESP-IDF asserts; the MQTT bridge with esp-mqtt adds 240 KB in the
+8 MB images.
 
 `tools/size-report.py` breaks an ELF down by owner. Application build:
 Rust code 1.49 MB (`hub-devices` 432 KB, `core` 232 KB, `alloc` 151 KB, `std`
@@ -1077,14 +1087,14 @@ UI and the HA integration see.
   [--mqtt-discovery] [--mqtt-base T] [--mqtt-user U --mqtt-password P]
   [--mqtt-settings FILE]` runs the bridge with three simulated devices;
   `hubctl mqtt-broker` is a small broker for tests (not for production).
-- **Firmware**: cargo feature `mqtt` (default) uses ESP-IDF's esp-mqtt;
-  `mqtt-lite` uses the bridge's own MQTT client on lwIP sockets (esp-mqtt
-  links esp-tls and the mbedtls TLS layer even for plain TCP);
-  `--no-default-features --features app` builds without the bridge.
-  Image sizes (release, 8 MB header; main before this: 2 568 416 B):
-  without the bridge 2 566 256 B, `mqtt` 2 811 616 B (+245 KB: the bridge
-  ~180 KB, esp-mqtt with esp-tls/mbedtls ~62 KB), `mqtt-lite`
-  2 750 176 B (+184 KB). Static RAM +1.5 KB. At run time, only when
+- **Firmware**: only in the **8 MB images** (cargo feature `mqtt`, built
+  by `tools/build-hub-firmware.sh`; `release-manifest.json` lists
+  `"features": ["mqtt"]` for them). The 4 MB dev images leave it out: their
+  API answers `mqtt/*` with `unsupported` and the web UI's MQTT card says
+  so. `mqtt` uses ESP-IDF's esp-mqtt; `mqtt-lite` (an option, in no image)
+  the bridge's own MQTT client on lwIP sockets (esp-mqtt links esp-tls and
+  the mbedtls TLS layer even for plain TCP; −62 KB). Size: +240 KB (the
+  bridge ~180 KB, esp-mqtt with esp-tls/mbedtls ~62 KB). Static RAM +1.5 KB. At run time, only when
   enabled: the bridge thread (16 KB stack), esp-mqtt's task (5 KB stack)
   with 2 KB of buffers and up to 8 KB of QoS 1 outbox, the queue (≤ 12 KB
   without PSRAM), the device model (3.4 KB per device measured on a 64-bit

@@ -118,6 +118,7 @@ jobs:
                   for b in m["boards"]:
                       app = b["files"]["app"]
                       print(f"| {b['title']} | `{b['layout']}` | `{b['files']['merged']['name']}` | `{app['name']}` at 0x{app['offset']:X} |")
+                  print("\nThe 8 MB images include the Zigbee2MQTT-compatible MQTT bridge; the 4 MB dev images do not.")
                   print("\nWith esptool, a first install (erases the S3):")
                   print("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 tbr-hub-<v>-<8mb|4mb-dev>[-opi]-merged.bin\n```")
                   print("`-opi` images: modules with octal PSRAM (`esptool chip-id` shows \"Embedded PSRAM 8MB\" or 16MB: WROOM-1 N4R8/N8R8/N16R8); "
