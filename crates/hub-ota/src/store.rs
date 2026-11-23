@@ -107,6 +107,10 @@ pub struct UploadMeta {
     pub min_file_version: Option<u32>,
     /// See [`Image::max_file_version`].
     pub max_file_version: Option<u32>,
+    /// A stored image of the same identity is replaced at the commit;
+    /// without it the upload fails with [`StoreError::Exists`] as soon as
+    /// its header shows the duplicate.
+    pub replace: bool,
 }
 
 /// Store errors.
@@ -188,6 +192,8 @@ struct Up {
     erased: u32,
     /// The first bytes until the header could be checked.
     head: Option<Vec<u8>>,
+    /// [`UploadMeta::replace`] of the `begin` this upload (re)started with.
+    replace: bool,
 }
 
 /// The store.
@@ -541,7 +547,11 @@ impl ImageStore {
                         written: u.written,
                         erased: u.written / self.sector,
                         head: None,
+                        replace: meta.replace,
                     });
+                }
+                if let Some(up) = self.up.as_mut() {
+                    up.replace = meta.replace;
                 }
                 return Ok((u.id, written));
             }
@@ -581,6 +591,7 @@ impl ImageStore {
             written: 0,
             erased: 0,
             head: Some(Vec::new()),
+            replace: meta.replace,
         });
         Ok((id, 0))
     }
@@ -622,6 +633,7 @@ impl ImageStore {
                 written: w,
                 erased: w / self.sector,
                 head: None,
+                replace: false,
             });
         }
         let img = self.images[idx].clone();
@@ -643,11 +655,14 @@ impl ImageStore {
             match Header::parse(head) {
                 Ok(h) => {
                     up.head = None;
+                    let replace = up.replace;
                     let err = if h.total_size != img.size {
                         Some(StoreError::File(FileError::SizeMismatch {
                             header: h.total_size,
                             file: img.size,
                         }))
+                    } else if replace {
+                        None
                     } else {
                         self.images
                             .iter()
@@ -694,10 +709,12 @@ impl ImageStore {
     }
 
     /// Finishes upload `id`: reads it back, checks SHA-256 (when given)
-    /// and the format. With `replace`, a stored image of the same identity
-    /// is deleted; otherwise it makes the commit fail with
-    /// [`StoreError::Exists`]. A failed check deletes the upload.
-    pub fn commit(&mut self, id: u16, replace: bool) -> Result<&Image, StoreError> {
+    /// and the format. A stored image of the same identity is deleted when
+    /// the upload began with [`UploadMeta::replace`]; otherwise it makes
+    /// the commit fail with [`StoreError::Exists`] (an upload resumed after
+    /// a restart is checked here, its header was checked before). A failed
+    /// check deletes the upload.
+    pub fn commit(&mut self, id: u16) -> Result<&Image, StoreError> {
         let Some(idx) = self
             .images
             .iter()
@@ -710,6 +727,7 @@ impl ImageStore {
             .as_ref()
             .filter(|u| u.id == id)
             .map_or(self.images[idx].written, |u| u.written);
+        let replace = self.up.as_ref().is_some_and(|u| u.id == id && u.replace);
         let img = self.images[idx].clone();
         if written != img.size {
             return Err(StoreError::Size);
@@ -892,8 +910,46 @@ mod tests {
             let end = (at as usize + chunk).min(f.len());
             at = s.write(id, at, &f[at as usize..end])?;
         }
-        s.commit(id, false)?;
+        s.commit(id)?;
         Ok(id)
+    }
+
+    #[test]
+    fn an_upload_begun_with_replace_replaces_the_stored_image() {
+        let fl = flash(40);
+        let mut s = ImageStore::open(Box::new(fl.clone())).unwrap();
+        let f = build(0x6D6B, 2, 0x10, "a", &[7; 9000], None);
+        let old = upload(&mut s, &f, "a.ota", 4096).unwrap();
+        let begin = |s: &mut ImageStore, replace| {
+            s.begin(
+                f.len() as u32,
+                UploadMeta {
+                    name: "b.ota".into(),
+                    replace,
+                    ..Default::default()
+                },
+                2,
+            )
+            .unwrap()
+            .0
+        };
+        // Without `replace` the header chunk already fails.
+        let id = begin(&mut s, false);
+        assert_eq!(s.write(id, 0, &f[..4096]), Err(StoreError::Exists(old)));
+        assert!(s.image(id).is_none());
+        // With it the upload goes through and takes the old image's place.
+        let id = begin(&mut s, true);
+        s.write(id, 0, &f[..4096]).unwrap();
+        s.write(id, 4096, &f[4096..]).unwrap();
+        assert_eq!(s.commit(id).unwrap().id, id);
+        assert!(s.image(old).is_none());
+        assert_eq!(s.find(0x6D6B, 2, 0x10).map(|i| i.id), Some(id));
+        drop(s);
+        let s = ImageStore::open(Box::new(fl)).unwrap();
+        assert_eq!(
+            s.images().iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![id]
+        );
     }
 
     #[test]
@@ -981,7 +1037,7 @@ mod tests {
             )
             .unwrap();
         s.write(id, 0, &f).unwrap();
-        assert_eq!(s.commit(id, false), Err(StoreError::Hash));
+        assert_eq!(s.commit(id), Err(StoreError::Hash));
         assert!(s.images().is_empty());
         // Chunks in order only, not past the size.
         let (id, _) = s.begin(f.len() as u32, UploadMeta::default(), 0).unwrap();
@@ -990,7 +1046,7 @@ mod tests {
             Err(StoreError::Offset { expected: 0 })
         );
         s.write(id, 0, &f[..50]).unwrap();
-        assert_eq!(s.commit(id, false).err(), Some(StoreError::Size));
+        assert_eq!(s.commit(id).err(), Some(StoreError::Size));
         assert_eq!(s.write(id, 50, &[0; 200]), Err(StoreError::Size));
         // Fragmentation: the largest run counts, not the sum.
         let mut s = ImageStore::open(Box::new(flash(8))).unwrap();
@@ -1036,7 +1092,7 @@ mod tests {
             let end = (at as usize + 7000).min(f.len());
             at = s.write(id, at, &f[at as usize..end]).unwrap();
         }
-        s.commit(id, false).unwrap();
+        s.commit(id).unwrap();
         let mut b = vec![0u8; f.len()];
         s.read(id, 0, &mut b).unwrap();
         assert_eq!(b, f);

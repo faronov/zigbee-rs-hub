@@ -73,7 +73,7 @@ impl Net {
         for (i, c) in f.chunks(4096).enumerate() {
             self.store.write(id, (i * 4096) as u32, c).unwrap();
         }
-        self.store.commit(id, false).unwrap();
+        self.store.commit(id).unwrap();
         id
     }
 
@@ -632,7 +632,7 @@ fn hardware_range_and_file_version_limits() {
         )
         .unwrap();
     n.store.write(id, 0, &f).unwrap();
-    n.store.commit(id, false).unwrap();
+    n.store.commit(id).unwrap();
     n.query(0);
     assert!(n.record(0)["available"].is_null());
     // Starting it anyway is refused, so is an unknown image.

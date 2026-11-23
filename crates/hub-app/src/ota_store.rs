@@ -304,6 +304,7 @@ pub fn request<T: ZigbeeTransport>(ota: &mut Ota, engine: &mut Engine<T>, ty: &s
                 sha256,
                 min_file_version: fv("min_file_version"),
                 max_file_version: fv("max_file_version"),
+                replace: v.get("replace").and_then(J::as_bool).unwrap_or(false),
             };
             let (id, offset) = ota.store.get()?.begin(size, meta, (now / 1000) as u32).map_err(store_err)?;
             Ok(json!({"upload": id, "offset": offset, "chunk_max": CHUNK_MAX}))
@@ -321,8 +322,7 @@ pub fn request<T: ZigbeeTransport>(ota: &mut Ota, engine: &mut Engine<T>, ty: &s
         }
         "ota/upload/commit" => {
             let id = u16_("upload").ok_or_else(|| err("invalid_value", "upload"))?;
-            let replace = v.get("replace").and_then(J::as_bool).unwrap_or(false);
-            ota.store.get()?.commit(id, replace).map_err(store_err)?;
+            ota.store.get()?.commit(id).map_err(store_err)?;
             ota.images_changed(engine, now);
             let targets = ota.targets_of(engine, u32::from(id));
             let s = ota.store.store.as_ref().unwrap();

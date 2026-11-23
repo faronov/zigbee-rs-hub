@@ -84,7 +84,7 @@ pub fn upload(url: &str, token: &str, path: &str, name: Option<String>, versions
     }
     let mut id = 0;
     let name = name.unwrap_or_else(|| std::path::Path::new(path).file_name().map_or("image.ota".into(), |n| n.to_string_lossy().into_owned()));
-    let mut begin = json!({"type": "ota/upload/begin", "size": f.len(), "name": name, "sha256": sha});
+    let mut begin = json!({"type": "ota/upload/begin", "size": f.len(), "name": name, "sha256": sha, "replace": replace});
     if let Some(v) = versions.0 {
         begin["min_file_version"] = v.into();
     }
@@ -107,7 +107,7 @@ pub fn upload(url: &str, token: &str, path: &str, name: Option<String>, versions
         eprint!("\r{at}/{} B", f.len());
     }
     eprintln!();
-    let r = call(&mut ws, &mut id, json!({"type": "ota/upload/commit", "upload": up, "replace": replace}))?;
+    let r = call(&mut ws, &mut id, json!({"type": "ota/upload/commit", "upload": up}))?;
     println!("stored as image {} in {:.1} s; updates {}", r["image"], t.elapsed().as_secs_f64(), r["devices"]);
     let _ = ws.close(None);
     Ok(())
