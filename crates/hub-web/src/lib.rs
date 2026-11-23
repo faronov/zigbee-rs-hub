@@ -4,6 +4,11 @@
 //! firmware's esp_http_server and by `hubctl serve`, pre-compressed.
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+#[cfg(test)]
+mod minify;
+
 /// The page, gzip-compressed at build time (`Content-Encoding: gzip`).
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
 
@@ -25,9 +30,8 @@ pub fn not_modified(if_none_match: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
     use super::*;
-    use std::string::String;
+    use std::string::{String, ToString};
 
     fn page() -> std::vec::Vec<u8> {
         let gz = INDEX_HTML_GZ;
@@ -40,9 +44,43 @@ mod tests {
     }
 
     #[test]
-    fn embedded_page_is_the_source_and_small() {
-        assert_eq!(page(), include_bytes!("../web/index.html"));
+    fn embedded_page_is_the_minified_source_and_small() {
+        let src = include_str!("../web/index.html");
+        assert_eq!(page(), super::minify::minify(src).unwrap().into_bytes());
         assert!(INDEX_HTML_GZ.len() <= 25 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
+    }
+
+    /// The page's scripts, minified and not, parse (when Node is installed).
+    #[test]
+    fn minified_script_parses() {
+        let src = include_str!("../web/index.html");
+        let script = |html: &str| {
+            let a = html.find("<script>").unwrap() + "<script>".len();
+            html[a..a + html[a..].find("</script>").unwrap()].to_string()
+        };
+        let min = super::minify::minify(src).unwrap();
+        for js in [script(src), script(&min)] {
+            use std::io::Write;
+            let Ok(mut node) = std::process::Command::new("node")
+                .args(["-e", "new Function(require('fs').readFileSync(0,'utf8'))"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            else {
+                return;
+            };
+            node.stdin.take().unwrap().write_all(js.as_bytes()).unwrap();
+            assert!(node.wait().unwrap().success(), "script does not parse");
+        }
+    }
+
+    #[test]
+    fn minifier_keeps_code_and_html() {
+        let html = "<p>\n  <b>x</b>\n</p>\n<style>\n a{b:c}\n\n d,\n e{f:g}\n</style>\n<script>\n// c\n let a=1,\n  b=\"//\";\n f(a,\n b)\n x=1 // y,\n z()\n</script>\n";
+        let want = "<p>\n  <b>x</b>\n</p>\n<style>\na{b:c}d,e{f:g}\n</style>\n<script>\nlet a=1,b=\"//\";\nf(a,b)\nx=1 // y,\nz()\n</script>\n";
+        assert_eq!(super::minify::minify(html).unwrap(), want);
+        assert!(super::minify::minify("<script>\nlet s=`a\nb`\n</script>\n").is_err());
+        assert!(super::minify::minify("<style>\na{b:\nc}\n</style>\n").is_err());
+        assert!(super::minify::minify("<script>\nx\n").is_err());
     }
 
     #[test]

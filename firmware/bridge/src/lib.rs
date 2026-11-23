@@ -113,8 +113,8 @@ pub fn start_console() {
 }
 
 /// Wait for USB enumeration (hand the PHY back to USB-Serial-JTAG after
-/// [`recovery::MOUNT_TIMEOUT`]), then idle forever.
-pub fn park() -> ! {
+/// [`recovery::MOUNT_TIMEOUT`]).
+pub fn wait_usb_mount() {
     let boot = Instant::now();
     loop {
         thread::sleep(Duration::from_millis(500));
@@ -126,6 +126,11 @@ pub fn park() -> ! {
             break;
         }
     }
+}
+
+/// [`wait_usb_mount`], then idle forever.
+pub fn park() -> ! {
+    wait_usb_mount();
     loop {
         thread::sleep(Duration::from_secs(60));
     }

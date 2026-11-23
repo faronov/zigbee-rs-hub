@@ -141,6 +141,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
 | `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF), optional size limit |
+| `tools/size-report.py` | Firmware size breakdown of an ELF: bytes per ESP-IDF component / library and per Rust crate (flash code, rodata, IRAM, DRAM), largest symbols |
 | `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`); button-free S3 reflash `s3_reflash.sh IMAGE TAG [4mb-dev or 8mb]` (the app offset comes from the partition table on the device via `s3_partition.py`; a different layout is refused) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
 | `definitions/examples/` | Example device definitions (YAML source form) |
@@ -789,8 +790,10 @@ mode (topic `gp`); API 1.2 added `gp/commissioning/status` and
 `gp/config/get` for it.
 It asks for the API token
 once (console `token`; a link ending in `#token=…` stores it too) and keeps
-it in the browser. `build.rs` gzips the page at build time (deterministic,
-pure Rust, no node toolchain) and derives a strong ETag; the hub answers
+it in the browser. `build.rs` minifies the page line by line (indentation,
+blank lines and `//` comment lines in the script and style; `src/minify.rs`,
+which refuses constructs it cannot keep intact) and gzips it at build time
+(deterministic, pure Rust, no node toolchain) and derives a strong ETag; the hub answers
 `Content-Encoding: gzip`, `Cache-Control: no-cache` and `304` on a matching
 `If-None-Match`. `hubctl serve` serves the same page on `/` (the WebSocket on
 `/api`), so the UI can be tried on a desktop, also with `--sim`. API 1.1
@@ -832,8 +835,8 @@ the last automatic backup, restore from a file in device batches, a new-network 
 that needs `RESET` typed, hub facts, Wi-Fi, token rotation, reboot, bridge
 mode, NCP diagnostics and the log tail); controls the hub or its NCP lack
 are hidden (`maintenance` in `hub/info`); the page stays usable while a
-scan runs, and a page opened meanwhile follows it. The page is 21.0 KB gzipped with the
-other tabs (Green Power included).
+scan runs, and a page opened meanwhile follows it. The page is 21.9 KB minified and gzipped
+with the other tabs (Green Power included; 23.3 KB without the minification).
 
 **RAM.** Until hub 0.1.3 the hwlab board's S3 ran **without PSRAM** (its
 N4R8 module has 8 MB of octal PSRAM, which the quad-only builds did not
@@ -861,7 +864,15 @@ NCP, Wi-Fi up: 0.1.3 8.4 KB internal free; 0.1.4 120 KB internal free
 crash, `info` shows the previous boot's start-up stage, free heap per stage,
 the last stack/heap watch, the last Rust panic message and the crash reset
 reason (RTC memory; hub-mode logs go to UART0, which the lab host cannot
-see); `hub stacks` shows the live picture.
+see); `hub stacks` shows the live picture. In 0.1.9 the main task ends
+after start-up (its 8 KiB stack returns to the heap) and lwIP has no IPv6:
++13 KB internal heap. Measured on the lab board (2026-11-23, Wi-Fi, two
+devices, one API session): octal build 117.8 → 131.0 KB free (minimum
+113.0 → 125.9 KB, largest block 45 → 55 KB); the quad build on the same
+board, i.e. without PSRAM, 23.5 → 36.5 KB free after boot (minimum 17.3 →
+30.0 KB). Without PSRAM a catalog search (`definitions/list` with a query)
+made 0.1.8 fail a 10.5 KB allocation and restart; 0.1.9 answers it (minimum
+5 KB free while searching, backup and energy scan included).
 
 With Wi-Fi (2026-11-21): the default Wi-Fi configuration left 14–22 KB of
 internal heap, so the hub build uses fewer Wi-Fi buffers (4 static RX,
@@ -907,15 +918,32 @@ host" while `curl` works): allow it in System Settings, or relay through
 
 | Build | App image | 3 MiB slot | 2 944 KiB dev slot |
 |---|---:|---:|---:|
-| `tbr-hub` (application, default) | 2 208 864 B | 70 % | 73 % |
-| `tbr-hub --no-default-features` (ZRHP host core only) | 664 560 B | 21 % | 22 % |
+| `tbr-hub` 0.1.9 (application, default; octal: +1 184 B) | 2 513 744 B | 80 % | 83 % |
+| `tbr-hub --no-default-features` (ZRHP host core only) | 568 208 B | 18 % | 19 % |
 
-Rust is ~1.2 MB of the application build (engine, `zdef`, `hub-ncp`, serde
-and the `core`/`std`/`alloc` monomorphisations), C ~670 KB (ESP-IDF, Wi-Fi,
-lwIP, mbedTLS, httpd). Size work so far: fat LTO at opt-level `z` (both
-firmwares), std without backtrace symbolisation (−138 KB, panic messages
-kept), the smaller `zdef` (zdef-size). `panic_immediate_abort` would save
-another ~250 KB but loses panic messages; not used.
+`tools/size-report.py` breaks an ELF down by owner. Application build:
+Rust code 1.49 MB (`hub-devices` 432 KB, `core` 232 KB, `alloc` 151 KB, `std`
+148 KB, `zdef` 113 KB, `hub-app` 108 KB, `hub-ncp` 93 KB, serde and
+`serde_json` 76 KB, `ed25519-compact` 17 KB), C 0.61 MB (Wi-Fi libraries
+175 KB, mbedTLS 56 KB, `wpa_supplicant` 54 KB, lwIP 51 KB, newlib 29 KB,
+httpd and its parser 22 KB, TinyUSB 13 KB), and 0.43 MB of constants and
+literal pools no symbol covers (mostly Rust strings and tables). The largest
+single items are the thread bodies (101 KB), the API request parser (serde,
+internally tagged: 66 KB), `ApiServer::dispatch` (53 KB) and 19 copies of
+std's stable sort (70 KB).
+
+Size work: fat LTO at opt-level `z` (both firmwares; `s` is 81 KB larger),
+std without backtrace symbolisation (−138 KB, panic messages kept), the
+smaller `zdef` (zdef-size), and in 0.1.9 the C printf family from ROM
+(newlib "nano", −27 KB; only ESP-IDF's own UART0 log lines use it), no IPv6
+in lwIP (the hub never had an IPv6 address; −20 KB) and the minified page,
+together −55 KB (2 568 416 B before). Not used: std's `optimize_for_size`
+(−63 KB of sort code, but its stable sort is inlined into each caller with a
+4 KiB stack buffer: the app thread needed 13 KB more stack, and two
+start-ups crashed on the hardware), `panic_immediate_abort` (~250 KB, no panic
+messages), `-Zlocation-detail=none` (−57 KB, panics without file and line)
+and silent ESP-IDF assertions (−49 KB flash, −5 KB internal RAM, `assert`
+without its expression and location).
 
 **Toolchain workaround.** The Xtensa LLVM of Rust 1.90.0.0 fails
 instruction selection ("Cannot select: i32 = Constant<5376>") on the btree
