@@ -854,6 +854,35 @@ fn request_model_round_trips() {
         let back: Envelope = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
     }
+    let req = |text: &str| serde_json::from_str::<Envelope>(text).map(|e| e.request);
+    let update = |extra: &str| {
+        req(&format!(
+            r#"{{"id":1,"type":"entities/update","uid":"u"{extra}}}"#
+        ))
+    };
+    let name = |r: Result<Request, serde_json::Error>| match r.unwrap() {
+        Request::EntitiesUpdate { name, .. } => name,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(name(update("")), None);
+    assert_eq!(name(update(r#","name":null"#)), Some(None));
+    assert_eq!(name(update(r#","name":"Lamp""#)), Some(Some("Lamp".into())));
+    assert_eq!(
+        req(r#"{"id":2,"type":"gp/commissioning/open","duration_s":30,"extra":1}"#).unwrap(),
+        Request::GpCommissioningOpen {
+            duration_s: 30,
+            involve_proxies: true,
+            exit_on_first_pairing: false
+        }
+    );
+    assert_eq!(
+        req(r#"{"id":3,"type":"zcl/read","device":"d","cluster":6}"#).unwrap(),
+        Request::ZclRead(json!({"device": "d", "cluster": 6}))
+    );
+    let bad = req(r#"{"id":4,"type":"nope/x"}"#).unwrap_err().to_string();
+    assert!(bad.contains("unknown variant `nope/x`"), "{bad}");
+    assert!(req(r#"{"id":5,"type":"network/permit_join","duration_s":300}"#).is_err());
+    assert!(req(r#"{"type":"hub/info"}"#).is_err());
     let m = ServerMessage::err(17, ApiError::zcl(crate::zcl::Status::UNSUPPORTED_ATTRIBUTE));
     assert_eq!(
         serde_json::to_value(m).unwrap(),
