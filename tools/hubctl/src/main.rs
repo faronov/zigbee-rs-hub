@@ -18,6 +18,7 @@ mod platform;
 mod push;
 mod serve;
 mod simdev;
+mod simdev_z2m;
 
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices] [--sim-unsupported ID,…]) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices] [--sim-unsupported ID,…]) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -60,18 +61,31 @@ commands:
                             energy-scan advice avoids; the catalog store in a
                             1 MiB hubdata image (FILE, or RAM); an extra
                             trusted signing key (raw Ed25519, hex)
+                [--mqtt HOST[:PORT]] [--mqtt-base TOPIC] [--mqtt-discovery]
+                [--mqtt-user U --mqtt-password P] [--mqtt-settings FILE]
+                            the Zigbee2MQTT-compatible MQTT bridge (plain
+                            MQTT over TCP): --mqtt enables it with this
+                            broker; settings persist in FILE (default RAM)
+                            and can be changed over the API (mqtt/config/set)
 simulated NCP:
   --sim-demo                form on channel 15 and add a small mesh (routers
                             answering Mgmt_Lqi/Mgmt_Rtg) for the network map
   --sim-devices             two On/Off plugs and a temperature sensor that
                             answer the hub (interview, reads, commands; the
                             sensor reports every 15 s), e.g. for automations
+  --sim-z2m-devices         instead: form on channel 15 and join three simulated
+                            devices (sensor, light, plug) that answer the
+                            interview and commands and report (Zigbee2MQTT
+                            names, for the MQTT bridge)
   --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.
                             0x0106,0x0108 (no energy scan / TX power, like the
                             current NCP image)
 also, without a hub:
   hubctl ws-call URL --token T [--listen SECS] JSON...
                             authenticate, send requests, print the frames
+  hubctl mqtt-broker [--listen ADDR] [--user U --password P]
+                            a small MQTT broker for local tests (default
+                            127.0.0.1:1883; not for production)
     hubctl catalog-push URL --token T [--from BASE_URL | --dir DIR] [--no-fetch]
                             upload the signed catalog to the hub: manifest,
                             then the bank and web tools it wants, then the
@@ -82,6 +96,43 @@ also, without a hub:
                             check catalog banks (.zdb) and manifest.cose with
                             the firmware's trusted keys
 ";
+
+/// `serve`'s MQTT bridge settings: `--mqtt-settings FILE` (else RAM), with
+/// the command-line overrides applied and stored.
+fn mqtt_settings(args: &mut Args) -> Result<Arc<dyn hub_mqtt::SettingsStore>, String> {
+    let store: Arc<dyn hub_mqtt::SettingsStore> = match args.value("--mqtt-settings") {
+        Some(p) => Arc::new(hub_mqtt::FileStore(p.into())),
+        None => Arc::new(hub_mqtt::MemoryStore::default()),
+    };
+    let mut o = serde_json::Map::new();
+    if let Some(hp) = args.value("--mqtt") {
+        let (host, port) = match hp.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|_| format!("--mqtt {hp}: bad port"))?),
+            None => (hp.clone(), 1883),
+        };
+        o.insert("enabled".into(), true.into());
+        o.insert("host".into(), host.into());
+        o.insert("port".into(), port.into());
+    }
+    if let Some(b) = args.value("--mqtt-base") {
+        o.insert("base_topic".into(), b.into());
+    }
+    if args.flag("--mqtt-discovery") {
+        o.insert("discovery".into(), true.into());
+    }
+    if let Some(u) = args.value("--mqtt-user") {
+        o.insert("username".into(), u.into());
+    }
+    if let Some(p) = args.value("--mqtt-password") {
+        o.insert("password".into(), p.into());
+    }
+    if !o.is_empty() {
+        let mut c = hub_mqtt::MqttConfig::from_store(store.load().as_deref());
+        c.apply(&o, true).map_err(|e| format!("--mqtt…: {e}"))?;
+        store.save(&c.to_store())?;
+    }
+    Ok(store)
+}
 
 /// `serve`'s catalog store: the hubdata image.
 fn catalog_setup(args: &mut Args) -> Result<hub_app::CatalogSetup, String> {
@@ -522,9 +573,14 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                 ..Default::default()
             };
             let catalog = catalog_setup(&mut args)?;
+            let mqtt_store = mqtt_settings(&mut args)?;
             let app = hub_app::App::start_with(hub.clone(), cfg, Some(catalog));
+            let transport: hub_mqtt::TransportFactory =
+                Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn hub_mqtt::Transport>);
+            let mqtt = hub_mqtt::MqttService::start(&app, mqtt_store, transport, hub_mqtt::ServiceConfig::default());
             println!("token: {token}");
             let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
+            mqtt.stop();
             let st = app.status();
             app.shutdown();
             println!(
@@ -561,6 +617,28 @@ fn main() -> ExitCode {
     let _ = log::set_logger(Box::leak(Box::new(Logger(Instant::now(), level))));
     log::set_max_level(level);
 
+    if args.0.first().map(String::as_str) == Some("mqtt-broker") {
+        let addr = args.value("--listen").unwrap_or_else(|| "127.0.0.1:1883".into());
+        let auth = args.value("--user").map(|u| (u, args.value("--password").unwrap_or_default()));
+        return match hub_mqtt::broker::Broker::start(&addr, auth) {
+            Ok(b) => {
+                println!("mqtt-broker: listening on {}", b.addr());
+                let mut seen = 0;
+                loop {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let log = b.published();
+                    for (t, p, r) in &log[seen..] {
+                        log::debug!("{}{t} {}", if *r { "(retained) " } else { "" }, String::from_utf8_lossy(p));
+                    }
+                    seen = log.len();
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {addr}: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args.0.first().map(String::as_str) == Some("catalog-verify") {
         let mut ok = true;
         for (slot, kid) in hub_app::catalog::key_ids() {
@@ -672,6 +750,7 @@ fn main() -> ExitCode {
     let sim = args.flag("--sim");
     let demo = args.flag("--sim-demo");
     let sim_devices = args.flag("--sim-devices");
+    let sim_z2m_devices = args.flag("--sim-z2m-devices");
     let serial = args.value("--serial");
     let baud = args
         .value("--baud")
@@ -736,8 +815,12 @@ fn main() -> ExitCode {
         Some(sim) => platform::sim_demo(&hub, sim),
         None => Ok(()),
     };
-    if let Some(sim) = sim_ncp.as_ref().filter(|_| sim_devices && result.is_ok()) {
-        result = simdev::start(&hub, sim);
+    if let Some(sim) = sim_ncp.as_ref().filter(|_| result.is_ok()) {
+        if sim_z2m_devices {
+            result = simdev_z2m::start(&hub, sim);
+        } else if sim_devices {
+            result = simdev::start(&hub, sim);
+        }
     }
     let result = result.and_then(|()| run(&hub, args));
     let c = hub.client().counters();

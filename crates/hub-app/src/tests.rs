@@ -123,6 +123,21 @@ fn api_session_endpoint_and_interview_start() {
 /// reaches the engine at once (the interview moves on instead of waiting
 /// for its response timeout).
 #[test]
+fn mqtt_requests_without_the_bridge_answer_unsupported() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    let (sid, rx) = session(&app);
+    let st = call(&app, sid, &rx, 1, json!({"type": "mqtt/status"}));
+    assert_eq!(st["success"], false, "{st}");
+    assert_eq!(st["error"]["code"], "unsupported", "{st}");
+    let other = call(&app, sid, &rx, 2, json!({"type": "nonexistent/request"}));
+    assert_eq!(other["error"]["code"], "invalid_format", "{other}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+#[test]
 fn aps_confirms_are_counted_and_failures_reach_the_engine() {
     let r = rig(Store::volatile());
     r.sim.with(|s| s.undeliverable.push((0x1234, 0xA8)));

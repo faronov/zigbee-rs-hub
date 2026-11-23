@@ -1,0 +1,42 @@
+{
+  "availability": [
+    {
+      "topic": "zigbee2mqtt/bridge/state",
+      "value_template": "{{ value_json.state }}"
+    },
+    {
+      "topic": "zigbee2mqtt/TRADFRI bulb E27 WS opal 980lm/availability",
+      "value_template": "{{ value_json.state }}"
+    }
+  ],
+  "availability_mode": "all",
+  "brightness": true,
+  "brightness_scale": 254,
+  "command_topic": "zigbee2mqtt/TRADFRI bulb E27 WS opal 980lm/set",
+  "device": {
+    "identifiers": [
+      "zigbee2mqtt_0x00158d0001000002"
+    ],
+    "manufacturer": "IKEA of Sweden",
+    "model": "TRADFRI bulb E27 WS opal 980lm",
+    "model_id": "TRADFRI bulb E27 WS opal 980lm",
+    "name": "TRADFRI bulb E27 WS opal 980lm",
+    "via_device": "zigbee2mqtt_bridge_0x00124b0000000001"
+  },
+  "max_mireds": 454,
+  "min_mireds": 250,
+  "name": null,
+  "object_id": "TRADFRI bulb E27 WS opal 980lm_light",
+  "origin": {
+    "name": "zigbee-rs-hub",
+    "sw": "0.1.8",
+    "url": "https://github.com/faronov/zigbee-rs-hub"
+  },
+  "schema": "json",
+  "state_topic": "zigbee2mqtt/TRADFRI bulb E27 WS opal 980lm",
+  "supported_color_modes": [
+    "color_temp"
+  ],
+  "transition": true,
+  "unique_id": "0x00158d0001000002_light_zigbee2mqtt"
+}

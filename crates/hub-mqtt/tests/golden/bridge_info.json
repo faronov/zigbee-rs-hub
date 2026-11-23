@@ -1,0 +1,46 @@
+{
+  "commit": null,
+  "config": {
+    "advanced": {
+      "cache_state": true,
+      "last_seen": "disable",
+      "log_level": "info",
+      "output": "json"
+    },
+    "availability": {
+      "enabled": true
+    },
+    "homeassistant": {
+      "discovery_topic": "homeassistant",
+      "enabled": false,
+      "status_topic": "homeassistant/status"
+    },
+    "mqtt": {
+      "base_topic": "zigbee2mqtt",
+      "server": "mqtt://broker:1883"
+    },
+    "permit_join": false
+  },
+  "config_schema": {},
+  "coordinator": {
+    "ieee_address": "0x00124b0000000001",
+    "meta": {
+      "board": "tbr",
+      "product": "zigbee-rs NCP",
+      "protocol": "1.0",
+      "revision": "0.1.2"
+    },
+    "type": "zigbee-rs NCP (esp32h2)"
+  },
+  "log_level": "info",
+  "network": {
+    "channel": 15,
+    "extended_pan_id": "0xdddddddddddddddd",
+    "pan_id": 6754
+  },
+  "permit_join": false,
+  "permit_join_end": null,
+  "permit_join_timeout": 0,
+  "restart_required": false,
+  "version": "0.1.8"
+}

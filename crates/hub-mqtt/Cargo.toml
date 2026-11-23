@@ -1,0 +1,20 @@
+[package]
+name = "hub-mqtt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "zigbee-rs-hub MQTT bridge with Zigbee2MQTT-compatible topics and payloads, optional Home Assistant MQTT discovery"
+publish = false
+
+[dependencies]
+hub-app = { workspace = true }
+hub-devices = { workspace = true }
+serde_json = "1"
+log = "0.4"
+
+[dev-dependencies]
+hub-devices = { workspace = true, features = ["sim"] }
+hub-ncp = { workspace = true, features = ["sim"] }
+zigbee-zrhp = { workspace = true, features = ["std"] }

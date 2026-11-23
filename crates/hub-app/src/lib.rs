@@ -33,7 +33,7 @@ pub mod registry;
 pub mod topology;
 pub mod transport;
 
-pub use app::{App, AppConfig, AppStatus, CatalogSetup, SessionSink, builtin_catalog};
+pub use app::{App, AppConfig, AppStatus, CatalogSetup, RequestHook, SessionSink, builtin_catalog};
 pub use platform::{LogRing, Platform};
 
 #[cfg(test)]

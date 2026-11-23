@@ -1,0 +1,34 @@
+{
+  "features": [
+    {
+      "access": 7,
+      "label": "State",
+      "name": "state",
+      "property": "state",
+      "type": "binary",
+      "value_off": "OFF",
+      "value_on": "ON",
+      "value_toggle": "TOGGLE"
+    },
+    {
+      "access": 7,
+      "label": "Brightness",
+      "name": "brightness",
+      "property": "brightness",
+      "type": "numeric",
+      "value_max": 254,
+      "value_min": 0
+    },
+    {
+      "access": 7,
+      "label": "Color temp",
+      "name": "color_temp",
+      "property": "color_temp",
+      "type": "numeric",
+      "unit": "mired",
+      "value_max": 454,
+      "value_min": 250
+    }
+  ],
+  "type": "light"
+}

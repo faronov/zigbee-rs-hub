@@ -45,5 +45,9 @@ pub mod zdo;
 mod scenarios;
 #[cfg(any(test, feature = "sim"))]
 pub mod testutil;
+/// The device simulator (`testutil::sim`) under the name other crates'
+/// tests use.
+#[cfg(feature = "sim")]
+pub use testutil::sim as sim_device;
 
 pub use hub::{ApiError, Hub, HubConfig, HubEvent};

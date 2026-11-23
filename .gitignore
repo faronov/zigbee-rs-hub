@@ -9,3 +9,5 @@
 *.key
 zdef-signing*
 /target-opi
+/target-8mb
+/target-8mb-opi

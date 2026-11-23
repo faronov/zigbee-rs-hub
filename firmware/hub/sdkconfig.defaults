@@ -1,7 +1,7 @@
 # Applied after firmware/bridge/sdkconfig.defaults (same board, same USB
 # identity, so the bridge mode looks exactly like tbr-bridge to the host).
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="tbr-hub-0.1.10"
+CONFIG_APP_PROJECT_VER="tbr-hub-0.2.0"
 
 # WebSocket JSON API (esp_http_server).
 CONFIG_HTTPD_WS_SUPPORT=y
@@ -61,3 +61,13 @@ CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 
 # SNTP: up to three servers (hub/time/set).
 CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# MQTT bridge (esp-mqtt): plain TCP only. The hub does no TLS, so the SSL
+# and WebSocket transports stay out of the image.
+CONFIG_MQTT_TRANSPORT_SSL=n
+CONFIG_MQTT_TRANSPORT_WEBSOCKET=n
+CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=n
+
+# lwIP's tcpip task also runs SNTP and its DNS lookups: 780 B of the
+# default 3 KiB were left on the lab board (hub 0.2.0); 1 KiB more margin.
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096

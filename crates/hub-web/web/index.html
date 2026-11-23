@@ -173,6 +173,15 @@ progress{width:12em}
 <datalist id="tzl"><option value="UTC0">UTC</option><option value="GMT0BST,M3.5.0/1,M10.5.0">London</option><option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin, Paris, Warsaw</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Kyiv, Helsinki, Riga</option><option value="MSK-3">Moscow, Istanbul (+3)</option><option value="EST5EDT,M3.2.0,M11.1.0">New York</option><option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles</option><option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney</option></datalist>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
+<section class="card" id="mqcard"><h2>MQTT (Zigbee2MQTT-compatible)</h2>
+<p class="mut hide" id="mqno">Not in this firmware build: the MQTT bridge comes with the 8 MB images.</p>
+<p class="mut">Devices on an MQTT broker with Zigbee2MQTT's topics and payloads (Node-RED, ioBroker, openHAB, Home Assistant MQTT). Plain MQTT over TCP, no TLS: use a broker on your LAN. Home Assistant: use either the hub's integration or MQTT discovery, not both.</p>
+<dl class="kv" id="mqs"></dl>
+<div class="row"><label><input type="checkbox" id="mqe"> Enabled</label><input id="mqh" placeholder="broker host" size="16"><input id="mqp" type="number" class="num" placeholder="1883"></div>
+<div class="row"><input id="mqu" placeholder="user (optional)" size="12"><input id="mqw" type="password" placeholder="password" size="12"><input id="mqc" placeholder="client ID (auto)" size="14"></div>
+<div class="row"><label>Base topic <input id="mqb" size="12"></label><label>Keepalive <input id="mqk" type="number" class="num"> s</label><label>QoS <select id="mqq"><option>0</option><option>1</option></select></label></div>
+<div class="row"><label><input type="checkbox" id="mqd"> HA discovery, prefix</label><input id="mqx" size="12"><label><input type="checkbox" id="mqr"> Retain states</label><label><input type="checkbox" id="mqa"> Retain availability</label></div>
+<div class="row acts"><button class="p" id="mqsv">Save MQTT</button></div></section>
 <section class="card"><h2>Diagnostics</h2><div class="row acts"><button id="dgb">Refresh</button><button id="dgr">Reset counters</button><button id="lgb" class="f-logs">Logs</button></div><div id="dg"></div><pre id="lg" class="hide"></pre></section>
 </div>
 </main>
@@ -346,7 +355,7 @@ setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById
 // ── Views: map and settings (API 1.2, device-support 14.6) ──
 const has=f=>(hub.maintenance||[]).includes(f);
 onTab.map=()=>{if(authed&&!mapData)call("network/topology",{refresh:false}).then(drawMap).catch(()=>{})};
-onTab.settings=()=>{if(authed){renderSNet();loadTime();for(const k of["energy_scan","active_scan"])if(!(k=="energy_scan"?Object.keys(esAgg).length:asNets))call("network/job/result",{kind:k}).then(jobRes).catch(()=>{})}};
+onTab.settings=()=>{if(authed){renderSNet();loadTime();loadMqtt();for(const k of["energy_scan","active_scan"])if(!(k=="energy_scan"?Object.keys(esAgg).length:asNets))call("network/job/result",{kind:k}).then(jobRes).catch(()=>{})}};
 function gate(){$("#esno").classList.toggle("hide",!hub.maintenance||has("energy_scan"));for(const e of document.querySelectorAll("[class*=f-]")){const f=[...e.classList].find(c=>c.startsWith("f-"));if(f)e.classList.toggle("hide",!has(f.slice(2)))}}
 const kv=(box,rows)=>{box.textContent="";for(const[k,v]of rows)if(v!=null&&v!==""&&v!==false)box.append(el("dt",{},k),el("dd",{},String(v)))};
 const dur=s=>s<3600?Math.round(s/60)+" min":s<86400?(s/3600).toFixed(1)+" h":(s/86400).toFixed(1)+" d";
@@ -444,6 +453,12 @@ function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a
   ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
   ["Store",s.store&&(s.store.volatile?"RAM only":"hubdata, generation "+s.store.journal_generation)],["App",a.devices+" devices, "+a.sessions+" sessions, APS "+(a.aps?(a.aps.delivered!=null?a.aps.delivered+" delivered / "+a.aps.not_delivered+" not delivered / "+(a.aps.busy+a.aps.failed)+" refused":a.aps.accepted+" ok / "+a.aps.failed+" failed"):"")]]);
  if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}
+// MQTT bridge settings: checkboxes and fields map 1:1 to mqtt/config.
+const mqF={mqh:"host",mqp:"port",mqu:"username",mqc:"client_id",mqb:"base_topic",mqk:"keepalive_s",mqx:"discovery_prefix",mqq:"qos"},mqB={mqe:"enabled",mqd:"discovery",mqr:"retain_state",mqa:"retain_availability"};
+function loadMqtt(){const on=has("mqtt");$("#mqno").classList.toggle("hide",on);for(const e of $("#mqcard").querySelectorAll("input,select,button"))e.disabled=!on;if(on)Promise.all([call("mqtt/config/get"),call("mqtt/status")]).then(([c,s])=>{for(const k in mqF)$("#"+k).value=c[mqF[k]];for(const k in mqB)$("#"+k).checked=c[mqB[k]];$("#mqw").value="";$("#mqw").placeholder=c.password_set?"password (unchanged)":"password";
+ kv($("#mqs"),[["State",s.state+(s.retry_in_s!=null?" (retry in "+s.retry_in_s+" s)":"")],["Last error",s.last_error],["Devices",s.devices],["Messages",s.published+" out, "+s.received+" in, "+s.dropped+" dropped, "+s.errors+" errors"]])}).catch(()=>{})}
+$("#mqsv").onclick=e=>{const p={};for(const k in mqF){const f=mqF[k],v=$("#"+k).value.trim(),n=["port","keepalive_s","qos"].includes(f);if(!(n&&v===""))p[f]=n?+v:v}for(const k in mqB)p[mqB[k]]=$("#"+k).checked;if($("#mqw").value)p.password=$("#mqw").value;
+ busy(e.target,act("mqtt/config/set",p).then(()=>{toast("MQTT settings saved");setTimeout(loadMqtt,1500)})).catch(()=>{})};
 $("#pics").checked=picOn();$("#pics").onchange=e=>{localStorage.setItem("zrhPics",e.target.checked?"1":"0");for(const id in devs)devSet(devs[id]);renderAll();if(mapData)drawMap(mapData)};
 $("#wb").onclick=()=>{const ssid=$("#wss").value.trim();if(!ssid)return;if(!confirm("Save Wi-Fi \""+ssid+"\" and reconnect? This page loses the hub until it is on that network."))return;act("hub/wifi/set",{ssid,password:$("#wpw").value}).then(()=>toast("Wi-Fi saved, reconnecting")).catch(()=>{})};
 $("#tkb").onclick=()=>{if(!confirm("Create a new API token? Other clients (Home Assistant) need it then; this page switches to it."))return;act("hub/token/rotate").then(r=>{localStorage.setItem("zrhToken",r.token);prompt("New API token (copy it for other clients):",r.token)}).catch(()=>{})};
