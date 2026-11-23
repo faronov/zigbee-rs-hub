@@ -2543,9 +2543,12 @@ subscribers call `automations/list`. `hub/info` carries `automations`
 subscribing). Command results that arrive later (a device's confirmation,
 a timeout) update the action's entry in the trace.
 
+Groups and scenes (14.9): a `command` action on a group's entity (group
+device `grp:<id>`, one groupcast), or a `request` action with `scenes/recall`,
+`groups/identify` and the other `groups/*` and `scenes/*` requests.
+
 Not yet: sunrise/sunset triggers, `for` durations on state triggers,
-templates, webhooks; groups and scenes are reached through `request` once
-their API exists.
+templates, webhooks.
 
 ### 14.9 Groups, scenes and bindings (API 1.3)
 
