@@ -408,7 +408,18 @@ impl SessionSink for WsSink {
         })
     }
     fn backlog(&self) -> usize {
+        // Polled while a snapshot waits: a lost drain is queued again here
+        // instead of with the next frame (which waits for the snapshot).
+        if !OUTBOX.lock().unwrap().is_empty() {
+            schedule(self.hd as httpd_handle_t);
+        }
         self.state.queued.load(Ordering::Relaxed)
+    }
+    fn close(&mut self) {
+        let hd = self.hd as httpd_handle_t;
+        if !self.state.dead.swap(true, Ordering::Relaxed) && is_current(hd, self.fd, self.generation) {
+            unsafe { httpd_sess_trigger_close(hd, self.fd) };
+        }
     }
     fn send_piece(&mut self, text: String, first: bool, last: bool) -> bool {
         let kind = if first { httpd_ws_type_t_HTTPD_WS_TYPE_TEXT } else { httpd_ws_type_t_HTTPD_WS_TYPE_CONTINUE };

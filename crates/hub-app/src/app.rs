@@ -79,6 +79,10 @@ pub trait SessionSink: Send {
         let _ = (text, first, last);
         false
     }
+
+    /// The app dropped the session (its client fell behind): close the
+    /// connection too, so the client notices and connects again.
+    fn close(&mut self) {}
 }
 
 /// How a sink takes a message in pieces ([`SessionSink::pieces`]).
@@ -88,9 +92,10 @@ pub struct Pieces {
     pub size: usize,
     /// The next piece is made while the sink's backlog is at most this.
     pub backlog: usize,
-    /// Bytes of other frames held until the snapshot is complete (they
-    /// cannot go between its pieces); more drops the session, whose client
-    /// then subscribes again.
+    /// The sink's byte budget: frames held until the snapshot is complete
+    /// (they cannot go between its pieces) stay below it, else the session
+    /// is dropped and its client subscribes again; a held frame goes once
+    /// it fits next to the sink's backlog.
     pub held: usize,
 }
 
@@ -967,7 +972,11 @@ impl Runner {
             while ok {
                 match out.items.front_mut() {
                     None => break,
-                    Some(Queued::Frame(_)) => {
+                    Some(Queued::Frame(f)) => {
+                        let backlog = sink.backlog();
+                        if backlog > 0 && (backlog > p.backlog || backlog + f.len() > p.held) {
+                            break;
+                        }
                         let Some(Queued::Frame(f)) = out.items.pop_front() else { unreachable!() };
                         out.held -= f.len();
                         ok = sink.send_owned(f);
@@ -1001,7 +1010,9 @@ impl Runner {
     }
 
     fn drop_session(&mut self, sid: SessionId) {
-        self.sinks.remove(&sid);
+        if let Some(mut sink) = self.sinks.remove(&sid) {
+            sink.close();
+        }
         self.outboxes.remove(&sid);
         self.api.disconnect(sid);
     }

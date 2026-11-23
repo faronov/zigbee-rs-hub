@@ -1,7 +1,7 @@
 //! The app on the host core against the simulated NCP.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -355,6 +355,7 @@ struct PieceSink {
     tx: mpsc::Sender<(String, Option<(bool, bool)>)>,
     busy: Arc<std::sync::atomic::AtomicUsize>,
     held: usize,
+    closed: Arc<AtomicBool>,
 }
 
 impl crate::SessionSink for PieceSink {
@@ -370,6 +371,9 @@ impl crate::SessionSink for PieceSink {
     fn send_piece(&mut self, text: String, first: bool, last: bool) -> bool {
         self.tx.send((text, Some((first, last)))).is_ok()
     }
+    fn close(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
 }
 
 #[test]
@@ -378,7 +382,7 @@ fn snapshot_waits_for_the_sink_and_later_frames_wait_for_the_snapshot() {
     let app = App::start(r.ncp.clone(), cfg());
     let (tx, rx) = mpsc::channel();
     let busy = Arc::new(std::sync::atomic::AtomicUsize::new(1));
-    let sid = app.connect(Box::new(PieceSink { tx, busy: busy.clone(), held: 64 * 1024 })).unwrap();
+    let sid = app.connect(Box::new(PieceSink { tx, busy: busy.clone(), held: 64 * 1024, closed: Arc::default() })).unwrap();
     let next = || rx.recv_timeout(T).unwrap();
     assert!(next().0.contains("auth_required"));
     app.text(sid, json!({"type": "auth", "token": "secret"}).to_string());
@@ -419,12 +423,14 @@ fn too_much_held_behind_a_stuck_snapshot_drops_the_session() {
     let app = App::start(r.ncp.clone(), cfg());
     let (tx, rx) = mpsc::channel();
     let busy = Arc::new(std::sync::atomic::AtomicUsize::new(1));
-    let sid = app.connect(Box::new(PieceSink { tx, busy, held: 32 })).unwrap();
+    let closed = Arc::new(AtomicBool::new(false));
+    let sid = app.connect(Box::new(PieceSink { tx, busy, held: 32, closed: closed.clone() })).unwrap();
     app.text(sid, json!({"type": "auth", "token": "secret"}).to_string());
     app.text(sid, json!({"id": 1, "type": "subscribe", "topics": ["devices"]}).to_string());
     assert!(app.wait(T, |s| s.sessions == 1));
     app.text(sid, json!({"id": 2, "type": "hub/info"}).to_string());
     assert!(app.wait(T, |s| s.sessions == 0), "{:?}", app.status());
+    assert!(closed.load(Ordering::SeqCst), "the connection of a dropped session stays open");
     drop(rx);
     app.shutdown();
     r.ncp.shutdown();
