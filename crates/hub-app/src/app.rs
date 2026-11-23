@@ -399,6 +399,7 @@ impl Runner {
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
         admin.start_worker();
+        admin.load_clock(&ncp);
         let mut r = Self {
             ncp,
             cfg,
@@ -569,7 +570,7 @@ impl Runner {
             out: Arc::new(move |o| {
                 let _ = jobs.lock().unwrap().send(Input::Admin(o));
             }),
-            now_s: now as f64 / 1000.0,
+            now_s: hub_devices::device::ts(now),
         };
         self.admin.handle(ctx, sid, head)
     }
@@ -614,6 +615,7 @@ impl Runner {
                 info!("app: reading {n} unknown states of restored devices");
             }
         }
+        self.admin.clock_tick(&mut self.engine.cfg, now);
         // Background maintenance jobs report progress once a second.
         for ev in self.admin.progress_events() {
             self.engine.network_event(ev);

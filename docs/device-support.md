@@ -2146,7 +2146,9 @@ code feels familiar:
   requests of 14.6, `maintenance` in `hub/info`, the `network_updated`
   and `topology_progress` events, `gp/commissioning/status`,
   `gp/config/get`, the GP fields of 14.5, `network/active_scan` and
-  `tx_power_requested` in `network/info`.
+  `tx_power_requested` in `network/info`. 1.3 (hub 0.2.0, one bump for
+  the whole batch) added `hub/time`, `hub/time/set`, `time_utc` and
+  `time_synced` in `network/info` and `hub/system`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2173,7 +2175,7 @@ code feels familiar:
 | Type | Parameters | Result |
 |---|---|---|
 | `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`; once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
-| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised) (fields the host core does not know are absent; `unsupported` without a host core) |
+| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced` (fields the host core does not know are absent; `unsupported` without a host core) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
 | `devices/list` | — | device records (4.1) |
 | `devices/get` | `id` | device record + endpoints + resolution summary |
@@ -2339,8 +2341,10 @@ written as text with fallible allocation, never as a JSON tree).
 | `network/backup/last` | — | `backup`: the last complete backup (taken by `network/backup`, `network/reset` or `network/restore`), or null |
 | `network/restore` | `backup` (the OCB object; its `devices` may be left out or partial), then any number of requests with `devices` (a batch of `devices[]` entries), each with `more` (bool) while more follow; the first request also takes `allow_ieee_change` (default true), `force`, `skip_backup`. A request with `more` is answered `staged_devices`; the last one starts the restore. Every request is a small JSON value, so a large backup never has to be in the hub's RAM at once (the web UI sends 8 devices per request) | `pan_id`, `channel`, `coordinator_ieee`, `devices`, `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` [{`index`, `note`}], `previous_network_backed_up`. ZRHP `BKP_RESTORE_*` with margins 10 000 / 10 000 (APS 2²⁰ when the file has no TCLK counter, Z2M); the restored network is adopted (store, counters as floors) and its devices imported. An NCP that runs a network needs `force`; it is backed up first unless `skip_backup` |
 | `network/reset` | `confirm` = `"RESET"`, `channel` or `channels` (default 11–26), `pan_id`, `ext_pan_id` (big-endian hex), `tx_power`, `skip_backup` | `network` {`pan_id`, `ext_pan_id`, `channel`}, `backup` (the automatic backup of the previous network, or null). Backup first (a failed backup changes nothing unless `skip_backup`), `NWK_LEAVE_RESET` (IEEE override and host endpoints kept), then forming with hub-chosen key and the given parameters. Also forms a network on an empty NCP. Devices stay in the registry and must join again |
-| `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason`), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time` |
-| `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged) |
+| `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason`), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time`, `time_synced` |
+| `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged), stamped `MM-DD HH:MM:SS` local time once the clock is set, else seconds since boot |
+| `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
+| `hub/time/set` | `tz` (POSIX TZ: `EET-2EEST,M3.5.0/3,M10.5.0/4`; `Mm.w.d`, `Jn` and `n` rules), `servers` (1–3 host names) | the `hub/time` record; both kept in the host store. The time zone drives the Time cluster server (0x000A) on the hub endpoint and the Tuya time sync (EF00 0x24); clients show times in their own zone |
 | `hub/wifi/set` | `ssid` (1–32 bytes), `password` (empty or 8–63) | `stored`, `reconnecting`: kept in NVS, the station reconnects with them (the connection to the hub drops) |
 | `hub/token/rotate` | — | `token`: the new API token (persisted); sessions already authenticated stay, new ones need it |
 | `hub/reboot` | — | `rebooting` |

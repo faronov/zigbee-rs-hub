@@ -1093,11 +1093,17 @@ pub trait ApiExtension<T: ZigbeeTransport> {
 
 /// The host core's facts plus `time`, the hub's clock (s, the time base of
 /// `last_seen` and state timestamps), so a client can show relative times
-/// even before the hub has synchronised its clock.
+/// even before the hub has synchronised its clock; once it has, `time` is
+/// Unix time and `time_utc` repeats it (null before), `time_synced` says
+/// which.
 fn network_info<T: ZigbeeTransport>(hub: &mut Hub<T>, now: Millis) -> Option<J> {
     let mut v = hub.transport.network_info()?;
     if let Some(o) = v.as_object_mut() {
-        o.insert("time".into(), crate::device::ts(now).into());
+        let t = crate::device::ts(now);
+        let synced = crate::device::time_synced();
+        o.insert("time".into(), t.into());
+        o.insert("time_utc".into(), if synced { t.into() } else { J::Null });
+        o.insert("time_synced".into(), synced.into());
     }
     Some(v)
 }

@@ -37,7 +37,26 @@ pub struct HubConfig {
     pub tz_offset_s: i64,
     /// GP pre-commissioned group (13.1).
     pub gp_group: u16,
+    /// The hub's clock for the Time cluster server (the app keeps it current).
+    pub clock: Clock,
 }
+
+/// What the Time cluster (0x000A) server on the hub endpoint reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Clock {
+    /// The hub knows UTC (SNTP or a clock kept over a restart).
+    pub synced: bool,
+    /// Standard time offset, s (TimeZone).
+    pub tz_s: i32,
+    /// This year's daylight saving time, ZCL time (s since 2000-01-01 UTC):
+    /// `(start, end, shift s)`.
+    pub dst: Option<(u32, u32, i32)>,
+    /// Last synchronisation, ZCL time.
+    pub last_set: Option<u32>,
+}
+
+/// Unix time of the ZCL epoch (2000-01-01 00:00 UTC).
+pub const ZCL_EPOCH_UNIX: i64 = 946_684_800;
 
 impl Default for HubConfig {
     fn default() -> Self {
@@ -46,6 +65,7 @@ impl Default for HubConfig {
             hub_endpoint: 1,
             tz_offset_s: 0,
             gp_group: 0x0B84,
+            clock: Clock::default(),
         }
     }
 }
@@ -1390,6 +1410,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                     self.complete_tsn(id, h.tsn, st, now);
                 }
             }
+            (FrameType::Global, global::READ_ATTRIBUTES)
+                if ind.cluster == cl::TIME && ind.dst_ep == self.cfg.hub_endpoint =>
+            {
+                needs_default_rsp = false;
+                let attrs = zf::parse_read_attributes(&frame.payload).unwrap_or_default();
+                self.serve_time(id, ep, h.tsn, &attrs, now);
+            }
             (FrameType::Global, _) => needs_default_rsp = false,
             (FrameType::Cluster, cmd) => {
                 let handled = match ind.cluster {
@@ -1492,6 +1519,33 @@ impl<T: ZigbeeTransport> Hub<T> {
             stop.header.disable_default_response = true;
             self.send_zcl(id, ep, cl::POLL_CONTROL, stop, Purpose::None, now);
         }
+    }
+
+    /// Read Attributes on the hub's Time cluster server: thermostats,
+    /// clocks and other devices take the hub's time from it.
+    fn serve_time(&mut self, id: &str, ep: u8, tsn: u8, attrs: &[u16], now: Millis) {
+        let recs: Vec<_> = attrs
+            .iter()
+            .map(|&a| zf::ReadRecord {
+                attr: a,
+                ..time_attr(&self.cfg.clock, now, a)
+            })
+            .collect();
+        let Ok(payload) = zf::read_attributes_rsp(&recs) else {
+            return;
+        };
+        let f = ZclFrame {
+            header: ZclHeader {
+                frame_type: FrameType::Global,
+                mfr: None,
+                direction: Direction::ServerToClient,
+                disable_default_response: true,
+                tsn,
+                cmd: global::READ_ATTRIBUTES_RSP,
+            },
+            payload,
+        };
+        self.send_zcl(id, ep, cl::TIME, f, Purpose::None, now);
     }
 
     fn take_pending(&mut self, id: &str, tsn: u8) -> Option<Pending> {
@@ -2740,4 +2794,63 @@ fn not_delivered(f: &crate::transport::ApsFailure) -> ApiError {
         },
     };
     ApiError::new("not_delivered", message)
+}
+
+/// One Time cluster attribute (ZCL 3.12.2) for the hub's clock at `now`.
+pub fn time_attr(c: &Clock, now: Millis, attr: u16) -> zf::ReadRecord {
+    let utc = (crate::device::wall_ms(now).div_euclid(1000) - ZCL_EPOCH_UNIX).clamp(0, 0xFFFF_FFFE)
+        as u32;
+    let in_dst = c.dst.is_some_and(|(s, e, _)| {
+        if s <= e {
+            utc >= s && utc < e
+        } else {
+            utc >= s || utc < e
+        }
+    });
+    let shift = c.dst.map_or(0, |d| d.2);
+    let std = utc.wrapping_add_signed(c.tz_s);
+    let (ty, v): (ZclType, u64) = match attr {
+        0x0000 => (
+            ZclType::UTC,
+            if c.synced {
+                u64::from(utc)
+            } else {
+                0xFFFF_FFFF
+            },
+        ),
+        // Master | Synchronized | MasterZoneDst once synced.
+        0x0001 => (ZclType(0x18), if c.synced { 0x07 } else { 0 }),
+        0x0002 => (ZclType(0x2B), c.tz_s as u32 as u64),
+        0x0003 => (ZclType(0x23), u64::from(c.dst.map_or(0, |d| d.0))),
+        0x0004 => (ZclType(0x23), u64::from(c.dst.map_or(0, |d| d.1))),
+        0x0005 => (ZclType(0x2B), shift as u32 as u64),
+        0x0006 => (ZclType(0x23), u64::from(std)),
+        0x0007 => (
+            ZclType(0x23),
+            u64::from(if in_dst {
+                std.wrapping_add_signed(shift)
+            } else {
+                std
+            }),
+        ),
+        0x0008 => (ZclType::UTC, u64::from(c.last_set.unwrap_or(0xFFFF_FFFF))),
+        0x0009 => (ZclType::UTC, 0xFFFF_FFFF),
+        _ => {
+            return zf::ReadRecord {
+                attr,
+                status: Status::UNSUPPORTED_ATTRIBUTE,
+                value: None,
+            };
+        }
+    };
+    let value = if matches!(ty.0, 0x2B) {
+        ZclValue::Int(i64::from(v as u32 as i32))
+    } else {
+        ZclValue::Uint(v)
+    };
+    zf::ReadRecord {
+        attr,
+        status: Status::SUCCESS,
+        value: Some(TypedValue { ty, value }),
+    }
 }

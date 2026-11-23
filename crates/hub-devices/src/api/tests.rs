@@ -59,7 +59,7 @@ fn auth_subscribe_snapshot_deltas_and_commands() {
     assert_eq!(bad[0]["type"], "auth_invalid");
     let ok = parse(&api.handle_text(&mut hub, s, r#"{"type": "auth", "token": "secret"}"#, T0));
     assert_eq!(ok[0]["type"], "auth_ok");
-    assert_eq!(ok[0]["api_version"], "1.2");
+    assert_eq!(ok[0]["api_version"], "1.3");
     assert_eq!(ok[0]["zdef_versions"], json!([1]));
     assert!(ok[0]["features"].as_array().unwrap().contains(&json!("gp")));
 
