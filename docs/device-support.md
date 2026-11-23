@@ -431,6 +431,14 @@ State message (WebSocket, 14.3):
   produces an `entity_state` message for each entity it carries, and updates
   the device's `last_seen` (D16; required for GP sensors such as the BGT1 GP,
   which report the same temperature for hours).
+- After a restart the hub shows the last known states it kept (`st/<device
+  id>` in the host store: values, part values, `last_changed`,
+  `last_reported`, and the device's `last_seen`, LQI and RSSI; times only
+  when the hub knew the time). Such a state carries `attributes.restored:
+  true` until the device reports it again; the hub reads restored states
+  like unknown ones. A device is written at most every 15 min when its
+  states changed, every 6 h when only diagnostic values did (`last_seen`,
+  LQI, RSSI, diagnostic entities), and at once on a clean reboot or stop.
 - Commands are HA service names with HA's parameter names
   (`{"uid": …, "command": "set_temperature", "params": {"temperature":
   21.5}}`). The hub validates them against the capabilities, encodes them
@@ -2148,7 +2156,8 @@ code feels familiar:
   `gp/config/get`, the GP fields of 14.5, `network/active_scan` and
   `tx_power_requested` in `network/info`. 1.3 (hub 0.2.0, one bump for
   the whole batch) added `hub/time`, `hub/time/set`, `time_utc` and
-  `time_synced` in `network/info` and `hub/system`.
+  `time_synced` in `network/info` and `hub/system`; restored states
+  (`attributes.restored`) and `app.last_values` in `hub/system`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2422,7 +2431,7 @@ API.
 
 | Area | Offset | Size | Content |
 |---|---:|---:|---|
-| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), GP registry and bindings (13.8) |
+| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/ntp`), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8) |
 | Catalog state | 0x020000 | 8 KiB | active-bank record, two 4 KiB slots (9.1) |
 | Manifest | 0x022000 | 24 KiB | the installed, verified `manifest.cose` (9.3; 9 KB today) |
 | Converter bank A | 0x028000 | 256 KiB | catalog bank (9.1) |

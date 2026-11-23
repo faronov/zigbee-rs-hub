@@ -23,6 +23,7 @@ pub mod catalog;
 pub mod clock;
 pub mod jobs;
 pub mod jw;
+pub mod laststate;
 pub mod convert;
 pub mod ocb;
 pub mod platform;

@@ -110,6 +110,11 @@ class ZigbeeRsEntity(Entity):
         return self.state_msg.get("attributes") or {}
 
     @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """`restored: true` while the value is the one the hub kept over its restart."""
+        return {"restored": True} if self.hub_attributes.get("restored") else None
+
+    @property
     def available(self) -> bool:
         """Connected, device available, entity not orphaned."""
         return self.hub.entity_available(self.uid)

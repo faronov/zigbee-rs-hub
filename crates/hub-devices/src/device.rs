@@ -169,6 +169,8 @@ pub struct EntityState {
     pub last_event: Option<String>,
     /// Expression errors and map misses.
     pub errors: u32,
+    /// Kept from before a restart; no report since (the API marks it).
+    pub restored: bool,
 }
 
 /// Live entity: resolved definition + state.
@@ -870,7 +872,10 @@ impl Entity {
 
     /// State message (4.5).
     pub fn state_msg(&self, available: bool) -> J {
-        let (state, attrs) = self.ha_state();
+        let (state, mut attrs) = self.ha_state();
+        if self.state.restored {
+            attrs.insert("restored".into(), true.into());
+        }
         json!({
             "uid": self.uid,
             "state": state,

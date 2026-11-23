@@ -994,3 +994,56 @@ fn time_zone_and_servers_are_set_kept_and_reported() {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
     assert!((n["time_utc"].as_f64().unwrap() - now).abs() < 5.0, "{n}");
 }
+
+#[test]
+fn last_values_are_kept_over_a_restart() {
+    use zigbee_zrhp::codec::Bytes16;
+    use zigbee_zrhp::msg::data::{EvtApsDataIndication, indication_flags};
+    let flash: Box<dyn hub_ncp::store::Flash> = Box::new(MemFlash::new(32, 4096));
+    let r = rig(Store::open(flash).unwrap());
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    join(&r.sim);
+    assert!(app.wait(T, |s| s.devices == 1));
+    // A frame from the device: its LQI and last_seen.
+    let ind = EvtApsDataIndication {
+        dst_mode: 0x02,
+        dst: 0,
+        dst_ep: 1,
+        src_nwk: 0x1234,
+        src_ieee: Ieee::from_u64(DEV),
+        src_ep: 1,
+        profile: 0x0104,
+        cluster: 0x0402,
+        flags: indication_flags::SRC_IEEE_VALID,
+        lqi: 177,
+        rssi: -61,
+        last_hop_nwk: 0x1234,
+        aps_counter: 1,
+        key_source: 0,
+        rx_time_ms: 5,
+        asdu: Bytes16(&[0x18, 0x01, 0x0A, 0x00, 0x00, 0x29, 0x59, 0x08]),
+    };
+    r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, hub_ncp::driver::encode_body(&ind).unwrap());
+    let (sid, rx) = session(&app);
+    let t = std::time::Instant::now();
+    while call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": "zb:00158d0001a2b3c4"}))["result"]["lqi"] != 177 {
+        assert!(t.elapsed() < T, "no LQI");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A clean stop writes them at once (else every 10 min).
+    app.shutdown();
+    let kept = r.ncp.with_store(|s| s.kv_get("st/zb:00158d0001a2b3c4").map(<[u8]>::to_vec)).expect("kept");
+    let kept: J = serde_json::from_slice(&kept).unwrap();
+    assert_eq!((kept["lqi"].as_u64(), kept["rssi"].as_i64()), (Some(177), Some(-61)));
+    assert!(kept["seen"].as_i64().unwrap() > 1_700_000_000_000, "Unix ms: {kept}");
+
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.restored == 1 && s.devices == 1));
+    let (sid, rx) = session(&app);
+    let dev = call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": "zb:00158d0001a2b3c4"}));
+    assert_eq!(dev["result"]["lqi"], 177, "{dev}");
+    let sys = call(&app, sid, &rx, 2, json!({"type": "hub/system"}));
+    assert!(sys["result"]["app"]["last_values"][1].is_u64(), "{sys}");
+    app.shutdown();
+}
