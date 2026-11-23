@@ -28,7 +28,7 @@ Four choices are independent:
 | Choice | Examples | Owns |
 |---|---|---|
 | Host board | Thread BR, S3 with an external NCP, Dongle-M | ESP target, wiring, reset/boot lines, network interfaces |
-| Host memory | 4/8/16 MB flash; Quad or Octal PSRAM of 2–16 MB, or none | partitions, application options, buffer limits |
+| Host memory | 4/8/16 MB flash; Quad or Octal PSRAM of 2–16 MB (required by the application) | partitions, application options, buffer limits |
 | Coordinator backend | ZRHP, EZSP, ZNP | framing, commands, callbacks, network lifecycle |
 | Radio update method | ZRHP `FW_*`, Gecko/XMODEM, TI ROM bootloader | target checks, safe programming and recovery |
 
@@ -234,14 +234,15 @@ about 259 KB of headroom (the hand-written API request parser saved
 and `zigbee-zrhp` (about 109 KB), so size is not on the backends' critical
 path. These are build results, not hardware results.
 
-Every image detects PSRAM at boot. Without it the hub warns and runs in
-`internal-fallback`: three HTTP sockets without least-recently-used purge
-(Home Assistant keeps its socket; a new connection is refused), 16 KiB
-queued per WebSocket client and 32 KiB in all, no decoded built-in
-example catalog, small MQTT queues and a free-heap guard. A subscription
-snapshot is sent as fragments of one WebSocket message, each made after
-the earlier ones are sent. PSRAM presence does not change Zigbee
-semantics; thread stacks and driver allocations always use internal RAM.
+Every image detects PSRAM at boot. Without it the application is not
+started (hardware run on the N4R8 lab board with a Quad image: ~35 KB of
+internal heap left, crash once clients connected); the hub core keeps the
+Zigbee network and the web page, `/api` (503 `psram_missing`) and the
+console name the image to flash. An internal-RAM application mode needs
+about 100 KB less memory and is future work. A subscription snapshot is
+sent as fragments of one WebSocket message, each made after the earlier
+ones are sent. Thread stacks and driver allocations always use internal
+RAM.
 
 For every candidate, record final app-image size, slot headroom, loaded
 ELF sections, static IRAM/DRAM, task-stack reservations and runtime
@@ -253,8 +254,9 @@ configuration without Wi-Fi Enterprise saves only ~7 KB.
 
 ## 5. Delivery and qualification
 
-1. Qualify the 4 MB variant on hardware with and without PSRAM (Home
-   Assistant, browser and MQTT together; heap minimum and largest block).
+1. Qualify the 4 MB variant on hardware (done on the N4R8 lab board with
+   PSRAM: fragmented snapshots, five concurrent clients, heap stable;
+   without PSRAM: the wrong-image mode). MQTT under load remains.
 2. Extract the coordinator/storage boundary while keeping the existing
    ZRHP wire behavior, persistence and recovery unchanged; ZRHP adapter
    conformance tests.

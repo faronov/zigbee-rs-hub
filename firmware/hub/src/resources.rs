@@ -37,15 +37,32 @@ pub fn get() -> &'static Resources {
     })
 }
 
+/// The other PSRAM interface's image, for the wrong-image message.
+pub fn other_psram_mode() -> &'static str {
+    if psram_mode() == "octal" { "quad" } else { "octal" }
+}
+
+/// Without PSRAM the app is not started (it needs about 100 KB more
+/// internal RAM than the module has left): the hub core keeps the Zigbee
+/// network, the console and a web page say which image to flash.
+pub fn app_allowed() -> bool {
+    !get().internal_fallback()
+}
+
+/// The wrong-image message (console, log, web page).
+pub fn wrong_image() -> String {
+    format!(
+        "PSRAM not detected: this image is for {} PSRAM. The Zigbee network keeps running, but the hub application \
+         (web UI, Home Assistant API, MQTT) is not started. Flash the {} PSRAM image (the web flasher picks it by the chip).",
+        psram_mode(),
+        other_psram_mode(),
+    )
+}
+
 pub fn log() {
     let r = get();
     if r.internal_fallback() {
-        log::warn!(
-            "PSRAM not detected ({} image): internal-RAM fallback with {} HTTP sockets, {} KiB queued per WebSocket client, no built-in examples; check the Quad/Octal image",
-            psram_mode(),
-            r.http_sockets,
-            r.ws_client_bytes / 1024,
-        );
+        log::warn!("{}", wrong_image());
     } else {
         log::info!(
             "{} KiB PSRAM ({}): {} HTTP sockets, {} KiB queued per WebSocket client",

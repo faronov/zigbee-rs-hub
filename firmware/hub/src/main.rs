@@ -139,6 +139,10 @@ fn status_text(hub: &Hub) -> String {
         out += &format!("last error: {e}\r\n");
     }
     #[cfg(feature = "app")]
+    if !resources::app_allowed() {
+        out += &format!("app: not started. {}\r\n", resources::wrong_image());
+    }
+    #[cfg(feature = "app")]
     if let Some(app) = APP.get() {
         let a = app.status();
         out += &format!(
@@ -362,7 +366,25 @@ fn start_hub() {
     let _ = HUB.set(hub.clone());
     stage(4);
     #[cfg(feature = "app")]
-    start_app(hub);
+    if resources::app_allowed() {
+        start_app(hub);
+    } else {
+        start_wrong_image(hub);
+    }
+}
+
+/// No PSRAM: the hub core only, plus Wi-Fi and a page that says so.
+#[cfg(feature = "app")]
+fn start_wrong_image(hub: Hub) {
+    match esp_idf_svc::hal::peripherals::Peripherals::take() {
+        Ok(p) => net::start(None, p.modem, move |up| {
+            platform::wifi_changed(up);
+            if let Err(e) = hub.set_coex(up) {
+                warn!("coex_enable {up}: {e}");
+            }
+        }),
+        Err(e) => warn!("peripherals: {e}"),
+    }
 }
 
 /// The catalog verifier's key slots.
@@ -418,7 +440,7 @@ fn start_app(hub: Hub) {
     usbapi::start(app.clone());
     stage(7);
     match esp_idf_svc::hal::peripherals::Peripherals::take() {
-        Ok(p) => net::start(app, p.modem, move |up| {
+        Ok(p) => net::start(Some(app), p.modem, move |up| {
             platform::wifi_changed(up);
             if let Err(e) = hub.set_coex(up) {
                 warn!("coex_enable {up}: {e}");

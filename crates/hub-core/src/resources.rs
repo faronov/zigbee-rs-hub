@@ -1,8 +1,9 @@
 //! Buffer limits from the memory the module has, detected at boot by every
 //! image. PSRAM changes buffering, not Zigbee device support or the flash
 //! layout. Without PSRAM (a module without it, or an image built for the
-//! other PSRAM interface) the hub keeps running on internal RAM with the
-//! reduced limits and says so in its log and `hub/system`.
+//! other PSRAM interface) the firmware does not start the application yet
+//! (it needs about 100 KB more internal RAM than is left); the reduced
+//! limits are for that future internal-RAM mode.
 
 /// Limits of one boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

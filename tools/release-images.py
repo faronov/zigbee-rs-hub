@@ -67,8 +67,9 @@ LAYOUTS = [
 ]
 # ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
 # variant by the chip's embedded PSRAM (eFuse PSRAM_CAP, esptool's
-# "Embedded PSRAM 8MB"); a wrong pick boots without PSRAM, on internal RAM
-# with reduced limits (hub/system memory_mode "internal-fallback").
+# "Embedded PSRAM 8MB"); a wrong pick boots without PSRAM: the hub core keeps
+# the network, the application is not started and the web page says which
+# image to flash.
 PSRAM_VARIANTS = [
     {"psram": "quad", "suffix": "", "title": "",
      "match": {"embedded_psram_mb": [0, 2, 4]},

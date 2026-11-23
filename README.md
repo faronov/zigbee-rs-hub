@@ -97,18 +97,22 @@ Every image marks its features and PSRAM mode in the binary;
 board entry (e.g. an 8 MB build left in the 4 MB target directory).
 
 Quad/Octal is the fitted memory's interface, not a PSRAM capacity; 2, 4, 8
-and 16 MB PSRAM get the same limits. Every image detects PSRAM at boot.
-When it is absent, or the image was built for the other interface, the hub
-warns and continues in `internal-fallback`: three HTTP sockets and no
-least-recently-used purge (a new connection is refused, Home Assistant
-keeps its session), 16 KiB queued per WebSocket client (32 KiB in all), no
-decoded built-in example catalog, the MQTT bridge with small queues and a
-free-heap guard. Flash-backed/user definitions and normal device support
-remain available. With PSRAM: seven sockets, 128 KiB per client (384 KiB in
-all). A subscription snapshot goes as the fragments of one WebSocket
-message, each made once the earlier ones are sent, so it needs no large
-contiguous buffer. `hub/system` reports `memory_mode`, the image's `build`
-(features, PSRAM mode) and these `limits`.
+and 16 MB PSRAM get the same limits: seven HTTP sockets, 128 KiB queued per
+WebSocket client (384 KiB in all). A subscription snapshot goes as the
+fragments of one WebSocket message, each made once the earlier ones are
+sent, so it needs no large contiguous buffer. `hub/system` reports
+`memory_mode`, the image's `build` (features, PSRAM mode) and these
+`limits`.
+
+Every image detects PSRAM at boot. Without it (the image was built for the
+other interface, or the module has none) the application is **not
+started**: on the lab N4R8 board a Quad image left ~35 KB of internal heap
+and crashed as soon as clients connected, since the application's data and
+the Wi-Fi/lwIP buffers otherwise live in PSRAM. The hub core keeps the
+Zigbee network (NCP session, host store); the web page, `/api` (HTTP 503,
+`psram_missing`) and the console's `info` say which image to flash. An
+application mode on internal RAM alone needs about 100 KB less memory and
+is future work.
 
 The 4 MB app still has a 2,944 KiB slot and no hub A/B update; this change
 adds neither SoftAP nor Zigbee OTA. Release **0.2.0** predates these
