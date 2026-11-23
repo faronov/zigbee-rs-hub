@@ -76,6 +76,22 @@ pub trait RequestHook: Send {
     fn request(&mut self, ty: &str, req: &serde_json::Value) -> Result<serde_json::Value, hub_devices::hub::ApiError>;
 }
 
+/// Request prefixes of optional services and why a build without their
+/// hook lacks them: such requests answer `unsupported`, not
+/// `invalid_format`.
+const OPTIONAL_SERVICES: &[(&str, &str)] =
+    &[("mqtt/", "the MQTT bridge is not in this firmware build (8 MB images only)")];
+
+/// The `unsupported` result of a request for an optional service this
+/// build does not have.
+fn optional_missing(text: &str) -> Option<String> {
+    let (prefix, why) = OPTIONAL_SERVICES.iter().find(|(p, _)| text.contains(p))?;
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v["type"].as_str().filter(|t| t.starts_with(prefix))?;
+    let id = v["id"].as_u64()?;
+    Some(hub_devices::api::ServerMessage::err(id, hub_devices::hub::ApiError::new("unsupported", *why)).to_text())
+}
+
 /// Period of [`SessionSink::keepalive`].
 pub const KEEPALIVE_S: u64 = 30;
 
@@ -774,7 +790,9 @@ impl Runner {
     /// A request of a [`RequestHook`]: the result frame, `None` when no
     /// hook serves it.
     fn hook_request(&mut self, text: &str) -> Option<String> {
-        let h = self.hooks.iter_mut().find(|h| text.contains(h.prefix()))?;
+        let Some(h) = self.hooks.iter_mut().find(|h| text.contains(h.prefix())) else {
+            return optional_missing(text);
+        };
         let v: serde_json::Value = serde_json::from_str(text).ok()?;
         let ty = v["type"].as_str().filter(|t| t.starts_with(h.prefix()))?;
         let id = v["id"].as_u64()?;

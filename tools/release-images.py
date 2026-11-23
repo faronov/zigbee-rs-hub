@@ -46,7 +46,10 @@ LAYOUTS = [
         "csv": "firmware/hub/partitions-8mb.csv",
         "app_partition": "ota_0",
         "max_app": 3 * 1024 * 1024,
-        "note": "Production layout: two 3 MiB app slots (A/B OTA) and 1 920 KiB hubdata.",
+        "target": "target-8mb",
+        "features": ["mqtt"],
+        "note": "Production layout: two 3 MiB app slots (A/B OTA) and 1 920 KiB hubdata; "
+        "with the Zigbee2MQTT-compatible MQTT bridge.",
     },
     {
         "id": "thread-br-s3-hub-4mb-dev",
@@ -56,23 +59,28 @@ LAYOUTS = [
         "csv": "firmware/hub/partitions-4mb-dev.csv",
         "app_partition": "factory",
         "max_app": 2944 * 1024,
-        "note": "Development layout: one 2 944 KiB app slot, no OTA, 1 MiB hubdata.",
+        "target": "target",
+        "features": [],
+        "note": "Development layout: one 2 944 KiB app slot, no OTA, 1 MiB hubdata; "
+        "no MQTT bridge (its API answers unsupported).",
     },
 ]
 # ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
 # variant by the chip's embedded PSRAM (eFuse PSRAM_CAP, esptool's
 # "Embedded PSRAM 8MB"); a wrong pick boots without PSRAM.
 PSRAM_VARIANTS = [
-    {"psram": "quad", "suffix": "", "target": "target", "title": "",
+    {"psram": "quad", "suffix": "", "title": "",
      "match": {"embedded_psram_mb": [0, 2, 4]},
      "note": "Quad PSRAM (WROOM-1 N4R2/N8R2, S3FH4R2) or none."},
-    {"psram": "octal", "suffix": "-opi", "target": "target-opi", "title": ", octal PSRAM",
+    {"psram": "octal", "suffix": "-opi", "title": ", octal PSRAM",
      "match": {"embedded_psram_mb": [8, 16]},
      "note": "Octal PSRAM (WROOM-1 N4R8/N8R8/N16R8, ESP32-S3R8/R16V die)."},
 ]
 BOARDS = [
     {**layout, "id": layout["id"] + v["suffix"], "title": layout["title"] + v["title"],
-     "note": layout["note"] + " " + v["note"], "psram": v["psram"], "match": v["match"], "target": v["target"]}
+     "note": layout["note"] + " " + v["note"], "psram": v["psram"], "match": v["match"],
+     # Cargo target dir of the image's build (tools/build-hub-firmware.sh).
+     "target": layout["target"] + ("-opi" if v["psram"] == "octal" else "")}
     for layout in LAYOUTS
     for v in PSRAM_VARIANTS
 ]
@@ -190,6 +198,7 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
         "flash_size": size,
         "layout": spec["layout"],
         "psram": spec["psram"],
+        "features": spec["features"],
         "match": spec["match"],
         "note": spec["note"],
         "connect": CONNECT,

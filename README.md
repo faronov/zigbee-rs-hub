@@ -1043,7 +1043,7 @@ UI and the HA integration see.
   SSL and WebSocket transports are compiled out): use a broker on your LAN
   (mosquitto, the HA add-on …), optionally with a user name and password.
 - **Settings**: web UI → Settings → MQTT, or the API (`mqtt/config/get`,
-  `mqtt/config/set`, `mqtt/status`; device-support 14.7); stored in NVS.
+  `mqtt/config/set`, `mqtt/status`; device-support 14.10); stored in NVS.
   Off until enabled. Broker host/port, client ID (default
   `zigbee-rs-hub-<6 hex of the coordinator IEEE>`), credentials, base
   topic (`zigbee2mqtt`), keepalive, HA discovery and its prefix

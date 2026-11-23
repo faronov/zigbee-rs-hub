@@ -1083,7 +1083,7 @@ openHAB, MQTT discovery Home Assistant, скрипты. `crates/hub-mqtt` —
   локальной сети (mosquitto, аддон HA …), по желанию с логином и паролем.
 - **Настройки**: веб-интерфейс → Settings → MQTT или API
   (`mqtt/config/get`, `mqtt/config/set`, `mqtt/status`; device-support
-  14.7); хранятся в NVS. Выключено, пока не включат. Хост и порт брокера,
+  14.10); хранятся в NVS. Выключено, пока не включат. Хост и порт брокера,
   client ID (по умолчанию `zigbee-rs-hub-<6 hex IEEE координатора>`),
   логин/пароль, базовый топик (`zigbee2mqtt`), keepalive, discovery HA и
   его префикс (`homeassistant`), retain состояний/доступности, QoS.

@@ -160,25 +160,17 @@ jobs:
       - name: Build tbr-hub without the application (ZRHP host core only)
         working-directory: firmware/hub
         run: cargo build --release --no-default-features
-      - name: Build tbr-hub (application without the MQTT bridge, and with its own MQTT client)
+      - name: Build tbr-hub with the MQTT bridge on its own client (option mqtt-lite, in no image)
         working-directory: firmware/hub
-        run: |
-          cargo build --release --no-default-features --features app
-          cargo build --release --features mqtt-lite
-      - name: Build tbr-hub (application)
-        working-directory: firmware/hub
-        run: cargo build --release
-      - name: Build tbr-hub (application, octal PSRAM variant)
-        working-directory: firmware/hub
-        env:
-          ESP_IDF_SDKCONFIG_DEFAULTS: firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target-opi
-        run: cargo build --release
-      - name: App images (tbr-hub must fit the 3 MiB production slot and the 2 944 KiB dev slot)
+        run: cargo build --release --features mqtt-lite
+      - name: Build tbr-hub (8 MB images with the MQTT bridge, 4 MB dev images without; quad and octal PSRAM)
+        run: tools/build-hub-firmware.sh
+      - name: App images (tbr-hub must fit the 3 MiB production slot, with MQTT, and the 2 944 KiB dev slot)
         run: |
           pip install --quiet "esptool>=5,<6"
           tools/make-app-image.sh release target/tbr-bridge-app.bin tbr-bridge
-          FLASH_SIZE=8MB MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-8mb-app.bin tbr-hub
+          TARGET_DIR=target-8mb FLASH_SIZE=8MB MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-8mb-app.bin tbr-hub
+          TARGET_DIR=target-8mb-opi FLASH_SIZE=8MB MAX_APP_BYTES=3145728 tools/make-app-image.sh release target/tbr-hub-8mb-opi-app.bin tbr-hub
           FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-app.bin tbr-hub
           TARGET_DIR=target-opi FLASH_SIZE=4MB MAX_APP_BYTES=3014656 tools/make-app-image.sh release target/tbr-hub-4mb-dev-opi-app.bin tbr-hub
       - name: Partition tables (8 MB production, 4 MB dev)
@@ -195,6 +187,7 @@ jobs:
           path: |
             target/tbr-bridge-app.bin
             target/tbr-hub-8mb-app.bin
+            target/tbr-hub-8mb-opi-app.bin
             target/tbr-hub-4mb-dev-app.bin
             target/tbr-hub-4mb-dev-opi-app.bin
             target/partitions-8mb.bin

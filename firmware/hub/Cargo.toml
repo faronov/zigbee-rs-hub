@@ -26,18 +26,19 @@ log = "0.4"
 tbr-bridge = { path = "../bridge" }
 
 [features]
-default = ["app", "mqtt"]
+default = ["app"]
 # The application (device engine, registry) with its WebSocket JSON API over
 # Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
 # phase-1 hub (ZRHP host core only).
 app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json"]
 # The Zigbee2MQTT-compatible MQTT bridge (esp-mqtt, plain TCP; settings in
-# NVS, off until enabled). `--no-default-features --features app` leaves
-# it out.
+# NVS, off until enabled). In the 8 MB images only
+# (tools/build-hub-firmware.sh): the 4 MB dev images leave it out, and their
+# API answers `mqtt/*` with `unsupported`.
 mqtt = ["app", "dep:hub-mqtt"]
 # The same bridge on its own MQTT 3.1.1 client over lwIP sockets instead of
 # esp-mqtt (which links esp-tls and the mbedtls TLS layer even for plain
-# TCP).
+# TCP). An option, off in every image.
 mqtt-lite = ["mqtt"]
 
 [build-dependencies]

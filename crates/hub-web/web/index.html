@@ -173,7 +173,8 @@ progress{width:12em}
 <datalist id="tzl"><option value="UTC0">UTC</option><option value="GMT0BST,M3.5.0/1,M10.5.0">London</option><option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin, Paris, Warsaw</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Kyiv, Helsinki, Riga</option><option value="MSK-3">Moscow, Istanbul (+3)</option><option value="EST5EDT,M3.2.0,M11.1.0">New York</option><option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles</option><option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney</option></datalist>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
-<section class="card f-mqtt"><h2>MQTT (Zigbee2MQTT-compatible)</h2>
+<section class="card" id="mqcard"><h2>MQTT (Zigbee2MQTT-compatible)</h2>
+<p class="mut hide" id="mqno">Not in this firmware build: the MQTT bridge comes with the 8 MB images.</p>
 <p class="mut">Devices on an MQTT broker with Zigbee2MQTT's topics and payloads (Node-RED, ioBroker, openHAB, Home Assistant MQTT). Plain MQTT over TCP, no TLS: use a broker on your LAN. Home Assistant: use either the hub's integration or MQTT discovery, not both.</p>
 <dl class="kv" id="mqs"></dl>
 <div class="row"><label><input type="checkbox" id="mqe"> Enabled</label><input id="mqh" placeholder="broker host" size="16"><input id="mqp" type="number" class="num" placeholder="1883"></div>
@@ -454,7 +455,7 @@ function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a
  if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}
 // MQTT bridge settings: checkboxes and fields map 1:1 to mqtt/config.
 const mqF={mqh:"host",mqp:"port",mqu:"username",mqc:"client_id",mqb:"base_topic",mqk:"keepalive_s",mqx:"discovery_prefix",mqq:"qos"},mqB={mqe:"enabled",mqd:"discovery",mqr:"retain_state",mqa:"retain_availability"};
-function loadMqtt(){if(has("mqtt"))Promise.all([call("mqtt/config/get"),call("mqtt/status")]).then(([c,s])=>{for(const k in mqF)$("#"+k).value=c[mqF[k]];for(const k in mqB)$("#"+k).checked=c[mqB[k]];$("#mqw").value="";$("#mqw").placeholder=c.password_set?"password (unchanged)":"password";
+function loadMqtt(){const on=has("mqtt");$("#mqno").classList.toggle("hide",on);for(const e of $("#mqcard").querySelectorAll("input,select,button"))e.disabled=!on;if(on)Promise.all([call("mqtt/config/get"),call("mqtt/status")]).then(([c,s])=>{for(const k in mqF)$("#"+k).value=c[mqF[k]];for(const k in mqB)$("#"+k).checked=c[mqB[k]];$("#mqw").value="";$("#mqw").placeholder=c.password_set?"password (unchanged)":"password";
  kv($("#mqs"),[["State",s.state+(s.retry_in_s!=null?" (retry in "+s.retry_in_s+" s)":"")],["Last error",s.last_error],["Devices",s.devices],["Messages",s.published+" out, "+s.received+" in, "+s.dropped+" dropped, "+s.errors+" errors"]])}).catch(()=>{})}
 $("#mqsv").onclick=e=>{const p={};for(const k in mqF){const f=mqF[k],v=$("#"+k).value.trim(),n=["port","keepalive_s","qos"].includes(f);if(!(n&&v===""))p[f]=n?+v:v}for(const k in mqB)p[mqB[k]]=$("#"+k).checked;if($("#mqw").value)p.password=$("#mqw").value;
  busy(e.target,act("mqtt/config/set",p).then(()=>{toast("MQTT settings saved");setTimeout(loadMqtt,1500)})).catch(()=>{})};
