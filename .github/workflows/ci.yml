@@ -17,8 +17,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p hub-core -p hub-ncp -p hub-app -p hub-web -p hub-mqtt -p hubctl
+      # hubctl enables `advanced`; the images without it build hub-mqtt alone.
+      - name: hub-mqtt without the advanced console
+        run: cargo test -p hub-mqtt
       - name: S3 flashing helpers (partition offsets from the device's table)
         run: python3 -m unittest discover -s tools/flow -p 'test_*.py'
+      - name: Firmware build selection, release image checks, size accounting
+        run: python3 -m unittest tools/test_hub_build.py tools/test_release_images.py tools/test_size_report.py
 
   home-assistant:
     name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)
@@ -55,6 +60,9 @@ jobs:
       - run: cargo fmt -p hub-devices -- --check
       - run: cargo clippy -p hub-devices --all-targets -- -D warnings
       - run: cargo test -p hub-devices
+      - run: cargo test -p hub-devices --features advanced
+      - run: cargo test -p hub-app -p hub-web --no-default-features
+      - run: cargo test -p hub-web --features advanced
 
   zdef:
     name: zdef + zdefc (host tests, clippy, fmt)

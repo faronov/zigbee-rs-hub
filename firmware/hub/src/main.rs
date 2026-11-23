@@ -21,6 +21,7 @@ mod catalog;
 mod cpu;
 mod esp;
 mod mode;
+mod resources;
 #[cfg(feature = "mqtt")]
 mod mqtt;
 #[cfg(feature = "app")]
@@ -136,6 +137,10 @@ fn status_text(hub: &Hub) -> String {
     };
     if let Some(e) = &s.last_error {
         out += &format!("last error: {e}\r\n");
+    }
+    #[cfg(feature = "app")]
+    if !resources::app_allowed() {
+        out += &format!("app: not started. {}\r\n", resources::wrong_image());
     }
     #[cfg(feature = "app")]
     if let Some(app) = APP.get() {
@@ -361,7 +366,25 @@ fn start_hub() {
     let _ = HUB.set(hub.clone());
     stage(4);
     #[cfg(feature = "app")]
-    start_app(hub);
+    if resources::app_allowed() {
+        start_app(hub);
+    } else {
+        start_wrong_image(hub);
+    }
+}
+
+/// No PSRAM: the hub core only, plus Wi-Fi and a page that says so.
+#[cfg(feature = "app")]
+fn start_wrong_image(hub: Hub) {
+    match esp_idf_svc::hal::peripherals::Peripherals::take() {
+        Ok(p) => net::start(None, p.modem, move |up| {
+            platform::wifi_changed(up);
+            if let Err(e) = hub.set_coex(up) {
+                warn!("coex_enable {up}: {e}");
+            }
+        }),
+        Err(e) => warn!("peripherals: {e}"),
+    }
 }
 
 /// The catalog verifier's key slots.
@@ -391,14 +414,14 @@ fn start_app(hub: Hub) {
         }
         t
     });
-    // The example definitions take ~90 KB decoded: only with PSRAM (the 4 MB
-    // early sample has none; its devices resolve through the generic tier).
-    let psram = unsafe { esp_idf_svc::sys::heap_caps_get_total_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM) };
+    // The example definitions take ~90 KB decoded; a flash-backed catalog
+    // and generic device support remain available without them.
+    let builtin_catalog = resources::get().builtin_catalog;
     let app_cfg = hub_app::AppConfig {
         hub_name: format!("zigbee-rs-hub {}", env!("CARGO_PKG_VERSION")),
         api_token: token,
         stack_size: APP_STACK,
-        builtin_catalog: psram > 0,
+        builtin_catalog,
         platform: Some(std::sync::Arc::new(platform::S3)),
         admin_stack: ADMIN_STACK,
         ..Default::default()
@@ -412,12 +435,12 @@ fn start_app(hub: Hub) {
     let app = cpu::named(c"app", || hub_app::App::start_with(hub.clone(), app_cfg, catalog));
     let _ = APP.set(app.clone());
     #[cfg(feature = "mqtt")]
-    let _ = MQTT.set(mqtt::start(&app, psram > 0));
+    let _ = MQTT.set(mqtt::start(&app, resources::get()));
     stage(6);
     usbapi::start(app.clone());
     stage(7);
     match esp_idf_svc::hal::peripherals::Peripherals::take() {
-        Ok(p) => net::start(app, p.modem, move |up| {
+        Ok(p) => net::start(Some(app), p.modem, move |up| {
             platform::wifi_changed(up);
             if let Err(e) = hub.set_coex(up) {
                 warn!("coex_enable {up}: {e}");
@@ -657,6 +680,7 @@ fn main() {
     record_panics();
     record_alloc_failures();
     info!("tbr-hub {} starting", env!("CARGO_PKG_VERSION"));
+    resources::log();
     let crashed = tbr_bridge::recovery::crashed_last_boot();
     if crashed {
         unsafe { (&raw mut CRASH_REASON).write_volatile(0x4352_0000 | esp_idf_svc::sys::esp_reset_reason()) };
@@ -695,8 +719,8 @@ fn main() {
         Mode::Hub => {
             usb::BRIDGE_ENABLED.store(false, Ordering::SeqCst);
             h2::AUTO_LINES.store(false, Ordering::SeqCst);
-            // The host link has RTS/CTS and credits: small rings save RAM
-            // (the 4 MB early sample has no PSRAM).
+            // The host link has RTS/CTS and credits; small rings also leave
+            // room for the internal-RAM fallback.
             uart::init_with_rings(hub_ncp::transport::Line::BR_DEFAULT.baud, 4096, 2048).expect("H2 UART");
             usb::init().expect("TinyUSB");
             stage(2);

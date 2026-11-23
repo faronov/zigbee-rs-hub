@@ -6,6 +6,7 @@
 //! [`ApiServer::pump`].
 
 pub mod messages;
+mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,6 +19,31 @@ use crate::model::{Binding, Definition, LayerSource};
 use crate::resolve::{Catalog, MemoryCatalog, ResolveInput, resolve};
 use crate::transport::ZigbeeTransport;
 pub use messages::*;
+pub use snapshot::SnapshotStream;
+
+/// A frame for a session: text, or a snapshot the sink takes whole
+/// ([`SnapshotStream::render`]) or piece by piece.
+#[derive(Debug)]
+pub enum Frame {
+    /// A whole message.
+    Text(String),
+    /// The `snapshot` event of a subscription.
+    Snapshot(SnapshotStream),
+}
+
+fn one(m: ServerMessage) -> Vec<Frame> {
+    vec![Frame::Text(m.into_text())]
+}
+
+impl Frame {
+    /// The whole text.
+    pub fn render<T: ZigbeeTransport>(self, hub: &mut Hub<T>, now: Millis) -> String {
+        match self {
+            Self::Text(t) => t,
+            Self::Snapshot(s) => s.render(hub, now),
+        }
+    }
+}
 
 /// A connection.
 pub type SessionId = u64;
@@ -203,6 +229,22 @@ impl ApiServer {
         now: Millis,
         ext: Option<&mut dyn ApiExtension<T>>,
     ) -> Vec<String> {
+        self.handle_text_frames(hub, s, text, now, ext)
+            .into_iter()
+            .map(|f| f.render(hub, now))
+            .collect()
+    }
+
+    /// [`handle_text_ext`](Self::handle_text_ext) with a subscription
+    /// snapshot left to the caller to render ([`Frame::Snapshot`]).
+    pub fn handle_text_frames<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        text: &str,
+        now: Millis,
+        ext: Option<&mut dyn ApiExtension<T>>,
+    ) -> Vec<Frame> {
         let Some(sess) = self.sessions.get_mut(&s) else {
             return Vec::new();
         };
@@ -210,22 +252,16 @@ impl ApiServer {
             return match serde_json::from_str::<Auth>(text) {
                 Ok(a) if a.token == self.token => {
                     sess.authed = true;
-                    vec![
-                        ServerMessage::AuthOk {
-                            hub: self.hub_name.clone(),
-                            api_version: API_VERSION.into(),
-                            zdef_versions: vec![1],
-                            features: hub.features.iter().map(|f| f.to_string()).collect(),
-                        }
-                        .to_text(),
-                    ]
+                    one(ServerMessage::AuthOk {
+                        hub: self.hub_name.clone(),
+                        api_version: API_VERSION.into(),
+                        zdef_versions: vec![1],
+                        features: hub.features.iter().map(|f| f.to_string()).collect(),
+                    })
                 }
-                _ => vec![
-                    ServerMessage::AuthInvalid {
-                        message: "unauthorized".into(),
-                    }
-                    .to_text(),
-                ],
+                _ => one(ServerMessage::AuthInvalid {
+                    message: "unauthorized".into(),
+                }),
             };
         }
         // Groups, scenes and bindings (14.9): parsed from the JSON value.
@@ -236,13 +272,10 @@ impl ApiServer {
                     || kind.starts_with("scenes/")
                     || kind.starts_with("bindings/"))
             {
-                return vec![
-                    match hub.zg_request(kind, &raw, now) {
-                        Ok(v) => ServerMessage::ok(id, v),
-                        Err(e) => ServerMessage::err(id, e),
-                    }
-                    .to_text(),
-                ];
+                return one(match hub.zg_request(kind, &raw, now) {
+                    Ok(v) => ServerMessage::ok(id, v),
+                    Err(e) => ServerMessage::err(id, e),
+                });
             }
         }
         // An extension may take a request from its text (uploads: no copy
@@ -251,13 +284,10 @@ impl ApiServer {
         if let Some(ext) = ext.as_deref_mut()
             && let Some((id, r)) = ext.request_text(hub, text, now)
         {
-            return vec![
-                match r {
-                    Ok(v) => ServerMessage::ok(id, v),
-                    Err(e) => ServerMessage::err(id, e),
-                }
-                .to_text(),
-            ];
+            return one(match r {
+                Ok(v) => ServerMessage::ok(id, v),
+                Err(e) => ServerMessage::err(id, e),
+            });
         }
         // Only requests an extension may serve are parsed twice.
         if let Some(ext) = ext
@@ -266,13 +296,10 @@ impl ApiServer {
             && let (Some(id), Some(kind)) = (raw["id"].as_u64(), raw["type"].as_str())
             && let Some(r) = ext.request(hub, kind, &raw, now)
         {
-            return vec![
-                match r {
-                    Ok(v) => ServerMessage::ok(id, v),
-                    Err(e) => ServerMessage::err(id, e),
-                }
-                .to_text(),
-            ];
+            return one(match r {
+                Ok(v) => ServerMessage::ok(id, v),
+                Err(e) => ServerMessage::err(id, e),
+            });
         }
         let env: Envelope = match serde_json::from_str(text) {
             Ok(e) => e,
@@ -281,16 +308,13 @@ impl ApiServer {
                     .ok()
                     .and_then(|v| v["id"].as_u64())
                     .unwrap_or(0);
-                return vec![
-                    ServerMessage::err(id, ApiError::new("invalid_format", e.to_string()))
-                        .to_text(),
-                ];
+                return one(ServerMessage::err(
+                    id,
+                    ApiError::new("invalid_format", e.to_string()),
+                ));
             }
         };
-        self.handle(hub, s, env, now)
-            .into_iter()
-            .map(ServerMessage::into_text)
-            .collect()
+        self.handle_frames(hub, s, env, now)
     }
 
     /// Handles one typed request.
@@ -301,28 +325,77 @@ impl ApiServer {
         env: Envelope,
         now: Millis,
     ) -> Vec<ServerMessage> {
-        let id = env.id;
         if let Request::Subscribe { topics } = &env.request {
-            let bad: Vec<&String> = topics
-                .iter()
-                .filter(|t| !TOPICS.contains(&t.as_str()))
-                .collect();
-            if !bad.is_empty() {
-                return vec![ServerMessage::err(
-                    id,
-                    ApiError::new("invalid_value", format!("unknown topics {bad:?}")),
-                )];
-            }
-            if let Some(sess) = self.sessions.get_mut(&s) {
-                sess.subs.insert(id, topics.iter().cloned().collect());
-            }
-            // Snapshot first, then deltas with increasing seq (14.1).
-            let snap = self.snapshot(hub, topics, id, now);
-            return vec![
-                ServerMessage::ok(id, json!({"seq": self.seq})),
-                ServerMessage::Text(snap),
-            ];
+            return match self.subscribe(hub, s, env.id, topics) {
+                Ok((ok, snap)) => vec![ok, ServerMessage::Text(snap.render(hub, now))],
+                Err(e) => vec![e],
+            };
         }
+        self.request(hub, s, env, now)
+    }
+
+    fn handle_frames<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        env: Envelope,
+        now: Millis,
+    ) -> Vec<Frame> {
+        if let Request::Subscribe { topics } = &env.request {
+            return match self.subscribe(hub, s, env.id, topics) {
+                Ok((ok, snap)) => vec![Frame::Text(ok.into_text()), Frame::Snapshot(snap)],
+                Err(e) => one(e),
+            };
+        }
+        self.request(hub, s, env, now)
+            .into_iter()
+            .map(|m| Frame::Text(m.into_text()))
+            .collect()
+    }
+
+    /// A subscription: its result and snapshot, then deltas with increasing
+    /// seq (14.1).
+    fn subscribe<T: ZigbeeTransport>(
+        &mut self,
+        hub: &Hub<T>,
+        s: SessionId,
+        id: u64,
+        topics: &[String],
+    ) -> Result<(ServerMessage, SnapshotStream), ServerMessage> {
+        #[cfg(not(feature = "advanced"))]
+        if topics.iter().any(|topic| topic == "frames") {
+            return Err(ServerMessage::err(
+                id,
+                ApiError::new("unsupported", "frame tracing requires an advanced image"),
+            ));
+        }
+        let bad: Vec<&String> = topics
+            .iter()
+            .filter(|t| !TOPICS.contains(&t.as_str()))
+            .collect();
+        if !bad.is_empty() {
+            return Err(ServerMessage::err(
+                id,
+                ApiError::new("invalid_value", format!("unknown topics {bad:?}")),
+            ));
+        }
+        if let Some(sess) = self.sessions.get_mut(&s) {
+            sess.subs.insert(id, topics.iter().cloned().collect());
+        }
+        Ok((
+            ServerMessage::ok(id, json!({"seq": self.seq})),
+            SnapshotStream::new(hub, topics, id, self.seq),
+        ))
+    }
+
+    fn request<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        env: Envelope,
+        now: Millis,
+    ) -> Vec<ServerMessage> {
+        let id = env.id;
         if let Request::Unsubscribe { subscription } = env.request {
             let found = self
                 .sessions
@@ -340,10 +413,14 @@ impl ApiServer {
                 command,
                 params,
             } => Some(hub.entity_command(uid, command, params, now)),
+            #[cfg(feature = "advanced")]
             Request::TuyaSend(a) => Some(crate::console::parse_dps(a).and_then(|dps| {
                 hub.tuya_send_dps(a["device"].as_str().unwrap_or_default(), &dps, now)
             })),
+            #[cfg(feature = "advanced")]
             r => crate::console::request(r).map(|c| c.and_then(|c| hub.console(c, now))),
+            #[cfg(not(feature = "advanced"))]
+            _ => None,
         };
         if let Some(res) = console {
             return match res {
@@ -372,98 +449,6 @@ impl ApiServer {
         }]
     }
 
-    /// The `snapshot` event of a subscription as text, one record at a time:
-    /// as a `Value` tree the entities and states of a single sensor took
-    /// about 15 KB of heap on the S3 for 4 KB of text.
-    fn snapshot<T: ZigbeeTransport>(
-        &self,
-        hub: &mut Hub<T>,
-        topics: &[String],
-        id: u64,
-        now: Millis,
-    ) -> String {
-        fn list(s: &mut String, key: &str, items: impl Iterator<Item = J>) {
-            s.push_str(",\"");
-            s.push_str(key);
-            s.push_str("\":[");
-            for (i, v) in items.enumerate() {
-                if i > 0 {
-                    s.push(',');
-                }
-                s.push_str(&v.to_string());
-            }
-            s.push(']');
-        }
-        fn field(s: &mut String, key: &str, v: &J) {
-            s.push_str(",\"");
-            s.push_str(key);
-            s.push_str("\":");
-            s.push_str(&v.to_string());
-        }
-        let has = |t: &str| topics.iter().any(|x| x == t);
-        // Room for the usual record sizes: no copy while the text grows.
-        let (devs, ents) = hub
-            .devices()
-            .fold((0, 0), |(d, e), x| (d + 1, e + x.entities.len()));
-        let mut s = String::with_capacity(
-            256 + has("devices") as usize * devs * 448 + has("entities") as usize * ents * 512,
-        );
-        s.push_str(&format!(
-            "{{\"type\":\"event\",\"id\":{id},\"seq\":{},\"event\":{{\"topic\":\"snapshot\"",
-            self.seq
-        ));
-        if has("devices") {
-            list(
-                &mut s,
-                "devices",
-                hub.devices()
-                    .map(|d| d.record())
-                    .chain(hub.zg_device_records()),
-            );
-        }
-        if has("entities") {
-            list(
-                &mut s,
-                "entities",
-                hub.devices()
-                    .flat_map(|d| d.entities.iter().map(move |e| e.record(&d.id)))
-                    .chain(hub.zg_entity_records()),
-            );
-            list(
-                &mut s,
-                "states",
-                hub.devices()
-                    .flat_map(|d| d.entities.iter().map(move |e| e.state_msg(d.available)))
-                    .chain(hub.zg_states()),
-            );
-        }
-        if has("groups") {
-            list(&mut s, "groups", hub.groups_list().into_iter());
-            list(&mut s, "bindings", hub.bindings_list(None).into_iter());
-        }
-        if has("gp") {
-            list(
-                &mut s,
-                "bindings",
-                hub.list_bindings(None, None).into_iter(),
-            );
-            field(
-                &mut s,
-                "gp_commissioning",
-                &hub.gp_commissioning_status(now),
-            );
-        }
-        if has("network") {
-            field(
-                &mut s,
-                "network",
-                &network_info(hub, now).unwrap_or(J::Null),
-            );
-        }
-        s.push_str("}}");
-        s
-    }
-
     fn dispatch<T: ZigbeeTransport>(
         &mut self,
         hub: &mut Hub<T>,
@@ -472,20 +457,24 @@ impl ApiServer {
     ) -> Result<J, ApiError> {
         use Request as R;
         Ok(match req {
-            R::Subscribe { .. }
-            | R::Unsubscribe { .. }
-            | R::EntitiesCommand { .. }
-            | R::ZclRead(_)
+            R::Subscribe { .. } | R::Unsubscribe { .. } | R::EntitiesCommand { .. } => J::Null,
+            R::ZclRead(_)
             | R::ZclWrite(_)
             | R::ZclConfigureReporting(_)
             | R::ZclReadReporting(_)
             | R::ZclDiscover(_)
             | R::ZclCommand(_)
-            | R::TuyaSend(_) => J::Null,
+            | R::TuyaSend(_) => {
+                return Err(ApiError::new(
+                    "unsupported",
+                    "manual ZCL/Tuya commands require an advanced image",
+                ));
+            }
             R::HubInfo => {
                 let mut r = json!({
                     "name": self.hub_name,
                     "api_version": API_VERSION,
+                    "advanced": cfg!(feature = "advanced"),
                     "features": hub.features,
                     "seq": self.seq,
                     "devices": hub.devices().count(),
@@ -1020,11 +1009,14 @@ impl ApiServer {
         hub: &mut Hub<T>,
         events: Vec<HubEvent>,
     ) -> Vec<(SessionId, String)> {
-        // Frames are tapped only while someone listens.
-        hub.frame_tap = self
-            .sessions
-            .values()
-            .any(|s| s.subs.values().any(|t| t.contains("frames")));
+        #[cfg(feature = "advanced")]
+        {
+            // Frames are tapped only while someone listens.
+            hub.frame_tap = self
+                .sessions
+                .values()
+                .any(|s| s.subs.values().any(|t| t.contains("frames")));
+        }
         let mut out = Vec::new();
         for ev in events {
             let ev = match ev {
@@ -1032,6 +1024,7 @@ impl ApiServer {
                     self.deliver(ticket, result.map(|_| json!({"status": "ok"})), &mut out);
                     continue;
                 }
+                #[cfg(feature = "advanced")]
                 HubEvent::ConsoleResult { ticket, result } => {
                     self.deliver(ticket, result, &mut out);
                     continue;
@@ -1108,7 +1101,10 @@ impl ApiServer {
                     }
                     ("gp", body)
                 }
-                HubEvent::CommandResult { .. } | HubEvent::ConsoleResult { .. } => continue,
+                HubEvent::CommandResult { .. } => continue,
+                #[cfg(feature = "advanced")]
+                HubEvent::ConsoleResult { .. } => continue,
+                #[cfg(feature = "advanced")]
                 HubEvent::Frame(body) => ("frames", body),
             };
             out.extend(self.publish(topic, body));
@@ -1191,7 +1187,7 @@ pub trait ApiExtension<T: ZigbeeTransport> {
 /// even before the hub has synchronised its clock; once it has, `time` is
 /// Unix time and `time_utc` repeats it (null before), `time_synced` says
 /// which.
-fn network_info<T: ZigbeeTransport>(hub: &mut Hub<T>, now: Millis) -> Option<J> {
+pub(crate) fn network_info<T: ZigbeeTransport>(hub: &mut Hub<T>, now: Millis) -> Option<J> {
     let mut v = hub.transport.network_info()?;
     if let Some(o) = v.as_object_mut() {
         let t = crate::device::ts(now);

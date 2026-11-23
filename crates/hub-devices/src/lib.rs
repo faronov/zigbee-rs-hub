@@ -22,6 +22,7 @@ pub mod bankcat;
 pub mod codec;
 pub mod commands;
 pub mod configure;
+#[cfg(feature = "advanced")]
 pub mod console;
 pub mod device;
 pub mod expr;

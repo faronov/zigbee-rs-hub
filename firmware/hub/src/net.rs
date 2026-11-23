@@ -28,7 +28,7 @@ pub static STATE: Mutex<String> = Mutex::new(String::new());
 
 /// What the station thread needs; kept here while no credentials exist.
 struct Pending {
-    app: App,
+    app: Option<App>,
     modem: Modem<'static>,
     on_up: Box<dyn Fn(bool) + Send>,
 }
@@ -76,7 +76,7 @@ pub fn ap() -> Option<(u8, i8)> {
     (unsafe { esp_idf_svc::sys::esp_wifi_sta_get_ap_info(&mut rec) } == esp_idf_svc::sys::ESP_OK).then_some((rec.primary, rec.rssi))
 }
 
-fn spawn(app: App, modem: Modem<'static>, ssid: String, pass: String, on_up: Box<dyn Fn(bool) + Send>) {
+fn spawn(app: Option<App>, modem: Modem<'static>, ssid: String, pass: String, on_up: Box<dyn Fn(bool) + Send>) {
     let spawned = std::thread::Builder::new().stack_size(8192).spawn(move || {
         if let Err(e) = run(app, modem, ssid, pass, on_up) {
             set_state(format!("error: {e}"));
@@ -92,8 +92,9 @@ fn set_state(s: String) {
     *STATE.lock().unwrap() = s;
 }
 
-/// Starts Wi-Fi (if configured) and the API server on a thread.
-pub fn start(app: App, modem: Modem<'static>, on_up: impl Fn(bool) + Send + 'static) {
+/// Starts Wi-Fi (if configured) and the API server on a thread; without
+/// an app (no PSRAM) only the wrong-image page.
+pub fn start(app: Option<App>, modem: Modem<'static>, on_up: impl Fn(bool) + Send + 'static) {
     let Some(ssid) = mode::get_str("wifi_ssid") else {
         set_state("not configured (console: wifi set <ssid> <password>, or hub/wifi/set)".into());
         *PENDING.lock().unwrap() = Some(Pending { app, modem, on_up: Box::new(on_up) });
@@ -112,7 +113,7 @@ fn client(ssid: &str, pass: &str) -> Configuration {
     })
 }
 
-fn run(app: App, modem: Modem<'static>, mut ssid: String, pass: String, on_up: Box<dyn Fn(bool) + Send>) -> Result<(), EspError> {
+fn run(app: Option<App>, modem: Modem<'static>, mut ssid: String, pass: String, on_up: Box<dyn Fn(bool) + Send>) -> Result<(), EspError> {
     let sys_loop = EspSystemEventLoop::take()?;
     let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), mode::partition())?, sys_loop)?;
     wifi.set_configuration(&client(&ssid, &pass))?;
@@ -172,15 +173,20 @@ fn close_after(req: *mut esp_idf_svc::sys::httpd_req_t) {
     }
 }
 
-fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
+fn api_server(app: Option<App>) -> Result<EspHttpServer<'static>, EspError> {
+    let Some(app) = app else { return wrong_image_server() };
+    let r = crate::resources::get();
     let mut server =
         EspHttpServer::new(&server::Configuration {
             stack_size: 8192,
-            // The web UI (page + WebSocket) and integrations at once; the
-            // least recently used socket is purged when they run out, so
-            // page requests close their socket (`close_after`). 7 + the
-            // server's 3 = CONFIG_LWIP_MAX_SOCKETS.
-            max_open_sockets: 7,
+            // The web UI (page + WebSocket) and integrations at once; page
+            // requests close their socket (`close_after`). With PSRAM the
+            // least recently used socket is purged when they run out;
+            // without it a new connection is refused instead, so Home
+            // Assistant keeps its session. 7 + the server's 3 =
+            // CONFIG_LWIP_MAX_SOCKETS.
+            max_open_sockets: r.http_sockets,
+            lru_purge_enable: r.http_lru_purge,
             // Peers that vanished without a FIN.
             keep_alive: Some(server::KeepAlive { idle_secs: 30, interval_secs: 5, probe_count: 3 }),
             ..Default::default()
@@ -225,5 +231,33 @@ fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
         })?;
     }
     crate::ws::register(&server, app)?;
+    Ok(server)
+}
+
+/// The server of a hub that did not start its app: the page says why, the
+/// API answers 503.
+fn wrong_image_server() -> Result<EspHttpServer<'static>, EspError> {
+    let mut server = EspHttpServer::new(&server::Configuration {
+        stack_size: 6144,
+        max_open_sockets: 2,
+        ..Default::default()
+    })
+    .map_err(|e| e.0)?;
+    server.fn_handler("/", Method::Get, |mut req| {
+        close_after(req.connection().handle());
+        let page = format!(
+            "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>zigbee-rs hub</title>\
+             <h1>zigbee-rs hub: wrong firmware image</h1><p>{}</p>",
+            crate::resources::wrong_image()
+        );
+        let headers = [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store"), ("Connection", "close")];
+        req.into_response(200, None, &headers)?.write_all(page.as_bytes()).map(|_| ())
+    })?;
+    server.fn_handler("/api", Method::Get, |mut req| {
+        close_after(req.connection().handle());
+        let body = serde_json::json!({"error": "psram_missing", "message": crate::resources::wrong_image()}).to_string();
+        let headers = [("Content-Type", "application/json"), ("Connection", "close")];
+        req.into_response(503, Some("Service Unavailable"), &headers)?.write_all(body.as_bytes()).map(|_| ())
+    })?;
     Ok(server)
 }

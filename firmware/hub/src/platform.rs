@@ -129,6 +129,7 @@ impl hub_app::Platform for S3 {
             )
         };
         let boot = crate::BOOT.get().copied();
+        let r = crate::resources::get();
         json!({
             "version": format!("tbr-hub {}", env!("CARGO_PKG_VERSION")),
             "uptime_s": unsafe { sys::esp_timer_get_time() } / 1_000_000,
@@ -137,6 +138,13 @@ impl hub_app::Platform for S3 {
             "persisted_mode": match mode::stored() { Some(Mode::Hub) => "hub", Some(Mode::Bridge) => "bridge", None => "unknown" },
             "wifi": net::info(),
             "reset_reason": unsafe { sys::esp_reset_reason() },
+            "build": {"features": crate::resources::features(), "psram": crate::resources::psram_mode()},
+            "memory_mode": r.memory_mode(),
+            "limits": {
+                "http_sockets": r.http_sockets,
+                "ws_client_bytes": r.ws_client_bytes,
+                "ws_total_bytes": r.ws_total_bytes,
+            },
         })
     }
     fn heap(&self) -> Option<(usize, usize)> {

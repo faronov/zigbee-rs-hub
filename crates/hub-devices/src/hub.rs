@@ -157,6 +157,7 @@ pub enum HubEvent {
         result: Result<String, ApiError>,
     },
     /// Deferred result of a ZCL console request (14.7): the decoded answer.
+    #[cfg(feature = "advanced")]
     ConsoleResult {
         /// Ticket.
         ticket: u64,
@@ -164,6 +165,7 @@ pub enum HubEvent {
         result: Result<J, ApiError>,
     },
     /// A frame to or from a device (topic `frames`, only while subscribed).
+    #[cfg(feature = "advanced")]
     Frame(J),
     /// Network topic events (`permit_join` …), from the host core.
     Network(J),
@@ -202,6 +204,7 @@ pub enum Purpose {
     GpProbe(u16),
     /// A ZCL console request; `cluster_answer`: a cluster-specific frame
     /// with its TSN answers it too.
+    #[cfg(feature = "advanced")]
     Console {
         /// Ticket.
         ticket: u64,
@@ -365,6 +368,7 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) tickets: BTreeMap<u64, Ticket>,
     /// Emit [`HubEvent::Frame`] for every frame (set while the API has
     /// `frames` subscribers).
+    #[cfg(feature = "advanced")]
     pub frame_tap: bool,
     pub(crate) next_ticket: u64,
     pub(crate) events: Vec<HubEvent>,
@@ -448,6 +452,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             zdo_tsn: 0,
             pending: BTreeMap::new(),
             tickets: BTreeMap::new(),
+            #[cfg(feature = "advanced")]
             frame_tap: false,
             next_ticket: 1,
             events: Vec::new(),
@@ -666,6 +671,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             );
             return;
         }
+        #[cfg(feature = "advanced")]
         self.tap_tx(dev_id, &req, now);
         if purpose != Purpose::None {
             self.pending.insert(
@@ -1269,6 +1275,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         let Some(id) = id else { return };
+        #[cfg(feature = "advanced")]
         self.tap_rx(&id, &ind, now);
         self.seen(&id, Some(ind.lqi), Some(ind.rssi), now);
         if let Some(d) = self.devices.get_mut(&id) {
@@ -1357,6 +1364,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             return;
         };
+        #[cfg(feature = "advanced")]
         self.console_answer(id, &frame);
         let h = frame.header;
         let ep = ind.src_ep;
@@ -2212,6 +2220,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             Purpose::Configure(key) => self.configure_done(id, key, false, err.code.clone(), now),
             Purpose::Command(t) => self.ticket_part_done(*t, Some(err), now),
+            #[cfg(feature = "advanced")]
             Purpose::Console { ticket, .. } => self.emit(HubEvent::ConsoleResult {
                 ticket: *ticket,
                 result: Err(err),

@@ -42,17 +42,43 @@ def run(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout
 
 
-def sections(elf):
-    """[(start, end, region)] of the loaded sections."""
+def parse_sections(text):
+    """Allocated sections: (start, end, region, name, stored in the image)."""
     out = []
-    for line in run(NM.replace("-nm", "-objdump"), "-h", elf).splitlines():
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
         f = line.split()
-        if len(f) >= 7 and f[0].isdigit():
-            name, size, vma = f[1], int(f[2], 16), int(f[3], 16)
-            for prefix, region in REGIONS:
-                if name.startswith(prefix) and size:
-                    out.append((vma, vma + size, region, name))
+        if len(f) < 7 or not f[0].isdigit() or i + 1 >= len(lines):
+            continue
+        flags = {s.strip() for s in lines[i + 1].split(",")}
+        if "ALLOC" not in flags:
+            continue
+        name, size, vma = f[1], int(f[2], 16), int(f[3], 16)
+        if not size:
+            continue
+        loaded = "LOAD" in flags and "CONTENTS" in flags
+        region = {".flash.appdesc": "flash rodata", ".noinit": "DRAM bss"}.get(name)
+        if region is None:
+            region = next((r for prefix, r in REGIONS if name.startswith(prefix)), None)
+        # NOLOAD flash sections reserve address space but add no image bytes.
+        if region is None or (region.startswith("flash ") and not loaded):
+            continue
+        out.append((vma, vma + size, region, name, loaded))
     return out
+
+
+def sections(elf):
+    return parse_sections(run(NM.replace("-nm", "-objdump"), "-h", elf))
+
+
+def accounted_symbols(symbols):
+    """Count aliases and partial overlaps once, independently in each section."""
+    ends = defaultdict(int)
+    for addr, size, name, region, loaded, section in sorted(symbols):
+        end = addr + size
+        count = max(0, end - max(addr, ends[section]))
+        ends[section] = max(ends[section], end)
+        yield count, name, region, loaded
 
 
 def archive_owner(path):
@@ -130,9 +156,10 @@ def main():
         if len(f) != 4:
             continue
         addr, size, name = int(f[0], 16), int(f[1], 16), f[3]
-        region = next((r for s, e, r, _ in secs if s <= addr < e), None)
-        if region:
-            syms.append((addr, size, name, region))
+        section = next((s for s in secs if s[0] <= addr < s[1]), None)
+        if section:
+            _, end, region, section_name, loaded = section
+            syms.append((addr, min(size, end - addr), name, region, loaded, section_name))
     rust = [s[2] for s in syms if s[2].startswith(RUST_PREFIXES)]
     dem = {}
     if rust:
@@ -140,13 +167,10 @@ def main():
         dem = dict(zip(rust, p.stdout.splitlines()))
 
     # Overlapping symbols (aliases) are counted once.
-    syms.sort()
     table = defaultdict(lambda: defaultdict(int))
+    owner_image = defaultdict(int)
     per_sym = []
-    end = 0
-    for addr, size, name, region in syms:
-        size = max(0, min(size, addr + size - end)) if addr < end else size
-        end = max(end, addr + size)
+    for size, name, region, loaded in accounted_symbols(syms):
         if name in owner:
             who = owner[name]
         elif name in dem:
@@ -154,11 +178,16 @@ def main():
         else:
             who = "(no archive: " + ("rust?" if name.startswith("_") else "C?") + ")"
         table[who][region] += size
+        if loaded:
+            owner_image[who] += size
         per_sym.append((size, who, region, dem.get(name, name)))
 
     totals = defaultdict(int)
-    for s, e, r, _ in secs:
+    image = 0
+    for s, e, r, _, loaded in secs:
         totals[r] += e - s
+        if loaded:
+            image += e - s
     regions = [r for _, r in REGIONS if totals[r]]
     attributed = defaultdict(int)
     for who in table:
@@ -167,13 +196,13 @@ def main():
     for r in regions:
         table["(unattributed)"][r] = totals[r] - attributed[r]
 
-    image = sum(totals[r] for r in regions if r not in ("DRAM bss", "RTC"))
-    rows = sorted(table.items(), key=lambda kv: -sum(v for r, v in kv[1].items() if r != "DRAM bss"))
+    owner_image["(unattributed)"] = image - sum(owner_image.values())
+    rows = sorted(table.items(), key=lambda kv: -owner_image[kv[0]])
     hdr = f"{'owner':<44}" + "".join(f"{r:>13}" for r in regions) + f"{'image %':>9}"
     print(hdr)
     print("-" * len(hdr))
     for who, v in rows[: a.top]:
-        img = sum(v[r] for r in regions if r not in ("DRAM bss", "RTC"))
+        img = owner_image[who]
         print(f"{who[:44]:<44}" + "".join(f"{v[r]:>13}" for r in regions) + f"{100 * img / image:>8.1f}%")
     rest = rows[a.top :]
     if rest:
@@ -181,9 +210,10 @@ def main():
         for _, x in rest:
             for r in regions:
                 v[r] += x[r]
-        img = sum(v[r] for r in regions if r not in ("DRAM bss", "RTC"))
+        img = sum(owner_image[who] for who, _ in rest)
         print(f"{f'({len(rest)} more)':<44}" + "".join(f"{v[r]:>13}" for r in regions) + f"{100 * img / image:>8.1f}%")
     print(f"{'total':<44}" + "".join(f"{totals[r]:>13}" for r in regions))
+    print(f"ELF loadable payload: {image} B (ESP image headers/alignment are additional)")
     if a.sym:
         print()
         for size, who, region, name in sorted((p for p in per_sym if p[1].startswith(a.prefix)), reverse=True)[: a.sym]:

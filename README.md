@@ -63,13 +63,60 @@ checks the versions (also the one in the built app), builds with pinned
 tools and attaches per layout the full flash image (`…-merged.bin`, offset
 0, padded to the flash size), bootloader, partition table, blank `otadata`
 (8 MB), app, plus the `tbr-bridge` app, `release-manifest.json` and
-`SHA256SUMS`; the release notes list the esptool commands. The 8 MB
-images carry the MQTT bridge, the 4 MB dev images do not (`features` per
-board in the manifest; `tools/build-hub-firmware.sh`). A suffix
+`SHA256SUMS`; the release notes list the esptool commands. Both flash sizes
+carry the MQTT bridge; the 8 MB images also enable the advanced console
+(`features` per board in the manifest; `tools/build-hub-firmware.sh`). A suffix
 (`hub-v0.2.0-rc.1`) makes a pre-release. The flasher picks the release up
 within six hours, or at once when this repository has the secret
 `FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
 faronov/zigbee-rs).
+
+### Image variants and memory (after release 0.2.0)
+
+Hardware/backend requirements and the feature/readiness matrix:
+[Firmware profiles and coordinator backends](docs/coordinator-profiles.md).
+
+The 4 MB image keeps the existing partition table, `nvs`, `hubdata` and
+boot-mode selection. Standard images use feature `mqtt` (4 MB) and
+`mqtt,advanced` (8 MB): normal ZCL, Tuya and Green Power devices,
+groups/scenes/bindings, local automations, the catalog, WebSocket/HA and
+ESP-IDF's esp-mqtt in both. The manual ZCL/Tuya console and live frame tap
+are the optional `advanced` feature; an image without it answers those API
+requests with `unsupported`. `hub/info.advanced` reports whether they are
+present.
+
+```sh
+RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --locked
+# Only the octal variant, or an advanced 4 MB image:
+RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --psram octal --locked
+RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --locked -- --features advanced
+```
+
+Every image marks its features and PSRAM mode in the binary;
+`tools/release-images.py` refuses an image whose marker differs from its
+board entry (e.g. an 8 MB build left in the 4 MB target directory).
+
+Quad/Octal is the fitted memory's interface, not a PSRAM capacity; 2, 4, 8
+and 16 MB PSRAM get the same limits: seven HTTP sockets, 128 KiB queued per
+WebSocket client (384 KiB in all). A subscription snapshot goes as the
+fragments of one WebSocket message, each made once the earlier ones are
+sent, so it needs no large contiguous buffer. `hub/system` reports
+`memory_mode`, the image's `build` (features, PSRAM mode) and these
+`limits`.
+
+Every image detects PSRAM at boot. Without it (the image was built for the
+other interface, or the module has none) the application is **not
+started**: on the lab N4R8 board a Quad image left ~35 KB of internal heap
+and crashed as soon as clients connected, since the application's data and
+the Wi-Fi/lwIP buffers otherwise live in PSRAM. The hub core keeps the
+Zigbee network (NCP session, host store); the web page, `/api` (HTTP 503,
+`psram_missing`) and the console's `info` say which image to flash. An
+application mode on internal RAM alone needs about 100 KB less memory and
+is future work.
+
+The 4 MB app still has a 2,944 KiB slot and no hub A/B update; this change
+adds neither SoftAP nor Zigbee OTA. Release **0.2.0** predates these
+variants: its 4 MB images omit MQTT and include the console.
 
 ## Device support
 
@@ -980,7 +1027,7 @@ may block an unsigned `hubctl` from reaching LAN addresses ("No route to
 host" while `curl` works): allow it in System Settings, or relay through
 `nc` on localhost.
 
-**Size.** The application targets the 8 MB production layout (3 MiB
+**Recorded release 0.2.0 sizes.** The application targets the 8 MB production layout (3 MiB
 slots; images with the MQTT bridge, feature `mqtt`) and the 4 MB dev layout
 (2 944 KiB; without it). `tools/build-hub-firmware.sh` builds all four
 images (quad and octal PSRAM).
@@ -1087,11 +1134,11 @@ UI and the HA integration see.
   [--mqtt-discovery] [--mqtt-base T] [--mqtt-user U --mqtt-password P]
   [--mqtt-settings FILE]` runs the bridge with three simulated devices;
   `hubctl mqtt-broker` is a small broker for tests (not for production).
-- **Firmware**: only in the **8 MB images** (cargo feature `mqtt`, built
-  by `tools/build-hub-firmware.sh`; `release-manifest.json` lists
-  `"features": ["mqtt"]` for them). The 4 MB dev images leave it out: their
-  API answers `mqtt/*` with `unsupported` and the web UI's MQTT card says
-  so. `mqtt` uses ESP-IDF's esp-mqtt; `mqtt-lite` (an option, in no image)
+- **Firmware**: both **4 MB and 8 MB images** select cargo feature `mqtt`
+  through `tools/build-hub-firmware.sh`; the release manifest lists it
+  for each image. Builds without it answer `mqtt/*` with `unsupported`.
+  Release 0.2.0 included MQTT only in 8 MB images.
+  `mqtt` uses ESP-IDF's esp-mqtt; `mqtt-lite` (an option, in no standard image)
   the bridge's own MQTT client on lwIP sockets (esp-mqtt links esp-tls and
   the mbedtls TLS layer even for plain TCP; −62 KB). Size: +240 KB (the
   bridge ~180 KB, esp-mqtt with esp-tls/mbedtls ~62 KB). Static RAM +1.5 KB. At run time, only when
