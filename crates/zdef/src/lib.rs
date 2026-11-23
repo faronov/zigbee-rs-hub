@@ -39,6 +39,7 @@ pub mod num;
 pub mod resolve;
 pub mod sign;
 pub mod siphash;
+pub mod small_sort;
 #[cfg(feature = "bank")]
 pub mod webtools;
 

@@ -918,7 +918,7 @@ host" while `curl` works): allow it in System Settings, or relay through
 
 | Build | App image | 3 MiB slot | 2 944 KiB dev slot |
 |---|---:|---:|---:|
-| `tbr-hub` 0.1.9 (application, default; octal: +1 184 B) | 2 513 744 B | 80 % | 83 % |
+| `tbr-hub` 0.1.10 (application, default; octal: +1 184 B) | 2 488 544 B | 79 % | 83 % |
 | `tbr-hub --no-default-features` (ZRHP host core only) | 568 208 B | 18 % | 19 % |
 
 `tools/size-report.py` breaks an ELF down by owner. Application build:
@@ -929,15 +929,17 @@ Rust code 1.49 MB (`hub-devices` 432 KB, `core` 232 KB, `alloc` 151 KB, `std`
 httpd and its parser 22 KB, TinyUSB 13 KB), and 0.43 MB of constants and
 literal pools no symbol covers (mostly Rust strings and tables). The largest
 single items are the thread bodies (101 KB), the API request parser (serde,
-internally tagged: 66 KB), `ApiServer::dispatch` (53 KB) and 19 copies of
-std's stable sort (70 KB).
+internally tagged: 66 KB), `ApiServer::dispatch` (53 KB) and 11 copies of
+std's stable sort (45 KB, most from `BTreeMap`/`BTreeSet` `collect()`).
 
 Size work: fat LTO at opt-level `z` (both firmwares; `s` is 81 KB larger),
 std without backtrace symbolisation (−138 KB, panic messages kept), the
 smaller `zdef` (zdef-size), and in 0.1.9 the C printf family from ROM
 (newlib "nano", −27 KB; only ESP-IDF's own UART0 log lines use it), no IPv6
 in lwIP (the hub never had an IPv6 address; −20 KB) and the minified page,
-together −55 KB (2 568 416 B before). Not used: std's `optimize_for_size`
+together −55 KB (2 568 416 B before); in 0.1.10 the `zdef` encoders and the
+fingerprint order their few keys with `zdef::small_sort` (a stable
+insertion sort, same order) instead of 8 copies of std's sort (−25 KB). Not used: std's `optimize_for_size`
 (−63 KB of sort code, but its stable sort is inlined into each caller with a
 4 KiB stack buffer: the app thread needed 13 KB more stack, and two
 start-ups crashed on the hardware), `panic_immediate_abort` (~250 KB, no panic

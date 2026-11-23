@@ -158,7 +158,7 @@ impl Fingerprint {
             fields.push((11, Box::new(move |c| c.text(&s))));
         }
         let mut eps = self.endpoints.clone();
-        eps.sort_by_key(|e| e.ep);
+        zdef::small_sort::sort_by_key(&mut eps, |e| e.ep);
         fields.push((
             12,
             Box::new(move |c| {
