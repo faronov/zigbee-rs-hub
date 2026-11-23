@@ -1156,7 +1156,10 @@ Named optional extensions (source key `x-<name>`, value any JSON, stored as
 canonical CBOR with text keys): top level `64 x-partial` (the generator's
 "partially translated" marker), match clause `64 x-priority` (zhc's
 definition priority) and `65 x-white-label` (`true`: the clause only lists
-white-label manufacturer names and scores as if it had none, 3.3). Other
+white-label manufacturer names and scores as if it had none, 3.3). A
+white-label entry's `model_id` list is key 64 of its map, in the extension
+range, so hubs before it skip it (they select the white label by
+manufacturer name only) instead of rejecting the definition. Other
 keys 64–127 have no source form; the decoder
 keeps them (top level, match clause, entity) so a decode/encode round trip
 is lossless, and ignores them otherwise.
