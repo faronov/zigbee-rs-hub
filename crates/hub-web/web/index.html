@@ -305,11 +305,18 @@ const devSet=d=>{d.image_url=picL(d)[0]||null;devs[d.id]=d};
 function pic(d,c){const us=picL(d),i=el("img",{class:"pic"+(c?" "+c:""),alt:"",loading:"lazy",referrerpolicy:"no-referrer"});
  const next=()=>{const u=us.shift();i.dataset.u=u||"";i.src=u||PICI};
  i.onerror=()=>{if(i.dataset.u){PICB.add(i.dataset.u);next()}};next();return i}
+// A device without a definition: fetch the catalog shard that may hold one.
+function findDef(id){ctSerial(async()=>{try{ct=await call("catalog/status");const m=(ct.missing||[]).find(x=>x.device==id);
+ if(!m||!(m.shards||[]).length)return toast("The catalog has no definition for this device");
+ await ctShards(m.shards);toast("Catalog checked for "+(devs[id]&&devs[id].name||id))}catch(e){toast(e.message)}})}
 function devCard(id){
  const d=devs[id];
  const iv=d.interview=="complete"?null:el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:""));
  const av=el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline");
- const info=el("div",{class:"mut"},[d.manufacturer,d.model].filter(Boolean).join(" · ")||"unknown model");
+ // No definition matched: generic ZCL support only (the picture needs one).
+ const gen=d.interview=="complete"&&!d.definition_model?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):null;
+ // Definition vendor/model (white label first), then the device's own Basic model ID.
+ const info=el("div",{class:"mut"},[d.manufacturer,d.model,d.model_id&&d.model_id!=d.model?"("+d.model_id+")":""].filter(Boolean).join(" · ")||"unknown model");
  const ids=el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):""));
  const q=el("div",{class:"mut"},"LQI "+(d.lqi??"–")+(d.rssi!=null?" · RSSI "+d.rssi+" dBm":"")+" · seen "+ago(d.last_seen)+" · "+d.power);
  const ul=el("ul",{class:"ents"});
@@ -317,9 +324,10 @@ function devCard(id){
  const acts=el("div",{class:"row acts"},
   el("button",{onclick:()=>{const n=prompt("Device name",d.name||"");if(n!=null)act("devices/update",{device:id,name:n.trim()}).catch(()=>{})}},"Rename"),
   el("button",{onclick:()=>act("devices/reinterview",{device:id}).catch(()=>{})},"Re-interview"),
+  gen?el("button",{onclick:()=>findDef(id)},"Find definition"):"",
   d.ieee?el("button",{onclick:()=>{bOpen.has(id)?bOpen.delete(id):bOpen.add(id);gEps().then(()=>renderDev(id),()=>{})}},"Bindings"):"",
   el("button",{class:"d",onclick:()=>{if(confirm("Remove "+(d.name||id)+" from the network?"))act("devices/remove",{device:id}).catch(()=>{})}},"Remove"));
- return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},pic(d),el("b",{},d.name||id),iv,av),info,ids,q,ul,acts,bOpen.has(id)?bindPanel(id):"");
+ return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},pic(d),el("b",{},d.name||id),iv,gen,av),info,ids,q,ul,acts,bOpen.has(id)?bindPanel(id):"");
 }
 function fmt(e,s){
  if(!s||s.state==null)return"–";let v=s.state;

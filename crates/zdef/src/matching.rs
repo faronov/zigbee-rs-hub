@@ -8,9 +8,16 @@ use crate::model::{
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Trims trailing NULs and spaces (spec 6.2).
+/// A Basic name as compared (spec 6.2): cut at the first NUL that follows
+/// text, then trimmed (zigbee-herdsman-converters' `normalizeModelID`); a
+/// binary name that starts with a NUL only loses its trailing NULs. Clause
+/// strings and device strings go through it alike, in matching and in index
+/// keys.
 pub fn trim_name(s: &str) -> &str {
-    s.trim_end_matches(['\0', ' '])
+    match s.split('\0').next() {
+        Some(head) if !head.trim().is_empty() => head.trim(),
+        _ => s.trim_end_matches('\0'),
+    }
 }
 
 /// One endpoint of the interview (Simple descriptor).
@@ -209,8 +216,8 @@ fn names_match(m: &NameMatch, v: Option<&str>) -> bool {
         return false;
     };
     match m {
-        NameMatch::Exact(s) => s == v,
-        NameMatch::Any(list) => list.iter().any(|s| s == v),
+        NameMatch::Exact(s) => trim_name(s) == v,
+        NameMatch::Any(list) => list.iter().any(|s| trim_name(s) == v),
         NameMatch::Prefix(p) => v.starts_with(p.as_str()),
     }
 }
@@ -247,6 +254,9 @@ pub mod score {
     pub const GP_WEAK: u16 = 100;
     pub const EXTRA: u16 = 10;
     pub const EXTRA_MAX: u16 = 50;
+    /// Tie-break penalty, below one extra constraint (a model ID equal only
+    /// after normalization; endpoints not exactly the device's).
+    pub const TIE: u16 = 1;
 }
 
 fn level(m: &Option<NameMatch>) -> u8 {
@@ -299,6 +309,12 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
                 }
                 extra += 1;
             }
+            if let Some(m) = &c.date_code {
+                if !names_match(m, fp.date_code.as_deref()) {
+                    return None;
+                }
+                extra += 1;
+            }
             if let Some(t) = c.logical_type {
                 if fp.logical_type != Some(t.code()) {
                     return None;
@@ -319,7 +335,17 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
                     }
                 }
             }
-            let base = match (level(&c.manufacturer), level(&c.model)) {
+            // CBOR `true` under `x-white-label` (keys::CLAUSE_EXT).
+            let white_label_only = c
+                .ext
+                .iter()
+                .any(|(k, v)| *k == 65 && v.as_slice() == [0xF5]);
+            let mfr_level = if white_label_only {
+                0
+            } else {
+                level(&c.manufacturer)
+            };
+            let base = match (mfr_level, level(&c.model)) {
                 (2, 2) => score::NAMES_EXACT,
                 (1, 2) | (2, 1) => score::MODEL_EXACT_MFR_PREFIX,
                 (0, 2) => score::MODEL_EXACT,
@@ -338,7 +364,30 @@ pub fn score_clause(c: &MatchClause, id: Identity<'_>) -> Option<u16> {
             if !c.endpoints.is_empty() && base != score::FINGERPRINT {
                 extra += 1;
             }
-            Some(base + (extra * score::EXTRA).min(score::EXTRA_MAX))
+            // Ties (zhc semantics): one point less for a model ID equal only
+            // after normalization, and for endpoints that are not exactly
+            // the device's (zhc compares the endpoint list as a whole).
+            let mut tie = 0;
+            if let Some(v) = fp.model_id.as_deref() {
+                let raw = |s: &str| s.trim_end_matches('\0') == v.trim_end_matches('\0');
+                let normalized_only = match &c.model {
+                    Some(NameMatch::Exact(s)) => !raw(s),
+                    Some(NameMatch::Any(l)) => !l.iter().any(|s| raw(s)),
+                    _ => false,
+                };
+                if normalized_only {
+                    tie += score::TIE;
+                }
+            }
+            let exact_endpoints = c.endpoints.len() == fp.endpoints.len()
+                && fp
+                    .endpoints
+                    .iter()
+                    .all(|e| c.endpoints.iter().any(|(ep, _)| *ep == e.ep));
+            if !c.endpoints.is_empty() && !exact_endpoints {
+                tie += score::TIE;
+            }
+            Some(base + (extra * score::EXTRA).min(score::EXTRA_MAX) - tie)
         }
         Identity::Gp(g) => {
             let gm = c.gp.as_ref()?;
@@ -617,50 +666,51 @@ pub fn clause_keys(c: &MatchClause) -> Result<Vec<(IndexKey<'_>, u8)>, NotIndexa
         || c.stack_version.is_some()
         || c.hw_version.is_some()
         || c.sw_build.is_some()
+        || c.date_code.is_some()
         || c.power.is_some()
         || !c.endpoints.is_empty();
     let rf = if extra { key_flags::RECHECK } else { 0 };
     match (&c.manufacturer, &c.model) {
         (Some(NameMatch::Exact(m)), Some(NameMatch::Exact(n))) => {
-            out.push((IndexKey::Names(m, n), rf))
+            out.push((IndexKey::Names(trim_name(m), trim_name(n)), rf))
         }
         (Some(NameMatch::Any(ms)), Some(NameMatch::Exact(n))) => {
             for m in ms {
-                out.push((IndexKey::Names(m, n), rf));
+                out.push((IndexKey::Names(trim_name(m), trim_name(n)), rf));
             }
         }
         (Some(NameMatch::Exact(m)), Some(NameMatch::Any(ns))) => {
             for n in ns {
-                out.push((IndexKey::Names(m, n), rf));
+                out.push((IndexKey::Names(trim_name(m), trim_name(n)), rf));
             }
         }
         (Some(NameMatch::Any(ms)), Some(NameMatch::Any(ns))) => {
             for m in ms {
                 for n in ns {
-                    out.push((IndexKey::Names(m, n), rf));
+                    out.push((IndexKey::Names(trim_name(m), trim_name(n)), rf));
                 }
             }
         }
-        (None, Some(NameMatch::Exact(n))) => out.push((IndexKey::Model(n), rf)),
+        (None, Some(NameMatch::Exact(n))) => out.push((IndexKey::Model(trim_name(n)), rf)),
         (None, Some(NameMatch::Any(ns))) => {
             for n in ns {
-                out.push((IndexKey::Model(n), rf));
+                out.push((IndexKey::Model(trim_name(n)), rf));
             }
         }
         (Some(NameMatch::Prefix(_)), Some(NameMatch::Exact(n))) => {
-            out.push((IndexKey::Model(n), key_flags::RECHECK))
+            out.push((IndexKey::Model(trim_name(n)), key_flags::RECHECK))
         }
         (Some(NameMatch::Prefix(_)), Some(NameMatch::Any(ns))) => {
             for n in ns {
-                out.push((IndexKey::Model(n), key_flags::RECHECK));
+                out.push((IndexKey::Model(trim_name(n)), key_flags::RECHECK));
             }
         }
         (Some(NameMatch::Exact(m)), None) => {
-            out.push((IndexKey::Manufacturer(m), key_flags::RECHECK))
+            out.push((IndexKey::Manufacturer(trim_name(m)), key_flags::RECHECK))
         }
         (Some(NameMatch::Any(ms)), None) => {
             for m in ms {
-                out.push((IndexKey::Manufacturer(m), key_flags::RECHECK));
+                out.push((IndexKey::Manufacturer(trim_name(m)), key_flags::RECHECK));
             }
         }
         _ => {
@@ -715,4 +765,29 @@ pub fn lookup_hashes(id: Identity<'_>) -> Vec<u64> {
     crate::sort_small_by_key(&mut out, |h| *h);
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::trim_name;
+
+    #[test]
+    fn names_are_compared_like_zhc_normalizes_them() {
+        assert_eq!(
+            trim_name("ALCANTARA2 D1.00P1.01Z1.00\0\0\0"),
+            "ALCANTARA2 D1.00P1.01Z1.00"
+        );
+        assert_eq!(
+            trim_name(" Light switch with neutral\0\0"),
+            "Light switch with neutral"
+        );
+        assert_eq!(trim_name("_TZ3000_eit7p838 "), "_TZ3000_eit7p838");
+        assert_eq!(trim_name("FLS-PP3 White\0junk"), "FLS-PP3 White");
+        // Binary model IDs keep their bytes; only trailing NULs go.
+        assert_eq!(
+            trim_name("\0\u{2}\0\u{4}^I\0\0\u{e}"),
+            "\0\u{2}\0\u{4}^I\0\0\u{e}"
+        );
+        assert_eq!(trim_name("\0\u{2}\0\0"), "\0\u{2}");
+    }
 }

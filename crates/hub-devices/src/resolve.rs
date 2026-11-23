@@ -23,6 +23,7 @@ pub const HUB_FEATURES: &[&str] = &[
     "codec.ascii",
     "codec.utf16be_hex",
     "codec.bitmap_flags",
+    "match.date_code",
 ];
 
 /// A source of definitions (bank + fetched cache, or user uploads). The
@@ -106,11 +107,27 @@ pub struct MemoryCatalog {
     pub defs: Vec<Arc<Definition>>,
 }
 
+/// A definition's model as compared for identity: a model identifies one
+/// definition (zigbee-herdsman-converters' `model`); `id` is its alias.
+pub fn model_key(model: &str) -> String {
+    zdef::matching::trim_name(model).to_lowercase()
+}
+
 impl MemoryCatalog {
-    /// Adds or replaces (same `id`) a definition.
-    pub fn insert(&mut self, d: Definition) {
-        self.defs.retain(|x| x.id != d.id);
+    /// Adds a definition, replacing one with the same `id` or the same
+    /// model; returns the IDs of replaced definitions with another `id`.
+    pub fn insert(&mut self, d: Definition) -> Vec<String> {
+        let key = model_key(&d.model);
+        let mut replaced = Vec::new();
+        self.defs.retain(|x| {
+            let same_model = !key.is_empty() && model_key(&x.model) == key;
+            if same_model && x.id != d.id {
+                replaced.push(x.id.clone());
+            }
+            x.id != d.id && !same_model
+        });
         self.defs.push(Arc::new(d));
+        replaced
     }
     /// Removes by ID.
     pub fn remove(&mut self, id: &str) -> bool {
@@ -773,11 +790,11 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());
             res.def_model = Some(d.model.clone());
-            if let Some(wl) = fp.manufacturer_name.as_deref().and_then(|m| {
-                d.white_label
-                    .iter()
-                    .find(|w| w.manufacturer.iter().any(|x| x == m))
-            }) {
+            if let Some(wl) = d
+                .white_label
+                .iter()
+                .find(|w| w.selects(fp.manufacturer_name.as_deref(), fp.model_id.as_deref()))
+            {
                 res.vendor = Some(wl.vendor.clone());
                 res.model = Some(wl.model.clone());
             }
@@ -849,6 +866,24 @@ mod tests {
         d.model = id.into();
         d.matches.push(clause);
         d
+    }
+
+    #[test]
+    fn a_model_identifies_one_definition() {
+        let mut c = MemoryCatalog::default();
+        let mut a = Definition::new("acme/plug-v1", LayerSource::User);
+        a.model = "PLUG-1 ".into();
+        assert!(c.insert(a).is_empty());
+        let mut b = Definition::new("acme/plug", LayerSource::User);
+        b.model = "plug-1".into();
+        assert_eq!(c.insert(b), ["acme/plug-v1"]);
+        assert_eq!(c.defs.len(), 1);
+        assert_eq!(c.defs[0].id, "acme/plug");
+        // Same ID, other model: replaced, nothing reported.
+        let mut d = Definition::new("acme/plug", LayerSource::User);
+        d.model = "PLUG-2".into();
+        assert!(c.insert(d).is_empty());
+        assert_eq!(c.defs.len(), 1);
     }
 
     #[test]

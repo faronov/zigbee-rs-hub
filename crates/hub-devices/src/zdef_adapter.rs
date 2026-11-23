@@ -557,6 +557,7 @@ pub fn adapt(
             vendor: w.vendor.clone().unwrap_or_else(|| d.vendor.clone()),
             model: w.model.clone().unwrap_or_else(|| d.model.clone()),
             manufacturer: w.manufacturer.clone(),
+            model_id: w.model_id.clone(),
         })
         .collect();
     d.requires = zd

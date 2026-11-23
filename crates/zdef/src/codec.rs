@@ -501,6 +501,7 @@ impl D<'_, '_, '_> {
                 53 => set(&mut c.stack_version, self.range()?),
                 54 => set(&mut c.hw_version, self.range()?),
                 55 => set(&mut c.sw_build, self.name_match(false)?),
+                190 => set(&mut c.date_code, self.name_match(false)?),
                 56 => {
                     let mut eps = self.keys()?;
                     while let Some(ep) = self.key(&mut eps, "endpoints")? {
@@ -600,6 +601,13 @@ impl D<'_, '_, '_> {
                 }
                 20 => set(&mut w.model, self.text()?),
                 43 => set(&mut w.vendor, self.text()?),
+                // keys::WHITE_LABEL_EXT: hubs before it skip the key.
+                64 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        w.model_id.push(self.text()?);
+                    }
+                }
                 _ => self.other(key, "white_label")?,
             }
         }
@@ -1495,6 +1503,13 @@ impl E<'_> {
                 if let Some(v) = &wl.vendor {
                     mm.put(43).text(v);
                 }
+                if !wl.model_id.is_empty() {
+                    let w = mm.put(64);
+                    w.array(wl.model_id.len());
+                    for n in &wl.model_id {
+                        w.text(n);
+                    }
+                }
                 mm.finish(w);
             }
         }
@@ -1695,6 +1710,9 @@ impl E<'_> {
         }
         if let Some(n) = &c.sw_build {
             self.name_match(m.put(55), n, false);
+        }
+        if let Some(n) = &c.date_code {
+            self.name_match(m.put(190), n, false);
         }
         if !c.endpoints.is_empty() {
             let w = m.put(56);
