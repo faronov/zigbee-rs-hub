@@ -26,7 +26,8 @@ RECONNECT_MAX: Final = 60.0
 
 PERMIT_JOIN_DEFAULT: Final = 254
 
-# Hub platform names (spec 4.3) → HA platforms; `update` is not served yet.
+# Hub platform names (spec 4.3, and `scene` of group scenes, 14.9) → HA
+# platforms; `update` is not served yet.
 PLATFORMS: Final = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
@@ -37,6 +38,7 @@ PLATFORMS: Final = [
     Platform.LIGHT,
     Platform.LOCK,
     Platform.NUMBER,
+    Platform.SCENE,
     Platform.SELECT,
     Platform.SENSOR,
     Platform.SIREN,

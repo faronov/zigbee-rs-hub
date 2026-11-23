@@ -163,6 +163,11 @@ impl ZigbeeTransport for NcpTransport {
         self.ncp.group_membership(1, group, endpoint).map_err(transport_error)
     }
 
+    fn group_remove(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
+        self.ready()?;
+        self.ncp.group_membership(2, group, endpoint).map_err(transport_error)
+    }
+
     fn remove_device(&mut self, ieee: u64) -> Result<(), TransportError> {
         self.ready()?;
         let nwk = self.nwk.get(&ieee).copied().unwrap_or(0xFFFF);

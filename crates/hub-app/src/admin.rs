@@ -94,6 +94,9 @@ pub enum JobOut {
     Event(J),
     /// The NCP's network was replaced: import its devices again.
     Reimport,
+    /// A restored backup's groups (`metadata.internal.zigbee_rs.groups`)
+    /// replace the hub's.
+    Groups(Vec<J>),
 }
 
 /// Delivery of [`JobOut`]s.
@@ -356,6 +359,7 @@ struct BackupReq {
 /// received so far, with the first request's options.
 struct Staged {
     restore: ocb::Restore,
+    groups: Option<Vec<J>>,
     allow_ieee_change: bool,
     force: bool,
     skip_backup: bool,
@@ -516,6 +520,14 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
         ncp_chip: session.as_ref().map_or(0, |s| s.negotiated.chip),
         ncp_build_id: session.as_ref().map(|s| hex(&s.negotiated.build_id)).unwrap_or_default(),
         host_devices: known.iter().map(|k| (k.ieee.to_le_bytes(), k.nwk)).collect(),
+        // The hub's groups as stored (device-support 14.9).
+        groups: ncp.with_store(|s| {
+            let v: Vec<&str> = s
+                .kv_prefix(hub_devices::hub::zgroups::GROUP_KEY)
+                .filter_map(|(_, v)| std::str::from_utf8(v).ok())
+                .collect();
+            format!("[{}]", v.join(","))
+        }),
     };
     let mut frame = Jw::result(id, 0)?.finish()?;
     frame.pop();
@@ -1070,8 +1082,9 @@ impl Admin {
                 return fail(bad("allow_ieee_change, force, skip_backup: true or false"));
             };
             self.staged = None;
+            let groups = b.pointer("/metadata/internal/zigbee_rs/groups").and_then(J::as_array).cloned();
             match ocb::to_records(b) {
-                Ok(restore) => self.staged = Some(Staged { restore, allow_ieee_change, force, skip_backup }),
+                Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }),
                 Err(e) => return fail(bad(e)),
             }
         } else if let Some(devices) = field(v, "devices") {
@@ -1093,7 +1106,7 @@ impl Admin {
         if more {
             return vec![frame(id, Ok(json!({"staged_devices": staged})))];
         }
-        let Some(Staged { restore, allow_ieee_change, force, skip_backup }) = self.staged.take() else {
+        let Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }) = self.staged.take() else {
             return fail(bad("no restore staged"));
         };
         let ncp = ctx.ncp.clone();
@@ -1122,6 +1135,9 @@ impl Admin {
             }
             let report = ncp.backup_restore(&restore.stream, opts).map_err(|e| ncp_error("restore", e))?;
             out(JobOut::Reimport);
+            if let Some(g) = groups {
+                out(JobOut::Groups(g));
+            }
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "restored"})));
             let note = |n: u8| ["", "host_backed", "child_demoted", "ignored", "floor_raised"].get(usize::from(n)).copied().unwrap_or("unknown");
             let mut w = Jw::result(id, 400 + 40 * report.notes.len())?;

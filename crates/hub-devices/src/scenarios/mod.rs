@@ -4,6 +4,7 @@
 mod bank;
 mod console;
 mod gp;
+mod groups;
 mod merge;
 mod plain;
 mod props;

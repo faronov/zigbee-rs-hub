@@ -265,6 +265,9 @@ pub struct ExportInfo {
     /// Devices the hub knows (IEEE in wire order, NWK) that the NCP did not
     /// export; added without keys.
     pub host_devices: Vec<([u8; 8], Option<u16>)>,
+    /// The hub's groups, a JSON array (`metadata.internal.zigbee_rs.groups`);
+    /// empty: none written.
+    pub groups: String,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -369,10 +372,12 @@ pub fn from_records(stream: &[u8], info: &ExportInfo, out: &mut String) -> Resul
     }
     let _ = write!(
         out,
-        "\"zigbee_rs\":{{\"fw\":{},\"chip\":{},\"build_id\":{}}},\"node\":{{\"ieee\":\"{coord}\",\"nwk\":\"0000\",\"type\":\"coordinator\"}}",
+        "\"zigbee_rs\":{{\"fw\":{},\"chip\":{},\"build_id\":{}{}{}}},\"node\":{{\"ieee\":\"{coord}\",\"nwk\":\"0000\",\"type\":\"coordinator\"}}",
         js(&info.ncp_fw),
         info.ncp_chip,
-        js(&info.ncp_build_id)
+        js(&info.ncp_build_id),
+        if info.groups.is_empty() { "" } else { ",\"groups\":" },
+        info.groups
     );
     if let Some(t) = &tclk {
         let _ = write!(
@@ -577,12 +582,14 @@ mod tests {
             ncp_chip: 1,
             ncp_build_id: "5151515151515151".into(),
             host_devices: vec![([9; 8], Some(0x1234)), (r.devices[0].0, Some(0x4D32))],
+            groups: r#"[{"id":1,"name":"Kitchen","members":[]}]"#.into(),
         };
         let mut text = String::new();
         let summary = from_records(&r.stream, &info, &mut text).unwrap();
         assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true });
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["metadata"]["internal"]["creation_time"], "2023-11-14T22:13:20+00:00");
+        assert_eq!(v["metadata"]["internal"]["zigbee_rs"]["groups"][0]["name"], "Kitchen");
         assert_eq!(v["coordinator_ieee"], "00124b0012345678");
         assert_eq!(v["pan_id"], "1a62");
         assert_eq!(v["channel_mask"], serde_json::json!([15, 20, 25]));

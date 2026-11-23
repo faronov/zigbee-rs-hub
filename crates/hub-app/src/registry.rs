@@ -10,10 +10,13 @@
 //! written when the engine reports it added or changed, and in a sweep
 //! every [`SWEEP_MS`]; the store skips identical values, and a snapshot
 //! holds no measured values, so reports alone never write flash.
+//! Groups and binding records (device-support 14.9): `grp/<4 hex>`,
+//! `bnd/<device id>` (JSON), written when the engine reports a change.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use hub_devices::device::Millis;
+use hub_devices::hub::zgroups::{BIND_KEY, GROUP_KEY};
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
 use hub_devices::model::LayerSource;
 use hub_devices::persist::DeviceSnapshot;
@@ -56,6 +59,8 @@ pub struct Registry {
     dirty: BTreeSet<String>,
     removed: BTreeSet<String>,
     dirty_since: Option<Millis>,
+    /// Groups or bindings changed.
+    zg_dirty: bool,
     last_sweep: Millis,
     /// Devices restored at start.
     pub restored: usize,
@@ -99,8 +104,19 @@ impl Registry {
                 Err(e) => warn!("registry: {key}: {e}"),
             }
         }
+        let zg: Records = ncp.with_store(|s| {
+            s.kv_prefix(GROUP_KEY)
+                .chain(s.kv_prefix(BIND_KEY))
+                .map(|(k, v)| (k.to_string(), v.to_vec()))
+                .collect()
+        });
+        for (key, v) in zg {
+            if let Err(e) = engine.zg_import(&key, &v) {
+                warn!("registry: {key}: {e}");
+            }
+        }
         self.last_sweep = now;
-        info!("registry: restored {} devices", self.restored);
+        info!("registry: restored {} devices, {} groups", self.restored, engine.zg.groups.len());
     }
 
     /// Notes engine events (before they go to the API).
@@ -117,6 +133,13 @@ impl Registry {
                 HubEvent::EntityRemoved(uid) if !self.removed.contains(device_of_uid(uid)) => {
                     device_of_uid(uid).to_string()
                 }
+                HubEvent::Groups { kind, .. } if matches!(kind.as_str(), "group_updated" | "group_removed" | "bindings_updated") => {
+                    self.zg_dirty = true;
+                    self.dirty_since.get_or_insert(now);
+                    continue;
+                }
+                // Group devices are not stored as devices.
+                HubEvent::DeviceRemoved(id) if id.starts_with("grp:") => continue,
                 HubEvent::DeviceRemoved(id) => {
                     self.dirty.remove(id);
                     self.removed.insert(id.clone());
@@ -157,6 +180,18 @@ impl Registry {
             .collect();
         let mut dels: Vec<String> =
             std::mem::take(&mut self.removed).into_iter().map(|id| format!("{DEV}{id}")).collect();
+        if sweep || std::mem::take(&mut self.zg_dirty) {
+            let zg = engine.zg_export();
+            ncp.with_store(|s| {
+                dels.extend(
+                    s.kv_prefix(GROUP_KEY)
+                        .chain(s.kv_prefix(BIND_KEY))
+                        .filter(|(k, _)| !zg.iter().any(|(x, _)| x == k))
+                        .map(|(k, _)| k.to_string()),
+                );
+            });
+            puts.extend(zg);
+        }
         if sweep {
             self.dirty.clear();
             self.last_sweep = now;

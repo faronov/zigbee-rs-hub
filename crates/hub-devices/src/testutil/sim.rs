@@ -42,6 +42,14 @@ pub struct SimDevice {
     pub responsive: bool,
     /// Answer Default Responses for cluster commands with this status.
     pub cmd_status: Status,
+    /// Group table `(ep, group)` (Groups cluster).
+    pub groups: BTreeSet<(u8, u16)>,
+    /// Group table capacity.
+    pub group_capacity: usize,
+    /// Scene table `(ep, group, scene)` → On/Off and level stored.
+    pub scenes: BTreeMap<(u8, u16, u8), (bool, u8)>,
+    /// Binding table `(src ep, cluster, destination)`.
+    pub bind_table: Vec<(u8, u16, zdo::BindDst)>,
 }
 
 impl SimDevice {
@@ -77,6 +85,10 @@ impl SimDevice {
             tuya_rx: Vec::new(),
             responsive: true,
             cmd_status: Status::SUCCESS,
+            groups: BTreeSet::new(),
+            group_capacity: 8,
+            scenes: BTreeMap::new(),
+            bind_table: Vec::new(),
         }
     }
 
@@ -242,10 +254,52 @@ impl SimDevice {
                     })
                 }
                 zdo::cluster::BIND_REQ => {
-                    if let Ok((_, _, ep, c, _)) = zdo::parse_bind_req(&req.payload) {
+                    if let Ok((_, _, ep, c, dst)) = zdo::parse_bind_req(&req.payload) {
                         self.binds.push((ep, c));
+                        if !self.bind_table.contains(&(ep, c, dst)) {
+                            self.bind_table.push((ep, c, dst));
+                        }
                     }
                     Some((zdo::cluster::BIND_RSP, vec![tsn, 0]))
+                }
+                zdo::cluster::UNBIND_REQ => {
+                    let mut st = 0x88;
+                    if let Ok((_, _, ep, c, dst)) = zdo::parse_bind_req(&req.payload) {
+                        if let Some(i) = self.bind_table.iter().position(|b| *b == (ep, c, dst)) {
+                            self.bind_table.remove(i);
+                            st = 0;
+                        }
+                    }
+                    Some((zdo::cluster::UNBIND_RSP, vec![tsn, st]))
+                }
+                // Mgmt_Bind_req: pages of two entries.
+                0x0033 => {
+                    let start = usize::from(req.payload[1]);
+                    let page: Vec<_> = self.bind_table.iter().skip(start).take(2).collect();
+                    let mut p = vec![
+                        tsn,
+                        0,
+                        self.bind_table.len() as u8,
+                        start as u8,
+                        page.len() as u8,
+                    ];
+                    for (ep, c, dst) in page {
+                        p.extend_from_slice(&self.ieee.to_le_bytes());
+                        p.push(*ep);
+                        p.extend_from_slice(&c.to_le_bytes());
+                        match dst {
+                            zdo::BindDst::Group(g) => {
+                                p.push(1);
+                                p.extend_from_slice(&g.to_le_bytes());
+                            }
+                            zdo::BindDst::Ieee(i, e) => {
+                                p.push(3);
+                                p.extend_from_slice(&i.to_le_bytes());
+                                p.push(*e);
+                            }
+                        }
+                    }
+                    Some((0x8033, p))
                 }
                 zdo::cluster::MGMT_LEAVE_REQ => Some((zdo::cluster::MGMT_LEAVE_RSP, vec![tsn, 0])),
                 _ => None,
@@ -361,6 +415,10 @@ impl SimDevice {
                         }
                     }
                     None
+                } else if let Some(p) = self.groups_scenes(ep, req.cluster, cmd, &f.payload) {
+                    let mut r = rsp(FrameType::Cluster, cmd, p);
+                    r.header.disable_default_response = true;
+                    Some(r)
                 } else {
                     if req.cluster == 0x0006 && cmd <= 0x02 {
                         let cur = matches!(
@@ -394,6 +452,119 @@ impl SimDevice {
     }
 }
 
+impl SimDevice {
+    /// Groups (0x0004) and Scenes (0x0005) server commands: the response
+    /// payload (None: not one of them, or no response).
+    fn groups_scenes(&mut self, ep: u8, cluster: u16, cmd: u8, p: &[u8]) -> Option<Vec<u8>> {
+        let g = p.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        let has = |s: &Self, c: u16| {
+            s.endpoints
+                .iter()
+                .any(|e| e.endpoint == ep && e.in_clusters.contains(&c))
+        };
+        match (cluster, cmd) {
+            (0x0004, _) if !has(self, 0x0004) => None,
+            (0x0005, _) if !has(self, 0x0005) => None,
+            (0x0004, 0x00) => {
+                let g = g?;
+                let st = if self.groups.contains(&(ep, g)) {
+                    0
+                } else if self.groups.len() >= self.group_capacity {
+                    0x89
+                } else {
+                    self.groups.insert((ep, g));
+                    0
+                };
+                Some([&[st][..], &g.to_le_bytes()].concat())
+            }
+            (0x0004, 0x01) => {
+                let g = g?;
+                let st = if self.groups.contains(&(ep, g)) {
+                    0
+                } else {
+                    0x8B
+                };
+                Some([&[st][..], &g.to_le_bytes(), &[0]].concat())
+            }
+            (0x0004, 0x02) => {
+                let mine: Vec<u16> = self
+                    .groups
+                    .iter()
+                    .filter(|(e, _)| *e == ep)
+                    .map(|(_, g)| *g)
+                    .collect();
+                let mut out = vec![
+                    (self.group_capacity - self.groups.len()) as u8,
+                    mine.len() as u8,
+                ];
+                for g in mine {
+                    out.extend_from_slice(&g.to_le_bytes());
+                }
+                Some(out)
+            }
+            (0x0004, 0x03) => {
+                let g = g?;
+                let st = if self.groups.remove(&(ep, g)) {
+                    0
+                } else {
+                    0x8B
+                };
+                self.scenes.retain(|k, _| !(k.0 == ep && k.1 == g));
+                Some([&[st][..], &g.to_le_bytes()].concat())
+            }
+            (0x0005, 0x01 | 0x02 | 0x04) => {
+                let (g, s) = (g?, *p.get(2)?);
+                let st = if !self.groups.contains(&(ep, g)) {
+                    0x85
+                } else if cmd == 0x04 {
+                    let on = matches!(
+                        self.attrs.get(&(ep, 6, 0, None)).map(|v| &v.value),
+                        Some(ZclValue::Bool(Some(true)))
+                    );
+                    let lvl = match self.attrs.get(&(ep, 8, 0, None)).map(|v| &v.value) {
+                        Some(ZclValue::Uint(l)) => *l as u8,
+                        _ => 0,
+                    };
+                    self.scenes.insert((ep, g, s), (on, lvl));
+                    0
+                } else if cmd == 0x02 {
+                    if self.scenes.remove(&(ep, g, s)).is_some() {
+                        0
+                    } else {
+                        0x8B
+                    }
+                } else if self.scenes.contains_key(&(ep, g, s)) {
+                    0
+                } else {
+                    0x8B
+                };
+                let mut out = [&[st][..], &g.to_le_bytes(), &[s]].concat();
+                if cmd == 0x01 && st == 0 {
+                    let (on, lvl) = self.scenes[&(ep, g, s)];
+                    out.extend_from_slice(&[0, 0, 0]);
+                    out.extend_from_slice(&[6, 0, 1, u8::from(on), 8, 0, 1, lvl]);
+                }
+                Some(out)
+            }
+            (0x0005, 0x05) => {
+                let (g, s) = (g?, *p.get(2)?);
+                if let Some((on, lvl)) = self.scenes.get(&(ep, g, s)).copied() {
+                    self.attrs.insert(
+                        (ep, 6, 0, None),
+                        TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(on))),
+                    );
+                    self.attrs.insert(
+                        (ep, 8, 0, None),
+                        TypedValue::uint(ZclType::U8, u64::from(lvl)),
+                    );
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 /// The simulated network.
 #[derive(Debug, Default)]
 pub struct Sim {
@@ -422,10 +593,25 @@ impl Sim {
             let mut inds = Vec::new();
             for s in sent {
                 if let Sent::Aps(req) = &s {
-                    if let ApsDst::Nwk(n) = req.dst {
-                        if let Some(d) = self.devices.iter_mut().find(|d| d.nwk == n) {
-                            inds.extend(d.answer(req));
+                    match req.dst {
+                        ApsDst::Nwk(n) => {
+                            if let Some(d) = self.devices.iter_mut().find(|d| d.nwk == n) {
+                                inds.extend(d.answer(req));
+                            }
                         }
+                        // Groupcast: every member endpoint.
+                        ApsDst::Group(g) => {
+                            for d in &mut self.devices {
+                                let eps: Vec<u8> =
+                                    d.groups.iter().filter(|x| x.1 == g).map(|x| x.0).collect();
+                                for ep in eps {
+                                    let mut r = req.clone();
+                                    r.dst_ep = ep;
+                                    inds.extend(d.answer(&r));
+                                }
+                            }
+                        }
+                        ApsDst::Ieee(_) => {}
                     }
                 }
                 self.log.push(s);
