@@ -599,6 +599,12 @@ impl D<'_, '_, '_> {
                     }
                 }
                 20 => set(&mut w.model, self.text()?),
+                23 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        w.model_id.push(self.text()?);
+                    }
+                }
                 43 => set(&mut w.vendor, self.text()?),
                 _ => self.other(key, "white_label")?,
             }
@@ -1491,6 +1497,13 @@ impl E<'_> {
                 }
                 if let Some(v) = &wl.model {
                     mm.put(20).text(v);
+                }
+                if !wl.model_id.is_empty() {
+                    let w = mm.put(23);
+                    w.array(wl.model_id.len());
+                    for n in &wl.model_id {
+                        w.text(n);
+                    }
                 }
                 if let Some(v) = &wl.vendor {
                     mm.put(43).text(v);

@@ -1477,13 +1477,14 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
             "match" => d.match_ = l.list(v, &p, |l, n, p| l.clause(n, p)),
             "white_label" => {
                 d.white_label = l.list(v, &p, |l, n, p| {
-                    let f = l.obj(n, p, &["vendor", "model", "manufacturer"])?;
+                    let f = l.obj(n, p, &["vendor", "model", "manufacturer", "model_id"])?;
                     let mut w = WhiteLabel::default();
                     for (k2, _, v2) in f {
                         let p2 = format!("{p}/{}", k2.as_json());
                         match k2.as_str().unwrap_or("") {
                             "vendor" => w.vendor = l.str_(v2, &p2),
                             "model" => w.model = l.str_(v2, &p2),
+                            "model_id" => w.model_id = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
                             _ => w.manufacturer = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
                         }
                     }
@@ -1749,8 +1750,20 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
             _ => {}
         }
     }
-    // White-label names must be in the match name list.
+    // White-label names must be in the match name list, their model IDs
+    // among the clauses' models.
     let names: Vec<String> = d.match_names().into_iter().map(String::from).collect();
+    let models: Vec<&str> = d
+        .match_
+        .iter()
+        .flat_map(|c| match &c.model {
+            Some(zdef::model::NameMatch::Exact(s)) => vec![zdef::matching::trim_name(s)],
+            Some(zdef::model::NameMatch::Any(v)) => {
+                v.iter().map(|s| zdef::matching::trim_name(s)).collect()
+            }
+            _ => Vec::new(),
+        })
+        .collect();
     for (i, w) in d.white_label.iter().enumerate() {
         for m in &w.manufacturer {
             if !names.contains(m) {
@@ -1758,6 +1771,15 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                     pos: root.pos,
                     path: format!("/white_label/{i}/manufacturer"),
                     message: format!("{m:?} is not a manufacturer name of any match clause"),
+                });
+            }
+        }
+        for m in &w.model_id {
+            if !models.contains(&zdef::matching::trim_name(m)) {
+                l.errs.push(Diag {
+                    pos: root.pos,
+                    path: format!("/white_label/{i}/model_id"),
+                    message: format!("{m:?} is not a model of any match clause"),
                 });
             }
         }

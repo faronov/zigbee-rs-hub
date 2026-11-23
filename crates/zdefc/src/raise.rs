@@ -722,6 +722,12 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
                         flow(seq(w.manufacturer.iter().map(|x| s(x)).collect())),
                     ));
                 }
+                if !w.model_id.is_empty() {
+                    b.push((
+                        "model_id",
+                        flow(seq(w.model_id.iter().map(|x| s(x)).collect())),
+                    ));
+                }
                 flow(map(b))
             })
             .collect();

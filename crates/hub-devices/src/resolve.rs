@@ -773,11 +773,11 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());
             res.def_model = Some(d.model.clone());
-            if let Some(wl) = fp.manufacturer_name.as_deref().and_then(|m| {
-                d.white_label
-                    .iter()
-                    .find(|w| w.manufacturer.iter().any(|x| x == m))
-            }) {
+            if let Some(wl) = d
+                .white_label
+                .iter()
+                .find(|w| w.selects(fp.manufacturer_name.as_deref(), fp.model_id.as_deref()))
+            {
                 res.vendor = Some(wl.vendor.clone());
                 res.model = Some(wl.model.clone());
             }

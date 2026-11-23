@@ -177,20 +177,19 @@ impl Definition {
         out
     }
 
-    /// Display identity for a device's manufacturer name (white labels, spec 6.1).
+    /// Display identity for a device's Basic names (white labels, spec 6.1):
+    /// the first white label that selects it.
     pub fn display_identity<'s>(
         &'s self,
         manufacturer_name: Option<&str>,
+        model_id: Option<&str>,
     ) -> (Option<&'s str>, Option<&'s str>) {
-        if let Some(m) = manufacturer_name {
-            let m = crate::matching::trim_name(m);
-            for wl in &self.white_label {
-                if wl.manufacturer.iter().any(|n| n == m) {
-                    return (
-                        wl.vendor.as_deref().or(self.vendor.as_deref()),
-                        wl.model.as_deref().or(self.model.as_deref()),
-                    );
-                }
+        for wl in &self.white_label {
+            if wl.selects(manufacturer_name, model_id) {
+                return (
+                    wl.vendor.as_deref().or(self.vendor.as_deref()),
+                    wl.model.as_deref().or(self.model.as_deref()),
+                );
             }
         }
         (self.vendor.as_deref(), self.model.as_deref())
@@ -281,6 +280,23 @@ pub struct WhiteLabel {
     pub model: Option<String>,
     /// Manufacturer names (encoded as indices into [`Definition::match_names`]).
     pub manufacturer: Vec<String>,
+    /// Basic ModelIdentifiers (zigbee-herdsman-converters' white-label
+    /// fingerprints by `modelID`).
+    pub model_id: Vec<String>,
+}
+
+impl WhiteLabel {
+    /// Whether a device with these Basic names is this white label: every
+    /// list given contains its name, and at least one list is given.
+    pub fn selects(&self, manufacturer_name: Option<&str>, model_id: Option<&str>) -> bool {
+        use crate::matching::trim_name;
+        let has = |list: &[String], v: Option<&str>| {
+            list.is_empty() || v.is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
+        };
+        (!self.manufacturer.is_empty() || !self.model_id.is_empty())
+            && has(&self.manufacturer, manufacturer_name)
+            && has(&self.model_id, model_id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]

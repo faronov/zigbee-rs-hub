@@ -500,8 +500,8 @@ pub fn resolve<'a>(layers: &Layers<'a>, target: Target<'a>) -> Resolution<'a> {
             }
         }
     }
-    if let (Some(name), Some(d)) = (target_manufacturer(target), top_def) {
-        let (v, m) = d.display_identity(Some(name));
+    if let (Target::Zigbee(fp), Some(d)) = (target, top_def) {
+        let (v, m) = d.display_identity(fp.manufacturer_name.as_deref(), fp.model_id.as_deref());
         res.vendor = v.or(res.vendor);
         res.model = m.or(res.model);
     }
@@ -522,11 +522,4 @@ pub fn resolve<'a>(layers: &Layers<'a>, target: Target<'a>) -> Resolution<'a> {
         }
     }
     res
-}
-
-fn target_manufacturer(t: Target<'_>) -> Option<&str> {
-    match t {
-        Target::Zigbee(fp) => fp.manufacturer_name.as_deref(),
-        Target::Gp(_) => None,
-    }
 }
