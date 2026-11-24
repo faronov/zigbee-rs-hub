@@ -90,9 +90,15 @@ pub fn run(profile: &'static BoardProfile) -> ! {
 
     let mut board = *profile;
     if let Some(o) = settings::get("board") {
-        match board.apply(&o) {
-            Ok(()) => info!("board overrides applied: {o}"),
-            Err(e) => error!("board overrides {o:?} ignored: {e}"),
+        // Escape hatch: the button held at power-up or reset boots with the
+        // profile's wiring (`board clear` then removes the overrides).
+        if profile.button.as_ref().is_some_and(led::held_at_boot) {
+            warn!("button held at boot: board overrides {o:?} ignored for this boot (`board clear` removes them)");
+        } else {
+            match board.apply(&o) {
+                Ok(()) => info!("board overrides applied: {o}"),
+                Err(e) => error!("board overrides {o:?} ignored: {e}"),
+            }
         }
     }
     let _ = BOARD.set(board);

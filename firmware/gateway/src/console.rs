@@ -19,7 +19,8 @@ zigbee-rs-hub gateway console (board bring-up: no coordinator backend yet):\r
                        last panic\r
   board                pins of the board profile and stored overrides\r
   board set <k=v ...>  store NCP wiring overrides (tx rx rts cts reset reset_od\r
-                       baud flow fallback), applied at the next boot\r
+                       baud flow fallback), applied at the next boot; the\r
+                       button held at boot ignores them for that boot\r
   board clear          remove the overrides\r
   net                  Ethernet / Wi-Fi state\r
   wifi set <ssid> [pw] store Wi-Fi credentials (station starts when Ethernet\r

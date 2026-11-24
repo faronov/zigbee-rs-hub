@@ -90,6 +90,17 @@ fn pressed(i: &Input) -> bool {
     level != i.active_low
 }
 
+/// The button held down for 100 ms at boot (the escape from stored board
+/// overrides).
+pub(crate) fn held_at_boot(i: &Input) -> bool {
+    configure_in(i);
+    (0..5).all(|_| {
+        let p = pressed(i);
+        std::thread::sleep(Duration::from_millis(20));
+        p
+    })
+}
+
 /// (r, g, b) at LED tick `t` (125 ms).
 fn colour(t: u32, flash: bool) -> [bool; 3] {
     let blink = |period: u32| t % period < period / 2;
