@@ -988,6 +988,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     fn configure(&mut self, info: HostInfo) -> Result<(), HostError> {
         let v = info.ezsp_version;
         self.version = Some(v);
+        // Nothing of the previous session's NCP carries over.
+        self.max_payload = None;
+        self.key_exportable = None;
+        self.info = None;
+        self.caps = None;
         let version_info = match self.try_call(&Command::GetValue {
             id: ValueId::VERSION_INFO,
         })? {
