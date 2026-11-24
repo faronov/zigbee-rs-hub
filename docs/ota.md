@@ -216,9 +216,10 @@ Both list the devices (Update, Abort, Check, their policy) and the
 images. The server settings (default policy, window, concurrency,
 pacing, index URL) are API only (`ota/settings/set`, e.g. `hubctl
 ws-call`), and the page has no index search of its own: a file from the
-index is downloaded by hand, or Home Assistant does it (the page budget
-of 32 KiB gzip leaves no room for more; the budget stays, decided
-2026-11-24).
+index is downloaded by hand, or Home Assistant does it (the trimmed
+Updates UI stays, decided 2026-11-24; the page budget is
+`hub_web::PAGE_BUDGET`, 34 KiB gzip since #66: the 8 MB page with the
+store is 33 249 B, with streaming 33 394 B).
 
 The index URL is a hub setting (`index_url`, default Koenkk's) that
 clients share. Home Assistant fetches it a minute
@@ -366,9 +367,9 @@ newer than the running one; the image inside is what the product's
   `unsupported`, `hub/info` has no `ota`, a Query Next Image gets the
   generic Default Response; CI checks with `cargo tree` that this build
   links no `hub-ota`.
-- `hub-web`: the page of every feature combination within the 32 KiB
-  gzip budget and parsing; without `ota` no Updates tab and no `ota/*`
-  request.
+- `hub-web`: the page of every feature combination within
+  `PAGE_BUDGET` (34 KiB gzip) and parsing; without `ota` no Updates tab
+  and no `ota/*` request.
 - Release tooling (`tools/test_release_images.py`,
   `tools/test_hub_build.py`): a 4 MB image marked with `ota` or an 8 MB
   one without it is refused; the board entries are the features the build

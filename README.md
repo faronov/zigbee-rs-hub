@@ -1180,7 +1180,7 @@ without it (`ota/*` answers `unsupported`, the hub endpoint does not list
 start — and a device's Query Next Image gets only the Default Response it
 asks for, as before the server). The
 Koenkk/zigbee-OTA index is fetched by Home Assistant (the web page has no
-index search: the page budget stays 32 KiB gzip). Per device: policy
+index search; the page budget is 34 KiB gzip). Per device: policy
 `manual` (default), `auto` (schedule window) or `off` (never: `ota/start`
 refused, a running job aborted; decided); Image
 Notify (sleepy devices through the queue); blocks of min(device, 48 B,
