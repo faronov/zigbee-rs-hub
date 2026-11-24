@@ -2,10 +2,11 @@
 
 **Status: build-tested, not hardware-tested.** `firmware/donglem` is the
 board bring-up stage of the Dongle-M port: network, LED, button, MG24
-lines and a read-only EZSP probe. It runs no coordinator backend and no hub
-application yet; those are wired after the backend selection lands. The
-layout, sdkconfig and memory budget below are planned for the product
-feature set. Nothing here is a Zigbee or interoperability claim.
+lines, a read-only EZSP probe and the way back to SONOFF's firmware. It
+runs no coordinator backend and no hub application yet; those are wired
+after the backend selection lands. The data region, sdkconfig and memory
+budget below are planned for the product feature set. Nothing here is a
+Zigbee or interoperability claim.
 
 ## Product target
 
@@ -17,12 +18,13 @@ PR H) and the EZSP backend.
 | Hub application: devices, catalog, groups, bindings, reporting, automations | yes |
 | Web UI with the advanced console, WebSocket API | yes |
 | MQTT with Home Assistant discovery | yes |
-| Zigbee device OTA | yes, with a dedicated image store (`otastore`) |
-| ESP32 self-update | yes, A/B app slots with a trial boot |
+| Zigbee device OTA | yes: 1 MiB image store in the hub's data region, larger images streamed from a client |
+| ESP32 self-update | yes, into the other app slot of SONOFF's table |
 | Ethernet (also PoE-powered) and Wi-Fi | yes; Ethernet first, Wi-Fi station as the fallback |
 | Network backup/restore (Open Coordinator Backup, EZSP key export) | yes |
 | Green Power through EZSP | later |
-| MG24 firmware update through the Gecko bootloader | later; flash reserved (`radio`), code not compiled |
+| MG24 firmware update through the Gecko bootloader | later; space reserved, code not compiled |
+| Installation through SONOFF's web console | yes: **SONOFF's partition table and bootloader never change** |
 | TCP bridge to the MG24 UART (port 6638, as the stock firmware) | **no** |
 | Bluetooth / BLE | **no** (`CONFIG_BT_ENABLED=n`, its RAM stays with the heap) |
 
@@ -65,83 +67,143 @@ firmware drives only after boot, as SONOFF's ESPHome configuration does.
 Whether a software restart with the oscillator running always boots from
 flash is checked on hardware (HIL list below).
 
+## Slots, installation and the way back
+
+SONOFF's stock partition table is the product layout
+(`firmware/donglem/partitions.csv` generates it byte for byte; CI checks
+its SHA-256):
+
+| Region | Offset | Size | Stock firmware | With the hub |
+|---|---|---|---|---|
+| bootloader (ESP-IDF v5.2.1) | 0x1000 | 27 KiB | | unchanged |
+| partition table | 0x8000 | 4 KiB | | unchanged |
+| `nvs` | 0x1C000 | 256 KiB | SONOFF's settings, Wi-Fi, credentials | shared: the hub adds its own namespace `zrh`, nothing else |
+| `otadata` | 0x5C000 | 8 KiB | seq 1 → `ota_0` | selects `ota_1` (installation) or `ota_0` (`stock confirm`, self-update) |
+| `phy_init` | 0x5E000 | 4 KiB | | unchanged (blank) |
+| `ota_0` | 0x60000 | 6 MiB | SONOFF's application 1.0.7 | kept until the hub's first self-update |
+| `ota_1` | 0x660000 | 6 MiB | blank | the hub |
+| `files` | 0xC60000 | 3 712 KiB | SONOFF's LittleFS: `config.json`, `device_info.json`, `indicator.json`, MG24 info and factory IEEE config, staging of MG24 updates | the hub's data region, only after an explicit claim (next section); this image only reads it |
+
+**Installation (product): SONOFF's web console**, Firmware →
+ESP32-D0WDR2-V3 → Upload & Flash Firmware, with `zrh-donglem-app.bin`.
+SONOFF's application writes it into `ota_1` with ESP-IDF's OTA functions
+and selects it. What the stock handler checks, from its strings: the
+image magic, the image length against the partition, the chip revision
+range, the appended SHA-256 (ESP-IDF `esp_ota_end`), and a checksum the
+web page computes. Our image is a plain ESP32 app image: chip ESP32,
+revision v3.0–v3.99 (the unit is v3.1), DIO 40 MHz, SHA-256 appended,
+0.91 MB of the 6 MiB slot. Its project name is `libespidf` (esp-idf-sys);
+SONOFF's guide says ESPHome images are accepted. **To verify on hardware**
+(the lab unit is first flashed over USB instead, below).
+
+**No trial boot.** SONOFF's application was built without ESP-IDF's app
+rollback: its `esp_ota_ops` carries the error strings that every build has
+(e.g. "OTA image has invalid magic byte") but not the one only a rollback
+build has ("Running app has not confirmed state"). The bootloader comes
+from the same ESP-IDF v5.2.1 build, so it very likely has no rollback
+either (its log is silent; **to verify**). An image installed through the
+web console is therefore selected for good: an image that does not start
+cannot fall back to SONOFF's, and recovery needs USB (SONOFF Dongle
+Flasher, or esprom with the backup). The hub's sdkconfig has no rollback
+either, so the entries it writes (`stock confirm`, self-update) are
+"undefined", which every bootloader boots and never reverts; it still
+confirms itself once its core runs (`esp_ota_mark_app_valid_cancel_rollback`),
+which only matters if a rollback bootloader ever put it on trial.
+
+**Self-update (follow-up)** writes the other slot. The hub runs from
+`ota_1`, so **its first self-update replaces SONOFF's application in
+`ota_0`**; from then on the two slots alternate between hub images.
+Before that, the hub warns and asks for confirmation.
+
+**Back to SONOFF's firmware**: `stock` / `stock confirm` on the console
+(the web UI later) while `ota_0` holds SONOFF's application: it selects
+`ota_0` and restarts. SONOFF's settings in `nvs` and `files` are
+untouched as long as `files` has not been claimed (after a claim, the
+copy in the region's `stock_copy` area is written back first, follow-up).
+After a self-update has replaced SONOFF's application, the way back is
+SONOFF Dongle Flasher (USB or web serial) or the esprom backup.
+
+## The hub's data region: SONOFF's `files` partition
+
+With the table unchanged, `files` is the only space for the hub's data:
+`hubdata` (host store journal, catalog, definitions), the Zigbee device
+OTA store and the MG24 image. Plan (`hub_core::layout::dongle_files`,
+tested):
+
+| Area | Offset in `files` | Size | Content |
+|---|---|---|---|
+| `claim` | 0x0 | 8 KiB | claim record, two sectors written alternately (`ZRHF`), where LittleFS keeps its superblock pair |
+| `hubdata` | 0x2000 | 1 920 KiB | the 8 MB `hubdata` map of `hub_core::layout` (journal first), as on the S3 8 MB images |
+| `ota_store` | 0x1E2000 | 1 MiB | Zigbee device images (format of `docs/ota.md`): 92 % of real images are ≤ 512 KiB; larger ones are streamed |
+| `radio` | 0x2E2000 | 640 KiB | one MG24 `.gbl` image, reserved for the Gecko updater (to be sized against the pinned EmberZNet image) |
+| `stock_copy` | 0x382000 | 120 KiB | SONOFF's LittleFS blocks in use at the claim: an index sector and up to 29 blocks |
+
+**Claim (follow-up; this image never writes `files`).** Only on an
+explicit confirmation in the console or web UI, never automatically, and
+only when `files` is SONOFF's LittleFS or blank (`info` shows which; an
+unknown content is refused):
+
+1. read every non-blank 4 KiB block into PSRAM; more than 29 → refused
+   (an MG24 update staged by SONOFF can be that large: reset SONOFF's
+   settings first, or take a USB backup and confirm discarding them);
+   the `stock_copy` blocks must be free in SONOFF's file system;
+2. write the index and the blocks into `stock_copy`, read them back
+   (SONOFF's file system is still intact: these blocks are free in it);
+3. write the claim record over block 0, then block 1 (SONOFF's LittleFS is
+   now invalid), then erase `hubdata`, `ota_store` and `radio` as they
+   are first used.
+
+On the lab unit SONOFF's LittleFS uses blocks 0, 1 and 411 (inside
+`hubdata`), so the copy is three blocks.
+
+**Return to stock after a claim (follow-up):** erase the region, write the
+copied blocks back to their block numbers, check them, then `stock
+confirm`. **To verify on hardware:** what SONOFF's firmware does with a
+`files` region that is not a valid LittleFS (presumably formats it and
+starts with factory settings: web and AP passwords, device name, the MG24
+info and factory IEEE config files gone), and that it mounts the restored
+blocks.
+
 ## Image and sdkconfig
 
-`firmware/donglem` (`zrh-donglem`: board profile, sdkconfig, partition
-tables) on `firmware/gateway` (`zrh-gateway`: the board-generic firmware),
+`firmware/donglem` (`zrh-donglem`: board profile, sdkconfig, the stock
+table) on `firmware/gateway` (`zrh-gateway`: the board-generic firmware),
 target `xtensa-esp32-espidf`, ESP-IDF v5.5.1, Xtensa Rust 1.90 (`esp`).
 
 | Setting | Value | Why |
 |---|---|---|
-| Image header | DIO, 40 MHz, 16 MB, chip v3.0–v3.99 | as the stock bootloader and application: the stock bootloader stays and boots it |
+| Image header | DIO, 40 MHz, 16 MB, chip v3.0–v3.99 | as SONOFF's bootloader and application: the stock bootloader stays and boots it |
 | PSRAM | quad, 40 MHz, `CONFIG_SPIRAM_USE_MALLOC`, C mallocs > 1 KiB and Wi-Fi/lwIP buffers to PSRAM, 32 KiB internal kept for DMA | 80 MHz PSRAM would need 80 MHz flash; heap policy of `firmware/hub` and `hub_core::resources` |
 | `CONFIG_ESP32_REV_MIN_3` | v3.0 | no PSRAM cache workaround: smaller, faster code |
 | Rust heap | prefers PSRAM (`firmware/hub/src/alloc.rs`, shared) | as `firmware/hub` |
 | Atomics | `-C target-feature=-s32c1i` + the same compile-time guard | S32C1I is not atomic between the cores on PSRAM; ESP-IDF's `__atomic_*` lock PSRAM addresses (`CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND`, on for SPIRAM on the ESP32). The build has no S32C1I in Rust code; `atomics` measures it |
 | Bluetooth | off | not in the feature set |
-| Panic | recorder in RTC memory (`firmware/hub/src/cpanic.rs`, shared, `--wrap=esp_panic_handler`); core dump (ELF, 4 tasks) to `coredump` | the stock table has no `coredump`: there only the recorder |
-| Self-update | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`; the image confirms itself once started | whether the stock bootloader has rollback support is unknown (silent log): without it a new image boots without the automatic fallback (open question) |
+| Panic | recorder in RTC memory (`firmware/hub/src/cpanic.rs`, shared, `--wrap=esp_panic_handler`); no core dump | the stock table has no `coredump` partition |
+| App rollback | off | as SONOFF's build (above) |
 | Web/MQTT | WebSocket support in esp_http_server; esp-mqtt plain TCP only; 3 SNTP servers; 4 KiB tcpip stack | as `firmware/hub` |
 | Internal RAM | no IPv6, ROM printf (nano), silent asserts | as `firmware/hub` |
-| NVS | own namespace `zrh`; no erase on init errors; Wi-Fi in RAM; PHY data not stored | while the image may share the stock NVS (bring-up); on the product table NVS is the hub's own |
+| NVS | SONOFF's partition, shared: own namespace `zrh`; no erase on init errors; Wi-Fi config in RAM; PHY data not stored | SONOFF's settings stay as they are |
 
 Build (the first build downloads ESP-IDF into `.embuild`):
 
 ```sh
 . ~/export-esp.sh && cd firmware/donglem && cargo build --release && cd ../..
-CHIP=esp32 FLASH_SIZE=16MB FLASH_FREQ=40m MIN_REV_FULL=300 MAX_APP_BYTES=4194304 \
+CHIP=esp32 FLASH_SIZE=16MB FLASH_FREQ=40m MIN_REV_FULL=300 MAX_APP_BYTES=6291456 \
   tools/make-app-image.sh release target/zrh-donglem-app.bin zrh-donglem
 python3 tools/make-otadata.py --seq 2 -o target/otadata-donglem-ota1.bin
 ```
 
-The bring-up image is 0.92 MB. CI checks it against the 4 MiB product slot.
-
-## Product layout (`firmware/donglem/partitions-16mb.csv`)
-
-| Partition | Offset | Size | Content |
-|---|---|---|---|
-| (bootloader) | 0x1000 | ≤ 28 KiB | the stock ESP-IDF v5.2.1 bootloader, kept |
-| (partition table) | 0x8000 | 4 KiB | |
-| `nvs` | 0x9000 | 80 KiB | settings, Wi-Fi, PHY calibration |
-| `otadata` | 0x1D000 | 8 KiB | A/B selection |
-| `phy_init` | 0x1F000 | 4 KiB | |
-| `coredump` | 0x20000 | 64 KiB | last core dump (ELF, 4 tasks) |
-| `ota_0` | 0x30000 | 4 MiB | application slot A |
-| `ota_1` | 0x430000 | 4 MiB | application slot B |
-| `hubdata` | 0x830000 | 2 MiB | host store journal, catalog banks, definitions, web tools: the 8 MB map of `hub_core::layout` (1 728 KiB) + 320 KiB spare |
-| `otastore` | 0xA30000 | 4 MiB | Zigbee device OTA images (type 0x41) |
-| `radio` | 0xE30000 | 1 856 KiB | two 928 KiB banks for MG24 `.gbl` images (current, previous; type 0x42), blank until the MG24 updater |
-
-Sizing:
-
-- **App slots, 4 MiB.** The S3 8 MB image with MQTT and the advanced
-  console is 2.80 MB (main 6fc074d); Zigbee device OTA adds ~0.14 MB, the
-  EZSP backend replaces ZRHP (`hub-ncp` + `zigbee-zrhp`, ~0.11 MB),
-  Ethernet adds ~0.04 MB, the S3's TinyUSB bridge goes; self-update,
-  backup/restore, Green Power and the MG24 updater ~0.15 MB. Estimate
-  3.0–3.2 MB: ≥ 1 MB (≈ 25 %) headroom. Both slots hold the application;
-  the store does not borrow the inactive slot (the S3 8 MB image does), so
-  a self-update never drops device images and the previous image stays for
-  a rollback.
-- **`otastore`, 4 MiB.** Real images (Koenkk index, 1 034 images): median
-  251 KB, 90 % ≤ 446 KB, largest 2.1 MB: the largest plus several typical
-  ones, or ~15 typical ones. Same store format as `docs/ota.md` (index A/B
-  + images), on its own partition (follow-up in `hub-app`).
-- **`hubdata`, 2 MiB**: is a `Layout::Production` with the 8 MB map (the
-  journal stays at the start; tested in `hub_core::layout`); the spare
-  allows larger catalog banks later.
-- **`radio`**: the MG24 has 1 536 KiB of flash; EmberZNet NCP images are a
-  fraction of it (to be measured for the pinned firmware). Two banks keep
-  the running image for a rollback, as the updater requirements in
-  `coordinator-profiles.md` need.
-- `hub_core::layout::check` accepts the table on 16 MB flash; the stock
-  table is `Foreign` (no `hubdata`: host store in RAM).
+The bring-up image is 0.91 MB; the full application is estimated at
+3.0–3.2 MB (the S3 8 MB image with MQTT and the advanced console is 2.80
+MB; Zigbee device OTA ~0.14 MB; the EZSP backend replaces ZRHP, ~0.11 MB;
+Ethernet ~0.04 MB; no TinyUSB bridge; self-update, backup/restore, Green
+Power, MG24 updater ~0.15 MB): ~3 MB headroom in the 6 MiB slot.
 
 ## RAM budget (2 MB PSRAM)
 
-Static RAM of the bring-up build: IRAM 101 KB of 128 KB (`.iram0.text`
-99 991 B + vectors), DRAM `.data` + `.bss` 32.9 KB. The application code
-runs from flash; IRAM grows little with it (levers if it ever runs out:
+Static RAM of the bring-up build: IRAM ~101 KB of 128 KB, DRAM `.data` +
+`.bss` ~33 KB (CI prints both). The application code runs from flash;
+IRAM grows little with it (levers if it ever runs out:
 `CONFIG_ESP_WIFI_IRAM_OPT`, `CONFIG_ESP_WIFI_RX_IRAM_OPT`, FreeRTOS and heap
 functions to flash, at some speed).
 
@@ -186,40 +248,20 @@ as any PSRAM size; the worst case fits with margin:
 | HTTP/OTA/self-update chunks (4 KiB), OTA streams (fixed, ≤ 4), snapshot pieces (8 KB) | < 64 |
 | **Worst case** | **≈ 1 280 of 2 048** |
 
-## Flash layouts in use
+## First flash of the lab unit (esprom, USB)
 
-**Bring-up (first flash): the stock table, unchanged.**
-`firmware/donglem/partitions.csv` reproduces the stock table at 0x8000
-byte for byte (CI checks its SHA-256). Only two regions are written:
+The lab unit gets the bring-up image over USB, not through the web
+console: only two regions are written, both blank before.
 
-| Region | Offset | Size | First flash |
+| Region | Offset | Size | Written |
 |---|---|---|---|
-| bootloader (ESP-IDF v5.2.1) | 0x1000 | 27 KiB | kept |
-| partition table | 0x8000 | 4 KiB | kept |
-| `nvs` (stock settings, credentials) | 0x1C000 | 256 KiB | kept (see runtime writes) |
-| `otadata` sector 0 (stock entry: seq 1 → `ota_0`) | 0x5C000 | 4 KiB | kept |
-| **`otadata` sector 1** | **0x5D000** | **4 KiB** | **written: seq 2, VALID → `ota_1`** (blank before) |
-| `phy_init` | 0x5E000 | 4 KiB | kept |
-| `ota_0` (stock application 1.0.7) | 0x60000 | 6 MiB | kept |
-| **`ota_1`** | **0x660000** | **6 MiB** | **written: `zrh-donglem-app.bin`** (blank before) |
-| `files` (SONOFF LittleFS: config, MG24 info) | 0xC60000 | 3 712 KiB | kept |
+| `ota_1` | 0x660000 | 6 MiB | `zrh-donglem-app.bin` |
+| `otadata` sector 1 | 0x5D000 | 4 KiB | seq 2, VALID → `ota_1` (`tools/make-otadata.py`) |
 
-The bootloader picks the valid `otadata` entry with the highest sequence
-number, so erasing sector 1 again boots the untouched stock application.
-Runtime writes: only NVS keys of the namespace `zrh` in the stock `nvs`,
-and only when a setting is changed (`wifi set`, `board set`, `led`). NVS is
-opened without the erase-on-error fallback; Wi-Fi keeps its configuration
-in RAM and the PHY calibrates at every boot, so the stock namespaces are
-neither read nor written. Nothing writes the MG24.
-
-**Product (with the hub application): `partitions-16mb.csv`.** Moving to
-it rewrites everything except the bootloader: partition table, `nvs`
-(erased: the hub's own), `otadata`, `coredump`, both app slots (the stock
-application and SONOFF's `files` are gone), `hubdata`, `otastore`, `radio`
-(erased). The way back to stock is the full backup (below). That step is
-for the release with the hub application and needs explicit confirmation.
-
-## Flashing the bring-up image with hwlab `esprom`
+Everything else stays (bootloader, table, `nvs`, `otadata` sector 0,
+`phy_init`, SONOFF's application in `ota_0`, `files`). The bootloader picks
+the valid `otadata` entry with the highest sequence number, so erasing
+sector 1 again boots SONOFF's untouched application.
 
 Verified backup first (already taken for the lab unit:
 `~/.hwlab/artifacts/sonoff-dongle-max/esprom-flash-esp32-<mac>-16384K-<sha>.bin`,
@@ -247,10 +289,11 @@ hwlab target bsl reset --plugin esprom --device $D --config allow_reset=true --a
 Write the application before `otadata`: a failed first step leaves the
 stock application selected.
 
-## Back to the stock firmware
+Back to SONOFF's firmware: `stock confirm` on the console, or from the
+backup over USB:
 
 ```sh
-# Stock application again: otadata sector 1 back to blank (from the backup).
+# otadata sector 1 back to blank: SONOFF's application boots again.
 hwlab target flash restore --plugin esprom --device $D --arg backup=$BK \
   --arg address=0x5D000 --arg length=0x1000 --arg confirm_protected=modify-protected-region \
   --token restore-flash --config allow_flash=true --yes
@@ -259,17 +302,17 @@ hwlab target flash restore --plugin esprom --device $D --arg backup=$BK --arg pa
   --token restore-flash --config allow_flash=true --yes
 ```
 
-The `zrh` NVS keys stay (the stock firmware ignores them). A whole-flash
-restore (`hwlab target flash restore … --arg backup=$BK`, with
-`confirm_protected`; the only way back from the product layout) also puts
-back the NVS of the backup's date: it rolls back stock settings changed
-since. SONOFF Dongle Flasher can also reinstall the stock firmware.
+(After `stock confirm`, `otadata` sector 0 holds the newer entry; restore
+the whole `otadata` partition to return to the backup's state.) The `zrh`
+NVS keys stay (SONOFF's firmware ignores them). A whole-flash restore also
+puts back the NVS of the backup's date: it rolls back SONOFF's settings
+changed since.
 
 ## Console (UART0, 115 200 8N1, the CP2102N port)
 
 | Command | What it does |
 |---|---|
-| `info` | firmware, chip, memory mode, partitions and layout verdict, running/boot slot, straps, last panic |
+| `info` | firmware, chip, memory mode, partitions and layout verdict, running/boot slot, what `ota_0` holds, what `files` holds, straps, last panic |
 | `board`, `board set <k=v …>`, `board clear` | profile pins; NCP wiring overrides (e.g. `baud=460800`), next boot |
 | `net`, `wifi set <ssid> [pw]`, `wifi clear` | Ethernet/Wi-Fi state; station credentials (the station starts when Ethernet has had no address for 10 s; next boot) |
 | `led <0-100>` | LED brightness |
@@ -279,6 +322,8 @@ since. SONOFF Dongle Flasher can also reinstall the stock firmware.
 | `mg24 ezsp info` | ASH reset (the NCP restarts), EZSP version negotiation (`hub-ezsp` host core), `getValue(VERSION_INFO)`, `getEui64`, `getMfgToken` (string, board name), `networkState` and, if joined, `getNetworkParameters`/`getNodeId`. Read-only |
 | `mg24 ezsp info init` | also `networkInit` (resumes a stored network; no form, leave or configuration), then an MG24 reset so the network does not keep running without a host |
 | `mg24 baud <rate>` | MG24 UART rate until the next boot |
+| `stock` | whether `ota_0` still holds SONOFF's application (project `Dongle-M`) and what `stock confirm` does, or why it cannot |
+| `stock confirm` | select `ota_0` in `otadata` (ESP-IDF verifies the image first) and restart into SONOFF's firmware |
 | `cpu [ms]`, `atomics` | CPU use per task; lost atomic updates between the cores (Rust atomics must lose none) |
 | `restart` | ESP32 restart |
 
@@ -292,26 +337,31 @@ stored network.
 
 ## Not in this stage
 
-- The hub application, the EZSP coordinator backend, the store on
-  `otastore`, self-update, backup/restore: after the backend selection.
+- The hub application, the EZSP coordinator backend, the `files` claim and
+  its way back, the OTA store on it, self-update, backup/restore: after
+  the backend selection.
 - **MG24 firmware updates** through the Gecko bootloader: the `donglem`
-  branch's updater (radio banks in its own 16 MB `hubdata`, ZRHP-based
+  branch's updater (radio banks in its own `hubdata`, ZRHP-based
   verification) does not port to an EZSP NCP, and the updater
   requirements of `coordinator-profiles.md` (backup export first,
   allow-list manifest, persisted state) are not met. Not compiled; the
-  `radio` partition is reserved for it.
+  `radio` area is reserved for it.
 - The ESP32-S3 SuperMini + MG24 bench profile of the `donglem` branch.
 
 ## HIL checklist (with the user's confirmation, after a fresh backup check)
 
-1. Flash the bring-up image as above; capture the boot log: PSRAM 2 MB
-   found, `memory mode psram`, stock table `Foreign`, running `ota_1`,
-   straps; `info` heap figures for the RAM budget.
+1. Flash the bring-up image over USB as above; capture the boot log: PSRAM
+   2 MB found, `memory mode psram`, stock table `Foreign`, running `ota_1`,
+   `ota_0` = SONOFF Dongle-M, `files` = LittleFS, straps; `info` heap
+   figures for the RAM budget.
 2. `atomics`: Rust atomics lose nothing on PSRAM (bare S32C1I may).
 3. Ethernet link and DHCP; Wi-Fi fallback with Ethernet unplugged (heap
    with Wi-Fi up); LED.
 4. `mg24 bootloader` banner (version), `mg24 ezsp info` (EZSP 13, EmberZNet
    7.4.x, EUI-64), with and without `init`.
 5. `restart` with Ethernet up (GPIO0 clock at a software reset).
-6. Back to stock (otadata sector 1 restore): the stock firmware boots and
-   works.
+6. `stock confirm`: SONOFF's firmware boots with its settings and stays
+   selected across resets (no rollback).
+7. From SONOFF's firmware: install `zrh-donglem-app.bin` through the web
+   console (Firmware → ESP32-D0WDR2-V3 → Upload & Flash Firmware); the hub
+   boots from `ota_1`.

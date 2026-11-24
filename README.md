@@ -191,7 +191,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim` |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
 | `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
-| `firmware/gateway`, `firmware/donglem` | SONOFF Dongle Max (classic ESP32 + EFR32MG24) firmware, board bring-up stage: Ethernet/Wi-Fi, LED, button, MG24 lines, read-only EZSP probe; stock and 16 MB product partition tables (`docs/dongle-max.md`) |
+| `firmware/gateway`, `firmware/donglem` | SONOFF Dongle Max (classic ESP32 + EFR32MG24) firmware, board bring-up stage: Ethernet/Wi-Fi, LED, button, MG24 lines, read-only EZSP probe, return to SONOFF's firmware; runs on SONOFF's unchanged partition table (`docs/dongle-max.md`) |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF; `CHIP=esp32` for the Dongle-M), optional size limit |
 | `tools/make-otadata.py` | One `otadata` sector selecting an OTA slot (the Dongle-M's first flash) |
 | `tools/size-report.py` | Firmware size breakdown of an ELF: bytes per ESP-IDF component / library and per Rust crate (flash code, rodata, IRAM, DRAM), largest symbols |
