@@ -28,7 +28,7 @@ use serde_json::Value as J;
 use sha2::{Digest, Sha256};
 use zdef::bank::{Bank, Inflate, MinizInflate};
 use zdef::sign::{Manifest, TrustedKey};
-use zigbee_zrhp::crc::crc32c;
+use hub_store::crc::crc32c;
 
 use super::data::{AreaWriter, DataFlash, SECTOR};
 use super::local::LocalDefs;

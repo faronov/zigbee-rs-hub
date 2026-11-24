@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 hub-devices = { workspace = true }
 hub-ncp = { workspace = true }
+hub-store = { workspace = true }
 zigbee-zrhp = { workspace = true, features = ["std"] }
 log = "0.4"
 miniz_oxide = "0.8"

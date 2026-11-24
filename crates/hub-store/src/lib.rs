@@ -9,6 +9,7 @@
 //! 16.1: everything shares the 128 KiB journal). Link keys and host-backed
 //! tables (`HOST_TABLES`) come later.
 
+pub mod crc;
 pub mod flash;
 pub mod journal;
 pub mod state;
