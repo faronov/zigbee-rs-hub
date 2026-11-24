@@ -511,7 +511,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 self.keep_link();
                 continue;
             }
-            self.expire();
+            // Callbacks that came before a deadline decide before it.
+            self.dispatch(false);
+            if self.rx.is_empty() {
+                self.expire();
+            }
             if self.refresh_pending {
                 self.refresh_network();
                 continue;
@@ -570,7 +574,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         if self.now() >= self.retry_at {
             self.start_session();
         } else {
-            let _ = self.host.pump(self.opts.poll);
+            if self.host.pump(self.opts.poll).is_err() {
+                // A transport that fails at once (adapter unplugged) must
+                // not spin the thread until the retry.
+                thread::sleep(self.opts.poll);
+            }
             while self.rx.try_recv().is_some() {}
         }
     }
@@ -928,8 +936,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     // ------------------------------------------------------------ session
 
     fn start_session(&mut self) {
-        self.state = SessionState::Negotiating;
-        self.publish();
+        // An incompatible NCP stays reported as such while it is retried.
+        if self.state != SessionState::Incompatible {
+            self.state = SessionState::Negotiating;
+            self.publish();
+        }
         self.held.clear();
         while self.rx.try_recv().is_some() {}
         self.lost = false;
@@ -958,7 +969,9 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     }
 
     fn retry_later(&mut self) {
-        self.state = SessionState::Down;
+        if self.state != SessionState::Incompatible {
+            self.state = SessionState::Down;
+        }
         self.lost = false;
         self.retry_at = self.now() + self.backoff_ms;
         let max = self.opts.retry_max.as_millis() as u64;
@@ -1357,7 +1370,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             } else {
                 self.keep_link();
             }
-            if self.up {
+            if self.up && self.rx.is_empty() {
                 self.expire();
             }
         }

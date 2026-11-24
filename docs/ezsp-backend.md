@@ -152,8 +152,10 @@ Permit join: `importTransientKey(FF…FF, "ZigBeeAlliance09")` (joining
 devices use the well-known key), the open trust center policy,
 `permitJoining(n)` and a ZDO Mgmt_Permit_Joining_req broadcast to 0xFFFC
 (or the request to one router only). At 0 or when the window ends: the
-closed policy and `clearTransientLinkKeys`. 255 ("for ever", not allowed
-from R21) is clamped to 254 s.
+closed policy and `clearTransientLinkKeys`. A request that fails half way
+is undone the same way (and `permitJoining(0)`), so nothing stays open that
+the hub does not report; a new request replaces the window of the previous
+one. 255 ("for ever", not allowed from R21) is clamped to 254 s.
 
 ## Requests
 
@@ -161,7 +163,8 @@ See the `hub_ezsp::coord` module docs. In short: tag ↔ `RequestId`;
 `Accepted` on the send response; `messageSentHandler` decides `Delivered`
 (acknowledged unicast) / `Sent` / `NotDelivered(NoAck)`; buffer and slot
 exhaustion is `Refused(Busy)`; no `messageSentHandler` within the deadline
-(60 s default) is `Unknown(Timeout)`; an NCP reset ends the requests on the
+(60 s default; checked only after the callbacks received before it) is
+`Unknown(Timeout)`; an NCP reset ends the requests on the
 NCP with `Unknown(DeliveryUnknown)` after `Session::Down` and keeps the
 queued ones for the next session. Control requests are barriers.
 `RemoveDevice` only forgets the address (the engine sends Mgmt_Leave_req;

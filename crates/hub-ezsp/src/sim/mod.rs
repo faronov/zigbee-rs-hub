@@ -188,6 +188,8 @@ pub struct SimNcp {
     random: u16,
     /// Callbacks sent just before the next response.
     early: Vec<Callback>,
+    /// The last `permitJoining` duration.
+    permit: u8,
 }
 
 fn default_config() -> BTreeMap<u8, u16> {
@@ -252,6 +254,7 @@ impl SimNcp {
             stall: None,
             random: 0x1234,
             early: Vec::new(),
+            permit: 0,
         }
     }
 
@@ -314,6 +317,11 @@ impl SimNcp {
         &self.transient_keys
     }
 
+    /// The duration of the last `permitJoining` (0: closed).
+    pub fn permit_joining(&self) -> u8 {
+        self.permit
+    }
+
     /// The last `setConcentrator`.
     pub fn concentrator(&self) -> Option<&Command> {
         self.concentrator.as_ref()
@@ -373,6 +381,7 @@ impl SimNcp {
         self.transient_keys.clear();
         self.concentrator = None;
         self.held.clear();
+        self.permit = 0;
     }
 
     fn handle_rx(&mut self, bytes: &[u8], now: u64) {
@@ -683,6 +692,7 @@ impl SimNcp {
             },
             Command::PermitJoining { duration } => {
                 if self.network_up {
+                    self.permit = duration;
                     let kind = if duration == 0 {
                         K::NetworkClosed
                     } else {

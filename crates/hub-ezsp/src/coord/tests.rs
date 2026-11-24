@@ -406,18 +406,30 @@ fn an_ncp_without_a_network_reports_none_and_forming_reports_it() {
     rig.finish();
 }
 
+/// Reported once, and the state stays `Incompatible` while the worker
+/// tries again (every `retry_max`).
 #[test]
-fn an_incompatible_ncp_is_reported_and_aps_refused() {
-    let mut rig = Rig::new(sim(12));
-    rig.until("incompatible", |l| {
-        l.iter()
-            .any(|e| matches!(e, CoordEvent::Session(s) if **s == SessionEvent::Incompatible))
-    });
-    assert_eq!(rig.coord().status().session, SessionState::Incompatible);
-    assert_eq!(
-        rig.coord().submit(unicast(1), None),
-        Err(CoordError::LinkDown)
-    );
+fn an_incompatible_ncp_is_reported_once_and_aps_refused() {
+    let mut o = opts();
+    o.retry_max = Duration::from_secs(1);
+    let mut rig = Rig::with(sim(12), o, Faults::none(), EVENT_SLOTS);
+    let incompatible =
+        |e: &CoordEvent| matches!(e, CoordEvent::Session(s) if **s == SessionEvent::Incompatible);
+    rig.until("incompatible", |l| l.iter().any(incompatible));
+    let versions = |r: &Rig| r.commands().iter().filter(|c| **c == id::VERSION).count();
+    let tried = versions(&rig);
+    let t = Instant::now();
+    while versions(&rig) < tried + 2 {
+        assert_eq!(rig.coord().status().session, SessionState::Incompatible);
+        assert_eq!(
+            rig.coord().submit(unicast(1), None),
+            Err(CoordError::LinkDown)
+        );
+        assert!(t.elapsed() < T);
+        thread::sleep(Duration::from_millis(1));
+    }
+    rig.drain();
+    assert_eq!(rig.log.iter().filter(|e| incompatible(e)).count(), 1);
     rig.finish();
 }
 
@@ -537,6 +549,59 @@ fn a_refusal_follows_the_callbacks_sent_before_the_response() {
         "{:#?}",
         rig.log
     );
+    rig.finish();
+}
+
+/// A request to an IEEE address the NCP does not know is refused after
+/// the callbacks that came before the lookup's response.
+#[test]
+fn an_unknown_ieee_is_refused_after_the_callbacks_sent_before_the_lookup() {
+    let mut rig = Rig::new(sim(14));
+    rig.next_up();
+    rig.sim.ncp(|n| {
+        let cb = incoming(n, 0x0BAD, 0x0104, 6, &[0x01]);
+        n.callback_before_next_response(cb);
+    });
+    let id = rig.submit(aps(ApsDst::Ieee(0x00AB_CDEF_0000_0002), true));
+    assert!(matches!(rig.outcome(id), Terminal::Refused(_)));
+    let ind = position(
+        &rig.log,
+        |e| matches!(e, CoordEvent::Indication(i) if i.src_nwk == 0x0BAD),
+    );
+    assert!(
+        ind.unwrap() < terminal(&rig.log, id).unwrap().0,
+        "{:#?}",
+        rig.log
+    );
+    rig.finish();
+}
+
+/// A `messageSentHandler` that came before the deadline, while the
+/// application was behind, decides the outcome: the deadline is checked
+/// only after the callbacks that came before it.
+#[test]
+fn a_deadline_does_not_overtake_a_message_sent_handler_already_received() {
+    let mut rig = Rig::with(sim(13), opts(), Faults::none(), 2);
+    rig.next_up();
+    rig.sim.ncp(|n| n.hold_message_sent(true));
+    let id = rig
+        .coord()
+        .submit(unicast(0x1234), Some(Duration::from_secs(3)))
+        .unwrap();
+    rig.ids.push(id);
+    rig.sim_until("sent", |n| n.held_message_sent() == 1);
+    rig.drain();
+    // The application falls behind: its queue (2) fills up.
+    for i in 0..8 {
+        rig.inject(|n| incoming(n, 0x1234, 0x0104, 6, &[i]));
+    }
+    rig.sim.ncp(|n| {
+        n.hold_message_sent(false);
+        n.release_message_sent(1);
+    });
+    // 6 s of virtual time with nobody draining: past the deadline.
+    thread::sleep(Duration::from_millis(600));
+    assert_eq!(rig.outcome(id), Terminal::Delivered);
     rig.finish();
 }
 
@@ -971,6 +1036,65 @@ fn permit_join_opens_the_trust_center_and_closes_it_again() {
         assert!(n.transient_keys().is_empty());
         assert_eq!(n.policy(PolicyId::TRUST_CENTER_POLICY), Some(0x02));
     });
+    rig.finish();
+}
+
+/// A permit join that fails half way (here the Mgmt_Permit_Joining_req
+/// broadcast: no buffer) leaves nothing open: neither the coordinator,
+/// nor the trust center policy, nor the transient key.
+#[test]
+fn a_failed_permit_join_leaves_nothing_open() {
+    let mut rig = Rig::new(sim(13));
+    rig.next_up();
+    rig.sim.ncp(|n| n.busy_sends(1));
+    let open = rig.submit(Request::PermitJoin {
+        duration_s: 60,
+        target: None,
+    });
+    assert_eq!(rig.outcome(open), Terminal::Refused(CoordError::Busy));
+    rig.sim.ncp(|n| {
+        assert_eq!(n.permit_joining(), 0);
+        assert!(n.transient_keys().is_empty());
+        assert_eq!(n.policy(PolicyId::TRUST_CENTER_POLICY), Some(0x02));
+    });
+    assert_eq!(rig.coord().status().permit_join_s, 0);
+    assert!(
+        !rig.log
+            .iter()
+            .any(|e| matches!(e, CoordEvent::PermitJoin { .. }))
+    );
+    rig.finish();
+}
+
+/// A permit join through a router waits for its delivery; the previous
+/// window ending meanwhile does not close the new one.
+#[test]
+fn a_new_permit_window_survives_the_end_of_the_previous_one() {
+    let mut rig = Rig::new(sim(13));
+    rig.next_up();
+    let first = rig.submit(Request::PermitJoin {
+        duration_s: 1,
+        target: None,
+    });
+    assert_eq!(rig.outcome(first), Terminal::Done(Reply::None));
+    rig.sim.ncp(|n| n.hold_message_sent(true));
+    let router = rig.submit(Request::PermitJoin {
+        duration_s: 60,
+        target: Some(0x1234),
+    });
+    rig.sim_until("router request", |n| n.held_message_sent() == 1);
+    // 3 s of virtual time: the first window has ended meanwhile.
+    thread::sleep(Duration::from_millis(300));
+    rig.sim.ncp(|n| {
+        n.hold_message_sent(false);
+        n.release_message_sent(usize::MAX);
+    });
+    assert_eq!(rig.outcome(router), Terminal::Done(Reply::None));
+    rig.sim.ncp(|n| {
+        assert_eq!(n.policy(PolicyId::TRUST_CENTER_POLICY), Some(0x03));
+        assert_eq!(n.transient_keys().len(), 1);
+    });
+    assert!(rig.coord().status().permit_join_s > 50);
     rig.finish();
 }
 

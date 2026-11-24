@@ -138,9 +138,21 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             group_id: 0,
             sequence: 0,
         };
-        let dst = match req.dst {
-            ApsDst::Nwk(n) => Some(n),
-            ApsDst::Ieee(ieee) => match self.resolve(ieee) {
+        let resolved = match req.dst {
+            ApsDst::Ieee(ieee) => {
+                let r = self.resolve(ieee);
+                // Callbacks that came before the lookup's response go
+                // first, whatever its outcome.
+                self.dispatch(true);
+                Some((ieee, r))
+            }
+            _ => None,
+        };
+        let dst = match (req.dst, resolved) {
+            (ApsDst::Nwk(n), _) => Some(n),
+            (ApsDst::Group(_), _) => None,
+            (ApsDst::Ieee(_), None) => unreachable!("resolved above"),
+            (ApsDst::Ieee(_), Some((ieee, r))) => match r {
                 Ok(Some(n)) => Some(n),
                 Ok(None) => {
                     let e = CoordError::described(
@@ -163,7 +175,6 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                     return;
                 }
             },
-            ApsDst::Group(_) => None,
         };
         let tag = self.alloc_tag();
         let (cmd, unicast, acked) = match (req.dst, dst) {
@@ -443,6 +454,37 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         target: Option<u16>,
     ) -> Result<Terminal, HostError> {
         let secs = secs.min(MAX_PERMIT_S);
+        // This request decides the window: the previous one does not close
+        // it while the request waits for the NCP.
+        let was_open = self.permit_until.take().is_some();
+        let r = self.open_joining(secs, target);
+        let ok = matches!(r, Ok(Terminal::Done(_)));
+        if secs == 0 || !ok {
+            // Closed, or not opened everywhere: nothing stays open that
+            // the hub does not report (best effort when the link is gone).
+            if !ok && secs > 0 && matches!(target, None | Some(0x0000)) {
+                let _ = self.host.permit_joining(0);
+            }
+            if let Err(e) = self.close_joining() {
+                self.link_error(&e);
+            }
+        } else {
+            self.permit_until = Some(self.now() + u64::from(secs) * 1000);
+        }
+        let remaining = if ok { u32::from(secs) } else { 0 };
+        self.permit_published = remaining;
+        self.publish();
+        if ok || was_open {
+            self.emit(CoordEvent::PermitJoin {
+                remaining_s: remaining,
+            });
+        }
+        r
+    }
+
+    /// The NCP's part of [`Self::permit_join`]; `Done` when every step
+    /// succeeded.
+    fn open_joining(&mut self, secs: u8, target: Option<u16>) -> Result<Terminal, HostError> {
         if secs > 0 {
             match self.host.call(&Command::ImportTransientKey {
                 eui64: ANY_EUI64,
@@ -478,18 +520,6 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 }
             }
         }
-        let now = self.now();
-        if secs == 0 {
-            self.permit_until = None;
-            self.close_joining()?;
-        } else {
-            self.permit_until = Some(now + u64::from(secs) * 1000);
-        }
-        self.permit_published = u32::from(secs);
-        self.publish();
-        self.emit(CoordEvent::PermitJoin {
-            remaining_s: u32::from(secs),
-        });
         Ok(Terminal::Done(Reply::None))
     }
 
