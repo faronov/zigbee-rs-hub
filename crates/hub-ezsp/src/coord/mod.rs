@@ -51,7 +51,7 @@
 //! | APS group | `sendMulticast` |
 //! | group membership | `setMulticastTableEntry`, replayed in every session |
 //! | permit join | transient ZigBeeAlliance09 key, trust center policy, `permitJoining`, ZDO Mgmt_Permit_Joining_req |
-//! | device removal | the address is forgotten; the engine sends Mgmt_Leave_req itself |
+//! | device removal | the address is forgotten; the engine sends Mgmt_Leave_req itself (EZSP `removeDevice` as a force removal: follow-up) |
 //! | device inventory | child table and neighbor table |
 //! | Green Power | refused ([`CoordError::Unsupported`]) until the GP follow-up |
 //!

@@ -227,8 +227,10 @@ devices left, route records, GP frames ignored).
   coordinator itself.
 - `sendMulticast.broadcastAddr` (EZSP ≥ 14) is 0xFFFD; undocumented.
 - The XOFF timeout (1 s) and the 10 ms UART slice are choices.
-- Leaves (`trustCenterJoinHandler` DEVICE_LEFT) have no neutral event
-  (hub-coord has `DeviceJoined` only); they are counted and logged.
+- Leaves: `trustCenterJoinHandler` DEVICE_LEFT becomes
+  `CoordEvent::DeviceLeft` with `rejoin: None` (the trust center's update
+  does not say); hub-app only logs it until PR H decides what a leave does
+  to the registry. The ZRHP adapter does not emit it yet.
 - `TxOptions::extended_timeout` is not applied (EmberZNet sets it per
   destination with `setExtendedTimeout`).
 - The operator's TX power lives in the worker; persisting it (backend key

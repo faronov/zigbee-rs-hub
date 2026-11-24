@@ -907,7 +907,7 @@ fn a_lossy_uart_still_ends_every_request_once() {
 // ------------------------------------------------------------ events
 
 #[test]
-fn joins_and_rejoins_are_reported_leaves_and_denials_are_not() {
+fn joins_rejoins_and_leaves_are_reported_denials_are_not() {
     let mut rig = Rig::new(sim(13));
     rig.next_up();
     let dev = 0x0015_8D00_0012_3456;
@@ -961,6 +961,19 @@ fn joins_and_rejoins_are_reported_leaves_and_denials_are_not() {
         })
         .collect();
     assert_eq!(joined, [(dev, 0x4321), (dev, 0x4322)]);
+    let left: Vec<&CoordEvent> = rig
+        .log
+        .iter()
+        .filter(|e| matches!(e, CoordEvent::DeviceLeft { .. }))
+        .collect();
+    assert_eq!(
+        left,
+        [&CoordEvent::DeviceLeft {
+            ieee: 0x98,
+            nwk: 0x4324,
+            rejoin: None
+        }]
+    );
     assert!(matches!(
         rig.sent().last(),
         Some(Command::SendUnicast {

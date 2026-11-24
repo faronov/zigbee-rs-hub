@@ -838,6 +838,11 @@ impl Runner {
                 self.engine.transport.nwk.insert(ieee, nwk);
                 self.engine.on_device_joined(ieee, nwk, now);
             }
+            // Logged only until PR H (backend selection) decides what a
+            // leave does to the registry.
+            CoordEvent::DeviceLeft { ieee, nwk, rejoin } => {
+                info!("app: device {ieee:016x} (0x{nwk:04X}) left, rejoin {rejoin:?}")
+            }
             CoordEvent::Gp(e) => self.engine.on_gp_event(*e, now),
             CoordEvent::NetworkState(c) => {
                 let state = match c {

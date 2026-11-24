@@ -723,11 +723,16 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             } => {
                 let ieee = new_node_eui64.to_u64();
                 if status == DeviceUpdate::DEVICE_LEFT {
-                    // No neutral event for leaves yet (hub-coord has
-                    // DeviceJoined only): the engine learns them from ZDO.
                     self.stats.devices_left += 1;
                     self.nwk_cache.retain(|(i, _)| *i != ieee);
                     info!("ezsp: {ieee:016X} left (0x{new_node_id:04X})");
+                    // The trust center's update does not say whether the
+                    // device rejoins.
+                    self.emit(CoordEvent::DeviceLeft {
+                        ieee,
+                        nwk: new_node_id,
+                        rejoin: None,
+                    });
                 } else if policy_decision == JoinDecision::DENY_JOIN {
                     info!("ezsp: join of {ieee:016X} denied");
                 } else {
