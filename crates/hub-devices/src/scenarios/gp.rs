@@ -996,6 +996,65 @@ fn on_device_binding_programs_pairing_and_translation_table() {
 }
 
 #[test]
+fn remote_answer_before_accepted_waits_for_its_tsn() {
+    use crate::transport::{Progress, Reply, Request, Terminal};
+    let mut b = bench(Some(COMBO));
+    b.hub.transport.manual = true;
+    let id = create(&mut b, ExecutorChoice::Device);
+    let (req, tsn) = pump(&mut b, T0 + 1000).remove(0);
+    assert!(matches!(req, GpRequest::RemoteSinkTableRequest { .. }));
+    let rid = b
+        .hub
+        .transport
+        .open
+        .iter()
+        .rev()
+        .find_map(|(i, r)| matches!(r, Request::Gp(_)).then_some(*i))
+        .unwrap();
+    // The target answers before the NCP has said which TSN it used.
+    let answer = GpEvent::RemoteSinkTable {
+        src_nwk: 0x4444,
+        zcl_tsn: tsn.unwrap(),
+        status: 0x8B,
+        records: vec![],
+    };
+    b.hub.on_gp_event(answer, T0 + 1050);
+    assert!(pump(&mut b, T0 + 1050).is_empty(), "the probe waits");
+    // Accepted: the answer is matched by its TSN, programming starts.
+    let p = Progress::Accepted { zcl_tsn: tsn };
+    b.hub.on_outcome(rid, p.into(), T0 + 1100);
+    let gp = pump(&mut b, T0 + 1100);
+    assert!(
+        matches!(gp[..], [(GpRequest::PairingConfiguration(_), Some(_))]),
+        "{gp:?}"
+    );
+    assert_eq!(binding(&b, id).executor, Some(Executor::Device));
+    b.hub
+        .on_outcome(rid, Terminal::Done(Reply::None).into(), T0 + 1100);
+    assert!(pump(&mut b, T0 + 1100).is_empty());
+    // An answer nothing waits for is dropped, not kept.
+    let pairing = b
+        .hub
+        .transport
+        .open
+        .iter()
+        .find_map(|(i, r)| {
+            matches!(r, Request::Gp(GpRequest::PairingConfiguration(_))).then_some(*i)
+        })
+        .unwrap();
+    b.hub
+        .on_outcome(pairing, Terminal::Done(Reply::None).into(), T0 + 1200);
+    let stray = GpEvent::RemoteStatus {
+        src_nwk: 0x4444,
+        zcl_tsn: 0x77,
+        command_id: 0x09,
+        zcl_status: 0,
+    };
+    b.hub.on_gp_event(stray, T0 + 1200);
+    assert!(b.hub.gp.early.is_empty());
+}
+
+#[test]
 fn on_device_binding_failures() {
     // FAILURE from the target at the Translation Table Update.
     let mut b = bench(Some(COMBO));

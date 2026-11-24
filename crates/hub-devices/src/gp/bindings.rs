@@ -7,8 +7,9 @@ use serde_json::{Map, Value as J, json};
 
 use super::types::*;
 use crate::device::{DeviceKind, Millis, ts};
+use crate::hub::control::Then;
 use crate::hub::{ApiError, Hub, HubEvent, Purpose};
-use crate::transport::{ApsDst, ApsRequest, TxOptions, ZigbeeTransport};
+use crate::transport::{ApsDst, ApsRequest, Request, TxOptions, ZigbeeTransport};
 use crate::zcl::frame::{ReadRecord, Status};
 use crate::zcl::{
     Direction, FrameType, PROFILE_GP, PROFILE_HA, ZclFrame, ZclHeader, ZclValue, cluster as cl,
@@ -589,28 +590,17 @@ impl<T: ZigbeeTransport> Hub<T> {
         req: GpRequest,
         now: Millis,
     ) {
-        match self.transport.gp_request(req.clone()) {
-            Ok(Some(tsn)) => {
-                self.gp.remote.insert(
-                    tsn,
-                    RemoteWait {
-                        binding,
-                        target: target.to_string(),
-                        nwk,
-                        step,
-                        sent_at: now,
-                        retries: 0,
-                        req,
-                    },
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                if let Some(id) = binding {
-                    self.binding_failed(id, None, format!("transport: {e}"));
-                }
-            }
-        }
+        let w = RemoteWait {
+            binding,
+            target: target.to_string(),
+            nwk,
+            step,
+            sent_at: now,
+            retries: 0,
+            req: req.clone(),
+        };
+        // Keyed by the ZCL TSN once the NCP accepts it (`Hub::on_outcome`).
+        self.control(Request::Gp(req), Then::GpRemote(Box::new(w)), None, now);
     }
 
     fn gpd_pairing(&self, gpd: GpdId, nwk: u16, actions: u8) -> PairingConfiguration {
@@ -728,7 +718,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .collect()
     }
 
-    fn binding_failed(&mut self, id: u32, zcl_status: Option<String>, reason: String) {
+    pub(crate) fn binding_failed(&mut self, id: u32, zcl_status: Option<String>, reason: String) {
         if let Some(b) = self.binding_mut(id) {
             b.state = BindState::Failed { zcl_status, reason };
         }
@@ -967,9 +957,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             if w.retries < REMOTE_RETRIES {
                 w.retries += 1;
                 w.sent_at = now;
-                if let Ok(Some(t)) = self.transport.gp_request(w.req.clone()) {
-                    self.gp.remote.insert(t, w);
-                }
+                let req = Request::Gp(w.req.clone());
+                self.control(req, Then::GpRemote(Box::new(w)), None, now);
                 continue;
             }
             match (w.binding, w.step) {
@@ -1257,7 +1246,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     extended_timeout: false,
                 },
             };
-            let _ = self.transport.aps_send(req);
+            let _ = self.transport.submit(Request::Aps(req));
             let _ = now;
         }
     }
