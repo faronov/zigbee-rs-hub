@@ -23,8 +23,19 @@ const MAX_EARLY: usize = 4;
 /// A control request in flight.
 pub(crate) struct Control {
     then: Then,
-    /// Ticket of the API answer it decides.
-    answer: Option<u64>,
+    /// The API answer it decides.
+    answer: Option<AnswerTo>,
+}
+
+/// An API answer that a control request decides.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AnswerTo {
+    ticket: u64,
+    /// The events when the request began: the answer goes before every
+    /// event the request caused, as when the handler returned it.
+    mark: usize,
+    /// `Hub::drains` then: after a drain the mark no longer applies.
+    drains: u64,
 }
 
 /// What follows the outcome of a control request.
@@ -127,7 +138,13 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// Submits a control request; a refusal ends it at once.
-    pub(crate) fn control(&mut self, req: Request, then: Then, answer: Option<u64>, now: Millis) {
+    pub(crate) fn control(
+        &mut self,
+        req: Request,
+        then: Then,
+        answer: Option<AnswerTo>,
+        now: Millis,
+    ) {
         match self.transport.submit(req) {
             Ok(id) => {
                 self.controls.insert(id, Control { then, answer });
@@ -139,24 +156,29 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
-    /// A ticket for an API answer that a control request decides.
-    pub(crate) fn answer_ticket(&mut self) -> u64 {
+    /// A ticket for an API answer that a control request decides; taken
+    /// before the request emits any event.
+    pub(crate) fn answer_ticket(&mut self) -> AnswerTo {
         self.answers += 1;
-        ANSWER_TICKETS | self.answers
+        AnswerTo {
+            ticket: ANSWER_TICKETS | self.answers,
+            mark: self.events.len(),
+            drains: self.drains,
+        }
     }
 
-    /// The API answer `ticket`: its result when the control request already
+    /// The API answer `a`: its result when the control request already
     /// ended, otherwise `null` and the ticket left for the API
     /// ([`Self::take_deferred`]).
-    pub(crate) fn answer(&mut self, ticket: u64) -> Result<J, ApiError> {
+    pub(crate) fn answer(&mut self, a: AnswerTo) -> Result<J, ApiError> {
         let i = self
             .events
             .iter()
-            .position(|e| matches!(e, HubEvent::Answer { ticket: t, .. } if *t == ticket));
+            .position(|e| matches!(e, HubEvent::Answer { ticket, .. } if *ticket == a.ticket));
         match i.map(|i| self.events.remove(i)) {
             Some(HubEvent::Answer { result, .. }) => result,
             _ => {
-                self.deferred = Some(ticket);
+                self.deferred = Some(a.ticket);
                 Ok(J::Null)
             }
         }
@@ -170,9 +192,7 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     fn finish(&mut self, c: Control, r: Result<(), CoordError>, now: Millis) {
         let Control { then, answer } = c;
-        // The answer goes before the events of what follows, as it did
-        // when the handler returned it.
-        let mark = self.events.len();
+        let start = self.events.len();
         let busy = |e: CoordError| ApiError::new("busy", e.to_string());
         let result = match then {
             Then::Nothing => None,
@@ -222,8 +242,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                 None
             }
         };
-        if let (Some(ticket), Some(result)) = (answer, result) {
-            let at = mark.min(self.events.len());
+        if let (Some(a), Some(result)) = (answer, result) {
+            // Before the events of the request, as when the handler returned
+            // it; once those went out, before the events of what follows.
+            let at = if a.drains == self.drains {
+                a.mark
+            } else {
+                start
+            };
+            let at = at.min(self.events.len());
+            let ticket = a.ticket;
             self.events.insert(at, HubEvent::Answer { ticket, result });
         }
     }

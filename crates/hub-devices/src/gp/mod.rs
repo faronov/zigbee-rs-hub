@@ -18,7 +18,7 @@ use serde_json::{Value as J, json};
 use crate::device::{Device, DeviceKind, GpState, Millis, ts};
 use crate::expr::Value;
 use crate::fingerprint::{EndpointFp, GpFingerprint};
-use crate::hub::control::{GpRemoved, Then};
+use crate::hub::control::{AnswerTo, GpRemoved, Then};
 use crate::hub::{ApiError, DKey, DevEnv, Hub, HubEvent, eval_trigger, set_value};
 use crate::model::{Binding, DeviceField, TriggerSource};
 use crate::transport::{Request, ZigbeeTransport};
@@ -664,6 +664,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         removed: GpRemoved,
         now: Millis,
     ) -> Result<J, ApiError> {
+        let ticket = self.answer_ticket();
         let ids: Vec<u32> = self
             .gp
             .bindings
@@ -674,7 +675,6 @@ impl<T: ZigbeeTransport> Hub<T> {
         for b in ids {
             let _ = self.delete_binding(b, now);
         }
-        let ticket = self.answer_ticket();
         let req = GpRequest::SinkRemove {
             gpd_id,
             flags: u8::from(send_remove),
@@ -711,7 +711,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         duration_s: u16,
         involve_proxies: bool,
         exit_on_first_pairing: bool,
-        answer: Option<u64>,
+        answer: Option<AnswerTo>,
         now: Millis,
     ) {
         let flags = u8::from(involve_proxies) | (u8::from(exit_on_first_pairing) << 1);

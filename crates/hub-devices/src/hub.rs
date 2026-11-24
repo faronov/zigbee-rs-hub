@@ -385,6 +385,8 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) controls: BTreeMap<RequestId, control::Control>,
     /// Answer tickets issued.
     answers: u64,
+    /// Times the events were drained.
+    drains: u64,
     /// The answer ticket of the request being handled, when its result
     /// follows later.
     pub(crate) deferred: Option<u64>,
@@ -476,6 +478,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             tickets: BTreeMap::new(),
             controls: BTreeMap::new(),
             answers: 0,
+            drains: 0,
             deferred: None,
             #[cfg(feature = "advanced")]
             frame_tap: false,
@@ -497,6 +500,7 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Takes the outbox.
     pub fn drain_events(&mut self) -> Vec<HubEvent> {
+        self.drains += 1;
         std::mem::take(&mut self.events)
     }
 

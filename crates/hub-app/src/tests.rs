@@ -339,6 +339,35 @@ fn refused_control_requests_answer_as_before() {
     r.sim.stop();
 }
 
+#[test]
+fn automation_group_delete_is_done_before_the_next_action() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let c = call(&app, sid, &rx, 1, json!({"type": "groups/create", "name": "a", "group": 5}));
+    assert_eq!(c["result"]["hub_member"], true, "{c}");
+    // The ID is free again for the next action.
+    let rule = json!({"id": "re", "actions": [
+        {"type": "request", "request": {"type": "groups/delete", "group": 5}},
+        {"type": "request", "request": {"type": "groups/create", "name": "b", "group": 5}},
+    ]});
+    let c = call(&app, sid, &rx, 2, json!({"type": "automations/create", "rule": rule}));
+    assert_eq!(c["success"], true, "{c}");
+    let c = call(&app, sid, &rx, 3, json!({"type": "automations/run", "automation": "re"}));
+    let t = &c["result"]["trace"];
+    assert_eq!(t["actions"][0]["result"], "ok", "{c}");
+    assert_eq!(t["actions"][1]["result"], "ok", "{c}");
+    let c = call(&app, sid, &rx, 4, json!({"type": "groups/list"}));
+    let groups = c["result"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{c}");
+    assert_eq!((groups[0]["id"].as_u64(), groups[0]["name"].as_str()), (Some(5), Some("b")), "{c}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 fn permit_events(rx: &Receiver<String>, until: impl Fn(&[u64]) -> bool) -> Vec<u64> {
     let mut seen = Vec::new();
     let t = std::time::Instant::now();

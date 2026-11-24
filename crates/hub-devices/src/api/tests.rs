@@ -1084,3 +1084,71 @@ fn control_request_results_follow_their_outcome() {
     assert!(hub.device("gp:00f40003").is_none());
     assert!(hub.transport.open.is_empty());
 }
+
+#[test]
+fn deferred_result_precedes_the_events_of_its_request() {
+    use crate::transport::{Reply, Terminal};
+    let mut hub = hub_with(&["gp-zigbee-rs-switch"]);
+    let mut api = ApiServer::new("hub", "t");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type":"auth","token":"t"}"#, T0);
+    let mut sim = Sim::default();
+    sim.devices.push(light());
+    sim.join(&mut hub, 0x0017880100aabbcc, T0);
+    let gpd = crate::gp::types::GpdId::SrcId(0x00F4_0003);
+    let record = crate::gp::types::GpSinkRecord {
+        gpd_id: gpd,
+        device_id: 2,
+        communication_mode: 2,
+        group: 0x0B84,
+        assigned_alias: 0xFFFF,
+        flags: 0,
+        security_level: 0,
+        key_type: 0,
+        key: None,
+        frame_counter: 1,
+        groupcast_radius: 0,
+    };
+    let ev = crate::gp::types::GpEvent::Commissioned {
+        gpd_id: gpd,
+        device_id: 0x02,
+        flags: 0,
+        record,
+    };
+    hub.on_gp_event(ev, T0);
+    let r = call(
+        &mut api,
+        &mut hub,
+        s,
+        1,
+        json!({"type": "gp/bindings/create", "gpd": "gp:00f40003", "trigger": {"command_id": 0x22},
+               "target": {"device": "zb:0017880100aabbcc", "endpoint": 11},
+               "action": {"cluster": 6, "command": 2, "payload": {"mode": "fixed", "bytes": []}}, "executor": "hub"}),
+    );
+    assert_eq!(r["result"]["state"], "active", "{r}");
+    let sub = r#"{"id":2,"type":"subscribe","topics":["devices","gp"]}"#;
+    assert_eq!(api.handle_text(&mut hub, s, sub, T0).len(), 2);
+    api.pump(&mut hub);
+    // As a backend answers: after the request returned.
+    hub.transport.manual = true;
+    let text = r#"{"id":3,"type":"devices/remove","device":"gp:00f40003"}"#;
+    assert!(api.handle_text(&mut hub, s, text, T0).is_empty());
+    let (id, _) = hub.transport.open.pop().unwrap();
+    hub.on_outcome(id, Terminal::Done(Reply::None).into(), T0);
+    let out: Vec<J> = api
+        .pump(&mut hub)
+        .into_iter()
+        .map(|(_, f)| serde_json::from_str(&f).unwrap())
+        .collect();
+    let kinds: Vec<String> = out
+        .iter()
+        .map(|f| match f["type"].as_str() {
+            Some("event") => f["event"]["topic"].as_str().unwrap_or("").to_string(),
+            t => t.unwrap_or("").to_string(),
+        })
+        .collect();
+    // The result first, as when it was answered at once.
+    assert_eq!(kinds, ["result", "gp/binding", "device_removed"], "{out:?}");
+    assert_eq!(out[0]["id"], 3);
+    assert_eq!(out[1]["event"]["state"], "removed");
+}

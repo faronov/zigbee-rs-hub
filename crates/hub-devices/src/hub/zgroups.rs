@@ -20,7 +20,7 @@
 //! from (`queued` in the records). Records are JSON values throughout
 //! (API, store, backup): no serde derives, which keeps the flash small.
 
-use super::control::{GroupTail, Then};
+use super::control::{AnswerTo, GroupTail, Then};
 use super::*;
 use crate::commands::{Action, CommandAck};
 use crate::transport::{CoordError, Request};
@@ -1307,7 +1307,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         id: u16,
         add: bool,
         tail: GroupTail,
-        answer: Option<u64>,
+        answer: Option<AnswerTo>,
         now: Millis,
     ) {
         let req = Request::Group {

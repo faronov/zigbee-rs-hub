@@ -493,10 +493,10 @@ impl AppWorld<'_> {
         let id = *self.next_id;
         req["id"] = id.into();
         let frames = self.api.handle_text(self.engine, AUTOMATIONS_SESSION, &req.to_string(), self.now);
+        // What the request's control requests decide is done before the
+        // rule's next action, as the transport answers them in place.
+        settle(self.engine, self.now);
         if frames.is_empty() {
-            // A result a control request decides: known once its outcome
-            // is in, as the transport answers those requests in place.
-            settle(self.engine, self.now);
             return (id, self.api.take_result(self.engine, AUTOMATIONS_SESSION, id));
         }
         (id, frames.first().and_then(|f| reply(f)).map(|(_, r)| r))
