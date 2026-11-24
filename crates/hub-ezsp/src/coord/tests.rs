@@ -1284,6 +1284,92 @@ fn admin_scans_tables_channel_change_zdo_and_diagnostics() {
     rig.finish();
 }
 
+/// The tag of an admin ZDO request is free once its messageSentHandler
+/// came; the response that ends the wait later must not touch the request
+/// that took the tag meanwhile (EZSP 13: 8-bit tags wrap after 255 sends).
+#[test]
+fn a_zdo_wait_does_not_touch_a_request_that_reused_its_tag() {
+    let mut rig = Rig::new(sim(13));
+    rig.next_up();
+    let admin = rig.admin.clone();
+    let zdo = thread::spawn(move || {
+        admin.zdo_request(0x1111, 0x0031, &[0x42, 0x00], Duration::from_secs(600))
+    });
+    let is_zdo =
+        |c: &Command| matches!(c, Command::SendUnicast { aps, .. } if aps.cluster_id == 0x0031);
+    rig.sim_until("ZDO sent", |n| n.sent().iter().any(|m| is_zdo(&m.command)));
+    // Through the other 254 tags while the response is awaited.
+    let done: Vec<RequestId> = (0..250).map(|_| rig.submit(unicast(0x1234))).collect();
+    for id in &done {
+        assert_eq!(rig.outcome(*id), Terminal::Delivered);
+    }
+    rig.sim.ncp(|n| n.hold_message_sent(true));
+    let held: Vec<RequestId> = (0..20).map(|_| rig.submit(unicast(0x1234))).collect();
+    rig.sim_until("held", |n| n.held_message_sent() == 20);
+    let tags: Vec<u16> = rig
+        .sent()
+        .iter()
+        .filter_map(|c| match c {
+            Command::SendUnicast { tag, .. } => Some(*tag),
+            _ => None,
+        })
+        .collect();
+    let zdo_tag = tags[0];
+    assert!(
+        tags[tags.len() - 20..].contains(&zdo_tag),
+        "the tag was taken again"
+    );
+    rig.inject(|n| incoming(n, 0x1111, 0, 0x8031, &[0x42, 0x00]));
+    assert_eq!(zdo.join().unwrap(), Ok(vec![0x00]));
+    rig.sim.ncp(|n| {
+        n.hold_message_sent(false);
+        n.release_message_sent(usize::MAX);
+    });
+    for id in &held {
+        assert_eq!(rig.outcome(*id), Terminal::Delivered);
+    }
+    rig.finish();
+}
+
+/// Only NOT_JOINED says the NCP stores no network. Another networkInit
+/// failure leaves the network unknown, and forming (which would overwrite
+/// a network still in the NCP's NVM) is refused.
+#[test]
+fn a_failed_network_init_reports_unknown_and_refuses_to_form() {
+    let mut rig = Rig::new(SimConfig {
+        network_init_fails: true,
+        ..sim(13)
+    });
+    rig.next_up();
+    let st = rig.coord().status();
+    assert_eq!(st.network_state, NetState::FormedDown);
+    assert_eq!(st.ownership, NetworkOwnership::Unknown);
+    assert!(
+        rig.log
+            .contains(&CoordEvent::Ownership(Box::new(NetworkOwnership::Unknown)))
+    );
+    let e = rig
+        .admin
+        .form(FormParams {
+            channel_mask: 1 << 11,
+            ..FormParams::default()
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            e.meaning(),
+            CoordError::Backend {
+                kind: Kind::InvalidState,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    let c = rig.commands();
+    assert!(!c.contains(&id::FORM_NETWORK) && !c.contains(&id::SET_INITIAL_SECURITY_STATE));
+    rig.finish();
+}
+
 #[test]
 fn leave_reset_clears_the_network_and_a_new_one_can_be_formed() {
     let mut rig = Rig::new(sim(14));

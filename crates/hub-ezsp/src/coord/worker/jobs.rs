@@ -118,7 +118,15 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// no frame counter reset, encrypted key required, a random root key
     /// hashed per device).
     pub(super) fn form(&mut self, p: FormParams) -> Result<NetworkParams, CoordError> {
-        if self.net == NetState::Up {
+        // Only over a definite "no network" (networkInit NOT_JOINED, or
+        // after leave_reset): the network is in the NCP's NVM, a form
+        // would overwrite one that is merely down or unreadable.
+        if self.ownership != NetworkOwnership::NoNetwork {
+            let why = if self.net == NetState::Up {
+                "the NCP already runs a network"
+            } else {
+                "the NCP may still store a network (leave_reset first)"
+            };
             return Err(CoordError::described(
                 CoordError::Backend {
                     code: Code {
@@ -128,7 +136,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                     },
                     kind: Kind::InvalidState,
                 },
-                "the NCP already runs a network",
+                why,
             ));
         }
         let mask = p.channel_mask & 0x07FF_F800;

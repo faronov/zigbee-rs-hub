@@ -356,6 +356,8 @@ struct Inflight {
 
 /// An admin ZDO request waiting for its delivery and response.
 struct ZdoWait {
+    /// The message tag while the NCP holds the request: 0 once its
+    /// `messageSentHandler` came and the tag is free for other sends.
     tag: u16,
     nwk: u16,
     cluster: u16,
@@ -875,6 +877,9 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                     let now = self.now();
                     let w = &mut self.zdo[w];
                     w.delivered = true;
+                    // The NCP is done with the tag: another send may take
+                    // it while the response is awaited.
+                    w.tag = 0;
                     w.deadline = now + w.t_ms;
                 } else {
                     let w = self.zdo.remove(w);
@@ -912,7 +917,8 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                     && message.first() == Some(&w.tsn)
             }) {
                 let w = self.zdo.remove(i);
-                self.inflight.retain(|f| f.tag != w.tag);
+                let now = self.now();
+                self.release_zdo_tag(w.tag, now);
                 w.slot.answer(Answer::Zdo(Ok(message[1..].to_vec())));
             }
         }
@@ -921,6 +927,22 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 self.learn(ieee, ind.src_nwk);
             }
             self.emit(CoordEvent::Indication(ind));
+        }
+    }
+
+    /// A ZDO wait ended before the `messageSentHandler` of its request: the
+    /// tag stays reserved for that late callback (as a timed-out request's).
+    /// Only the wait's own entry is touched; tag 0 means it was released.
+    fn release_zdo_tag(&mut self, tag: u16, now: u64) {
+        if tag == 0 {
+            return;
+        }
+        if let Some(f) = self
+            .inflight
+            .iter_mut()
+            .find(|f| f.tag == tag && matches!(f.owner, Owner::Zdo))
+        {
+            f.owner = Owner::Expired(now);
         }
     }
 
@@ -1061,13 +1083,21 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         }
         let init = self.host.network_init(NetworkInitBitmask::NO_OPTIONS)?;
         self.network = None;
-        self.ownership = NetworkOwnership::NoNetwork;
-        if init.is_success() {
+        // Only NOT_JOINED says the NCP stores no network: forming is
+        // allowed then alone. Any other failure may hide a stored network
+        // (NcpNv): unknown, and not overwritten.
+        if init.kind() == StatusKind::NotJoined {
+            self.net = NetState::None;
+            self.ownership = NetworkOwnership::NoNetwork;
+        } else {
             self.net = NetState::FormedDown;
-            let deadline = self.now() + self.opts.network_up_timeout.as_millis() as u64;
-            self.wait(deadline, |w| w.net == NetState::Up);
-        } else if init.kind() != StatusKind::NotJoined {
-            warn!("ezsp: networkInit: {init:?}");
+            self.ownership = NetworkOwnership::Unknown;
+            if init.is_success() {
+                let deadline = self.now() + self.opts.network_up_timeout.as_millis() as u64;
+                self.wait(deadline, |w| w.net == NetState::Up);
+            } else {
+                warn!("ezsp: networkInit: {init:?}; the NCP's network is unknown");
+            }
         }
         self.eui64 = self.host.get_eui64()?;
         let board = self.mfg_string(MfgTokenId::BOARD_NAME)?;
@@ -1079,8 +1109,6 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.replay_groups()?;
         if self.net == NetState::Up {
             self.after_network_up()?;
-        } else if init.is_success() {
-            self.ownership = NetworkOwnership::Unknown;
         }
         self.info = Some(Arc::new(NcpInfo {
             fw: firmware_name(version_info.as_deref(), &info),

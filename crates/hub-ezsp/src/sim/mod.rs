@@ -70,6 +70,9 @@ pub struct SimConfig {
     pub boot_ms: u64,
     /// A network is stored: `networkInit` succeeds.
     pub network_formed: bool,
+    /// `networkInit` fails with ERR_FATAL (`SL_STATUS_FAIL` from EZSP 14)
+    /// whether or not a network is stored.
+    pub network_init_fails: bool,
     pub eui64: Eui64,
     pub node_id: NodeId,
     pub node_type: NodeType,
@@ -111,6 +114,7 @@ impl Default for SimConfig {
             stack_version: StackVersion(0x8230),
             boot_ms: 0,
             network_formed: true,
+            network_init_fails: false,
             eui64: Eui64::from_u64(0x00_0B_57_FF_FE_12_34_56),
             node_id: 0x0000,
             node_type: NodeType::COORDINATOR,
@@ -649,7 +653,11 @@ impl SimNcp {
                 Response::AddEndpoint { status }
             }
             Command::NetworkInit { .. } => {
-                if self.cfg.network_formed {
+                if self.cfg.network_init_fails {
+                    Response::NetworkInit {
+                        status: Self::ember(v, EmberStatus::ERR_FATAL),
+                    }
+                } else if self.cfg.network_formed {
                     self.network_up = true;
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, Ember, K::NetworkUp),

@@ -314,9 +314,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                         "no messageSentHandler in time",
                     )
                 };
-                if let Some(f) = self.inflight.iter_mut().find(|f| f.tag == w.tag) {
-                    f.owner = Owner::Expired(now);
-                }
+                self.release_zdo_tag(w.tag, now);
                 w.slot.answer(Answer::Zdo(Err(e)));
             } else {
                 i += 1;
@@ -600,8 +598,22 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 .any(|f| f.tag == tag && matches!(f.owner, Owner::Wait(Some(_))))
         };
         self.wait(deadline, sent);
-        let i = self.inflight.iter().position(|f| f.tag == tag);
-        match i.map(|i| self.inflight.remove(i).owner) {
+        let i = self
+            .inflight
+            .iter()
+            .position(|f| f.tag == tag && matches!(f.owner, Owner::Wait(_)));
+        let now = self.now();
+        let owner = i.map(|i| {
+            // Without its messageSentHandler the tag stays reserved for
+            // the late callback.
+            let reserved = matches!(self.inflight[i].owner, Owner::Wait(None));
+            if reserved {
+                std::mem::replace(&mut self.inflight[i].owner, Owner::Expired(now))
+            } else {
+                self.inflight.remove(i).owner
+            }
+        });
+        match owner {
             Some(Owner::Wait(Some(r))) => Ok(r),
             _ if self.lost => Ok(Err(CoordError::described(
                 CoordError::DeliveryUnknown,
