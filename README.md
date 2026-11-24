@@ -1212,11 +1212,11 @@ Hardware (octal 4 MB lab board, lab build with `ota` of this branch
 at 6efb7ab): the zigbee-rs C6 updated twice by streaming, with the client
 away and a hub restart mid-download, no panic, internal heap flat
 (results in [docs/ota.md](docs/ota.md#hardware-results)); not yet on
-hardware: the 8 MB store. App image vs main (35fb5ac, quad PSRAM, CI):
-8 MB (`mqtt,advanced,ota-store`) 2 932 608 B, +134 304 B, 93.2 % of the
-3 MiB slot; 4 MB (`mqtt`, no Zigbee OTA) 2 781 248 B, +4 112 B (generic
+hardware: the 8 MB store. App image vs main (3c777d2, quad PSRAM, CI):
+8 MB (`mqtt,advanced,ota-store`) 2 933 504 B, +131 232 B, 93.3 % of the
+3 MiB slot; 4 MB (`mqtt`, no Zigbee OTA) 2 785 520 B, +3 632 B (generic
 plumbing kept in every image: app clusters and their outcomes, events
-serialized once), 92.3 % of the 2 944 KiB slot; no static RAM. Open: hub self-OTA must take the
+serialized once), 92.4 % of the 2 944 KiB slot; no static RAM. Open: hub self-OTA must take the
 app-slot lock. zigbee-rs devices advertise OTA manufacturer code 0x6D6B
 (devices on older firmware: one transition file with 0x1234).
 
