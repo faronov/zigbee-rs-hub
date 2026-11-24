@@ -5,12 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Desktop runner of the zigbee-rs-hub ZRHP host core: the real NCP through the phase-0 bridge, or a simulated NCP"
+description = "Desktop runner of the zigbee-rs-hub ZRHP host core (the real NCP through the phase-0 bridge, or a simulated NCP) and of the hub app on the EZSP backend's simulated NCP"
 publish = false
 
 [dependencies]
 hub-ncp = { workspace = true, features = ["sim"] }
-hub-app = { workspace = true, features = ["advanced", "ota-store"] }
+hub-app = { workspace = true, features = ["advanced", "ota-store", "zrhp", "ezsp"] }
+# `--backend ezsp --sim`: the simulated EmberZNet NCP.
+hub-ezsp = { workspace = true, features = ["sim"] }
 hub-ota = { workspace = true, features = ["store"] }
 sha2 = "0.10"
 # `--sim-devices`: the engine's device simulator behind the simulated NCP.

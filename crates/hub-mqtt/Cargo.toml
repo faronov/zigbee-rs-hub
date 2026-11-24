@@ -9,12 +9,15 @@ description = "zigbee-rs-hub MQTT bridge with Zigbee2MQTT-compatible topics and 
 publish = false
 
 [dependencies]
+# No coordinator backend here: the firmware selects it.
 hub-app = { workspace = true }
 hub-devices = { workspace = true }
 serde_json = "1"
 log = "0.4"
 
 [dev-dependencies]
+# The tests run the app on the ZRHP host core's simulated NCP.
+hub-app = { workspace = true, features = ["zrhp"] }
 hub-devices = { workspace = true, features = ["sim"] }
 hub-ncp = { workspace = true, features = ["sim"] }
 zigbee-zrhp = { workspace = true, features = ["std"] }
