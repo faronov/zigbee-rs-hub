@@ -28,7 +28,7 @@ GP bindings). `std`, sans-IO, host-tested without hardware.
 | `gp` | GP events, commissioning, generic GP tier, GP reports 0xA0–0xA3, GP definitions, GP bindings (on-device and hub-side) | 13 |
 | `hub::zgroups` | Zigbee groups (ZCL Groups, hub endpoint via `NWK_GROUP_MEMBERSHIP`), group devices/entities with aggregated state and groupcast commands, scenes (ZCL Scenes), bindings (Bind/Unbind/Mgmt_Bind), persistence records | 14.9 |
 | `api` | WebSocket JSON message model and a transport-free `ApiServer` (auth, subscriptions with snapshot + `seq`, handlers) | 14 |
-| `transport` | `ZigbeeTransport` trait (the boundary to the ZRHP host core) and `MockTransport` | 2 |
+| `transport` | `ZigbeeTransport` trait (the boundary to the ZRHP host core) and `MockTransport`; `ApsRequest`, `ApsIndication`, `ApsDst`, `TxOptions` are re-exported from `hub-coord` | 2 |
 | `persist` | `DeviceSnapshot`: what of a device survives a restart (no measured values), `Hub::snapshot_device` / `restore_device`; stored by `hub-app`'s registry | 3, 16.1 |
 
 ## Boundary to the ZRHP host core (`hub-ncp`; adapter: `crates/hub-app`)
@@ -45,7 +45,7 @@ everything incoming is a method call with the current time.
 | `permit_join(duration, target)` | `Hub::permit_join(secs)` (whole network; per-router targets are not in phase1) |
 | `Hub::on_aps_indication` | `EVT_APS_DATA_INDICATION` from `Hub::subscribe()` |
 | `Hub::on_device_joined` | `EVT_DEVICE_JOINED` with an admitted decision |
-| `Hub::on_gp_event` | `EVT_GP_FRAME`, `EVT_GP_COMMISSIONING`, `EVT_GP_COMMISSIONED`, `EVT_GP_COMMISSIONING_FAILED`, `EVT_GP_DECOMMISSIONED`, `EVT_GP_REMOTE_*` (owned mirrors in `gp::types`, field names 1:1 with `zigbee_zrhp::msg::gp`) |
+| `Hub::on_gp_event` | `EVT_GP_FRAME`, `EVT_GP_COMMISSIONING`, `EVT_GP_COMMISSIONED`, `EVT_GP_COMMISSIONING_FAILED`, `EVT_GP_DECOMMISSIONED`, `EVT_GP_REMOTE_*` (owned mirrors in `gp::types`, re-exported from `hub_coord::gp`, field names 1:1 with `zigbee_zrhp::msg::gp`) |
 | `Hub::tick(now)` | a 1 s timer |
 
 The hub endpoint (1, HA profile) must be registered with `add_endpoint`.
