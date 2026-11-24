@@ -21,7 +21,7 @@
 //! (`ota/status` `tx`, `tx_failed` per device): the device's own requests
 //! and the server's timers drive the transfer, as before.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use hub_devices::device::{Device as EngineDevice, Millis};
 use hub_devices::hub::{ApiError, Hub as Engine};
@@ -138,13 +138,12 @@ pub struct Ota {
     last_sweep: Millis,
     /// Free heap probe (`None`: the desktop).
     platform: Option<std::sync::Arc<dyn crate::platform::Platform>>,
-    /// The server's frames in flight: device and ZCL command (`global`,
-    /// `cmd`).
-    tx: BTreeMap<RequestId, (String, bool, u8)>,
+    /// The server's frames in flight.
+    tx: Vec<RequestId>,
     /// Outcomes of the server's frames.
     tx_counts: TxCounters,
     /// Frames per device not delivered or refused, since the start.
-    tx_failed: BTreeMap<String, u32>,
+    tx_failed: Vec<(String, u32)>,
 }
 
 /// What became of the server's frames (`ota/status` `tx`).
@@ -208,9 +207,9 @@ impl Ota {
             snapshot_dirty: true,
             last_sweep: 0,
             platform: cfg.platform.clone(),
-            tx: BTreeMap::new(),
+            tx: Vec::new(),
             tx_counts: TxCounters::default(),
-            tx_failed: BTreeMap::new(),
+            tx_failed: Vec::new(),
         }
     }
 
@@ -407,6 +406,7 @@ impl Ota {
         if now.saturating_sub(self.last_sweep) >= 60_000 {
             self.last_sweep = now;
             let gone: Vec<String> = self.server.devices.keys().filter(|id| engine.device(id).is_none()).cloned().collect();
+            self.tx_failed.retain(|(d, _)| engine.device(d).is_some());
             for id in gone {
                 self.server.devices.remove(&id);
                 kv::with(kv, |s| {
@@ -511,18 +511,24 @@ impl Ota {
     /// Sends a frame of the server: a request of the ticketed transport,
     /// kept until its outcome.
     fn send<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, device: &str, ep: u8, frame: ZclFrame, now: Millis) {
-        let (global, cmd) = (frame.header.frame_type == FrameType::Global, frame.header.cmd);
         match engine.send_app_zcl(device, ep, CLUSTER, frame, now) {
             Ok(Some(id)) => {
                 self.tx_counts.submitted += 1;
-                self.tx.insert(id, (device.to_string(), global, cmd));
+                self.tx.push(id);
             }
             Ok(None) => self.tx_counts.queued += 1,
             Err(e) => {
                 self.tx_counts.refused += 1;
-                *self.tx_failed.entry(device.to_string()).or_default() += 1;
-                debug!("ota: {device}: {} 0x{cmd:02X} refused: {e}", if global { "global" } else { "command" });
+                self.tx_failure(device, &e);
             }
+        }
+    }
+
+    fn tx_failure(&mut self, device: &str, e: &hub_devices::transport::CoordError) {
+        debug!("ota: {device}: a frame was not delivered: {e}");
+        match self.tx_failed.iter_mut().find(|(d, _)| d == device) {
+            Some((_, n)) => *n += 1,
+            None => self.tx_failed.push((device.to_string(), 1)),
         }
     }
 
@@ -534,34 +540,19 @@ impl Ota {
                 continue;
             }
             // A queued frame's ID is new to the server.
-            let sent = o.id.and_then(|id| self.tx.remove(&id));
+            if let Some(i) = o.id.and_then(|id| self.tx.iter().position(|t| *t == id)) {
+                self.tx.swap_remove(i);
+            }
             let c = &mut self.tx_counts;
-            let failed = match &o.terminal {
-                Terminal::Delivered => {
-                    c.delivered += 1;
-                    None
-                }
-                Terminal::Sent | Terminal::Done(_) => {
-                    c.sent += 1;
-                    None
-                }
-                Terminal::NotDelivered(e) => {
-                    c.not_delivered += 1;
-                    Some(e)
-                }
-                Terminal::Refused(e) => {
-                    c.refused += 1;
-                    Some(e)
-                }
-                Terminal::Unknown(_) | Terminal::Cancelled => {
-                    c.unknown += 1;
-                    None
-                }
-            };
-            if let Some(e) = failed {
-                *self.tx_failed.entry(o.device.clone()).or_default() += 1;
-                let what = sent.map(|(_, g, cmd)| format!(" {} 0x{cmd:02X}", if g { "global" } else { "command" })).unwrap_or_default();
-                debug!("ota: {}:{what} not delivered: {e}", o.device);
+            match &o.terminal {
+                Terminal::Delivered => c.delivered += 1,
+                Terminal::Sent | Terminal::Done(_) => c.sent += 1,
+                Terminal::NotDelivered(_) => c.not_delivered += 1,
+                Terminal::Refused(_) => c.refused += 1,
+                Terminal::Unknown(_) | Terminal::Cancelled => c.unknown += 1,
+            }
+            if let Terminal::NotDelivered(e) | Terminal::Refused(e) = &o.terminal {
+                self.tx_failure(&o.device, e);
             }
         }
     }
@@ -577,7 +568,7 @@ impl Ota {
                 .ostr("sw_version", d.fp.sw_build_id.as_deref())
                 .bool("sleepy", d.sleepy())
                 .bool("available_device", d.available)
-                .num("tx_failed", self.tx_failed.get(id).copied().unwrap_or(0));
+                .num("tx_failed", self.tx_failed.iter().find(|(d, _)| d == id).map_or(0, |x| x.1));
         }))
     }
 
@@ -775,16 +766,16 @@ impl Ota {
     /// `ota/status` `tx`.
     fn tx_json(&self) -> J {
         let c = &self.tx_counts;
-        json!({
-            "submitted": c.submitted,
-            "queued": c.queued,
-            "in_flight": self.tx.len(),
-            "delivered": c.delivered,
-            "sent": c.sent,
-            "not_delivered": c.not_delivered,
-            "refused": c.refused,
-            "unknown": c.unknown,
-        })
+        let mut o = Obj::new();
+        o.num("submitted", c.submitted)
+            .num("queued", c.queued)
+            .num("in_flight", self.tx.len())
+            .num("delivered", c.delivered)
+            .num("sent", c.sent)
+            .num("not_delivered", c.not_delivered)
+            .num("refused", c.refused)
+            .num("unknown", c.unknown);
+        serde_json::from_str(&o.end()).unwrap_or_default()
     }
 
     /// The NCP's `max_asdu` (blocks are cut to fit unfragmented frames).

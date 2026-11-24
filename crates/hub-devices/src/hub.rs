@@ -434,7 +434,7 @@ pub struct Hub<T: ZigbeeTransport> {
     app_frames: Vec<AppFrame>,
     /// Frames of the application in flight: their outcomes go to
     /// [`Hub::take_app_outcomes`].
-    app_sent: BTreeMap<RequestId, AppSent>,
+    app_sent: Vec<AppSent>,
     app_outcomes: Vec<AppOutcome>,
     /// Snapshots of the topics of services outside the engine, sent on
     /// `subscribe` (kept current by the application).
@@ -459,6 +459,7 @@ pub struct AppFrame {
 /// A frame of the application in flight.
 #[derive(Debug, Clone)]
 struct AppSent {
+    id: RequestId,
     device: String,
     cluster: u16,
     at: Millis,
@@ -563,7 +564,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             zg: Default::default(),
             app_clusters: Vec::new(),
             app_frames: Vec::new(),
-            app_sent: BTreeMap::new(),
+            app_sent: Vec::new(),
             app_outcomes: Vec::new(),
             app_snapshots: BTreeMap::new(),
         }
@@ -844,14 +845,12 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.tap_tx(dev_id, &req, now);
         match purpose {
             Purpose::None => {}
-            Purpose::App => {
-                let sent = AppSent {
-                    device: dev_id.to_string(),
-                    cluster: req.cluster,
-                    at: now,
-                };
-                self.app_sent.insert(rid, sent);
-            }
+            Purpose::App => self.app_sent.push(AppSent {
+                id: rid,
+                device: dev_id.to_string(),
+                cluster: req.cluster,
+                at: now,
+            }),
             purpose => {
                 self.pending.insert(
                     (zdo, tsn),
@@ -942,7 +941,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let q: Vec<Queued> = dev.queue.drain(..).collect();
         for item in q {
             let zdo = item.req.profile == 0;
-            let (app, cluster) = (item.purpose == Purpose::App, item.req.cluster);
+            let (app, cluster) = (matches!(item.purpose, Purpose::App), item.req.cluster);
             if let Err(e) = self.transmit(dev_id, item.req, item.purpose, item.tsn, zdo, now)
                 && app
             {
@@ -2294,7 +2293,8 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// with `not_delivered` instead of waiting for the response timeout.
     /// Other outcomes leave it to the response.
     fn aps_done(&mut self, id: RequestId, t: Terminal, now: Millis) {
-        if let Some(s) = self.app_sent.remove(&id) {
+        if let Some(i) = self.app_sent.iter().position(|s| s.id == id) {
+            let s = self.app_sent.swap_remove(i);
             self.app_outcomes.push(AppOutcome {
                 device: s.device,
                 cluster: s.cluster,
@@ -2349,14 +2349,12 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Advances timers.
     pub fn tick(&mut self, now: Millis) {
         // The application's frames whose outcome never came.
-        let lost: Vec<RequestId> = self
+        while let Some(s) = self
             .app_sent
             .iter()
-            .filter(|(_, s)| now.saturating_sub(s.at) > APP_OUTCOME_MS)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in lost {
-            self.aps_done(id, Terminal::Unknown(CoordError::Timeout), now);
+            .find(|s| now.saturating_sub(s.at) > APP_OUTCOME_MS)
+        {
+            self.aps_done(s.id, Terminal::Unknown(CoordError::Timeout), now);
         }
         // Request timeouts.
         let expired: Vec<(bool, u8)> = self
