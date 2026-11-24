@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("release_images", ROOT / "tools/release-images.py")
+release_images = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(release_images)
 
 
 class HubBuildTests(unittest.TestCase):
@@ -69,6 +73,17 @@ elf.write_text(" ".join(sys.argv[1:]))
         for folder in ["target-8mb", "target-8mb-opi"]:
             elf = self.root / folder / "xtensa-esp32s3-espidf/release/tbr-hub"
             self.assertIn("mqtt,advanced,ota-store", elf.read_text())
+
+    def test_release_board_features_are_what_the_build_selects(self):
+        # release-images.py checks each image's marker against its board
+        # entry: the entries must name the features this script builds.
+        calls = self.run_build("--psram", "quad")
+        built = {"target-8mb": self.features(calls[0]), "target": self.features(calls[1])}
+        for layout in release_images.LAYOUTS:
+            with self.subTest(layout=layout["id"]):
+                self.assertEqual(sorted(built[layout["target"]].split(",")), sorted(layout["features"]))
+        self.assertIn("ota-store", built["target-8mb"])
+        self.assertNotIn("ota-store", built["target"])
 
     def test_one_psram_mode_and_extra_features_reach_cargo(self):
         calls = self.run_build("--layout", "4mb", "--psram", "octal", "--", "--features", "advanced")

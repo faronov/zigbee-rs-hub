@@ -15,6 +15,8 @@ class BuildMarkerTests(unittest.TestCase):
         self.assertEqual(release_images.build_marker(image), (["advanced", "mqtt"], "octal"))
         image = b"tbr-hub-build:features=;psram=quad;"
         self.assertEqual(release_images.build_marker(image), ([], "quad"))
+        image = b"tbr-hub-build:features=advanced,mqtt,ota-store;psram=quad;"
+        self.assertEqual(release_images.build_marker(image), (["advanced", "mqtt", "ota-store"], "quad"))
 
     def test_missing_or_conflicting_markers_are_refused(self):
         for image in [
