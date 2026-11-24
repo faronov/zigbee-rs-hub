@@ -186,6 +186,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | Path | What |
 |---|---|
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
+| `crates/hub-coord` | Coordinator backend boundary (`std`, no backend protocol crate): requests and outcomes, events, errors, capabilities, network identity, the administration traits, and the APS/Green Power types the engine exchanges (re-exported by `hub-devices`); see `docs/coordinator-boundary.md` |
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `crates/hub-web` | The embedded web UI: one static page (`web/index.html`), gzip-compressed by `build.rs` |
 | `crates/hub-ota` | Zigbee OTA Upgrade server (cluster 0x0019): OTA file format, streamed images, image store (inactive app slot, 8 MB), server state machine, simulated OTA client ([`docs/ota.md`](docs/ota.md)) |

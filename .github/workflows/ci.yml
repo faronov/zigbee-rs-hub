@@ -18,9 +18,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo test -p hub-core -p hub-store -p hub-ncp -p hub-ota -p hub-app -p hub-web -p hub-mqtt -p hubctl
+      - run: cargo test -p hub-core -p hub-store -p hub-coord -p hub-ncp -p hub-ota -p hub-app -p hub-web -p hub-mqtt -p hubctl
       - name: hub-store links no ZRHP code
         run: "! cargo tree -p hub-store -e normal | grep -q zigbee-zrhp"
+      - name: hub-coord stays backend-neutral (no hub-store, hub-ncp or zigbee-zrhp)
+        run: |
+          deps=$(cargo tree -p hub-coord -e normal --prefix none)
+          if grep -E '^(zigbee-zrhp|hub-ncp|hub-store) ' <<<"$deps"; then exit 1; fi
       # hubctl enables `advanced`; the images without it build hub-mqtt alone.
       - name: hub-mqtt without the advanced console
         run: cargo test -p hub-mqtt
@@ -67,8 +71,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo fmt -p hub-devices -- --check
-      - run: cargo clippy -p hub-devices --all-targets -- -D warnings
+      - run: cargo fmt -p hub-coord -p hub-devices -- --check
+      - run: cargo clippy -p hub-coord -p hub-devices --all-targets -- -D warnings
       - run: cargo test -p hub-devices
       - run: cargo test -p hub-devices --features advanced
       # The 4 MB images: no Zigbee device OTA.

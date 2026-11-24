@@ -1,0 +1,13 @@
+[package]
+name = "hub-coord"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Coordinator backend boundary of zigbee-rs-hub (std): requests, outcomes, events, errors, capabilities, network identity and the administration API, independent of the NCP protocol"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = { version = "0.10", default-features = false }

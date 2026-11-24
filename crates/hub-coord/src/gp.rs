@@ -1,7 +1,8 @@
 //! Owned mirrors of the ZRHP 7.11 Green Power records, events and remote
 //! provisioning requests (zigbee-zrhp `msg::gp`, master 0580bc1). The
 //! phase-1 host core converts its borrowed wire structs into these; the
-//! field names and meanings are kept 1:1.
+//! field names and meanings are kept 1:1. Re-exported as
+//! `hub_devices::gp::types`.
 
 use std::fmt;
 

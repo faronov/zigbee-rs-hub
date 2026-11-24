@@ -1148,6 +1148,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hub-coord"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "hub-core"
 version = "0.1.0"
 dependencies = [
@@ -1160,6 +1168,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "heapless",
+ "hub-coord",
  "miniz_oxide 0.8.9",
  "proptest",
  "serde",
