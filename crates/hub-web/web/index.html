@@ -62,6 +62,7 @@ nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-botto
 nav#tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:.5em .8em;color:var(--mut);white-space:nowrap}
 nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 .card h3{font-size:.9em;margin:.8em 0 0;color:var(--mut)}
+.dev .gh{font-size:.75em;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin:1.6em 0 .3em;cursor:default}.gh+.ents{margin:0;border-top:0}
 #gcw{display:inline-block;margin:.6em 0 0}
 @media(max-width:600px){#gpl li,#gpb li{flex-wrap:wrap}#gpl .n,#gpb .n{flex-basis:100%}}
 textarea{width:100%;font:.85em/1.35 ui-monospace,Menlo,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:.5em}
@@ -351,12 +352,15 @@ function findDef(id){ctSerial(async()=>{try{ct=await call("catalog/status");cons
  await ctShards(m.shards);toast("Catalog checked for "+(devs[id]&&devs[id].name||id))}catch(e){toast(e.message)}})}
 // Device cards (#/devices): sensors, controls, battery and signal; a click
 // outside the controls opens the device page (#device/<id>) with the rest.
-// Entity groups: 0 sensors, 1 controls, 2 config, 3 diagnostic.
-const eg=e=>e.category=="diagnostic"?3:e.category?2:/sensor/.test(e.platform)?0:1,
+// Entity groups (HA's categories, and events): 0 sensors, 1 controls,
+// 2 events, 3 config, 4 diagnostic; the card shows the first three.
+const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/sensor/.test(e.platform)?0:1,
  dEnts=id=>Object.values(ents).filter(e=>e.device==id&&!e.orphaned).sort((a,b)=>eg(a)-eg(b)||(a.uid>b.uid?1:-1)),
- onCard=e=>eg(e)<2&&e.enabled_default!==false,
- // No definition matched: generic ZCL support only (the picture needs one).
- gn=d=>d.interview=="complete"&&!d.definition_model,
+ onCard=e=>eg(e)<3&&e.enabled_default!==false,
+ // Definition layers over the generic one (always the base).
+ dL=d=>(d.definition||[]).filter(l=>l.source!="generic"),
+ // No definition matched: generic ZCL support only.
+ gn=d=>d.interview=="complete"&&!dL(d).length,
  bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
   gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
   el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
@@ -372,15 +376,21 @@ function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen}
 function netLine(id,f){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.s<20;
  return el("div",{class:"row mut acts",id:"n-"+id},v.s!=null||v.b!=null?el("span",{class:lo?"warn":null},"🔋"+(v.s!=null?" "+Math.round(v.s)+" %":"")+(lo?" low":"")):"",
   el("span",{class:"dot "+(q>=150?"on":q>=80?"wait":"")}),"LQI "+(q??"–")+(v.rssi!=null?" · RSSI "+v.rssi+" dBm":"")+(f?" · seen "+ago(v.t)+" · "+d.power:""))}
+// The definition (vendor and model, else its id) and its source, over the
+// generic layer; partial (17.2): the catalog could not translate all of
+// it, generic support gives the rest.
+function defLn(d){const l=dL(d),pa=l.some(x=>x.partial),S={fetched:"catalog",self_description:"self-description"};
+ return el("div",{class:"mut",title:(d.definition||[]).map(x=>x.id+" ("+x.source+", rev "+x.revision+")").join(" + ")},"definition: "+(l.length?(d.definition_model?(d.model==d.definition_model?d.manufacturer+" ":"")+d.definition_model:l[l.length-1].id)+
+  " ("+[...new Set(l.map(x=>S[x.source]||x.source))].join(" + ")+(pa?", partial: generic support for the rest":"")+")":"generic only"))}
 // f: the device page (everything, entities grouped), else the card.
 function devCard(id,f){
  const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),c=[];let ul,k;
- for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{},["Sensors","Controls","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
+ for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{class:"gh"},["Sensors","Controls","Events","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
  return el("article",{class:"card dev",id:"d-"+id,onclick:f?null:x=>{x=x.target;if(!x.closest("button,input,select")){sy=scrollY;if(!x.closest("a"))location.hash=h}}},
   el("div",{class:"top"},f?el("button",{"aria-label":"Back",onclick:()=>sy!=null?history.back():location.hash="#/devices"},"←"):"",pic(d),f?el("b",{},d.name||id):el("a",{href:h},el("b",{},d.name||id)),...bdg(d)),...f?[
    // Definition vendor/model (white label first), then the device's own Basic model ID.
    el("div",{class:"mut"},[d.manufacturer,d.model,d.model_id&&d.model_id!=d.model?"("+d.model_id+")":""].filter(Boolean).join(" · ")||"unknown model"),
-   el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):"")+" · definition: "+((d.definition||[]).map(l=>l.id+" ("+l.source+")").join(", ")||"none")),
+   el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):"")),defLn(d),
    netLine(id,f),el("div",{class:"row acts"},
    bt("Rename",()=>{const n=prompt("Device name",d.name||"");return n!=null?act("devices/update",{device:id,name:n.trim()}):Promise.resolve()}),
    bt("Re-interview",()=>act("devices/reinterview",{device:id})),
@@ -391,7 +401,9 @@ function devCard(id,f){
   ...c,f?"":netLine(id),f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
 }
 onTab.devices=()=>{const p=pgId(),o=pgOn;pgOn=p;renderAll();if(p!=o)scrollTo(0,p?0:sy)};
+// Events: the last one and when (the state is its time), — before any.
 function fmt(e,s){
+ if(e.platform=="event")return s&&s.state!=null?[(s.attributes||{}).event_type,ago(s.state)].filter(Boolean).join(" · "):"—";
  if(!s||s.state==null)return"–";let v=s.state;
  if(e.device_class=="timestamp"&&typeof v=="number")return ago(v);
  if(typeof v=="number"){const p=e.precision??(e.capabilities&&e.capabilities.suggested_display_precision);if(p!=null)v=v.toFixed(p)}

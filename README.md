@@ -842,12 +842,14 @@ upload service ~50 KB), static RAM +32 B.
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
 on `/api`: network (state, PAN ID, channel, extended PAN ID, NCP firmware,
 IEEE and link), permit join with a countdown, compact device cards (picture,
-name, availability, the main sensors and controls with their live states,
-battery and a signal indicator from LQI/RSSI; subscription to `devices`,
+name, availability, the main sensors, controls and events — a remote's last
+action and when — with their live states, battery and a signal indicator
+from LQI/RSSI; subscription to `devices`,
 `entities` and `network`) and, one click on a card away, the device page
 `#device/<id>` (model, IEEE, NWK, LQI/RSSI, last seen, power source,
-definition, every entity grouped as sensors, controls, configuration and
-diagnostic; rename, re-interview, find definition, bindings, reporting per
+definition — its model and source, partial when the catalog could not
+translate all of it —, every entity under a section header: sensors,
+controls, events, configuration and diagnostic; rename, re-interview, find definition, bindings, reporting per
 attribute — min and max in seconds, the change in the entity's units — and
 remove with confirmation; back returns to the list where it was), controls for switches and lights (on/off, brightness), numbers,
 selects and buttons, connection status with automatic reconnect; mobile
@@ -891,7 +893,7 @@ it in the browser. `build.rs` minifies the page line by line (indentation,
 blank lines and `//` comment lines in the script and style; `src/minify.rs`,
 which refuses constructs it cannot keep intact) and gzips it at build time
 (deterministic, pure Rust, no node toolchain) and derives a strong ETag (every image
-variant's page must stay within 34 KiB gzipped, `hub_web::PAGE_BUDGET`, checked by
+variant's page must stay within 36 KiB gzipped, `hub_web::PAGE_BUDGET`, checked by
 the crate's tests); the hub answers
 `Content-Encoding: gzip`, `Cache-Control: no-cache` and `304` on a matching
 `If-None-Match`. `hubctl serve` serves the same page on `/` (the WebSocket on
@@ -1197,7 +1199,7 @@ without it (`ota/*` answers `unsupported`, the hub endpoint does not list
 start — and a device's Query Next Image gets only the Default Response it
 asks for, as before the server). The
 Koenkk/zigbee-OTA index is fetched by Home Assistant (the web page has no
-index search; the page budget is 34 KiB gzip). Per device: policy
+index search; the page budget is 36 KiB gzip). Per device: policy
 `manual` (default), `auto` (schedule window) or `off` (never: `ota/start`
 refused, a running job aborted; decided); Image
 Notify (sleepy devices through the queue); blocks of min(device, 48 B,

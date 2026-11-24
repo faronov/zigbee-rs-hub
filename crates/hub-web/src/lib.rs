@@ -15,9 +15,10 @@ mod variant;
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
 
 /// Budget of the compressed page in every image variant (raised from
-/// 32 KiB for the 8 MB image's OTA and reporting UI); it counts in the
-/// firmware image.
-pub const PAGE_BUDGET: usize = 34 * 1024;
+/// 32 KiB for the 8 MB image's OTA and reporting UI, from 34 KiB for the
+/// device page's event entities and the catalog update before shards); it
+/// counts in the firmware image.
+pub const PAGE_BUDGET: usize = 36 * 1024;
 
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
 pub const ETAG: &str = include_str!(concat!(env!("OUT_DIR"), "/etag"));

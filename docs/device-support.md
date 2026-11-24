@@ -3463,7 +3463,7 @@ exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
 size table (definitions, strings, index) per run. The hub CI checks the app
 against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
 D24; README). The web page (`hub-web`, gzip as embedded) must stay within
-34 KiB (34 816 B, `hub_web::PAGE_BUDGET`) in every image variant; its
+36 KiB (36 864 B, `hub_web::PAGE_BUDGET`) in every image variant; its
 tests build each variant and fail above it.
 
 ### 18.6 Hardware
