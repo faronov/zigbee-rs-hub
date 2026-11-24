@@ -10,8 +10,27 @@
 //! handlers, flash writes copy a PSRAM source through a bounce buffer, and
 //! thread stacks are allocated by FreeRTOS, not through this allocator.
 //!
+//! Atomics are the exception the image is built for: on the S3 the S32C1I
+//! instruction (compare-and-set, behind every atomic read-modify-write) is
+//! not atomic between the two cores on PSRAM. ESP-IDF builds its own C code
+//! without it (`CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND`): its `__atomic_*`
+//! functions take a lock for PSRAM addresses. With S32C1I, every `Arc`
+//! count, channel index and lazily created `Mutex` in this heap could race
+//! between the cores: lost updates, a channel slot claimed twice, two
+//! threads in one mutex, then freed memory in use (the likely cause of
+//! zeroed `Sender`s, failed mutex unlocks, cache and MMU faults under load).
+//! `.cargo/config.toml` turns the instruction off for all Rust code (std
+//! included), so Rust atomics call those functions too; `hub atomics` on the
+//! console checks it.
+//!
 //! Without PSRAM (or before [`init`]) every request goes to the default
 //! heap, as before.
+
+#[cfg(target_feature = "s32c1i")]
+compile_error!(
+    "Rust atomics would use S32C1I, which is not atomic on PSRAM: build tbr-hub from firmware/hub \
+     (its .cargo/config.toml sets -C target-feature=-s32c1i)"
+);
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;

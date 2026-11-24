@@ -136,3 +136,84 @@ pub fn bench() -> String {
     }
     s
 }
+
+unsafe extern "C" {
+    /// ESP-IDF's plain S32C1I fetch-add (newlib; its `__atomic_*` functions
+    /// use it for internal RAM only).
+    fn __atomic_s32c1i_fetch_add_4(ptr: *mut u32, value: u32, memorder: i32) -> u32;
+}
+
+/// Runs `f` on its own thread pinned to `core`.
+fn on_core(
+    core: i32,
+    f: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    unsafe {
+        let mut cfg = sys::esp_pthread_get_default_config();
+        cfg.pin_to_core = core;
+        sys::esp_pthread_set_cfg(&cfg);
+    }
+    let h = std::thread::Builder::new().stack_size(3072).spawn(f);
+    unsafe {
+        let cfg = sys::esp_pthread_get_default_config();
+        sys::esp_pthread_set_cfg(&cfg);
+    }
+    h
+}
+
+/// `hub atomics`: a thread on each core adds 1 to one word `N` times, with
+/// Rust's atomics and with the bare S32C1I instruction, in PSRAM and in
+/// internal RAM. Lost updates mean the add is not atomic between the cores
+/// (S32C1I on PSRAM; Rust atomics must stay exact, see `alloc.rs`).
+pub fn atomics() -> String {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    const N: u32 = 100_000;
+    let mut s = String::new();
+    for (label, caps, bare) in [
+        ("Rust AtomicU32, PSRAM", sys::MALLOC_CAP_SPIRAM, false),
+        ("Rust AtomicU32, internal", sys::MALLOC_CAP_INTERNAL, false),
+        ("bare S32C1I, PSRAM", sys::MALLOC_CAP_SPIRAM, true),
+        ("bare S32C1I, internal", sys::MALLOC_CAP_INTERNAL, true),
+    ] {
+        let word = unsafe { sys::heap_caps_calloc(1, 4, caps | sys::MALLOC_CAP_8BIT) } as usize;
+        if word == 0 {
+            s += &format!("{label}: no memory\r\n");
+            continue;
+        }
+        let t = std::time::Instant::now();
+        let threads: Vec<_> = (0..2)
+            .map(|core| {
+                on_core(core, move || {
+                    for i in 0..N {
+                        if bare {
+                            unsafe { __atomic_s32c1i_fetch_add_4(word as *mut u32, 1, 0) };
+                        } else {
+                            unsafe { &*(word as *const AtomicU32) }.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // Lets the idle tasks run (task watchdog).
+                        if i % 8192 == 8191 {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                })
+            })
+            .collect();
+        let mut ok = true;
+        for th in threads {
+            ok &= th.is_ok_and(|h| h.join().is_ok());
+        }
+        let got = unsafe { (word as *const u32).read_volatile() };
+        unsafe { sys::heap_caps_free(word as *mut core::ffi::c_void) };
+        if !ok {
+            s += &format!("{label}: thread failed\r\n");
+            continue;
+        }
+        s += &format!(
+            "{label}: {got} of {}, {} lost, {:?}\r\n",
+            2 * N,
+            (2 * N).saturating_sub(got),
+            t.elapsed()
+        );
+    }
+    s
+}

@@ -975,6 +975,16 @@ keeps requests below `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` internal, and the
 hub's data are many small Rust allocations, while 2 MB of PSRAM stayed empty.
 From 0.1.4 Rust allocations prefer PSRAM (`firmware/hub/src/alloc.rs`; C
 mallocs above 1 KiB and Wi-Fi/lwIP buffers too; thread stacks stay internal).
+On PSRAM the S32C1I instruction behind every atomic read-modify-write is
+not atomic between the two cores (ESP-IDF builds its C code without it,
+`CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND`). Rust code used it for every
+`Arc` count, channel slot and lazily created `Mutex` in that heap; cross-core
+races there corrupt memory, which fits the crashes after 40–80
+`network/diagnostics` in a row (a zeroed channel `Sender`, failed mutex
+unlocks, cache and MMU faults). The hub is now built with `-C target-feature=-s32c1i`
+(`firmware/hub/.cargo/config.toml`): Rust atomics call ESP-IDF's `__atomic_*`
+functions, which lock for PSRAM addresses (+2.6 KB image, +1 KB IRAM).
+`hub atomics` on the console counts lost updates of adds from both cores.
 Measured on an ESP32-S3 SuperMini (S3FH4R2, 2 MB quad) in hub mode without an
 NCP, Wi-Fi up: 0.1.3 8.4 KB internal free; 0.1.4 120 KB internal free
 (minimum 119 KB while installing the whole catalog), PSRAM 160 KB used. For the next
