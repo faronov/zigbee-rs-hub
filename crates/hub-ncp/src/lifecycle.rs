@@ -1228,9 +1228,12 @@ impl Hub {
 impl hub_store::KvStore for Hub {
     /// Network-scoped records behind the registry's gate ([`Hub::registry`]).
     fn with_kv(&self, f: &mut dyn FnMut(&mut dyn hub_store::Kv)) {
-        self.with_store(|s| match owner::gate(*self.inner.registry.lock().unwrap()) {
-            hub_store::Gate::Open => f(s),
-            gate => f(&mut hub_store::Guarded::new(s, gate)),
+        self.with_store(|s| {
+            let gate = owner::gate(*self.inner.registry.lock().unwrap());
+            match gate {
+                hub_store::Gate::Open => f(s),
+                gate => f(&mut hub_store::Guarded::new(s, gate)),
+            }
         });
     }
     fn stats(&self) -> JournalStats {
