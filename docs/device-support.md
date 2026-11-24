@@ -373,9 +373,6 @@ changed, the self-description hash changed, or the user asks. Effects:
   `translation_key` ("has_entity_name" style); a definition can give `name`.
 - `capabilities` carries the platform-specific static data HA needs (4.3).
 - `source`: generic, catalog, self_description, user (diagnostics only).
-- `report` (only when the user overrode the reporting of the entity,
-  5.2): `{part: setting}`, `""` for the entity's own value, e.g.
-  `{"": [60, 1800, 25]}` or `{"brightness": [1, 300, 5], "on_off": "off"}`.
 
 ### 4.3 Platforms
 
@@ -578,12 +575,24 @@ device (every `max` seconds); sleepy devices are never polled.
 
 **User settings.** The table is editable per attribute class (global
 defaults), and the reporting of any ZCL-bound value of an entity can be
-overridden per entity (layer 5). Precedence for one value, highest first:
+overridden (layer 5, `entities/update` `report`, 14.3). Configure
+Reporting is per attribute, so an override belongs to the attribute —
+`(endpoint, cluster, attribute, manufacturer code)` — and entities bound to
+the same attribute share it (Aqara's occupancy and illuminance on
+0xFCC0/0x0112, struct entities of one attribute): set through one of them,
+it applies to all, and `entities/reporting` lists the others as `shared`.
+Precedence for one attribute, highest first:
 
-1. the entity's override (`entities/update` `report`, 14.3);
-2. the definition's `report` (a definition entity, or `generic.patch`);
+1. the user's override;
+2. the definition: a `configure: - report:` op (6.8), sent after the
+   entity records, then the `report` of the first entity bound to it (a
+   definition entity, or `generic.patch`);
 3. the edited global default of the attribute's class;
 4. the built-in table above.
+
+An override replaces a definition's `configure: report` op for its
+attribute: the op is not sent while the override exists, and is sent again
+once the override is removed.
 
 Global defaults apply where the built-in table does: to the generic tier's
 values (a definition entity without `report` still gets no Configure
@@ -618,11 +627,23 @@ reporting the attribute; the hub binds nothing for it and never polls it,
 even if the device refuses (an explicit `off` means no reporting and no
 polling). `report: off` in a definition still means "send nothing".
 
+Removing an override sends what the attribute inherits. When it inherits
+no Configure Reporting at all (a definition entity without `report`, or
+with `report: off`), the hub sends the ZCL "revert to default" record
+(minimum 0xFFFF, maximum 0x0000, change 0; ZCL r8 2.5.7.1.5–6), so a
+device silenced by `off` goes back to its own default configuration. It
+stays part of the configure (a reconfigure sends it again) until a new
+override replaces it or a definition starts configuring the attribute.
+Devices older than ZCL r7 may take the record literally (no periodic
+reports, changes at most every 18 h); give them an explicit setting.
+
 Global defaults are kept in the host store as `cfg/report` (JSON, the
 edited classes only; no key while nothing is edited); overrides are part
-of the device's registry snapshot (`entities[].report`, absent without
-overrides, so snapshots of devices without overrides are unchanged; earlier
-builds ignore the field, and snapshots of earlier builds load without it).
+of the device's registry snapshot (`reporting`: [{`ep`, `cluster`, `attr`,
+`mfr`, `report`}], `report` also `"revert"` for a pending revert; absent
+without overrides, so snapshots of devices without overrides are
+unchanged; earlier builds ignore the field, and snapshots of earlier
+builds load without it).
 
 ### 5.3 Configure: binds, reporting, enrollment, sleepy devices
 
@@ -2268,8 +2289,7 @@ code feels familiar:
   `unsupported`). Added later within 1.3, in every image: reporting
   configuration (5.2, 14.3): `entities/reporting`,
   `reporting/defaults/get`, `reporting/defaults/set`, the `report` and
-  `part` parameters of `entities/update`, the entity record's `report` and
-  the event `entity_reporting`.
+  `part` parameters of `entities/update` and the event `entity_reporting`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2325,9 +2345,9 @@ deadline, as an NCP image need not report `EVT_PERMIT_JOIN_STATE`) and `network_
 | `entities/states` | `uids` (optional) | states (4.5) |
 | `entities/command` | `uid`, `command` (HA service name), `params` | `{"status": "ok"}` after the device confirmed (write/command response, Tuya dataResponse), `"queued"` for sleepy devices |
 | `entities/refresh` | `uid` | reads the bound attribute(s) now (mains devices) |
-| `entities/update` | `uid`, `name`, `enabled`, `value` for `hub` bindings, `report` (5.2: `[min, max, change]`, `"off"`, `"default"` or null) with `part` (the part of a composite entity; `""` or absent for the entity's own value) | entity record (`report`: its overrides). `report` is checked first: an invalid one changes nothing |
+| `entities/update` | `uid`, `name`, `enabled`, `value` for `hub` bindings, `report` (5.2: `[min, max, change]`, `"off"`, `"default"` or null) with `part` (the part of a composite entity; `""` or absent for the entity's own value) | entity record. `report` is checked first (an invalid one changes nothing) and sets the override of the attribute the value is bound to, shared by every entity bound to it; `entities/reporting` shows it |
 | `entities/delete` | `uid` | only orphaned entities (3.4) |
-| `entities/reporting` | `uid` (one entity) or `device` (all its entities), `read` (bool, default false) | `{status, records}`; one record per ZCL-bound value: `uid`, `part` (null: the own value), `endpoint`, `cluster`, `attribute`, `type` (ZCL type code), `manufacturer` (when set), `report` (what the hub configures, battery cap applied: `[min, max, change]`, `"off"`, or null for no Configure Reporting), `source` (`override`, `definition`, `default`), `default` (with an override: the setting without it), `class` (5.2), `applied` (the last readback: `{status, report, time}`, absent before one). `status`: `cached` without `read`; with `read`, `ok` once the device answered (the result waits for it; `timeout` / `not_delivered` errors as for commands) or, for a sleeping device, `queued` at once (the read goes out at its next contact, and its answer comes as the event `entity_reporting`). `unsupported` for GP devices |
+| `entities/reporting` | `uid` (one entity) or `device` (all its entities), `read` (bool, default false) | `{status, records}`; one record per ZCL-bound value: `uid`, `part` (null: the own value), `endpoint`, `cluster`, `attribute`, `type` (ZCL type code), `manufacturer` (when set), `report` (the record the configure sends for the attribute — the last one, after overrides, definition ops and the battery cap: `[min, max, change]`, `"off"`, or null for none or a revert to the device's default), `source` (`override`, `definition`, `default`: where that record comes from), `default` (with an override: what the attribute inherits without it), `shared` (the other entities bound to the same attribute, which share its setting), `class` (5.2), `applied` (the last readback: `{status, report, time}`, absent before one). `status`: `cached` without `read`; with `read`, `ok` once the device answered (the result waits for it; `timeout` / `not_delivered` errors as for commands) or, for a sleeping device, `queued` at once (the read goes out at its next contact, and its answer comes as the event `entity_reporting`). `unsupported` for GP devices |
 | `reporting/defaults/get` | — | `classes`: [{`key`, `attributes` ([[cluster, attribute]]), `builtin`, `report` (effective), `edited`}] |
 | `reporting/defaults/set` | `defaults`: `{class: setting}` (a setting, `"default"` or null) | as `reporting/defaults/get`. All entries are checked first (`invalid_value` for an unknown class or setting; nothing applied); a setting equal to the built-in one removes the edit. Devices re-resolve and reconfigure what changed (5.3) |
 

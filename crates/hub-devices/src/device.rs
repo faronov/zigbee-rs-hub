@@ -188,8 +188,6 @@ pub struct Entity {
     pub user_name: Option<String>,
     /// User enable override.
     pub user_enabled: Option<bool>,
-    /// User reporting overrides by part name (`""`: the own value).
-    pub user_report: BTreeMap<String, crate::reporting::ReportSetting>,
 }
 
 /// Per-device diagnostics (14.2 `devices/diagnostics`).
@@ -368,6 +366,8 @@ pub struct Device {
     /// Reporting configurations the device answered (`entities/reporting`
     /// with `read`) by `(ep, cluster, attr)`; not persisted.
     pub reporting: BTreeMap<(u8, u16, u16), crate::reporting::Applied>,
+    /// User reporting overrides by attribute (5.2, layer 5).
+    pub report_overrides: BTreeMap<crate::reporting::AttrKey, crate::reporting::ReportSetting>,
 }
 
 impl Device {
@@ -407,6 +407,7 @@ impl Device {
             fp_hash: None,
             tuya_query_at: None,
             reporting: BTreeMap::new(),
+            report_overrides: BTreeMap::new(),
         }
     }
 
@@ -748,7 +749,7 @@ impl Entity {
                     .as_ref()
                     .map(|n| format!("{} {n}", e.key.replace('_', " ")))
             });
-        let mut r = json!({
+        json!({
             "uid": self.uid,
             "device": device_id,
             "endpoint": self.r.ep,
@@ -765,11 +766,7 @@ impl Entity {
             "capabilities": capabilities(e),
             "source": self.r.source,
             "orphaned": self.orphaned,
-        });
-        if !self.user_report.is_empty() {
-            r["report"] = self.report_json();
-        }
-        r
+        })
     }
 
     /// HA state + attributes (4.5).

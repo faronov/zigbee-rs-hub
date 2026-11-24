@@ -12,6 +12,7 @@ use crate::device::{Device, InterviewStep, Millis};
 use crate::hub::control::Then;
 use crate::hub::{Hub, HubEvent, OpKind, OpRun, Purpose};
 use crate::model::*;
+use crate::reporting::ReportSetting;
 use crate::transport::{Request, ZigbeeTransport};
 use crate::values;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
@@ -22,7 +23,7 @@ fn mfr_s(m: Option<u16>) -> String {
     m.map_or("-".into(), |m| format!("{m:04x}"))
 }
 
-fn first_ep_with(d: &Device, cluster: u16) -> u8 {
+pub(crate) fn first_ep_with(d: &Device, cluster: u16) -> u8 {
     let app = d.fp.endpoints.iter().filter(|e| e.profile != PROFILE_GP);
     app.clone()
         .find(|e| e.in_clusters.contains(&cluster) || e.out_clusters.contains(&cluster))
@@ -71,7 +72,7 @@ pub fn build_ops(
     let mut reads: BTreeMap<(u8, u16, Option<u16>), Vec<u16>> = BTreeMap::new();
     let mut binds: Vec<(u8, u16)> = Vec::new();
     for e in d.entities.iter().filter(|e| !e.orphaned) {
-        for (part, v) in e.r.def.values() {
+        for (_, v) in e.r.def.values() {
             let (cluster, attr, ty, mfr) = match &v.binding {
                 Binding::Zcl(z) => (z.cluster, z.attr, z.ty, z.mfr),
                 Binding::Struct {
@@ -80,26 +81,35 @@ pub fn build_ops(
                 _ => continue,
             };
             let ep = e.r.ep;
-            // A user's `off` (5.2): max 0xFFFF stops the device's reports.
-            let rec = match e.report_of(part, v) {
-                Some(ReportSpec::Config { min, max, change }) => Some(ReportingConfig {
-                    attr,
-                    ty,
-                    min,
-                    max: crate::reporting::capped(min, max, sleepy_cap),
-                    change,
-                }),
-                Some(ReportSpec::Disable) => Some(ReportingConfig {
-                    attr,
-                    ty,
-                    min: 0,
-                    max: 0xFFFF,
-                    change: None,
-                }),
+            let key = (ep, cluster, attr, mfr);
+            let rec = |min, max| ReportingConfig {
+                attr,
+                ty,
+                min,
+                max,
+                change: None,
+            };
+            // User settings (5.2): `off` sends max 0xFFFF (stop reporting);
+            // a removed override that nothing replaces sends min 0xFFFF,
+            // max 0 (back to the device's own default). Neither binds.
+            let rec = match (
+                d.report_overrides.get(&key),
+                crate::reporting::value_report(d, ep, v),
+            ) {
+                (Some(ReportSetting::Revert), _) if !crate::reporting::inherited_record(d, key) => {
+                    Some((rec(0xFFFF, 0), false))
+                }
+                (_, Some(ReportSpec::Config { min, max, change })) => Some((
+                    ReportingConfig {
+                        change,
+                        ..rec(min, crate::reporting::capped(min, max, sleepy_cap))
+                    },
+                    true,
+                )),
+                (_, Some(ReportSpec::Disable)) => Some((rec(0, 0xFFFF), false)),
                 _ => None,
             };
-            if let Some(rec) = rec {
-                let bind = rec.max != 0xFFFF;
+            if let Some((rec, bind)) = rec {
                 let l = reports.entry((ep, cluster, mfr)).or_default();
                 if !l.iter().any(|r| r.attr == attr) {
                     l.push(rec);
@@ -283,6 +293,13 @@ pub fn build_ops(
                 let ReportSpec::Config { min, max, change } = *report else {
                     continue;
                 };
+                // A user's override of the attribute replaces it (5.2).
+                if d.report_overrides
+                    .get(&(ep, *cluster, *attr, *mfr))
+                    .is_some_and(|s| s.is_override())
+                {
+                    continue;
+                }
                 let rec = ReportingConfig {
                     attr: *attr,
                     ty: *ty,

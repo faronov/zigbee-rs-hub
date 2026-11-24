@@ -136,9 +136,18 @@ fn override_changes_the_hash_and_reconfigures_with_its_bytes() {
     assert_eq!(sim.aps().len(), 1);
     let h1 = hash(&hub, MAINS);
     assert_ne!(h1, h0);
+    let x = row(&rows(&mut hub, &id(MAINS)), &uid);
     assert_eq!(
-        hub.entity(&uid).unwrap().1.record(&id(MAINS))["report"],
-        json!({"": [60, 1800, 25]})
+        (
+            x["report"].clone(),
+            x["source"].clone(),
+            x["default"].clone()
+        ),
+        (
+            json!([60, 1800, 25]),
+            json!("override"),
+            json!([30, 900, 50])
+        )
     );
 
     // off: maximum interval 0xFFFF, the device stops reporting.
@@ -164,14 +173,12 @@ fn override_changes_the_hash_and_reconfigures_with_its_bytes() {
     sim.run(&mut hub, T0 + 3000);
     assert_eq!(configure_frames(&sim), [(0x5001, 0x0402, builtin)]);
     assert_eq!(hash(&hub, MAINS), h0);
-    assert!(
-        hub.entity(&uid)
-            .unwrap()
-            .1
-            .record(&id(MAINS))
-            .get("report")
-            .is_none()
+    let x = row(&rows(&mut hub, &id(MAINS)), &uid);
+    assert_eq!(
+        (x["report"].clone(), x["source"].clone(), x.get("default")),
+        (json!([30, 900, 50]), json!("default"), None)
     );
+    assert!(hub.device(&id(MAINS)).unwrap().report_overrides.is_empty());
     // Unchanged: nothing is sent.
     sim.log.clear();
     hub.set_entity_report(&uid, None, &json!("default"), T0 + 4000)
@@ -259,7 +266,7 @@ fn settings_are_validated() {
         "not_found"
     );
     // Nothing above changed anything.
-    assert!(hub.entity(&temp).unwrap().1.user_report.is_empty());
+    assert!(hub.device(&id(SLEEPY)).unwrap().report_overrides.is_empty());
     // Valid settings.
     hub.set_entity_report(&lamp, Some("on_off"), &json!([0, 300]), T0)
         .unwrap();
@@ -267,10 +274,18 @@ fn settings_are_validated() {
         .unwrap();
     hub.set_entity_report(&temp, None, &json!([60, 21600, 10]), T0)
         .unwrap();
-    let r = hub.entity(&lamp).unwrap().1.record(&id(LIGHT));
+    let r = rows(&mut hub, &id(LIGHT));
+    let reports: Vec<(J, J, J)> = r
+        .iter()
+        .filter(|x| x["uid"] == lamp)
+        .map(|x| (x["part"].clone(), x["report"].clone(), x["source"].clone()))
+        .collect();
     assert_eq!(
-        r["report"],
-        json!({"brightness": [1, 300, 5], "on_off": [0, 300]})
+        reports,
+        [
+            (json!("on_off"), json!([0, 300]), json!("override")),
+            (json!("brightness"), json!([1, 300, 5]), json!("override")),
+        ]
     );
     // Global defaults: unknown classes and invalid settings are refused,
     // nothing applied.
@@ -546,7 +561,7 @@ fn overrides_persist_and_old_snapshots_load() {
     // Without overrides the snapshot has no new field (byte-identical to
     // earlier builds).
     let plain = hub.snapshot_device(&d).unwrap().to_bytes();
-    assert!(!String::from_utf8_lossy(&plain).contains("\"report\""));
+    assert!(!String::from_utf8_lossy(&plain).contains("\"reporting\""));
     hub.set_entity_report(&lamp, Some("brightness"), &json!([1, 300, 5]), T0)
         .unwrap();
     hub.set_entity_report(&lamp, Some("on_off"), &json!("off"), T0)
@@ -556,15 +571,19 @@ fn overrides_persist_and_old_snapshots_load() {
     let bytes = snap.to_bytes();
     let text = String::from_utf8_lossy(&bytes);
     assert!(
-        text.contains(r#""report":{"brightness":[1,300,5],"on_off":"off"}"#),
+        text.ends_with(
+            r#","reporting":[{"ep":11,"cluster":6,"attr":0,"report":"off"},{"ep":11,"cluster":8,"attr":0,"report":[1,300,5]}]}"#
+        ),
         "{text}"
     );
     let back = DeviceSnapshot::from_bytes(&bytes).unwrap();
     assert_eq!(back, snap);
     let mut restored = hub_with(&[]);
     restored.restore_device(back, None, T0 + 1000).unwrap();
-    let (_, e) = restored.entity(&lamp).unwrap();
-    assert_eq!(e.user_report, hub.entity(&lamp).unwrap().1.user_report);
+    assert_eq!(
+        restored.device(&d).unwrap().report_overrides,
+        hub.device(&d).unwrap().report_overrides
+    );
     assert_eq!(
         restored.device(&d).unwrap().configure.hash,
         hub.device(&d).unwrap().configure.hash
@@ -578,26 +597,21 @@ fn overrides_persist_and_old_snapshots_load() {
     );
     assert!(restored.transport.take().is_empty());
 
-    // A snapshot of an earlier build (no `report`) loads; one of this
-    // build loads in an earlier one (unknown fields ignored).
+    // A snapshot of an earlier build (no `reporting`) loads; one of this
+    // build loads in an earlier one (serde ignores the unknown field).
     let mut v: J = serde_json::from_slice(&bytes).unwrap();
-    for e in v["entities"].as_array_mut().unwrap() {
-        e.as_object_mut().unwrap().remove("report");
-        e["name"] = "Lamp".into();
-    }
+    v.as_object_mut().unwrap().remove("reporting");
     let old = DeviceSnapshot::from_bytes(&serde_json::to_vec(&v).unwrap()).unwrap();
-    assert!(old.entities.iter().all(|e| e.report.is_empty()));
+    assert!(old.reporting.is_empty());
     #[derive(serde::Deserialize)]
     #[allow(dead_code)]
-    struct EarlierEntitySnap {
-        uid: String,
-        name: Option<String>,
-        enabled: Option<bool>,
+    struct Earlier {
+        v: u8,
+        id: String,
+        entities: Vec<crate::persist::EntitySnap>,
     }
-    let entities: Vec<EarlierEntitySnap> =
-        serde_json::from_value(serde_json::from_slice::<J>(&bytes).unwrap()["entities"].clone())
-            .unwrap();
-    assert_eq!(entities[0].uid, lamp);
+    let e: Earlier = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(e.id, d);
 }
 
 #[test]
@@ -855,7 +869,18 @@ fn api_requests() {
         &mut hub,
         json!({"id": 1, "type": "entities/update", "uid": uid, "report": [60, 1800, 25]}),
     );
-    assert_eq!(r["result"]["report"], json!({"": [60, 1800, 25]}), "{r}");
+    assert!(
+        r["result"]["uid"] == uid && r["result"].get("report").is_none(),
+        "{r}"
+    );
+    let src = |hub: &mut Hub<MockTransport>| {
+        let r = hub.entity_reporting(Some(&uid), None, false, T0).unwrap();
+        (
+            r["records"][0]["report"].clone(),
+            r["records"][0]["source"].clone(),
+        )
+    };
+    assert_eq!(src(&mut hub), (json!([60, 1800, 25]), json!("override")));
     // Checked before anything changes: the name stays.
     let r = call(
         &mut hub,
@@ -868,12 +893,14 @@ fn api_requests() {
         &mut hub,
         json!({"id": 3, "type": "entities/update", "uid": uid, "name": "T"}),
     );
-    assert_eq!(r["result"]["report"], json!({"": [60, 1800, 25]}));
+    assert_eq!(r["result"]["name"], "T");
+    assert_eq!(src(&mut hub), (json!([60, 1800, 25]), json!("override")));
     let r = call(
         &mut hub,
         json!({"id": 4, "type": "entities/update", "uid": uid, "report": null}),
     );
-    assert!(r["result"].get("report").is_none(), "{r}");
+    assert_eq!(r["result"]["uid"], uid);
+    assert_eq!(src(&mut hub), (json!([30, 900, 50]), json!("default")));
     let r = call(&mut hub, json!({"id": 5, "type": "reporting/defaults/get"}));
     assert_eq!(
         r["result"]["classes"].as_array().unwrap().len(),
@@ -901,4 +928,228 @@ fn api_requests() {
     assert_eq!(r["error"]["code"], "invalid_value");
     let r = call(&mut hub, json!({"id": 8, "type": "entities/reporting"}));
     assert_eq!(r["error"]["code"], "invalid_value");
+}
+
+// ---- Review regressions: what the device ends with matches the rows. ----
+
+const DEF: u64 = 0x00124b00dddd0001;
+
+/// A mains device matched by a definition `yaml` (entities and configure
+/// ops below `model: DEF-1`).
+fn with_definition(yaml: &str, dev: SimDevice) -> (Hub<MockTransport>, Sim) {
+    use crate::model::LayerSource;
+    use crate::resolve::MemoryCatalog;
+    use crate::testutil::yaml::load_definition;
+    let src = format!(
+        "zdef: 1\nid: test/def-1\nrevision: 1\nvendor: Test\nmodel: DEF-1\nmatch:\n  - model: DEF-1\n{yaml}"
+    );
+    let mut hub = hub_with(&[]);
+    let mut cat = MemoryCatalog::default();
+    cat.insert(load_definition(&src, LayerSource::Catalog).unwrap());
+    hub.set_catalog(Box::new(cat), T0);
+    let mut sim = Sim::default();
+    sim.devices.push(dev.basic("Test", "DEF-1", 0x01));
+    sim.join(&mut hub, DEF, T0);
+    sim.log.clear();
+    (hub, sim)
+}
+
+fn def_device(clusters: &[u16]) -> SimDevice {
+    SimDevice::new(DEF, 0x6001, LogicalType::Router, true, 0x1234)
+        .endpoint(1, 0x0104, 0x0302, clusters, &[])
+        .attr(1, 0x0402, 0x0000, TypedValue::int(ZclType::I16, 2137))
+}
+
+/// The last configuration the simulated device received for an attribute.
+fn device_config(sim: &mut Sim, cluster: u16, attr: u16) -> Option<(u16, u16)> {
+    sim.dev(DEF)
+        .reporting
+        .iter()
+        .rfind(|r| r.1 == cluster && r.2.attr == attr)
+        .map(|r| (r.2.min, r.2.max))
+}
+
+const TEMP_NO_REPORT: &str = "entities:
+  - key: temperature
+    platform: sensor
+    zcl: {cluster: 0x0402, attr: 0x0000, type: i16}
+    div: 100
+";
+
+#[test]
+fn clearing_an_override_with_nothing_inherited_reverts_the_device_to_its_default() {
+    for (name, yaml) in [
+        ("no report", TEMP_NO_REPORT.to_string()),
+        ("report: off", format!("{TEMP_NO_REPORT}    report: off\n")),
+    ] {
+        let (mut hub, mut sim) = with_definition(&yaml, def_device(&[0x0000, 0x0402]));
+        let uid = format!("{}:1:temperature", id(DEF));
+        let h0 = hash(&hub, DEF);
+        hub.set_entity_report(&uid, None, &json!("off"), T0 + 1000)
+            .unwrap();
+        sim.run(&mut hub, T0 + 1000);
+        assert_eq!(
+            configure_frames(&sim),
+            [(
+                0x6001,
+                0x0402,
+                vec![0x00, 0x00, 0x00, 0x29, 0, 0, 0xFF, 0xFF, 0, 0]
+            )],
+            "{name}"
+        );
+        // Back: min 0xFFFF, max 0 (ZCL: revert to the device's default).
+        sim.log.clear();
+        hub.set_entity_report(&uid, None, &J::Null, T0 + 2000)
+            .unwrap();
+        sim.run(&mut hub, T0 + 2000);
+        assert_eq!(
+            configure_frames(&sim),
+            [(
+                0x6001,
+                0x0402,
+                vec![0x00, 0x00, 0x00, 0x29, 0xFF, 0xFF, 0, 0, 0, 0]
+            )],
+            "{name}"
+        );
+        assert_eq!(device_config(&mut sim, 0x0402, 0), Some((0xFFFF, 0)));
+        let x = row(&rows(&mut hub, &id(DEF)), &uid);
+        assert_eq!(
+            (x["report"].clone(), x["source"].clone(), x.get("default")),
+            (J::Null, json!("definition"), None),
+            "{name}"
+        );
+        assert_ne!(hash(&hub, DEF), h0);
+        // A reconfigure sends it again; a new override replaces it.
+        sim.log.clear();
+        hub.reconfigure(&id(DEF), T0 + 3000).unwrap();
+        sim.run(&mut hub, T0 + 3000);
+        assert!(
+            configure_frames(&sim)
+                .iter()
+                .any(|f| f.2 == [0x00, 0x00, 0x00, 0x29, 0xFF, 0xFF, 0, 0, 0, 0]),
+            "{name}"
+        );
+        hub.set_entity_report(&uid, None, &json!([60, 1800, 25]), T0 + 4000)
+            .unwrap();
+        sim.run(&mut hub, T0 + 4000);
+        assert_eq!(device_config(&mut sim, 0x0402, 0), Some((60, 1800)));
+    }
+}
+
+#[test]
+fn definition_configure_report_ops_yield_to_overrides() {
+    let yaml = format!(
+        "{TEMP_NO_REPORT}configure:\n  - report: {{ep: 1, cluster: 0x0402, attr: 0x0000, type: i16, report: [10, 600, 10]}}\n"
+    );
+    let (mut hub, mut sim) = with_definition(&yaml, def_device(&[0x0000, 0x0402]));
+    let uid = format!("{}:1:temperature", id(DEF));
+    assert_eq!(device_config(&mut sim, 0x0402, 0), Some((10, 600)));
+    // The row shows what the definition op sends.
+    let x = row(&rows(&mut hub, &id(DEF)), &uid);
+    assert_eq!(
+        (x["report"].clone(), x["source"].clone()),
+        (json!([10, 600, 10]), json!("definition"))
+    );
+    hub.set_entity_report(&uid, None, &json!([60, 1800, 25]), T0 + 1000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 1000);
+    assert_eq!(device_config(&mut sim, 0x0402, 0), Some((60, 1800)));
+    // A reconfigure sends the override only: the device keeps it.
+    sim.log.clear();
+    hub.reconfigure(&id(DEF), T0 + 2000).unwrap();
+    sim.run(&mut hub, T0 + 2000);
+    let temp: Vec<Vec<u8>> = configure_frames(&sim)
+        .into_iter()
+        .filter(|f| f.1 == 0x0402)
+        .map(|f| f.2)
+        .collect();
+    assert_eq!(
+        temp,
+        [vec![0x00, 0x00, 0x00, 0x29, 60, 0, 0x08, 0x07, 25, 0]]
+    );
+    assert_eq!(device_config(&mut sim, 0x0402, 0), Some((60, 1800)));
+    let x = row(&rows(&mut hub, &id(DEF)), &uid);
+    assert_eq!(
+        (
+            x["report"].clone(),
+            x["source"].clone(),
+            x["default"].clone()
+        ),
+        (
+            json!([60, 1800, 25]),
+            json!("override"),
+            json!([10, 600, 10])
+        )
+    );
+    // Cleared: the definition op goes out again.
+    sim.log.clear();
+    hub.set_entity_report(&uid, None, &J::Null, T0 + 3000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 3000);
+    assert_eq!(
+        configure_frames(&sim),
+        [(
+            0x6001,
+            0x0402,
+            vec![0x00, 0x00, 0x00, 0x29, 10, 0, 0x58, 0x02, 10, 0]
+        )]
+    );
+    assert_eq!(device_config(&mut sim, 0x0402, 0), Some((10, 600)));
+    let x = row(&rows(&mut hub, &id(DEF)), &uid);
+    assert_eq!(
+        (x["report"].clone(), x["source"].clone()),
+        (json!([10, 600, 10]), json!("definition"))
+    );
+}
+
+#[test]
+fn entities_sharing_an_attribute_share_its_override() {
+    // Two entities decode one manufacturer attribute (Aqara style).
+    let yaml = "entities:
+  - key: occupancy
+    platform: binary_sensor
+    zcl: {cluster: 0xFCC0, attr: 0x0112, type: u32, mfr: 0x115F}
+    report: [1, 3600, 1]
+  - key: illuminance
+    platform: sensor
+    zcl: {cluster: 0xFCC0, attr: 0x0112, type: u32, mfr: 0x115F}
+";
+    let (mut hub, mut sim) = with_definition(yaml, def_device(&[0x0000, 0xFCC0]));
+    let (occ, lux) = (
+        format!("{}:1:occupancy", id(DEF)),
+        format!("{}:1:illuminance", id(DEF)),
+    );
+    assert_eq!(device_config(&mut sim, 0xFCC0, 0x0112), Some((1, 3600)));
+    let r = rows(&mut hub, &id(DEF));
+    for (u, other) in [(&occ, &lux), (&lux, &occ)] {
+        let x = row(&r, u);
+        assert_eq!(
+            (x["report"].clone(), x["shared"].clone()),
+            (json!([1, 3600, 1]), json!([other]))
+        );
+    }
+    // `off` on the second entity is the attribute's: sent, and both rows
+    // show it.
+    hub.set_entity_report(&lux, None, &json!("off"), T0 + 1000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 1000);
+    assert_eq!(device_config(&mut sim, 0xFCC0, 0x0112), Some((0, 0xFFFF)));
+    let r = rows(&mut hub, &id(DEF));
+    for u in [&occ, &lux] {
+        let x = row(&r, u);
+        assert_eq!(
+            (x["report"].clone(), x["source"].clone()),
+            (json!("off"), json!("override")),
+            "{u}"
+        );
+    }
+    // Cleared from the other entity: the definition's config again.
+    hub.set_entity_report(&occ, None, &J::Null, T0 + 2000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 2000);
+    assert_eq!(device_config(&mut sim, 0xFCC0, 0x0112), Some((1, 3600)));
+    let r = rows(&mut hub, &id(DEF));
+    for u in [&occ, &lux] {
+        assert_eq!(row(&r, u)["report"], json!([1, 3600, 1]), "{u}");
+    }
 }

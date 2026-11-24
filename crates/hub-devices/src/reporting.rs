@@ -19,8 +19,9 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value as J, json};
 
 use crate::device::{Device, Entity, InterviewStep, Millis, ts};
+use crate::hub::OpKind;
 use crate::hub::{ApiError, Hub, HubEvent, Purpose, device_of_uid};
-use crate::model::{Binding, EntityDef, LayerSource, PowerKind, ReportSpec, ValueDef};
+use crate::model::{Binding, ConfigureOp, EntityDef, LayerSource, PowerKind, ReportSpec, ValueDef};
 use crate::transport::ZigbeeTransport;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
 use crate::zcl::{FrameType, Status, ZclFrame, ZclType, cluster as cl};
@@ -48,7 +49,17 @@ pub enum ReportSetting {
     },
     /// `off`: the device is told to stop reporting; never polled.
     Off,
+    /// Left by a removed override when nothing else configures the
+    /// attribute: the device is told to go back to its own default
+    /// configuration (ZCL r8 2.5.7.1.6: minimum 0xFFFF, maximum 0). Not a
+    /// user setting (the API shows no override); stored as `"revert"`.
+    Revert,
 }
+
+/// Device attribute: `(endpoint, cluster, attribute, manufacturer code)`.
+/// Configure Reporting is per attribute, so overrides are too: entities
+/// bound to the same attribute share one.
+pub type AttrKey = (u8, u16, u16, Option<u16>);
 
 const fn cfg(min: u16, max: u16, change: Option<f64>) -> ReportSetting {
     ReportSetting::Config { min, max, change }
@@ -146,15 +157,23 @@ impl ReportSetting {
             } => json!([min, max, c]),
             Self::Config { min, max, .. } => json!([min, max]),
             Self::Off => "off".into(),
+            Self::Revert => "revert".into(),
         }
     }
 
-    /// The resolved form.
+    /// The resolved form (`Revert` resolves to nothing: `build_ops` sends
+    /// its record).
     pub fn spec(self) -> ReportSpec {
         match self {
             Self::Config { min, max, change } => ReportSpec::Config { min, max, change },
             Self::Off => ReportSpec::Disable,
+            Self::Revert => ReportSpec::Off,
         }
+    }
+
+    /// A user's override (not a pending revert).
+    pub fn is_override(self) -> bool {
+        self != Self::Revert
     }
 }
 
@@ -166,7 +185,11 @@ impl serde::Serialize for ReportSetting {
 
 impl<'de> serde::Deserialize<'de> for ReportSetting {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::parse(&J::deserialize(d)?)
+        let v = J::deserialize(d)?;
+        if v == "revert" {
+            return Ok(Self::Revert);
+        }
+        Self::parse(&v)
             .map_err(serde::de::Error::custom)?
             .ok_or_else(|| serde::de::Error::custom("report: a setting"))
     }
@@ -522,24 +545,81 @@ fn check_class(c: &ReportClass, s: ReportSetting) -> Result<(), String> {
     s.check(&types, None)
 }
 
-impl Entity {
-    /// The reporting of one of its values: the user's override, else the
-    /// resolved one.
-    pub fn report_of(&self, part: Option<&str>, v: &ValueDef) -> Option<ReportSpec> {
-        match self.user_report.get(part.unwrap_or("")) {
-            Some(s) => Some(s.spec()),
-            None => v.report,
-        }
+/// The attribute a value is bound to: `(cluster, attribute, type, mfr)`.
+pub fn zcl_attr(v: &ValueDef) -> Option<(u16, u16, ZclType, Option<u16>)> {
+    match &v.binding {
+        Binding::Zcl(z) => Some((z.cluster, z.attr, z.ty, z.mfr)),
+        Binding::Struct {
+            cluster, attr, mfr, ..
+        } => Some((*cluster, *attr, ZclType::OCTET_STR, *mfr)),
+        _ => None,
     }
+}
 
-    /// The overrides as the entity record shows them (`""`: the own value).
-    pub fn report_json(&self) -> J {
-        J::Object(
-            self.user_report
-                .iter()
-                .map(|(k, s)| (k.clone(), s.to_json()))
-                .collect(),
-        )
+/// The reporting of an entity value on endpoint `ep`: the user's override
+/// of its attribute, else the resolved one (definition `configure: report`
+/// ops aside).
+pub fn value_report(d: &Device, ep: u8, v: &ValueDef) -> Option<ReportSpec> {
+    let user = zcl_attr(v).and_then(|(c, a, _, m)| d.report_overrides.get(&(ep, c, a, m)));
+    match user {
+        Some(s) if s.is_override() => Some(s.spec()),
+        _ => v.report,
+    }
+}
+
+/// The reporting of a definition `configure: report` op for the attribute
+/// (the last one), if any.
+pub fn op_report(d: &Device, key: AttrKey) -> Option<ReportSpec> {
+    d.resolution.configure.iter().rev().find_map(|op| match op {
+        ConfigureOp::Report {
+            ep,
+            cluster,
+            attr,
+            mfr,
+            report,
+            ..
+        } if (*cluster, *attr, *mfr) == (key.1, key.2, key.3)
+            && ep.unwrap_or_else(|| crate::configure::first_ep_with(d, *cluster)) == key.0 =>
+        {
+            Some(*report)
+        }
+        _ => None,
+    })
+}
+
+fn has_record(s: Option<ReportSpec>) -> bool {
+    matches!(s, Some(ReportSpec::Config { .. } | ReportSpec::Disable))
+}
+
+/// The resolved reporting an attribute gets without a user override:
+/// that of a definition op, else of the first entity value with a record
+/// (the one `build_ops` sends), with that entity and value.
+fn inherited(d: &Device, key: AttrKey) -> (Option<ReportSpec>, Option<(&Entity, &ValueDef)>) {
+    let owner = d.entities.iter().filter(|e| !e.orphaned).find_map(|e| {
+        reportable(e)
+            .into_iter()
+            .find(|r| (r.1, r.2, r.3, r.5) == key && has_record(r.6.report))
+            .map(|r| (e, r.6))
+    });
+    let op = op_report(d, key);
+    (op.or(owner.and_then(|o| o.1.report)), owner)
+}
+
+/// Whether the attribute gets a Configure Reporting record without a user
+/// override.
+pub fn inherited_record(d: &Device, key: AttrKey) -> bool {
+    has_record(inherited(d, key).0)
+}
+
+/// A record as the API shows it: `[min, max, change]`, `"off"` (maximum
+/// 0xFFFF), or null for a revert to the device's own default.
+fn record_json(c: &ReportingConfig) -> J {
+    if c.max == 0xFFFF {
+        "off".into()
+    } else if c.min == 0xFFFF {
+        J::Null
+    } else {
+        cfg(c.min, c.max, c.change.filter(|_| c.ty.is_analog())).to_json()
     }
 }
 
@@ -568,6 +648,33 @@ fn reportable(e: &Entity) -> Vec<Reportable<'_>> {
         .collect()
 }
 
+/// The values of a device's live entities bound to attribute `key`, with
+/// their entity uids.
+fn shared(
+    d: &Device,
+    key: AttrKey,
+) -> Vec<(
+    Option<&str>,
+    u8,
+    u16,
+    u16,
+    ZclType,
+    Option<u16>,
+    &ValueDef,
+    &str,
+)> {
+    d.entities
+        .iter()
+        .filter(|e| !e.orphaned)
+        .flat_map(|e| {
+            reportable(e)
+                .into_iter()
+                .filter(|r| (r.1, r.2, r.3, r.5) == key)
+                .map(|r| (r.0, r.1, r.2, r.3, r.4, r.5, r.6, e.uid.as_str()))
+        })
+        .collect()
+}
+
 /// What a device answered to Read Reporting Configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
@@ -586,12 +693,7 @@ impl Applied {
         let mut o = Map::new();
         o.insert("status".into(), self.status.name().into());
         if let Some(c) = &self.config {
-            let r = if c.max == 0xFFFF {
-                "off".into()
-            } else {
-                cfg(c.min, c.max, c.change.filter(|_| c.ty.is_analog())).to_json()
-            };
-            o.insert("report".into(), r);
+            o.insert("report".into(), record_json(c));
         }
         o.insert("time".into(), ts(self.at).into());
         J::Object(o)
@@ -665,7 +767,10 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// `entities/update` `report` (and `part`): sets or clears the
-    /// override of one value of an entity.
+    /// override of the attribute one value of an entity is bound to (all
+    /// entities bound to that attribute share it). Clearing it when
+    /// nothing else configures the attribute leaves a revert to the
+    /// device's own default ([`ReportSetting::Revert`]).
     pub fn set_entity_report(
         &mut self,
         uid: &str,
@@ -703,25 +808,42 @@ impl<T: ZigbeeTransport> Hub<T> {
                 format!("part: one of {names:?}")
             })
         })?;
+        let key = (vals[k].1, vals[k].2, vals[k].3, vals[k].5);
         if let Some(s) = setting {
-            s.check(&[vals[k].4], max_cap(d)).map_err(bad)?;
+            let types: Vec<ZclType> = shared(d, key).into_iter().map(|r| r.4).collect();
+            s.check(&types, max_cap(d)).map_err(bad)?;
         }
-        let key = names[k].to_string();
-        let d = self.devices.get_mut(&did).unwrap();
-        let e = &mut d.entities[i];
-        let changed = match setting {
-            Some(s) => e.user_report.insert(key, s) != Some(s),
-            None => e.user_report.remove(&key).is_some(),
+        let cur = d.report_overrides.get(&key).copied();
+        let next = match (setting, cur) {
+            (Some(s), _) => Some(s),
+            (None, Some(c)) if c.is_override() && !inherited_record(d, key) => {
+                Some(ReportSetting::Revert)
+            }
+            (None, Some(ReportSetting::Revert)) => cur,
+            (None, _) => None,
         };
-        if changed {
-            self.reporting_changed(&did, now);
+        if next == cur {
+            return Ok(());
         }
+        let d = self.devices.get_mut(&did).unwrap();
+        match next {
+            Some(s) => d.report_overrides.insert(key, s),
+            None => d.report_overrides.remove(&key),
+        };
+        self.reporting_changed(&did, now);
         Ok(())
     }
 
     /// The reporting rows of a device's entities (all, or `uid`'s) and the
-    /// attributes to read back, by `(ep, cluster, mfr)`.
-    fn reporting_rows(&self, did: &str, uid: Option<&str>) -> Result<(Vec<J>, Groups), ApiError> {
+    /// attributes to read back, by `(ep, cluster, mfr)`. `report` is the
+    /// record the configure sends for the attribute (the last one, after
+    /// overrides, definition ops and the battery cap).
+    fn reporting_rows(
+        &self,
+        did: &str,
+        uid: Option<&str>,
+        now: Millis,
+    ) -> Result<(Vec<J>, Groups), ApiError> {
         let d = self
             .devices
             .get(did)
@@ -738,6 +860,40 @@ impl<T: ZigbeeTransport> Hub<T> {
                 uid.unwrap_or_default().to_string(),
             ));
         }
+        let env = crate::hub::DevEnv {
+            dev: d,
+            now,
+            tz: self.cfg.tz_offset_s,
+        };
+        let ops =
+            crate::configure::build_ops(d, self.cfg.coordinator_ieee, self.cfg.hub_endpoint, &env);
+        let sent = |key: AttrKey| {
+            ops.iter().rev().find_map(|o| match &o.kind {
+                OpKind::Report {
+                    ep,
+                    cluster,
+                    mfr,
+                    records,
+                } if (*ep, *cluster, *mfr) == (key.0, key.1, key.3) => {
+                    records.iter().find(|r| r.attr == key.2)
+                }
+                _ => None,
+            })
+        };
+        // Generic values keep the default unless a definition patched it.
+        let label = |e: &Entity, v: &ValueDef| {
+            let class = zcl_attr(v)
+                .filter(|a| a.3.is_none())
+                .and_then(|a| class_of(a.0, a.1));
+            let patched = class.is_some_and(|c| {
+                v.report != Some(self.report_defaults.edit(c.key).unwrap_or(c.builtin).spec())
+            });
+            if e.r.source != LayerSource::Generic || patched {
+                "definition"
+            } else {
+                "default"
+            }
+        };
         let cap = max_cap(d);
         let mut rows = Vec::new();
         let mut groups = Groups::new();
@@ -747,19 +903,16 @@ impl<T: ZigbeeTransport> Hub<T> {
             .filter(|e| !e.orphaned && uid.is_none_or(|u| e.uid == u))
         {
             for (part, ep, cluster, attr, ty, mfr, v) in reportable(e) {
-                let class = class_of(cluster, attr).filter(|_| mfr.is_none());
-                let over = e.user_report.get(part.unwrap_or(""));
+                let key = (ep, cluster, attr, mfr);
+                let over = d.report_overrides.get(&key).filter(|s| s.is_override());
+                let (inh, owner) = inherited(d, key);
                 let source = if over.is_some() {
                     "override"
-                } else if e.r.source != LayerSource::Generic {
-                    "definition"
-                } else if class.is_some_and(|c| {
-                    v.report != Some(self.report_defaults.edit(c.key).unwrap_or(c.builtin).spec())
-                }) {
-                    // A `generic.patch` of the definition.
+                } else if op_report(d, key).is_some() {
                     "definition"
                 } else {
-                    "default"
+                    let (o, ov) = owner.unwrap_or((e, v));
+                    label(o, ov)
                 };
                 let mut o = Map::new();
                 o.insert("uid".into(), e.uid.clone().into());
@@ -771,12 +924,20 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if let Some(m) = mfr {
                     o.insert("manufacturer".into(), m.into());
                 }
-                o.insert("report".into(), spec_json(e.report_of(part, v), cap));
+                o.insert("report".into(), sent(key).map_or(J::Null, record_json));
                 o.insert("source".into(), source.into());
                 if over.is_some() {
-                    o.insert("default".into(), spec_json(v.report, cap));
+                    o.insert("default".into(), spec_json(inh, cap));
                 }
-                if let Some(c) = class {
+                let others: Vec<J> = shared(d, key)
+                    .into_iter()
+                    .filter(|r| r.7 != e.uid)
+                    .map(|r| J::from(r.7))
+                    .collect();
+                if !others.is_empty() {
+                    o.insert("shared".into(), J::Array(others));
+                }
+                if let Some(c) = class_of(cluster, attr).filter(|_| mfr.is_none()) {
                     o.insert("class".into(), c.key.into());
                 }
                 if let Some(a) = d.reporting.get(&(ep, cluster, attr)) {
@@ -812,7 +973,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             (None, Some(d)) => d.to_string(),
             (None, None) => return Err(bad("uid or device required")),
         };
-        let (rows, groups) = self.reporting_rows(&did, uid)?;
+        let (rows, groups) = self.reporting_rows(&did, uid, now)?;
         if !read || groups.is_empty() {
             let status = if read { "ok" } else { "cached" };
             return Ok(json!({"status": status, "records": rows}));
@@ -898,11 +1059,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                         );
                     }
                 }
-                self.reporting_part_done(read, None);
+                self.reporting_part_done(read, None, now);
             }
             Err(e) => self.reporting_part_done(
                 read,
                 Some(ApiError::new("failed", format!("malformed answer: {e}"))),
+                now,
             ),
         }
     }
@@ -940,15 +1102,15 @@ impl<T: ZigbeeTransport> Hub<T> {
                         );
                     }
                 }
-                self.reporting_part_done(*read, None);
+                self.reporting_part_done(*read, None, now);
             }
-            Err(e) => self.reporting_part_done(*read, Some(e)),
+            Err(e) => self.reporting_part_done(*read, Some(e), now),
         }
     }
 
     /// One frame of readback `read` done; the last one answers the
     /// request, or (a sleeping device's read) emits `entity_reporting`.
-    fn reporting_part_done(&mut self, read: u64, err: Option<ApiError>) {
+    fn reporting_part_done(&mut self, read: u64, err: Option<ApiError>, now: Millis) {
         let Some(r) = self.reporting_reads.get_mut(&read) else {
             return;
         };
@@ -968,7 +1130,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let result = match r.error.filter(|_| !r.answered) {
             Some(e) => Err(e),
             None => self
-                .reporting_rows(&r.device, r.uid.as_deref())
+                .reporting_rows(&r.device, r.uid.as_deref(), now)
                 .map(|(rows, _)| json!({"status": "ok", "records": rows})),
         };
         match r.answer {

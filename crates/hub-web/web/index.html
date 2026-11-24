@@ -370,14 +370,15 @@ function entRow(e){
  return li;
 }
 // Reporting (device-support 5.2): hub setting (* = override) and what the
-// device applied; input "min max change", "off", empty = default.
+// device applied; input "min max change", "off", empty = default. ⇄: the
+// attribute (and its setting) is shared with other entities.
 const rOpen=new Set,rTxt=r=>r==null?"–":r=="off"?r:r.join(" "),rVal=v=>(v=v.trim())?v=="off"?v:v.split(/[\s,]+/).map(Number):"default";
 // `data`: an entity_reporting event (a sleeping device answered the read).
 function repPanel(id,read,data){const box=el("div",{id:"rp-"+id},el("h3",{},"Reporting"));
  (data?Promise.resolve(data):call("entities/reporting",{device:id,read:!!read})).then(r=>{const t=el("table",{},el("tr",{},...["entity","attribute","hub","device",""].map(h=>el("th",{},h))));
   for(const x of r.records||[]){const e=ents[x.uid]||{},o=x.source=="override",i=el("input",{size:9,value:o?rTxt(x.report):"",placeholder:"min max change"}),a=x.applied;
    i.onchange=()=>act("entities/update",{uid:x.uid,part:x.part||"",report:rVal(i.value)}).then(()=>renderDev(id),()=>{});
-   t.append(el("tr",{},el("td",{},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")),el("td",{},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{title:x.source},rTxt(x.report)+(o?" *":"")),el("td",{title:a?a.status:""},a?a.report?rTxt(a.report):a.status:"?"),el("td",{},i)))}
+   t.append(el("tr",{},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{title:x.source},rTxt(x.report)+(o?" *":"")),el("td",{title:a?a.status:""},a?a.report?rTxt(a.report):a.status:"?"),el("td",{},i)))}
   box.append(t,r.status=="queued"?el("p",{class:"mut"},"Read queued until the device wakes."):r.error?el("p",{class:"mut"},r.error.message):"",bt("Read from device",async()=>box.replaceWith(repPanel(id,1))))}).catch(e=>box.append(e.message));
  return box}
 function renderEnt(e){const o=document.getElementById("e-"+e.uid);if(o)o.replaceWith(entRow(e));else renderDev(e.device)}

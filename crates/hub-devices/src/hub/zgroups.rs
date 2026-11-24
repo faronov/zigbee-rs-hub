@@ -341,7 +341,6 @@ fn group_entity(uid: String, def: EntityDef) -> Entity {
         orphaned: false,
         user_name: None,
         user_enabled: None,
-        user_report: Default::default(),
     }
 }
 

@@ -17,6 +17,7 @@ use crate::fingerprint::EndpointFp;
 use crate::generic::{GenericInput, generic_entities};
 use crate::gp::types::GpdId;
 use crate::model::*;
+use crate::reporting::value_report;
 use crate::resolve::{Catalog, FpEnv, HUB_FEATURES, MemoryCatalog, ResolveInput, resolve};
 use crate::transport::{
     ApsDst, ApsIndication, ApsRequest, CoordError, Request, RequestId, Terminal, TxOptions,
@@ -1213,7 +1214,6 @@ impl<T: ZigbeeTransport> Hub<T> {
                         orphaned: false,
                         user_name: None,
                         user_enabled: None,
-                        user_report: BTreeMap::new(),
                     });
                 }
             }
@@ -2375,16 +2375,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .iter()
                 .filter(|e| !e.orphaned && e.r.ep == ep && e.r.def.category.is_none())
                 .find_map(|e| {
-                    e.r.def
-                        .values()
-                        .find_map(|(p, v)| match (&v.binding, e.report_of(p, v)) {
+                    e.r.def.values().find_map(|(_, v)| {
+                        match (&v.binding, value_report(d, e.r.ep, v)) {
                             (Binding::Zcl(z), Some(ReportSpec::Config { max, .. }))
                                 if z.cluster == c && z.attr == a =>
                             {
                                 Some((u64::from(max.max(10)), z.mfr))
                             }
                             _ => None,
-                        })
+                        }
+                    })
                 });
             let Some((max, mfr)) = primary else { continue };
             // `poll_at` holds the time of the last poll (or of the failure).
@@ -2436,7 +2436,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .flat_map(|e| {
                 e.r.def
                     .values()
-                    .map(|(p, v)| e.report_of(p, v))
+                    .map(|(_, v)| value_report(d, e.r.ep, v))
                     .collect::<Vec<_>>()
             })
             .filter_map(|r| match r {
