@@ -1,13 +1,15 @@
 //! Coordinator-boundary baselines (`docs/coordinator-boundary.md` §4, §7
 //! PR A): a scripted scenario of the app on the simulated NCP whose wire
-//! trace, host store and API answers are kept as golden files
-//! ([`crate::baseline`]), and the journal format on its own.
+//! trace, host store writes and content, and API answers are kept as
+//! golden files ([`crate::baseline`]), and the journal format through
+//! [`Store`] on its own.
 //!
 //! Determinism: the hub's RNG is the tests' counter ([`crate::tests::rig`]),
 //! the simulated devices answer every request at once, and every step
-//! waits for its effects and for a quiet link before the next one starts.
+//! waits for its effects and for a quiet link, then has the app write its
+//! registry and last values, before the next one starts.
 //! What still depends on the clock is normalized: [`VOLATILE`] in API JSON,
-//! [`STORE_VOLATILE`] and the registry's `last_seen` in the store.
+//! [`normalize_kv`] and the registry's `last_seen` in the store.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,7 +35,7 @@ use zigbee_zrhp::records::{GpSinkRecord, GpTranslation, GpTranslationRecord, Rec
 use zigbee_zrhp::types::Ieee;
 
 use crate::baseline::{self, Req, Step};
-use crate::tests::{T, call, ok, rig, session};
+use crate::tests::{T, call, ok, rig_with, session};
 use crate::{App, AppConfig};
 
 /// The wire comparison of the scenario. `Exact` today; a transport that
@@ -49,7 +51,8 @@ const WIRE_ORDER: Order = Order::Exact;
 
 /// API JSON fields that follow the clock (wall time, durations) or the
 /// thread timing (event sequence, host link frame counts, how often the
-/// registry coalesced its writes).
+/// registry coalesced its writes, bytes of last values whose times vary in
+/// length).
 const VOLATILE: &[&str] = &[
     "/time",
     "/time_utc",
@@ -59,14 +62,8 @@ const VOLATILE: &[&str] = &[
     "/backup/metadata/internal/creation_time",
     "/host_link",
     "/app/registry_writes",
+    "/app/last_values/2",
     "/store/journal_live_sectors",
-];
-
-/// Keys of numbers and strings that follow the clock in the host store's
-/// JSON values, per key prefix.
-const STORE_VOLATILE: &[(&str, &[&str])] = &[
-    ("st/", &["seen", "c", "r"]),
-    ("bkp/last", &["creation_time"]),
 ];
 
 /// The combo light (on/off + GP proxy/sink on EP 242, as in hub-devices'
@@ -117,25 +114,109 @@ fn plug() -> SimDevice {
         )
 }
 
-/// The host store region, readable after the scenario.
+/// Journal records as programmed: `(type, payload)`.
+type Records = Vec<(u8, Vec<u8>)>;
+
+/// A host store region, readable after the scenario, that also logs every
+/// record the journal programs.
 #[derive(Clone)]
-struct SharedMem(Arc<Mutex<MemFlash>>);
+struct SharedMem {
+    flash: Arc<Mutex<MemFlash>>,
+    log: Arc<Mutex<Records>>,
+}
+
+impl SharedMem {
+    fn new(sectors: u32, sector_size: u32) -> Self {
+        SharedMem {
+            flash: Arc::new(Mutex::new(MemFlash::new(sectors, sector_size))),
+            log: Arc::default(),
+        }
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.flash.lock().unwrap().bytes().to_vec()
+    }
+
+    /// The records programmed since the last call.
+    fn take_log(&self) -> Records {
+        std::mem::take(&mut self.log.lock().unwrap())
+    }
+}
 
 impl Flash for SharedMem {
     fn sector_size(&self) -> u32 {
-        self.0.lock().unwrap().sector_size()
+        self.flash.lock().unwrap().sector_size()
     }
     fn sectors(&self) -> u32 {
-        self.0.lock().unwrap().sectors()
+        self.flash.lock().unwrap().sectors()
     }
     fn read(&mut self, offset: u32, buf: &mut [u8]) -> std::io::Result<()> {
-        self.0.lock().unwrap().read(offset, buf)
+        self.flash.lock().unwrap().read(offset, buf)
     }
     fn write(&mut self, offset: u32, data: &[u8]) -> std::io::Result<()> {
-        self.0.lock().unwrap().write(offset, data)
+        // A record is programmed whole with its commit byte erased (`u16
+        // len | u8 type | 0xFF | payload | crc32c | pad`), then committed
+        // by a one-byte write; sector headers start with the magic.
+        if data.len() >= 8 && data[3] == 0xFF && &data[..4] != b"ZHJ1" {
+            let len = usize::from(u16::from_le_bytes([data[0], data[1]]));
+            if let Some(p) = data.get(4..4 + len) {
+                self.log.lock().unwrap().push((data[2], p.to_vec()));
+            }
+        }
+        self.flash.lock().unwrap().write(offset, data)
     }
     fn erase(&mut self, sector: u32) -> std::io::Result<()> {
-        self.0.lock().unwrap().erase(sector)
+        self.flash.lock().unwrap().erase(sector)
+    }
+}
+
+/// One journal record as a line: a key/value part as key, part and length
+/// (`verbose`: and the value), normalized ([`normalize_kv`]); a registry
+/// device without `last_seen`.
+fn describe(t: u8, p: &[u8], verbose: bool) -> String {
+    let key = |p: &[u8]| {
+        let n = usize::from(p[0]);
+        (String::from_utf8_lossy(&p[1..1 + n]).into_owned(), 1 + n)
+    };
+    match t {
+        0x14 => format!(
+            "device {} {}",
+            baseline::hex(&p[..8]),
+            baseline::hex(&p[8..12])
+        ),
+        0x20 => {
+            let (k, at) = key(p);
+            let part = u16::from_le_bytes([p[at], p[at + 1]]);
+            let parts = u16::from_le_bytes([p[at + 2], p[at + 3]]);
+            let data = normalize_kv(&k, &p[at + 4..]);
+            let mut line = format!("kv_put {k} {part}/{parts} {} B", data.len());
+            if verbose {
+                line.push(' ');
+                line += &std::str::from_utf8(&data)
+                    .map_or_else(|_| baseline::hex(&data), str::to_string);
+            }
+            line
+        }
+        0x21 => format!("kv_del {}", key(p).0),
+        _ => {
+            let name = match t {
+                0x01 => "snap_begin",
+                0x02 => "snap_end",
+                0x10 => "meta",
+                0x11 => "network",
+                0x12 => "network_clear",
+                0x13 => "fc",
+                0x15 => "device_del",
+                0x16 => "fw_pending",
+                0x17 => "fw_clear",
+                0x18 => "endpoint",
+                0x19 => "endpoint_del",
+                _ => "unknown",
+            };
+            format!("{name} {}", baseline::hex(p))
+                .trim_end()
+                .to_string()
+        }
     }
 }
 
@@ -153,6 +234,9 @@ impl crate::Platform for Platform {
         for (i, b) in buf.iter_mut().enumerate() {
             *b = 0xA0 + i as u8;
         }
+    }
+    fn reboot(&self) -> Result<(), String> {
+        Ok(())
     }
     fn features(&self) -> Vec<&'static str> {
         vec!["logs"]
@@ -203,9 +287,10 @@ impl Air {
         let stop = Arc::new(AtomicBool::new(false));
         let (sim, flag) = (sim.clone(), stop.clone());
         let worker = thread::spawn(move || {
-            let mut seen = sim.with(|s| s.trace.len());
+            let mut seen = sim.with(|s| s.trace.as_ref().map_or(0, Vec::len));
             while !flag.load(Ordering::SeqCst) {
-                let new: Vec<(u16, Vec<u8>)> = sim.with(|s| s.trace[seen..].to_vec());
+                let new: Vec<(u16, Vec<u8>)> =
+                    sim.with(|s| s.trace.as_ref().map_or(Vec::new(), |t| t[seen..].to_vec()));
                 seen += new.len();
                 for (_, raw) in new.iter().filter(|(id, _)| *id == ids::APS_DATA_REQUEST) {
                     let r = ApsDataRequest::read(&mut Reader::new(raw)).unwrap();
@@ -257,29 +342,35 @@ fn until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
-/// Cuts the trace into steps.
+/// Cuts the trace and the host store's records into steps.
 struct Recorder {
     sim: SimNcp,
+    mem: SharedMem,
     mark: usize,
     steps: Vec<Step>,
+    /// Records committed per step, described and sorted.
+    writes: Vec<(String, Vec<String>)>,
 }
 
 /// No new request for this long ends a step.
 const QUIET: Duration = Duration::from_millis(300);
 
 impl Recorder {
+    fn trace(&self, from: usize) -> Vec<(u16, Vec<u8>)> {
+        self.sim
+            .with(|s| s.trace.as_ref().expect("trace on")[from..].to_vec())
+    }
+
     fn len(&self) -> usize {
-        self.sim.with(|s| s.trace.len())
+        self.sim.with(|s| s.trace.as_ref().map_or(0, Vec::len))
     }
 
     /// Requests of `id` since the step began.
     fn count(&self, id: u16) -> usize {
-        self.sim.with(|s| {
-            s.trace[self.mark..]
-                .iter()
-                .filter(|(m, _)| *m == id)
-                .count()
-        })
+        self.trace(self.mark)
+            .iter()
+            .filter(|(m, _)| *m == id)
+            .count()
     }
 
     fn wait_for(&self, id: u16, n: usize) {
@@ -288,9 +379,10 @@ impl Recorder {
         });
     }
 
-    /// Ends a step with the requests since the last one, once the link is
-    /// quiet.
-    fn end(&mut self, name: &str) {
+    /// Ends a step once the link is quiet: its requests, and the records
+    /// the host store committed, after the app (`api`, if running) wrote
+    /// its registry and last values.
+    fn end(&mut self, name: &str, api: Option<&mut Api>) {
         let (mut n, mut since) = (self.len(), Instant::now());
         while since.elapsed() < QUIET {
             thread::sleep(Duration::from_millis(20));
@@ -299,21 +391,46 @@ impl Recorder {
                 (n, since) = (m, Instant::now());
             }
         }
-        let reqs: Vec<Req> = self.sim.with(|s| {
-            s.trace[self.mark..n]
-                .iter()
-                .map(|(msg_id, payload)| Req {
-                    msg_id: *msg_id,
-                    payload: payload.clone(),
-                })
-                .collect()
-        });
+        if let Some(api) = api {
+            api.flush();
+        }
+        let reqs: Vec<Req> = self.trace(self.mark)[..n - self.mark]
+            .iter()
+            .map(|(msg_id, payload)| Req {
+                msg_id: *msg_id,
+                payload: payload.clone(),
+            })
+            .collect();
         self.mark = n;
         self.steps.push(Step {
             name: name.into(),
             reqs,
         });
+        let mut writes: Vec<String> = self
+            .mem
+            .take_log()
+            .iter()
+            .map(|(t, p)| describe(*t, p, false))
+            .collect();
+        writes.sort();
+        self.writes.push((name.into(), writes));
     }
+}
+
+fn render_writes(steps: &[(String, Vec<String>)]) -> String {
+    let mut s = String::from(
+        "# Records the host store committed per scenario step (SharedMem's log of the journal's record writes),\n\
+         # sorted within a step (threads interleave). The app writes its registry and last values at the end of\n\
+         # every step (hub/reboot). kv_put: key, part/parts, length; device: without last_seen.\n",
+    );
+    for (name, writes) in steps {
+        s += &format!("@ {name}\n");
+        for w in writes {
+            s += w;
+            s.push('\n');
+        }
+    }
+    s
 }
 
 fn config() -> AppConfig {
@@ -325,29 +442,66 @@ fn config() -> AppConfig {
     }
 }
 
-/// `"key": <number or string>` → `"key": 0` in a JSON text, keeping the
-/// rest of the bytes as written.
-fn mask_json(text: &str, keys: &[&str]) -> String {
-    let mut out = text.to_string();
-    for k in keys {
-        let pat = format!("\"{k}\":");
-        let mut from = 0;
-        while let Some(i) = out[from..].find(&pat) {
-            let start = from + i + pat.len();
-            let rest = &out[start..];
-            let len = if let Some(quoted) = rest.strip_prefix('"') {
-                quoted.find('"').map_or(0, |e| e + 2)
+/// What follows the clock in the host store's JSON values, zeroed: in
+/// `st/`, every number of at least 10^9 (Unix times in s or ms: `c`, `r`,
+/// `seen`, the `last_seen` entity); in `bkp/last`, `creation_time`.
+fn normalize_kv(key: &str, value: &[u8]) -> Vec<u8> {
+    if key.starts_with("st/") {
+        mask_times(value)
+    } else if key == "bkp/last" {
+        mask_json(value, "creation_time")
+    } else {
+        value.to_vec()
+    }
+}
+
+/// JSON numbers of at least 10^9 outside strings → `0`.
+fn mask_times(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let (mut i, mut in_str, mut esc) = (0, false, false);
+    while i < text.len() {
+        let c = text[i];
+        if in_str {
+            (in_str, esc) = (esc || c != b'"', !esc && c == b'\\');
+        } else if c == b'"' {
+            in_str = true;
+        } else if c.is_ascii_digit() || c == b'-' {
+            let end = text[i..]
+                .iter()
+                .position(|x| !(x.is_ascii_digit() || b".eE+-".contains(x)))
+                .map_or(text.len(), |n| i + n);
+            let n: f64 = std::str::from_utf8(&text[i..end])
+                .unwrap()
+                .parse()
+                .unwrap_or(0.0);
+            if n.abs() >= 1e9 {
+                out.push(b'0');
             } else {
-                rest.find(|c: char| {
-                    !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == '+')
-                })
-                .unwrap_or(rest.len())
-            };
-            out.replace_range(start..start + len, "0");
-            from = start + 1;
+                out.extend_from_slice(&text[i..end]);
+            }
+            i = end;
+            continue;
         }
+        out.push(c);
+        i += 1;
     }
     out
+}
+
+/// `"key":"…"` → `"key":0` in a JSON text, the rest as written.
+fn mask_json(text: &[u8], key: &str) -> Vec<u8> {
+    let mut out = String::from_utf8_lossy(text).into_owned();
+    let pat = format!("\"{key}\":\"");
+    let mut from = 0;
+    while let Some(i) = out[from..].find(&pat) {
+        let start = from + i + pat.len() - 1;
+        let end = out[start + 1..]
+            .find('"')
+            .map_or(out.len(), |e| start + e + 2);
+        out.replace_range(start..end, "0");
+        from = start + 1;
+    }
+    out.into_bytes()
 }
 
 /// The store state with what follows the clock zeroed.
@@ -357,42 +511,36 @@ fn normalized(state: &HostState) -> HostState {
         d.last_seen = 0;
     }
     for (k, v) in s.kv.iter_mut() {
-        for (prefix, keys) in STORE_VOLATILE {
-            if k.starts_with(prefix) {
-                *v = mask_json(std::str::from_utf8(v).unwrap(), keys).into_bytes();
-            }
-        }
+        *v = normalize_kv(k, v);
     }
     s
 }
 
-/// The journal image of `state` written into an empty `hubdata` journal
-/// (the record encodings of everything the scenario stored), and a
-/// listing of its records.
+/// `state` written through [`Store`] into an empty 32 × 4 KiB journal
+/// (typed records with `commit`, key/value records with `kv_put`): the
+/// records it programmed and the image.
 fn store_golden(state: &HostState) -> (String, String) {
-    let changes = state.snapshot();
-    let mut listing = String::from(
-        "# The scenario's host store, normalized (registry last_seen 0, STORE_VOLATILE keys 0).\n",
-    );
-    for c in &changes {
-        listing += &match c {
-            Change::KvPut {
-                key,
-                part,
-                parts,
-                data,
-            } => {
-                let shown =
-                    std::str::from_utf8(data).map_or_else(|_| baseline::hex(data), str::to_string);
-                format!("kv {key} [{part}/{parts}] {shown}\n")
-            }
-            other => format!("{other:?}\n"),
-        };
+    let mem = SharedMem::new(32, 4096);
+    let mut store = Store::open(Box::new(mem.clone())).unwrap();
+    for c in state
+        .snapshot()
+        .into_iter()
+        .filter(|c| !matches!(c, Change::KvPut { .. }))
+    {
+        store.commit(c).unwrap();
     }
-    let mut j = Journal::open(MemFlash::new(32, 4096)).unwrap();
-    j.commit_many(&changes).unwrap();
-    assert_eq!(j.state(), state);
-    (listing, baseline::hexdump(j.into_flash().bytes()))
+    for (k, v) in &state.kv {
+        store.kv_put(k, v).unwrap();
+    }
+    assert_eq!(store.state(), state);
+    let mut listing = String::from(
+        "# The scenario's host store, normalized (registry last_seen 0, normalize_kv), as Store writes it.\n",
+    );
+    for (t, p) in mem.take_log() {
+        listing += &describe(t, &p, true);
+        listing.push('\n');
+    }
+    (listing, baseline::hexdump(&mem.bytes()))
 }
 
 fn gpd_frame(sim: &SimNcp, command_id: u8, counter: u32, result: u8, payload: &[u8]) {
@@ -458,6 +606,12 @@ impl Api {
         }
     }
 
+    /// The registry and last values written now, as before a reboot (the
+    /// test platform's reboot does nothing).
+    fn flush(&mut self) {
+        assert_eq!(self.ok(json!({"type": "hub/reboot"}))["rebooting"], true);
+    }
+
     fn interviewed(&mut self, device: &str) -> bool {
         self.call(json!({"type": "devices/get", "device": device}))["result"]["interview"]
             == "complete"
@@ -478,7 +632,7 @@ fn store_goldens(
     state: &HostState,
     goldens: &mut Vec<Result<(), String>>,
 ) {
-    let raw = Journal::open(MemFlash::clone(&mem.0.lock().unwrap())).unwrap();
+    let raw = Journal::open(mem.flash.lock().unwrap().clone()).unwrap();
     assert_eq!(
         raw.state(),
         state,
@@ -491,36 +645,43 @@ fn store_goldens(
 
 #[test]
 fn coordinator_boundary_scenario() {
-    let mem = SharedMem(Arc::new(Mutex::new(MemFlash::new(32, 4096))));
-    let r = rig(Store::open(Box::new(mem.clone())).unwrap());
+    let mem = SharedMem::new(32, 4096);
+    let r = rig_with(Store::open(Box::new(mem.clone())).unwrap(), |sim| {
+        sim.with(|s| s.trace = Some(Vec::new()))
+    });
     let mut rec = Recorder {
         sim: r.sim.clone(),
+        mem: mem.clone(),
         mark: 0,
         steps: Vec::new(),
+        writes: Vec::new(),
     };
     let mut goldens = Vec::new();
-    rec.end("boot: session and resume without a network");
+    rec.end("boot: session and resume without a network", None);
 
     let devs = Arc::new(Mutex::new(vec![light(), plug()]));
     let _air = Air::start(&r.sim, devs.clone());
     let mut api = Api::start(&r);
     rec.wait_for(ids::TBL_READ, 1);
-    rec.end("app start: endpoint registration, NCP device import");
+    rec.end(
+        "app start: endpoint registration, NCP device import",
+        Some(&mut api),
+    );
 
     // Form (no network yet: no backup, no leave).
     api.ok(json!({"type": "network/reset", "confirm": "RESET", "channel": 15, "pan_id": 0x1A2B, "ext_pan_id": "00124b0001020304"}));
     rec.wait_for(ids::TBL_READ, 1);
-    rec.end("form: network/reset on an empty NCP");
+    rec.end("form: network/reset on an empty NCP", Some(&mut api));
 
     // Resume after an NCP restart: NWK_INIT floors, endpoint replay.
     let resumes = r.ncp.status().resumes;
     r.sim.reboot();
     assert!(r.ncp.wait_status(T, |s| s.resumes > resumes));
     rec.wait_for(ids::TBL_READ, 1);
-    rec.end("resume: NCP restart, replay, import");
+    rec.end("resume: NCP restart, replay, import", Some(&mut api));
 
     api.ok(json!({"type": "network/permit_join", "duration_s": 60}));
-    rec.end("permit join: open 60 s");
+    rec.end("permit join: open 60 s", Some(&mut api));
 
     // Join and interview.
     let ev = EvtDeviceJoined {
@@ -534,11 +695,11 @@ fn coordinator_boundary_scenario() {
     event(&r.sim, ids::EVT_DEVICE_JOINED, &ev);
     let light_id = format!("zb:{LIGHT:016x}");
     until("the interview of the light", || api.interviewed(&light_id));
-    rec.end("join: device joined, interview, configure");
+    rec.end("join: device joined, interview, configure", Some(&mut api));
     // Closed before any later resume could replay a remainder that
     // depends on the clock.
     api.ok(json!({"type": "network/permit_join", "duration_s": 0}));
-    rec.end("permit join: close");
+    rec.end("permit join: close", Some(&mut api));
 
     // Groups: the hub endpoint and the light's endpoint 11.
     let group = api.ok(json!({"type": "groups/create", "name": "Kitchen"}))["id"]
@@ -550,12 +711,12 @@ fn coordinator_boundary_scenario() {
     until("the light in the group", || {
         devs.lock().unwrap()[0].groups.contains(&(11, group as u16))
     });
-    rec.end("group: create, add member");
+    rec.end("group: create, add member", Some(&mut api));
     api.ok(json!({"type": "groups/delete", "group": group}));
     until("the light out of the group", || {
         devs.lock().unwrap()[0].groups.is_empty()
     });
-    rec.end("group: delete");
+    rec.end("group: delete", Some(&mut api));
 
     // Green Power: the sink settings, then commissioning.
     api.ok(json!({"type": "gp/config", "security_level": 0}));
@@ -610,7 +771,7 @@ fn coordinator_boundary_scenario() {
             .is_some_and(|a| !a.is_empty())
     });
     api.ok(json!({"type": "gp/commissioning/close"}));
-    rec.end("gp: sink config, commissioning");
+    rec.end("gp: sink config, commissioning", Some(&mut api));
 
     // Remote pairing: a binding the light executes (ZRHP remote GP
     // provisioning; the answers are the light's, through the NCP).
@@ -670,12 +831,12 @@ fn coordinator_boundary_scenario() {
                 .any(|x| x["id"] == binding && x["state"] == "active")
         })
     });
-    rec.end("gp: remote pairing (binding on the light)");
+    rec.end("gp: remote pairing (binding on the light)", Some(&mut api));
 
     // An app restart: the registry and last values are written at the
     // stop, restored at the start.
     api.app.shutdown();
-    rec.end("app stop");
+    rec.end("app stop", None);
     store_goldens("store_mid", &mem, &r.ncp.store_state(), &mut goldens);
     let mut api = Api::start(&r);
     assert!(
@@ -684,7 +845,10 @@ fn coordinator_boundary_scenario() {
         api.app.status()
     );
     rec.wait_for(ids::TBL_READ, 1);
-    rec.end("app restart: registry restored, NCP device import");
+    rec.end(
+        "app restart: registry restored, NCP device import",
+        Some(&mut api),
+    );
 
     // Network map: coordinator tables, the light answering over the air.
     let own = r
@@ -712,14 +876,14 @@ fn coordinator_boundary_scenario() {
         "api/topology.json",
         &baseline::json(&map, VOLATILE),
     ));
-    rec.end("topology: network map");
+    rec.end("topology: network map", Some(&mut api));
     r.sim.with(|s| {
         (s.neighbors, s.children, s.routes, s.remotes) = (None, None, Vec::new(), Vec::new())
     });
 
     api.ok(json!({"type": "devices/remove", "device": light_id}));
     rec.wait_for(ids::NWK_REMOVE_DEVICE, 1);
-    rec.end("remove: the light");
+    rec.end("remove: the light", Some(&mut api));
 
     // Read-only answers, once the engine counted the confirms of all its
     // APS requests since the restart (the map's ZDO requests are the
@@ -757,7 +921,10 @@ fn coordinator_boundary_scenario() {
             &baseline::json(&v, VOLATILE),
         ));
     }
-    rec.end("api: network/info, hub/info, hub/system, network/diagnostics");
+    rec.end(
+        "api: network/info, hub/info, hub/system, network/diagnostics",
+        Some(&mut api),
+    );
 
     // Backup, with a device in the NCP's table (the plug).
     r.sim.with(|s| {
@@ -769,7 +936,7 @@ fn coordinator_boundary_scenario() {
         "api/backup_ocb.json",
         &baseline::json(&backup, VOLATILE),
     ));
-    rec.end("backup: export");
+    rec.end("backup: export", Some(&mut api));
 
     // Reset onto another channel: automatic backup, leave, form.
     r.sim.with(|s| s.table_devices.clear());
@@ -779,7 +946,10 @@ fn coordinator_boundary_scenario() {
         &baseline::json(&reset, VOLATILE),
     ));
     rec.wait_for(ids::TBL_READ, 1);
-    rec.end("reset: backup, leave, form, NCP device import");
+    rec.end(
+        "reset: backup, leave, form, NCP device import",
+        Some(&mut api),
+    );
 
     // Restore the backup: the plug comes back, is imported and interviewed.
     let report = api.ok(
@@ -796,14 +966,21 @@ fn coordinator_boundary_scenario() {
     ));
     let plug_id = format!("zb:{PLUG:016x}");
     until("the interview of the plug", || api.interviewed(&plug_id));
-    rec.end("restore: backup onto the NCP, import, interview");
+    rec.end(
+        "restore: backup onto the NCP, import, interview",
+        Some(&mut api),
+    );
 
     api.app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();
-    rec.end("shutdown");
+    rec.end("shutdown", None);
     store_goldens("store_end", &mem, &r.ncp.store_state(), &mut goldens);
 
+    goldens.push(baseline::check(
+        "store_writes.txt",
+        &render_writes(&rec.writes),
+    ));
     let wire = baseline::check("wire_trace.txt", &baseline::render_trace(&rec.steps));
     if wire.is_err() && WIRE_ORDER == Order::Relaxed {
         let want = baseline::parse_trace(
@@ -821,12 +998,16 @@ fn coordinator_boundary_scenario() {
     baseline::assert_all(goldens);
 }
 
-/// Every journal record type, multi-part values, deletions, compaction and
-/// the wrap of the ring, as raw `hubdata` bytes: the on-flash format the
-/// host store must keep byte for byte.
+/// A fixed sequence through [`Store`], as raw `hubdata` bytes: every
+/// record type (`commit`), changes skipped and written (`commit_if_changed`),
+/// key/value records (`kv_put`: an identical put, a value of three parts, an
+/// empty one; `kv_delete`, also of a missing key), three compactions and the
+/// wrap of the ring. The on-flash format and the store's write rules, byte
+/// for byte.
 #[test]
 fn journal_format_golden() {
-    let mut j = Journal::open(MemFlash::new(6, 4096)).unwrap();
+    let mem = SharedMem::new(6, 4096);
+    let mut store = Store::open(Box::new(mem.clone())).unwrap();
     let meta = Meta {
         ncp_ieee: [0x02, 0x01, 0, 0, 0, 0, 0x51, 0x5A],
         table_epoch: 0xE0E0_0001,
@@ -860,26 +1041,16 @@ fn journal_format_golden() {
         flags: i & 1,
         last_seen: u32::from(i) * 60,
     };
-    let big: Vec<u8> = (0..2100u32).map(|i| (i * 7 + 3) as u8).collect();
-    let mut changes = vec![
+    let fc = |limit: u32, generation: u32| FcRecord {
+        key_seq: 0,
+        limit,
+        generation,
+    };
+    for c in [
         Change::Meta(meta),
         Change::Network(net),
-        Change::Fc(
-            1,
-            FcRecord {
-                key_seq: 0,
-                limit: 0x400,
-                generation: 1,
-            },
-        ),
-        Change::Fc(
-            2,
-            FcRecord {
-                key_seq: 0,
-                limit: 0x800,
-                generation: 1,
-            },
-        ),
+        Change::Fc(1, fc(0x400, 1)),
+        Change::Fc(2, fc(0x800, 1)),
         Change::Endpoint(ep),
         Change::FwPending(FwPending {
             version: 0x0001_0002,
@@ -894,46 +1065,51 @@ fn journal_format_golden() {
         Change::EndpointDel(9),
         Change::NetworkClear,
         Change::Network(net),
-    ];
-    changes.extend(HostState::kv_changes(
-        "dev/zb:0000000000000002",
-        br#"{"v":1,"id":"zb:0000000000000002"}"#,
-    ));
-    changes.extend(HostState::kv_changes("udef/big", &big));
-    changes.push(Change::KvDel("dev/zb:0000000000000002".into()));
-    changes.extend(HostState::kv_changes("cfg/tz", b"UTC0"));
-    for c in &changes {
-        j.commit_many(std::slice::from_ref(c)).unwrap();
+    ] {
+        store.commit(c).unwrap();
     }
+    // Unchanged: nothing written.
+    store.commit_if_changed(Change::Network(net)).unwrap();
+    store.commit_if_changed(Change::Device(dev(2))).unwrap();
+    store.commit_if_changed(Change::DeviceDel([1; 8])).unwrap();
+    store
+        .commit_if_changed(Change::Device(DeviceRecord {
+            nwk: 0x2222,
+            ..dev(2)
+        }))
+        .unwrap();
+    let big: Vec<u8> = (0..4100u32).map(|i| (i * 7 + 3) as u8).collect();
+    let small = br#"{"v":1,"id":"zb:0000000000000002"}"#;
+    store.kv_put("dev/zb:0000000000000002", small).unwrap();
+    store.kv_put("dev/zb:0000000000000002", small).unwrap();
+    store.kv_put("udef/big", &big).unwrap();
+    store.kv_put("udef/big", &big).unwrap();
+    store.kv_put("cfg/empty", b"").unwrap();
+    store.kv_put("cfg/tz", b"UTC0").unwrap();
+    store.kv_delete("dev/zb:0000000000000002").unwrap();
+    store.kv_delete("dev/zb:0000000000000002").unwrap();
+    store.kv_delete("cfg/missing").unwrap();
     // Appends until the third compaction (the ring has wrapped by then).
     let mut round = 0u32;
-    while j.stats().generation < 3 {
-        j.commit(Change::Fc(
-            1,
-            FcRecord {
-                key_seq: 0,
-                limit: 0x400 * (round + 2),
-                generation: round + 2,
-            },
-        ))
-        .unwrap();
-        j.commit_many(&HostState::kv_changes(
-            "st/zb:0000000000000002",
-            format!("{{\"lqi\":{round}}}").as_bytes(),
-        ))
-        .unwrap();
+    while store.stats().generation < 3 {
+        store
+            .commit(Change::Fc(1, fc(0x400 * (round + 2), round + 2)))
+            .unwrap();
+        store
+            .kv_put(
+                "st/zb:0000000000000002",
+                format!("{{\"lqi\":{round}}}").as_bytes(),
+            )
+            .unwrap();
         round += 1;
         assert!(round < 10_000);
     }
-    let state = j.state().clone();
-    let flash = j.into_flash();
-    assert_eq!(
-        Journal::open(flash.clone()).unwrap().state(),
-        &state,
-        "reopens to the same state"
-    );
+    let state = store.state().clone();
+    drop(store);
+    let reopened = Journal::open(mem.flash.lock().unwrap().clone()).unwrap();
+    assert_eq!(reopened.state(), &state, "reopens to the same state");
     baseline::assert_all(vec![baseline::check(
         "journal_format.hex",
-        &baseline::hexdump(flash.bytes()),
+        &baseline::hexdump(&mem.bytes()),
     )]);
 }

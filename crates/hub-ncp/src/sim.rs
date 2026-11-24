@@ -65,10 +65,11 @@ pub struct SimState {
     pub floors: Vec<(u32, u32)>,
     /// Request IDs received (with the `RETRY` flag).
     pub requests: Vec<(u16, bool)>,
-    /// Every request in arrival order, `(msg_id, payload)`: first
-    /// transmissions only (retransmissions are in `requests`), including
-    /// stalled ones. The wire baseline of the hub's tests.
-    pub trace: Vec<(u16, Vec<u8>)>,
+    /// `Some`: every request from now on, in arrival order, as
+    /// `(msg_id, payload)`: first transmissions only (retransmissions are
+    /// in `requests`), stalled ones included. Off by default; the hub's
+    /// wire baseline test turns it on.
+    pub trace: Option<Vec<(u16, Vec<u8>)>>,
     /// Host endpoints registered this boot.
     pub endpoints: Vec<u8>,
     /// Slot images `(version, sha256)`; index = slot.
@@ -190,7 +191,7 @@ impl SimNcp {
             aps_limit: STRIDE,
             floors: Vec::new(),
             requests: Vec::new(),
-            trace: Vec::new(),
+            trace: None,
             endpoints: Vec::new(),
             slots: [(0x0001_0000, [0x11; 32]), (0, [0; 32])],
             running: 0,
@@ -382,8 +383,8 @@ impl SimNcp {
                                     }
                                 let stalled = self.with(|s| {
                                     s.requests.push((id, m.header.retry));
-                                    if !m.header.retry {
-                                        s.trace.push((id, m.payload.to_vec()));
+                                    if let Some(t) = s.trace.as_mut().filter(|_| !m.header.retry) {
+                                        t.push((id, m.payload.to_vec()));
                                     }
                                     s.stall == Some(id)
                                 });
