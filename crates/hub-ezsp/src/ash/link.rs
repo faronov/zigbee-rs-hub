@@ -97,6 +97,12 @@ pub struct AshConfig {
     pub rx_not_ready_at: usize,
     /// Bound of frames queued by [`Ash::send`] that do not fit the window.
     pub tx_queue_frames: usize,
+    /// Longest pause of the host's transmitter after an XOFF without the
+    /// matching XON (software flow control, UG101 §4). A lost XON must not
+    /// stall the link for good; transmission resumes after this.
+    // UNVERIFIED: UG101 gives no value; 1 s stays below the ACK timeouts
+    // the NCP counts before it gives up on the link (UG101 §7).
+    pub xoff_timeout_ms: u32,
 }
 
 impl Default for AshConfig {
@@ -114,6 +120,7 @@ impl Default for AshConfig {
             rx_queue_frames: 8,
             rx_not_ready_at: 4,
             tx_queue_frames: 4,
+            xoff_timeout_ms: 1000,
         }
     }
 }
@@ -145,7 +152,10 @@ impl AshConfig {
                 "ACK timeouts must satisfy 0 < min <= init <= max",
             ));
         }
-        if self.rstack_timeout_ms == 0 || self.not_ready_refresh_ms == 0 {
+        if self.rstack_timeout_ms == 0
+            || self.not_ready_refresh_ms == 0
+            || self.xoff_timeout_ms == 0
+        {
             return Err(ConfigError("timeouts must be non-zero"));
         }
         if self.rx_queue_frames == 0 || self.tx_queue_frames == 0 {
@@ -251,6 +261,12 @@ pub struct AshStats {
     pub rx_discarded: u32,
     /// RSTACKs ignored while resetting: not the answer to our RST.
     pub rx_stale_rstack: u32,
+    /// XOFF bytes received (host role).
+    pub rx_xoff: u32,
+    /// XON bytes received (host role).
+    pub rx_xon: u32,
+    /// XOFF pauses that ended without an XON ([`AshConfig::xoff_timeout_ms`]).
+    pub xoff_timeouts: u32,
     pub ack_timeouts: u32,
     pub resets: u32,
 }
@@ -334,6 +350,8 @@ pub struct Ash {
     advertised_not_ready: bool,
     last_not_ready_tx: u64,
     remote_not_ready_until: Option<u64>,
+    /// XOFF received: nothing is transmitted before XON or this time.
+    xoff_until: Option<u64>,
     // NCP role.
     rstack_pending: Option<u8>,
     error_pending: bool,
@@ -376,6 +394,7 @@ impl Ash {
             advertised_not_ready: false,
             last_not_ready_tx: 0,
             remote_not_ready_until: None,
+            xoff_until: None,
             rstack_pending: None,
             error_pending: false,
             events: VecDeque::new(),
@@ -447,6 +466,7 @@ impl Ash {
         self.ctrl = None;
         self.advertised_not_ready = false;
         self.remote_not_ready_until = None;
+        self.xoff_until = None;
         self.error_pending = false;
     }
 
@@ -567,7 +587,30 @@ impl Ash {
                     self.stats.rx_too_long += 1;
                     self.reject_if_connected();
                 }
+                // UG101 §4: XON/XOFF are always ignored by the NCP.
+                Some(Deframed::Xoff) if self.role == Role::Host => {
+                    self.stats.rx_xoff += 1;
+                    self.xoff_until = Some(now + u64::from(self.cfg.xoff_timeout_ms));
+                }
+                Some(Deframed::Xon) if self.role == Role::Host => {
+                    self.stats.rx_xon += 1;
+                    self.xoff_until = None;
+                }
+                Some(Deframed::Xoff | Deframed::Xon) => {}
             }
+        }
+    }
+
+    /// Whether an XOFF holds our transmitter at `now`.
+    pub fn tx_paused(&self, now: u64) -> bool {
+        self.xoff_until.is_some_and(|t| now < t)
+    }
+
+    /// Ends an XOFF pause whose XON did not come in time.
+    fn expire_xoff(&mut self, now: u64) {
+        if self.xoff_until.is_some_and(|t| now >= t) {
+            self.xoff_until = None;
+            self.stats.xoff_timeouts += 1;
         }
     }
 
@@ -787,6 +830,9 @@ impl Ash {
     /// Runs expired timers: RSTACK wait / RST retry, ACK timeout with
     /// retransmission and timer doubling (UG101 §5).
     pub fn handle_timeout(&mut self, now: u64) {
+        self.expire_xoff(now);
+        // The ACK timer does not run while XOFF holds our retransmissions.
+        let paused = self.tx_paused(now);
         match self.state {
             State::Resetting {
                 attempt,
@@ -805,6 +851,7 @@ impl Ash {
             }
             State::Connected => {
                 if let Some(front) = self.window.front()
+                    && !paused
                     && self.retx != Some(0)
                     && now >= front.last_sent + self.t_rx_ack
                 {
@@ -830,6 +877,9 @@ impl Ash {
     /// Earliest time at which [`handle_timeout`](Self::handle_timeout) or
     /// [`poll_transmit`](Self::poll_transmit) has work to do.
     pub fn next_timeout(&self) -> Option<u64> {
+        if let Some(t) = self.xoff_until {
+            return Some(t);
+        }
         match self.state {
             State::Resetting { deadline, .. } => deadline,
             State::Connected => {
@@ -848,7 +898,16 @@ impl Ash {
     /// Appends at most one encoded frame to `out`; returns whether it did.
     /// Call until it returns `false`. Priority: RST/RSTACK/ERROR, ACK/NAK,
     /// retransmissions, new DATA (UG101 §5 "Sending DATA Frames").
+    ///
+    /// Nothing is sent while an XOFF from the NCP holds the transmitter
+    /// (UG101 §4 "XOFF: Stop transmission"), until XON or
+    /// [`AshConfig::xoff_timeout_ms`]. A frame already written to the
+    /// transport is not recalled: the pause applies between frames.
     pub fn poll_transmit(&mut self, now: u64, out: &mut Vec<u8>) -> bool {
+        self.expire_xoff(now);
+        if self.tx_paused(now) {
+            return false;
+        }
         match self.state {
             State::Resetting {
                 attempt,
