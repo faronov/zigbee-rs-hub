@@ -167,8 +167,10 @@ exhaustion is `Refused(Busy)`; no `messageSentHandler` within the deadline
 `Unknown(Timeout)`; an NCP reset ends the requests on the
 NCP with `Unknown(DeliveryUnknown)` after `Session::Down` and keeps the
 queued ones for the next session. Control requests are barriers.
-`RemoveDevice` only forgets the address (the engine sends Mgmt_Leave_req;
-with hashed link keys the trust center keeps no key for the device).
+`RemoveDevice` only forgets the address: the engine's ZDO Mgmt_Leave_req
+stays the primary removal path, and with hashed link keys the trust center
+keeps no key for the device. An EZSP `removeDevice` to the parent, as an
+explicit force removal of unreachable or sleepy children, is a follow-up.
 
 ## Flow control
 
@@ -194,13 +196,20 @@ coexistence, backup or firmware update yet.
 
 ## Identity and ownership
 
-The NCP owns its network (`NcpNv`). The backend reports what it found,
-never `Owned`: `Ownership(Observed(identity))` with the EPID, PAN ID,
-channel, key sequence, coordinator IEEE and the key ID (SHA-256 of the
-network key, design §2.5) when the security manager exports the key;
-`None` otherwise (Secure Vault), and the hub matches on the EPID alone
-(design §8.5). `NoNetwork` when `networkInit` answers `NOT_JOINED`. The
-hub's tag (§2.7, PR I) decides whether it is the hub's network.
+The NCP owns its network (`NcpNv`, design §2.5): the backend reports the
+NCP's identity and never decides ownership. It reports
+`Ownership(Observed(identity))`, never `Owned`: the EPID, PAN ID, channel,
+key sequence, coordinator IEEE and the key ID (SHA-256 of the network key,
+§2.5) when the security manager exports the key, `None` otherwise (Secure
+Vault), in which case the EPID alone decides (§8.5). It reports `NoNetwork`
+when `networkInit` answers `NOT_JOINED`, and `Unknown` before a session.
+
+hub-app decides: it compares the observed identity with the `hub/owner`
+tag (§2.7) and turns it into owned or foreign. PR I (#71) adds the tag types
+and the read-only registry state (`unverified` for an `NcpNv` network not
+compared yet); the `NcpNv` decision itself, and refusing device traffic
+until the NCP's identity matches the tag, are wired in PR H together with
+the backend selection.
 
 ## Diagnostics
 
@@ -245,9 +254,13 @@ devices left, route records, GP frames ignored).
    host).
 3. NCP firmware update: `launchStandaloneBootloader` + XMODEM GBL
    (`FwUpdateMethod::GeckoXmodem`).
-4. PR H: backend selection in hub-app and the firmware (`ezsp` feature),
-   the UART transport on the ESP32, persistence of the TX power.
-5. HIL on the Dongle Max: session start on the stock "1.0.0" image, XON/XOFF
+4. Force removal: `removeDevice(parent short address, parent EUI64, target
+   EUI64)` (APS Remove Device to the parent) for unreachable or sleepy
+   children, as an explicit fallback behind the engine's Mgmt_Leave_req.
+5. PR H: backend selection in hub-app and the firmware (`ezsp` feature),
+   the UART transport on the ESP32, persistence of the TX power, the
+   `NcpNv` ownership decision.
+6. HIL on the Dongle Max: session start on the stock "1.0.0" image, XON/XOFF
    on the 115 200 Bd line, key export, permit join with real devices,
    channel change, callback bursts and the capacities the NCP accepts.
 
