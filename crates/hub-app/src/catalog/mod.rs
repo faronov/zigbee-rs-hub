@@ -26,7 +26,7 @@ pub mod data;
 pub mod local;
 pub mod service;
 pub mod store;
-#[cfg(test)]
+#[cfg(all(test, feature = "zrhp"))]
 mod tests_e2e;
 pub mod web;
 

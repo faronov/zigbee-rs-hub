@@ -29,13 +29,13 @@ impl Runner {
         let failed = |e: std::io::Error| ApiError::new("failed", e.to_string());
         let adopt = head.ty == "network/registry/adopt";
         let r = if adopt {
-            self.ncp.registry_adopt().map_err(failed).map(|_| {
+            self.records.adopt().map_err(failed).map(|_| {
                 let n = if self.registry.loaded { 0 } else { self.load_network(now) };
                 format!("\"restored\":{n}")
             })
         } else {
             self.forget_network(now).and_then(|forgotten| {
-                let deleted = self.ncp.registry_clear().map_err(failed)?;
+                let deleted = self.records.clear().map_err(failed)?;
                 self.registry.loaded = true;
                 #[cfg(feature = "ota")]
                 self.ota.forget_devices();
@@ -52,7 +52,7 @@ impl Runner {
                 self.ota.set_writable(true);
                 let reason = if adopt { "registry_adopted" } else { "registry_cleared" };
                 self.engine.network_event(json!({"topic": "network_updated", "reason": reason}));
-                let registry = registry_json(&self.ncp.registry());
+                let registry = registry_json(&self.records.registry());
                 format!(r#"{{"id":{id},"type":"result","success":true,"result":{{{fields},"registry":{registry}}}}}"#)
             }
             Err(e) => admin::frame(id, Err(e)),
@@ -71,7 +71,7 @@ impl Runner {
 
     /// Why the network records cannot be written now (`None`: they can).
     pub(super) fn registry_read_only(&self) -> Option<ApiError> {
-        let why = match self.ncp.registry() {
+        let why = match self.records.registry() {
             RegistryState::Untagged | RegistryState::Owned => return None,
             RegistryState::Unverified => "the device registry is unverified",
             RegistryState::Foreign { .. } => "the device registry is foreign: adopt or clear it first",
@@ -83,7 +83,7 @@ impl Runner {
     /// readable after the start are loaded, and the rules learn whether
     /// they can be stored (their enable and disable actions).
     pub(super) fn check_registry(&mut self, now: Millis) {
-        let state = self.ncp.registry();
+        let state = self.records.registry();
         self.automations.read_only = !matches!(state, RegistryState::Untagged | RegistryState::Owned);
         #[cfg(feature = "ota")]
         self.ota.set_writable(!self.automations.read_only);
@@ -95,11 +95,11 @@ impl Runner {
     /// Devices (the stored ones replace those the engine has made since
     /// the start), groups, bindings, last values and rules from the store.
     fn load_network(&mut self, now: Millis) -> usize {
-        let n = self.registry.load_network(&self.ncp, &mut self.engine, now);
-        self.last.load(&self.ncp, &mut self.engine, now);
+        let n = self.registry.load_network(&*self.records, &mut self.engine, now);
+        self.last.load(&*self.records, &mut self.engine, now);
         #[cfg(feature = "ota")]
-        self.ota.load_devices(&self.ncp, &self.engine, now);
-        let rules = kv::with(&self.ncp, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
+        self.ota.load_devices(&*self.records, &self.engine, now);
+        let rules = kv::with(&*self.records, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
         self.automations.load(rules);
         self.with_automations(|a, w, _| a.prime(w));
         let known: Vec<(u64, u16)> = self.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();

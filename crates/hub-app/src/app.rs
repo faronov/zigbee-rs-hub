@@ -5,10 +5,14 @@
 //!
 //! ```text
 //!  coordinator events ─┐ (EventQueue, Input::Coord)
-//!  API connections ────┼─> app thread: engine (hub-devices) ─> CoordTransport ─> Coordinator (zrhp-pump)
+//!  API connections ────┼─> app thread: engine (hub-devices) ─> CoordTransport ─> Coordinator (zrhp-pump, ezsp-worker)
 //!  1 s tick ───────────┘        │  ApiServer (sessions, subscriptions)
-//!                               └─ Registry ─> host store (hubdata)
+//!                               └─ Registry ─> Records (host store in hubdata)
 //! ```
+//!
+//! The backend comes as a [`Backend`] ([`App::start_backend`]);
+//! [`App::start`] and [`App::start_with`] (feature `zrhp`) start the app on
+//! a running ZRHP host core.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -18,8 +22,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hub_coord::{
-    BackendConfig, CoordEvent, EVENT_SLOTS, EndpointConfig, EventQueue, NcpInfo, NetChange, NetworkAdmin, Reply,
-    Request, RequestId, SessionEvent, SessionState as CoordSession, Terminal,
+    BackendConfig, CoordEvent, EVENT_SLOTS, EndpointConfig, EventQueue, NcpInfo, NetChange, NetworkAdmin, RadioControl,
+    Reply, Request, RequestId, SessionEvent, SessionState as CoordSession, Terminal,
 };
 use hub_devices::api::{ApiExtension, ApiServer, Frame, SessionId};
 use hub_devices::bankcat::StoreCatalog;
@@ -28,13 +32,11 @@ use hub_devices::hub::{Hub as Engine, HubConfig};
 use hub_devices::resolve::{Catalog, MemoryCatalog};
 use hub_devices::transport::Outcome;
 use hub_devices::zdef_adapter::ZdefSchemaDecoder;
-use hub_ncp::store::EndpointRecord;
-use hub_ncp::Hub as Ncp;
-use hub_ncp::coord::ZrhpCoordinator;
-use hub_store::kv;
+use hub_store::{EndpointRecord, KvStore, kv};
 use log::{info, warn};
 
 use crate::admin::{self, Admin, JobOut};
+use crate::backend::{Backend, Records};
 use crate::automations::{self, Automations, Clock, World};
 use crate::catalog::data::SharedFlash;
 use crate::catalog::service::{CONFIG_KEY, CatalogService, load_config};
@@ -331,6 +333,7 @@ pub struct App {
     // 32-bit: the S3 has no 64-bit atomics.
     next_session: Arc<AtomicU32>,
     web: SharedWeb,
+    radio: Option<Arc<dyn RadioControl>>,
 }
 
 fn endpoint_config(e: &EndpointRecord) -> EndpointConfig {
@@ -349,13 +352,23 @@ fn wall_ms() -> Millis {
 }
 
 impl App {
-    /// Start the application on a running host core.
-    pub fn start(ncp: Ncp, cfg: AppConfig) -> App {
+    /// Start the application on a running ZRHP host core.
+    #[cfg(feature = "zrhp")]
+    pub fn start(ncp: hub_ncp::Hub, cfg: AppConfig) -> App {
         Self::start_with(ncp, cfg, None)
     }
 
-    /// [`App::start`] with the catalog store in `hubdata`.
-    pub fn start_with(ncp: Ncp, cfg: AppConfig, catalog: Option<CatalogSetup>) -> App {
+    /// [`App::start`] with the catalog store in `hubdata`:
+    /// [`App::start_backend`] with [`Backend::zrhp`].
+    #[cfg(feature = "zrhp")]
+    pub fn start_with(ncp: hub_ncp::Hub, cfg: AppConfig, catalog: Option<CatalogSetup>) -> App {
+        Self::start_backend(Backend::zrhp(ncp), cfg, catalog)
+    }
+
+    /// Start the application on a coordinator backend (its coordinator is
+    /// started here, on the app's event queue, with the hub endpoint of
+    /// `cfg`), with the catalog store in `hubdata` when `catalog` is given.
+    pub fn start_backend(backend: Backend, cfg: AppConfig, catalog: Option<CatalogSetup>) -> App {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(AppStatus::default()));
         let stopped = Arc::new(AtomicBool::new(false));
@@ -366,8 +379,9 @@ impl App {
                 let _ = bell.send(Input::Coord);
             }),
         ));
-        let backend = BackendConfig { endpoints: vec![endpoint_config(&cfg.endpoint)] };
-        let coord = ZrhpCoordinator::start(ncp.clone(), backend, events.clone());
+        let endpoints = BackendConfig { endpoints: vec![endpoint_config(&cfg.endpoint)] };
+        let (coord, net) = (backend.coordinator)(endpoints, events.clone());
+        let records = backend.kv;
         let st = status.clone();
         let stop = stopped.clone();
         let jobs = tx.clone();
@@ -376,9 +390,15 @@ impl App {
         thread::Builder::new()
             .name("hub-app".into())
             .stack_size(cfg.stack_size)
-            .spawn(move || Runner::new(ncp, Box::new(coord), events, cfg, st, jobs, catalog, web2).run(rx, stop))
+            .spawn(move || Runner::new(records, coord, net, events, cfg, st, jobs, catalog, web2).run(rx, stop))
             .expect("hub-app thread");
-        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)), web }
+        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)), web, radio: backend.radio }
+    }
+
+    /// The backend's Wi-Fi coexistence control (the firmware's Wi-Fi
+    /// callbacks); `None` when the NCP has none.
+    pub fn radio(&self) -> Option<&Arc<dyn RadioControl>> {
+        self.radio.as_ref()
     }
 
     /// A new API connection; the `auth_required` frame goes to `sink`.
@@ -450,7 +470,8 @@ impl App {
 }
 
 struct Runner {
-    ncp: Ncp,
+    /// The hub's records and whose they are.
+    records: Arc<dyn Records>,
     cfg: AppConfig,
     engine: Engine<CoordTransport>,
     /// The coordinator's events.
@@ -616,7 +637,7 @@ fn settle(engine: &mut Engine<CoordTransport>, now: Millis) {
 
 /// Opens the catalog store in `hubdata` and its service.
 #[inline(never)]
-fn open_catalog(ncp: &Ncp, setup: CatalogSetup, web: SharedWeb) -> Option<(StoreCatalog, CatalogService)> {
+fn open_catalog(kv: &dyn KvStore, setup: CatalogSetup, web: SharedWeb) -> Option<(StoreCatalog, CatalogService)> {
     let size = setup.flash.lock().unwrap().size();
     let Some(map) = hub_core::layout::HubdataMap::for_size(size) else {
         warn!("catalog: hubdata of {size} B has no catalog areas");
@@ -641,7 +662,7 @@ fn open_catalog(ncp: &Ncp, setup: CatalogSetup, web: SharedWeb) -> Option<(Store
     if let Some(c) = &store.active {
         info!("catalog: bank generation {} ({} definitions, key {})", c.generation, c.definitions, c.kid);
     }
-        let cfg = load_config(kv::with(ncp, |s| s.get(CONFIG_KEY).map(<[u8]>::to_vec)));
+    let cfg = load_config(kv::with(kv, |s| s.get(CONFIG_KEY).map(<[u8]>::to_vec)));
     let cat = StoreCatalog { bank, fetched: store.local.catalog(), ..Default::default() };
     Some((cat, CatalogService::new(setup.flash, store, cfg, web)))
 }
@@ -655,8 +676,9 @@ fn permit_changed(before: u32, now: u32) -> bool {
 impl Runner {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        ncp: Ncp,
+        records: Arc<dyn Records>,
         coord: Box<dyn hub_coord::Coordinator>,
+        net: Arc<dyn NetworkAdmin>,
         events: Arc<EventQueue>,
         cfg: AppConfig,
         status: Arc<Mutex<AppStatus>>,
@@ -666,7 +688,7 @@ impl Runner {
     ) -> Self {
         let builtin = if cfg.builtin_catalog { builtin_catalog() } else { MemoryCatalog::default() };
         let (catalog, service): (Box<dyn Catalog>, Option<CatalogService>) =
-            match setup.map(|s| open_catalog(&ncp, s, web)) {
+            match setup.map(|s| open_catalog(&*records, s, web)) {
                 Some(Some((mut c, svc))) => {
                     // The examples stand in until a bank is installed.
                     if c.bank.is_none() {
@@ -677,8 +699,9 @@ impl Runner {
                 _ => (Box::new(builtin), None),
             };
         let hub_cfg = HubConfig { tz_offset_s: cfg.tz_offset_s, ..HubConfig::default() };
-        let net: Arc<dyn NetworkAdmin> = Arc::new(hub_ncp::coord::ZrhpAdmin::new(ncp.clone()));
-        let mut engine = Engine::new(CoordTransport::new(coord, net.clone()), hub_cfg, catalog);
+        let mut transport = CoordTransport::new(coord, net.clone());
+        transport.records = Some(records.clone());
+        let mut engine = Engine::new(transport, hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
         // Without the OTA server, OTA cluster commands take the engine's
         // generic path (a requested Default Response, no OTA answer).
@@ -693,9 +716,9 @@ impl Runner {
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
         admin.start_worker();
-        admin.load_clock(&ncp);
+        admin.load_clock(&*records);
         let mut r = Self {
-            ncp,
+            records,
             cfg,
             engine,
             events,
@@ -731,17 +754,15 @@ impl Runner {
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
-        registry.load(&r.ncp, &mut r.engine, now);
+        registry.load(&*r.records, &mut r.engine, now);
         r.registry = registry;
-        let ncp = r.ncp.clone();
-        r.engine.transport.registry = Some(Box::new(move || ncp.registry()));
         // The clock first: kept times convert only once the time is known.
         r.admin.clock_tick(&mut r.engine.cfg, now);
         let mut last = std::mem::take(&mut r.last);
-        last.load(&r.ncp, &mut r.engine, now);
+        last.load(&*r.records, &mut r.engine, now);
         r.last = last;
         let records: Vec<(String, Vec<u8>)> =
-            kv::with(&r.ncp, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
+            kv::with(&*r.records, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
         let n = r.automations.load(records);
         if n > 0 {
             info!("automations: {n} rules restored");
@@ -756,7 +777,7 @@ impl Runner {
         let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
         r.engine.transport.nwk.extend(known);
         #[cfg(feature = "ota")]
-        r.ota.load(&r.ncp, &r.engine, now);
+        r.ota.load(&*r.records, &r.engine, now);
         // Restored devices produce added events; nobody is subscribed yet,
         // and their snapshots are what the store holds.
         let _ = r.engine.drain_events();
@@ -799,7 +820,7 @@ impl Runner {
         let dirty = std::mem::take(&mut self.automations.dirty);
         if !dirty.is_empty() {
             let a = &self.automations;
-            kv::with(&self.ncp, |s| {
+            kv::with(&*self.records, |s| {
                 for id in &dirty {
                     let k = format!("{}{id}", automations::PREFIX);
                     let r = match a.rule(id) {
@@ -860,8 +881,8 @@ impl Runner {
             self.after(&mut next_tick);
         }
         let now = self.now();
-        self.registry.flush(&self.ncp, &self.engine, now, true);
-        self.last.flush(&self.ncp, &self.engine, now, true);
+        self.registry.flush(&*self.records, &self.engine, now, true);
+        self.last.flush(&*self.records, &self.engine, now, true);
         // The coordinator (its pump) stops with the engine.
         drop(self);
         stopped.store(true, Ordering::SeqCst);
@@ -890,8 +911,8 @@ impl Runner {
                 self.engine.transport.nwk.insert(ieee, nwk);
                 self.engine.on_device_joined(ieee, nwk, now);
             }
-            // Logged only until PR H (backend selection) decides what a
-            // leave does to the registry.
+            // Logged: a device stays until it is removed (`devices/remove`),
+            // as with ZRHP, which reports no leaves.
             CoordEvent::DeviceLeft { ieee, nwk, rejoin } => {
                 info!("app: device {ieee:016x} (0x{nwk:04X}) left, rejoin {rejoin:?}")
             }
@@ -910,12 +931,13 @@ impl Runner {
             CoordEvent::ScanProgress { done, total, .. } => self.admin.scan_progress(done, total),
             CoordEvent::Progress { id, p } => self.outcome(id, p.into(), now),
             CoordEvent::Done { id, t } => self.outcome(id, t.into(), now),
-            CoordEvent::Session(s) => {
-                if let SessionEvent::Up { info, .. } = *s {
-                    self.register(&info);
-                }
-            }
-            CoordEvent::Ownership(_) => {}
+            CoordEvent::Session(s) => match *s {
+                SessionEvent::Up { info, .. } => self.register(&info),
+                // The NCP's network is unknown until the next session's
+                // ownership report.
+                SessionEvent::Down | SessionEvent::Incompatible => self.records.observe(None),
+            },
+            CoordEvent::Ownership(o) => self.records.observe(Some(&o)),
             CoordEvent::Dropped { events } => warn!("app: {events} coordinator events lost"),
         }
     }
@@ -1017,8 +1039,8 @@ impl Runner {
                     && let Some(head) = admin::head(&text)
                 {
                     if matches!(head.ty.as_str(), "hub/reboot" | "hub/mode/set") {
-                        self.registry.flush(&self.ncp, &self.engine, now, true);
-                        self.last.flush(&self.ncp, &self.engine, now, true);
+                        self.registry.flush(&*self.records, &self.engine, now, true);
+                        self.last.flush(&*self.records, &self.engine, now, true);
                     }
                     for frame in self.admin_request(sid, &head, now) {
                         self.send(sid, &frame);
@@ -1096,7 +1118,7 @@ impl Runner {
         {
             return Some(hub_devices::api::ServerMessage::err(id, e).to_text());
         }
-        Some(match self.ota.request(&mut self.engine, &self.ncp, sid, &ty, &v, now) {
+        Some(match self.ota.request(&mut self.engine, &*self.records, sid, &ty, &v, now) {
             Ok(r) => r.frame(id),
             Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),
         })
@@ -1107,7 +1129,7 @@ impl Runner {
     #[cfg(feature = "ota")]
     fn pump_ota(&mut self, now: Millis) {
         self.ota.frames(&mut self.engine, now);
-        self.ota.poll(&mut self.engine, &self.ncp, now);
+        self.ota.poll(&mut self.engine, &*self.records, now);
         // Streams of sessions that are gone wait for a client.
         let sinks = &self.sinks;
         self.ota.prune(|sid| sinks.contains_key(&sid), now);
@@ -1118,7 +1140,8 @@ impl Runner {
 
     /// `hub/info` `maintenance`: the admin features and the hooks'.
     fn set_maintenance(&mut self) {
-        let mut f = self.admin.features(&self.ncp);
+        let caps = self.engine.transport.status().caps;
+        let mut f = self.admin.features(caps.as_deref());
         f.extend(self.hooks.iter().filter_map(|h| h.feature()));
         self.api.set_info("maintenance", f.into());
     }
@@ -1179,8 +1202,10 @@ impl Runner {
             })
         };
         let jobs = Mutex::new(self.jobs.clone());
+        let st = self.engine.transport.status();
         let ctx = admin::Ctx {
-            ncp: &self.ncp,
+            records: &self.records,
+            status: &st,
             net: &self.net,
             api: &mut self.api,
             known: &known,
@@ -1327,6 +1352,9 @@ impl Runner {
         }
         let st = self.engine.transport.status();
         let ready = st.session == CoordSession::Ready;
+        // Device traffic waits until the NCP's network is the records'
+        // (`NcpNv` backends; always for ZRHP).
+        let verified = self.records.verified();
         let cookie = st.epoch;
         if ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
@@ -1335,17 +1363,17 @@ impl Runner {
             self.set_maintenance();
         }
         // Group memberships of the hub endpoint, once per NCP session.
-        if self.registered && ready && self.groups_for != cookie {
+        if self.registered && ready && verified && self.groups_for != cookie {
             self.groups_for = cookie;
             let n = self.engine.groups_resync(now);
             if n > 0 {
                 info!("app: hub endpoint joined {n} groups");
             }
         }
-        if self.registered && self.cfg.import_ncp_devices && ready {
+        if self.registered && self.cfg.import_ncp_devices && ready && verified {
             self.import_ncp_devices(cookie);
         }
-        self.refresh(ready, now);
+        self.refresh(ready && verified, now);
         self.admin.clock_tick(&mut self.engine.cfg, now);
         // Background maintenance jobs report progress once a second.
         for ev in self.admin.progress_events() {
@@ -1373,7 +1401,7 @@ impl Runner {
         if c.config_dirty {
             c.config_dirty = false;
             let v = c.cfg.to_json().to_string();
-            if let Err(e) = kv::with(&self.ncp, |s| s.put(CONFIG_KEY, v.as_bytes())) {
+            if let Err(e) = kv::with(&*self.records, |s| s.put(CONFIG_KEY, v.as_bytes())) {
                 warn!("catalog: saving the settings: {e}");
             }
         }
@@ -1438,7 +1466,7 @@ impl Runner {
                 self.import_retry = Some(Instant::now() + Duration::from_secs(30));
             }
         }
-        let ready = self.engine.transport.status().session == CoordSession::Ready;
+        let ready = self.engine.transport.status().session == CoordSession::Ready && self.records.verified();
         self.refresh(ready, now);
     }
 
@@ -1484,7 +1512,7 @@ impl Runner {
     /// `EVT_PERMIT_JOIN_STATE` (the zigbee-rs NCP does not), so the event
     /// follows the host core's remaining time.
     fn observe_permit(&mut self) {
-        let left = self.ncp.permit_join_remaining();
+        let left = self.engine.transport.permit_join_s();
         if permit_changed(self.permit_left, left) {
             self.engine.network_event(serde_json::json!({"topic": "permit_join", "remaining_s": left}));
         }
@@ -1520,8 +1548,8 @@ impl Runner {
             }
         }
         self.pump_automations();
-        self.registry.flush(&self.ncp, &self.engine, now, false);
-        self.last.flush(&self.ncp, &self.engine, now, false);
+        self.registry.flush(&*self.records, &self.engine, now, false);
+        self.last.flush(&*self.records, &self.engine, now, false);
         let mut st = self.status.lock().unwrap();
         st.last_values = (self.last.restored, self.last.writes, self.last.bytes, self.last.errors);
         st.devices = self.engine.devices().count();

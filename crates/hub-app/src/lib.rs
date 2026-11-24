@@ -1,9 +1,12 @@
 //! zigbee-rs-hub application runtime (stage 2): the device and entity
-//! engine (`hub-devices`) on the ZRHP host core (`hub-ncp`).
+//! engine (`hub-devices`) on a coordinator backend: the ZRHP host core
+//! (`hub-ncp`, feature `zrhp`, default) or an EmberZNet NCP (`hub-ezsp`,
+//! feature `ezsp`).
 //!
 //! | Module | Contents |
 //! |---|---|
-//! | [`transport`] | the engine's `ZigbeeTransport` on a `hub_coord::Coordinator` (ZRHP: `hub_ncp::coord::ZrhpCoordinator`) |
+//! | [`backend`] | the backend the app runs on ([`Backend`]: coordinator, administration, the hub's records and whose they are) |
+//! | [`transport`] | the engine's `ZigbeeTransport` on a `hub_coord::Coordinator` (ZRHP: `hub_ncp::coord::ZrhpCoordinator`, EZSP: `hub_ezsp::coord::EzspCoordinator`) |
 //! | [`registry`] | device registry and user definitions in the host store journal (`hubdata`) |
 //! | [`app`] | the app thread: engine, `ApiServer` sessions, registry, 1 s tick |
 //! | [`catalog`] | the definitions catalog: trusted keys (slot 0, slot 1 for rotation), bank/manifest verification, the store in `hubdata` (bank slots A/B, active-bank record, manifest, local definitions) and the service (update checks, downloads, on-demand fetch, uploads, `catalog/*` API) |
@@ -21,6 +24,7 @@
 
 pub mod admin;
 pub mod app;
+pub mod backend;
 pub mod automations;
 pub mod catalog;
 pub mod clock;
@@ -38,19 +42,21 @@ pub mod topology;
 pub mod transport;
 
 pub use app::{App, AppConfig, AppStatus, CatalogSetup, Pieces, RequestHook, SessionSink, builtin_catalog};
+pub use backend::{Backend, NcpNvRecords, Records};
 #[cfg(feature = "ota-store")]
 pub use ota_store::OtaFlash;
 pub use platform::{LogRing, Platform};
 
-#[cfg(all(test, feature = "ota"))]
+// The app on the ZRHP host core and its simulated NCP (`App::start`).
+#[cfg(all(test, feature = "ota", feature = "zrhp"))]
 mod ota_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "zrhp"))]
 mod baseline;
-#[cfg(test)]
+#[cfg(all(test, feature = "zrhp"))]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "zrhp"))]
 mod tests_baseline;
-#[cfg(test)]
+#[cfg(all(test, feature = "zrhp"))]
 mod tests_groups;
-#[cfg(test)]
+#[cfg(all(test, feature = "zrhp"))]
 mod tests_owner;

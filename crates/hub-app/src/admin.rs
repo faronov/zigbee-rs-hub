@@ -1,7 +1,8 @@
 //! Network and hub maintenance API (device-support 14.6, API 1.2): energy
 //! scan with a channel recommendation, channel change, TX power, NCP
 //! diagnostics, the network map, backup/restore (Open Coordinator Backup),
-//! forming a new network after a reset, and the hub's own settings (Wi-Fi,
+//! forming a network (a new one after a reset, or where the NCP has
+//! none), and the hub's own settings (Wi-Fi,
 //! API token, reboot, boot mode, system facts, log tail).
 //!
 //! Requests reach this module only from authenticated sessions. Everything
@@ -13,15 +14,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hub_coord::{Beacon, CoordError, Diagnostics, EnergyChannel, FormParams, Kind, NetworkAdmin, RestoreOptions};
+use hub_coord::{
+    Beacon, Capabilities, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams, Kind, NetState, NetworkAdmin,
+    NetworkOwnership, RestoreOptions,
+};
 use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
-use hub_store::kv;
-use hub_ncp::Hub as Ncp;
+use hub_store::{KvStore, kv};
 use log::{info, warn};
 use serde_json::{Value as J, json};
-use zigbee_zrhp::msg::system::caps;
 
+use crate::backend::Records;
 use crate::clock;
 use crate::jobs::{self, Lane};
 use crate::jw::{Jw, oom};
@@ -44,6 +47,7 @@ pub const TYPES: &[&str] = &[
     "network/job/cancel",
     "network/restore",
     "network/reset",
+    "network/form",
     "network/registry/adopt",
     "network/registry/clear",
     "hub/system",
@@ -106,8 +110,10 @@ pub type Out = Arc<dyn Fn(JobOut) + Send + Sync>;
 
 /// Everything a request may need from the app thread.
 pub struct Ctx<'a> {
-    /// Host core.
-    pub ncp: &'a Ncp,
+    /// The hub's records in the backend's store.
+    pub records: &'a Arc<dyn Records>,
+    /// The coordinator's status now.
+    pub status: &'a CoordStatus,
     /// Network administration (its blocking calls on job threads only).
     pub net: &'a Arc<dyn NetworkAdmin>,
     /// API sessions (token rotation).
@@ -448,19 +454,19 @@ impl Backup {
 /// Export (keys optional) and write the OCB file straight into a result
 /// frame (one buffer, reserved fallibly); complete backups are also kept in
 /// the host store.
-fn take_backup(net: &dyn NetworkAdmin, ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
+fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
     let mut export = ocb::Export::default();
     net.backup_export(keys, &mut export).map_err(|e| ncp_error("backup export", e))?;
-    let session = ncp.client().session();
+    let ncp = net.status().and_then(|s| s.ncp);
     let info = ocb::ExportInfo {
         source: source.to_string(),
         creation_time: ocb::rfc3339(now_s as u64),
-        ncp_fw: session.as_ref().map(|s| s.negotiated.fw.clone()).unwrap_or_default(),
-        ncp_chip: session.as_ref().map_or(0, |s| s.negotiated.chip),
-        ncp_build_id: session.as_ref().map(|s| hex(&s.negotiated.build_id)).unwrap_or_default(),
+        ncp_fw: ncp.as_ref().map(|n| n.fw.clone()).unwrap_or_default(),
+        ncp_chip: ncp.as_ref().map_or(0, |n| n.chip),
+        ncp_build_id: ncp.as_ref().map(|n| hex(&n.build_id)).unwrap_or_default(),
         host_devices: known.iter().map(|k| (k.ieee.to_le_bytes(), k.nwk)).collect(),
         // The hub's groups as stored (device-support 14.9).
-        groups: kv::with(ncp, |s| {
+        groups: kv::with(kv, |s| {
             let v: Vec<&str> = s
                 .prefix(hub_devices::hub::zgroups::GROUP_KEY)
                 .filter_map(|(_, v)| std::str::from_utf8(v).ok())
@@ -481,7 +487,7 @@ fn take_backup(net: &dyn NetworkAdmin, ncp: &Ncp, keys: bool, known: &[Known], s
     let b = Backup { frame, file: start..end };
     if summary.complete {
         // A kept backup of another network (registry foreign) stays.
-        kv::with(ncp, |s| if s.gate() == hub_store::Gate::Open { s.put(LAST_BACKUP_KEY, b.file().as_bytes()) } else { Ok(()) })
+        kv::with(kv, |s| if s.gate() == hub_store::Gate::Open { s.put(LAST_BACKUP_KEY, b.file().as_bytes()) } else { Ok(()) })
             .map_err(|e| ApiError::new("failed", format!("backup not stored: {e}")))?;
     }
     info!("admin: backup taken ({} devices, {} link keys, complete {})", summary.devices, summary.link_keys, summary.complete);
@@ -505,14 +511,20 @@ impl Admin {
         }
     }
 
-    /// `hub/info` `maintenance`: what this hub and its NCP support.
-    pub fn features(&self, ncp: &Ncp) -> Vec<&'static str> {
+    /// `hub/info` `maintenance`: what this hub and its NCP (`caps`)
+    /// support.
+    pub fn features(&self, caps: Option<&Capabilities>) -> Vec<&'static str> {
         let mut f = vec!["diagnostics", "topology", "change_channel", "reset"];
-        for (bit, name) in
-            [(caps::ENERGY_SCAN, "energy_scan"), (caps::TX_POWER, "tx_power"), (caps::BACKUP_RESTORE, "backup"), (caps::BACKUP_RESTORE, "restore")]
-        {
-            if ncp.ncp_has(bit) {
-                f.push(name);
+        if let Some(c) = caps {
+            for (has, name) in [
+                (c.radio.energy_scan, "energy_scan"),
+                (c.radio.tx_power, "tx_power"),
+                (c.backup.export, "backup"),
+                (c.backup.restore, "restore"),
+            ] {
+                if has {
+                    f.push(name);
+                }
             }
         }
         f.extend(self.platform.as_ref().map(|p| p.features()).unwrap_or_default());
@@ -528,7 +540,7 @@ impl Admin {
             "hub/system" => Ok(self.system(&ctx)),
             "hub/logs" => self.logs(v),
             "hub/time" => return vec![self.time_frame(id)],
-            "hub/time/set" => match self.set_time(ctx.ncp, v) {
+            "hub/time/set" => match self.set_time(&**ctx.records, v) {
                 Ok(()) => return vec![self.time_frame(id)],
                 Err(e) => Err(e),
             },
@@ -537,7 +549,7 @@ impl Admin {
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
             "hub/mode/set" => self.mode(v),
             "network/backup/last" => {
-                let r = kv::with(ctx.ncp, |s| {
+                let r = kv::with(&**ctx.records, |s| {
                     let last = s.get(LAST_BACKUP_KEY).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
                     let mut w = Jw::result(id, last.len() + 80)?;
                     w.obj().key("backup").raw(last).end_obj();
@@ -582,28 +594,11 @@ impl Admin {
 
     fn system(&self, ctx: &Ctx<'_>) -> J {
         let mut v = self.platform.as_ref().map(|p| p.system()).unwrap_or_else(|| json!({}));
-        let st = ctx.ncp.status();
         if let Some(o) = v.as_object_mut() {
             o.insert("app".into(), (ctx.app_facts)());
-            o.insert(
-                "store".into(),
-                json!({
-                    "volatile": st.store_volatile,
-                    "journal_sectors": st.journal.sectors,
-                    "journal_live_sectors": st.journal.live_sectors,
-                    "journal_generation": st.journal.generation,
-                }),
-            );
-            o.insert(
-                "ncp".into(),
-                json!({
-                    "fw": st.ncp.as_ref().map(|s| s.negotiated.fw.clone()),
-                    "resumes": st.resumes,
-                    "restarts": st.ncp_restarts,
-                    "last_error": st.last_error,
-                    "slots": st.slots.iter().map(|s| json!({"slot": s.slot, "state": s.state, "version": format!("0x{:08X}", s.version)})).collect::<Vec<_>>(),
-                }),
-            );
+            let (store, ncp) = ctx.records.system(ctx.status);
+            o.insert("store".into(), store);
+            o.insert("ncp".into(), ncp);
             o.insert("time".into(), ctx.now_s.into());
             o.insert("time_synced".into(), hub_devices::device::time_synced().into());
         }
@@ -618,8 +613,8 @@ impl Admin {
 
     /// Time settings from the host store; hands them to the platform.
     #[inline(never)]
-    pub fn load_clock(&mut self, ncp: &Ncp) {
-        let (tz, ntp) = kv::with(ncp, |s| {
+    pub fn load_clock(&mut self, kv: &dyn KvStore) {
+        let (tz, ntp) = kv::with(kv, |s| {
             let get = |k| s.get(k).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string);
             (get(TZ_KEY), get(NTP_KEY))
         });
@@ -710,10 +705,10 @@ impl Admin {
     }
 
     #[inline(never)]
-    fn set_time(&mut self, ncp: &Ncp, v: &J) -> Result<(), ApiError> {
+    fn set_time(&mut self, kv: &dyn KvStore, v: &J) -> Result<(), ApiError> {
         if let Some(tz) = text(v, "tz")? {
             let t = clock::parse(tz).ok_or_else(|| bad("tz: a POSIX TZ string such as EET-2EEST,M3.5.0/3,M10.5.0/4"))?;
-            kv::with(ncp, |s| s.put(TZ_KEY, tz.trim().as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            kv::with(kv, |s| s.put(TZ_KEY, tz.trim().as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
             self.clock.tz = t;
             self.clock.tz_text = tz.trim().to_string();
         }
@@ -723,7 +718,7 @@ impl Admin {
                 .and_then(|a| a.iter().map(|s| s.as_str().map(|s| s.trim().to_string())).collect::<Option<Vec<_>>>())
                 .filter(|l| (1..=3).contains(&l.len()) && l.iter().all(|s| (1..=64).contains(&s.len()) && !s.contains(',')))
                 .ok_or_else(|| bad("servers: 1–3 host names"))?;
-            kv::with(ncp, |s| s.put(NTP_KEY, servers.join(",").as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            kv::with(kv, |s| s.put(NTP_KEY, servers.join(",").as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
             self.clock.servers = servers;
         }
         if let Some(p) = &self.platform {
@@ -845,7 +840,7 @@ impl Admin {
 
     fn ncp_job(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, v: &J) -> Vec<String> {
         let id = head.id;
-        let ncp = ctx.ncp.clone();
+        let records = ctx.records.clone();
         let net = ctx.net.clone();
         let out = ctx.out.clone();
         let fail = |e: ApiError| vec![frame(id, Err(e))];
@@ -879,7 +874,7 @@ impl Admin {
                             }
                             done += 1;
                             bg.pass_done(done, p.elapsed());
-                            text = energy_result(&agg, mask, done, passes, bg.cancelled(), wifi, ncp.status().network.map(|n| n.channel), t)?;
+                            text = energy_result(&agg, mask, done, passes, bg.cancelled(), wifi, current_channel(&*net), t)?;
                             if done < passes && !bg.cancelled() {
                                 bg.partial(&text);
                             }
@@ -903,7 +898,7 @@ impl Admin {
                     Box::new(move |_| {
                         let t = std::time::Instant::now();
                         let found = net.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
-                        let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
+                        let own = net.status().and_then(|s| s.network).map(|n| (n.pan_id, n.ext_pan_id));
                         // Every router of a network beacons: one entry per
                         // network and channel, its best beacon, and the count.
                         let mut nets: Vec<(&Beacon, u32)> = Vec::new();
@@ -954,6 +949,7 @@ impl Admin {
                 };
                 self.spawn("TX power", out, sid, id, move |out| {
                     let applied = net.set_tx_power(q.dbm).map_err(|e| ncp_error("TX power", e))?;
+                    records.tx_power_set(q.dbm);
                     out(JobOut::Event(json!({"topic": "network_updated", "reason": "tx_power", "tx_power": applied})));
                     Ok(Reply::Json(json!({"requested_dbm": q.dbm, "applied_dbm": applied})))
                 })
@@ -974,21 +970,23 @@ impl Admin {
                 if q.keys && ctx.api.token().is_empty() {
                     return fail(ApiError::new("unauthorized", "backups with keys need an API token"));
                 }
-                if !ncp.ncp_has(caps::BACKUP_RESTORE) {
+                if !ctx.status.caps.as_ref().is_some_and(|c| c.backup.export) {
                     return fail(ApiError::new("unsupported", "the NCP has no BACKUP_RESTORE"));
                 }
                 let known = (ctx.known)();
                 let source = self.source.clone();
                 let now_s = ctx.now_s;
-                self.spawn("backup", out, sid, id, move |_| take_backup(&*net, &ncp, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame)))
+                self.spawn("backup", out, sid, id, move |_| {
+                    take_backup(&*net, &*records, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame))
+                })
             }
-            "network/reset" => self.reset(ctx, sid, id, v),
+            "network/reset" => self.reset(ctx, sid, id, v, false),
+            "network/form" => self.reset(ctx, sid, id, v, true),
             other => fail(ApiError::new("unsupported", other.to_string())),
         }
     }
 
     fn job_topology(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, q: TopologyReq) -> Vec<String> {
-        let ncp = ctx.ncp.clone();
         let net = ctx.net.clone();
         let known = (ctx.known)();
         let now_s = ctx.now_s;
@@ -1002,7 +1000,7 @@ impl Admin {
             Box::new(move |bg| {
                 let opts = ScanOpts { routes: q.routes, cancel: Some(bg.cancel_flag()), ..ScanOpts::default() };
                 let mut progress = |scanned: usize, queued: usize| bg.fraction((scanned * 1000 / (scanned + queued).max(1)) as u32);
-                topology::scan(&*net, &ncp, &known, opts, now_s, &mut progress)
+                topology::scan(&*net, &known, opts, now_s, &mut progress)
             }),
         )
     }
@@ -1054,13 +1052,13 @@ impl Admin {
         let Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }) = self.staged.take() else {
             return fail(bad("no restore staged"));
         };
-        let ncp = ctx.ncp.clone();
+        let records = ctx.records.clone();
         let net = ctx.net.clone();
-        if !ncp.ncp_has(caps::BACKUP_RESTORE) {
+        if !ctx.status.caps.as_ref().is_some_and(|c| c.backup.restore) {
             return fail(ApiError::new("unsupported", "the NCP has no BACKUP_RESTORE"));
         }
-        let st = ncp.status();
-        if st.network_state != 0 && !force {
+        let st = ctx.status;
+        if st.network_state != NetState::None && !force {
             let pan = st.network.map_or(String::from("?"), |n| format!("0x{:04X}", n.pan_id));
             return fail(bad(format!(
                 "the NCP runs a network (PAN {pan}); set force to replace it (it is backed up first unless skip_backup)"
@@ -1073,13 +1071,13 @@ impl Admin {
             RestoreOptions { allow_ieee_change, nwk_margin: 10_000, aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN } };
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
             let mut previous = false;
-            if ncp.status().network_state == 2 && !skip_backup {
-                drop(take_backup(&*net, &ncp, true, &known, &source, now_s, id).map_err(|e| {
+            if network_state(&*net) == NetState::Up && !skip_backup {
+                drop(take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
                     ApiError::new(&e.code, format!("automatic backup before the restore failed ({}); set skip_backup to restore anyway", e.message))
                 })?);
                 previous = true;
             }
-            let report = net.backup_restore(restore.encoder.finish(), opts).map_err(|e| ncp_error("restore", e))?;
+            let report = replace(&*net, &*records, || net.backup_restore(restore.encoder.finish(), opts).map_err(|e| ncp_error("restore", e)))?;
             out(JobOut::Reimport);
             if let Some(g) = groups {
                 out(JobOut::Groups(g));
@@ -1100,13 +1098,22 @@ impl Admin {
         })
     }
 
-    fn reset(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, v: &J) -> Vec<String> {
+    /// `network/reset` (leave the network, backed up first unless
+    /// `skip_backup`, then form a new one) and `network/form` (`form_only`:
+    /// only where the backend reports no network; nothing to confirm).
+    fn reset(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, v: &J, form_only: bool) -> Vec<String> {
         let fail = |e: ApiError| vec![frame(id, Err(e))];
         let q = match ResetReq::from(v) {
             Ok(q) => q,
             Err(e) => return fail(e),
         };
-        if q.confirm != "RESET" {
+        if form_only && ctx.status.ownership != NetworkOwnership::NoNetwork {
+            return fail(bad(format!(
+                "the NCP reports {} network ownership, not no_network: network/reset replaces a network",
+                ctx.status.ownership.as_str()
+            )));
+        }
+        if !form_only && q.confirm != "RESET" {
             return fail(bad("confirm must be \"RESET\""));
         }
         let channels = match (q.channel, &q.channels) {
@@ -1137,37 +1144,40 @@ impl Admin {
             Some(Ok(b)) => Some(b),
             None => None,
         };
-        let ncp = ctx.ncp.clone();
+        let records = ctx.records.clone();
         let net = ctx.net.clone();
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
         let skip_backup = q.skip_backup;
         let tx_power = q.tx_power;
-        self.spawn("network reset", ctx.out.clone(), sid, id, move |out| {
+        self.spawn(if form_only { "form" } else { "network reset" }, ctx.out.clone(), sid, id, move |out| {
             let mut backup = None;
-            let st = ncp.status();
-            if st.network_state != 0 {
-                if st.network_state == 2 && !skip_backup {
-                    let b = take_backup(&*net, &ncp, true, &known, &source, now_s, id).map_err(|e| {
-                        ApiError::new(&e.code, format!("automatic backup failed ({}); nothing was changed; set skip_backup to reset anyway", e.message))
-                    })?;
-                    backup = Some(b);
-                }
-                net.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
+            let state = if form_only { NetState::None } else { network_state(&*net) };
+            if state == NetState::Up && !skip_backup {
+                let b = take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
+                    ApiError::new(&e.code, format!("automatic backup failed ({}); nothing was changed; set skip_backup to reset anyway", e.message))
+                })?;
+                backup = Some(b);
             }
-            let req = FormParams {
-                channel_mask: mask,
-                pan_id: q.pan_id,
-                ext_pan_id: epid,
-                network_key: None,
-                tx_power: tx_power.or(net.tx_power_setting()).unwrap_or(0),
-            };
-            let formed = net.form(req).map_err(|e| ncp_error("form", e))?;
-            if let Some(dbm) = tx_power
-                && let Err(e) = net.set_tx_power(dbm)
-            {
-                warn!("admin: TX power after forming: {e}");
+            let formed = replace(&*net, &*records, || {
+                if state != NetState::None {
+                    net.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
+                }
+                let req = FormParams {
+                    channel_mask: mask,
+                    pan_id: q.pan_id,
+                    ext_pan_id: epid,
+                    network_key: None,
+                    tx_power: tx_power.or(net.tx_power_setting()).unwrap_or(0),
+                };
+                net.form(req).map_err(|e| ncp_error("form", e))
+            })?;
+            if let Some(dbm) = tx_power {
+                match net.set_tx_power(dbm) {
+                    Ok(_) => records.tx_power_set(dbm),
+                    Err(e) => warn!("admin: TX power after forming: {e}"),
+                }
             }
             out(JobOut::Reimport);
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "formed"})));
@@ -1179,6 +1189,26 @@ impl Admin {
             Ok(Reply::Frame(w.finish()?))
         })
     }
+}
+
+/// The NCP's network state as the backend reports it now.
+fn network_state(net: &dyn NetworkAdmin) -> NetState {
+    net.status().map_or(NetState::None, |s| s.network_state)
+}
+
+/// The channel the network runs on now.
+fn current_channel(net: &dyn NetworkAdmin) -> Option<u8> {
+    net.status().and_then(|s| s.network).map(|n| n.channel)
+}
+
+/// `f` replaces the NCP's network: meanwhile the records decide nothing
+/// on what the NCP reports, then the new network becomes theirs.
+fn replace<T>(net: &dyn NetworkAdmin, records: &dyn Records, f: impl FnOnce() -> Result<T, ApiError>) -> Result<T, ApiError> {
+    records.replacing();
+    let r = f();
+    let now = r.as_ref().ok().and_then(|_| net.status()).map(|s| s.ownership);
+    records.replaced(now.as_ref());
+    r
 }
 
 /// Heap a job needs besides its stack (its result, frames in flight).
