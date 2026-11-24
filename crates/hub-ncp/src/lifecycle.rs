@@ -973,6 +973,9 @@ impl Hub {
             nwk_manager: 0,
         };
         self.commit(Change::Network(record));
+        // The records follow it now: an interrupted formation leaves them
+        // this network's, not foreign.
+        self.sync_owner(true);
         let body = NwkForm {
             channel_mask: req.channel_mask,
             pan_id,

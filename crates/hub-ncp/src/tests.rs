@@ -568,3 +568,20 @@ fn ownership_tag_follows_the_owned_network() {
     hub.shutdown();
     sim.stop();
 }
+
+#[test]
+fn an_interrupted_formation_keeps_the_records_owned() {
+    use hub_coord::RegistryState;
+    let (hub, sim) = formed(15);
+    hub.with_store(|s| s.kv_put("dev/zb:1", b"{}")).unwrap();
+    hub.leave_reset().unwrap();
+    // The new network is stored, then NWK_FORM fails.
+    sim.with(|s| s.unsupported.push(ids::NWK_FORM));
+    assert!(hub.form(FormRequest { channel_mask: 1 << 20, ..FormRequest::default() }).is_err());
+    assert!(hub.store_state().network.is_some());
+    assert_eq!(hub.registry(), RegistryState::Owned);
+    // The next start finds the records the stored network's.
+    assert_eq!(hub.with_store(|s| crate::coord::owner::open(s, true)), RegistryState::Owned);
+    hub.shutdown();
+    sim.stop();
+}
