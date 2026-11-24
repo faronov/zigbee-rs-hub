@@ -6,8 +6,9 @@
 //!
 //! | Start | Records | Gate |
 //! |---|---|---|
-//! | no tag, no network-scoped records | `untagged` | open |
-//! | no tag, network-scoped records (migration) | tagged `{backend, epid: null}`, `unverified` | read-only |
+//! | no tag, no stored ZRHP network, no network-scoped records | `untagged` | open |
+//! | no tag, a ZRHP image's stored network (`NetworkRecord`) | tagged as that image's migration does (`{zrhp, epid of the record}`), `foreign` | closed |
+//! | no tag, network-scoped records of unknown origin | `unverified` until `network/registry/adopt` or `clear` | closed |
 //! | this backend's tag | `unverified` | read-only |
 //! | another backend's tag, unreadable tag | `foreign` | closed |
 //!
@@ -16,6 +17,7 @@
 //! | `Observed` matching the tag (EPID, and the key ID when both are known), or no tag yet | `owned`; the tag written or its informative fields updated | allowed |
 //! | `Observed` of another network | `foreign` (nothing written) | refused |
 //! | `NoNetwork`, `Unknown`, session down | unchanged | refused until the next match |
+//! | anything, while the records' origin is unknown | `unverified`, closed | refused until adopted or cleared |
 //!
 //! While the operator replaces the network (`network/reset`, `form`,
 //! `restore`), reports decide nothing; the new network then becomes the
@@ -29,7 +31,7 @@ use hub_coord::{
     RegistryState,
 };
 use hub_store::kv::{self, scope};
-use hub_store::{Gate, Guarded, JournalStats, Kv, KvStore, OWNER_KEY, Scope, Store};
+use hub_store::{Gate, Guarded, HostState, JournalStats, Kv, KvStore, OWNER_KEY, Scope, Store};
 use log::{info, warn};
 use serde_json::{Value as J, json};
 
@@ -45,6 +47,10 @@ struct State {
     verified: bool,
     /// The operator is replacing the network.
     replacing: bool,
+    /// Network-scoped records of unknown origin (no tag, no stored
+    /// network): closed, and decided only by the operator (adopt, clear,
+    /// or a network formed or restored over them).
+    hold: bool,
 }
 
 /// [`Records`] of an `NcpNv` backend in the hub's own store.
@@ -55,26 +61,49 @@ pub struct NcpNvRecords {
     state: Mutex<State>,
 }
 
-/// Access to the network-scoped records in `state`.
-fn gate(state: RegistryState) -> Gate {
-    match state {
+/// Access to the network-scoped records in `st`.
+fn gate(st: &State) -> Gate {
+    match st.registry {
         RegistryState::Foreign { .. } => Gate::Closed,
+        RegistryState::Unverified if st.hold => Gate::Closed,
         RegistryState::Unverified => Gate::ReadOnly,
         RegistryState::Untagged | RegistryState::Owned => Gate::Open,
     }
 }
 
+/// The network a ZRHP image stored (its host records), as the identity
+/// its ownership tag names (`hub_ncp::coord::owner::identity`): the key ID
+/// is unknown when the network was adopted without the key (all zero).
+fn zrhp_network(s: &HostState) -> Option<NetworkIdentity> {
+    let n = s.network?;
+    Some(NetworkIdentity {
+        ext_pan_id: n.ext_pan_id,
+        key_id: (n.network_key != [0; 16]).then(|| NetworkIdentity::key_id_for(&n.network_key)),
+        pan_id: n.pan_id,
+        channel: n.channel,
+        key_seq: n.key_seq,
+        coordinator_ieee: s.meta.ncp_ieee,
+    })
+}
+
 impl NcpNvRecords {
-    /// The records of `backend` in `store`, before the app loads them.
+    /// The records of `backend` in `store`, before the app loads them. An
+    /// untagged store is never taken silently: a ZRHP image's records are
+    /// tagged as that image would (and are another backend's), records of
+    /// unknown origin wait for the operator.
     pub fn open(backend: BackendKind, mut store: Store) -> Self {
-        let registry = if store.kv_get(OWNER_KEY).is_some() {
-            RegistryState::check(store.kv_get(OWNER_KEY), backend, OwnershipModel::NcpNv, None)
-        } else if kv::has_network_records(&store) {
-            // Written by this backend before a network was known (rules
-            // while the NCP had none), or by an image without the tag.
-            if let Err(e) = store.kv_put(OWNER_KEY, OwnerTag::new(backend, None).encode().as_bytes()) {
-                warn!("hub: tagging the network records: {e}");
+        let mut hold = false;
+        let registry = if let Some(tag) = store.kv_get(OWNER_KEY) {
+            RegistryState::check(Some(tag), backend, OwnershipModel::NcpNv, None)
+        } else if let Some(network) = zrhp_network(store.state()) {
+            let tag = OwnerTag::new(BackendKind::Zrhp, Some(network)).encode();
+            if let Err(e) = store.kv_put(OWNER_KEY, tag.as_bytes()) {
+                warn!("hub: tagging the ZRHP network records: {e}");
             }
+            RegistryState::check(Some(tag.as_bytes()), backend, OwnershipModel::NcpNv, None)
+        } else if kv::has_network_records(&store) {
+            warn!("hub: network records without an ownership tag: closed until adopted or cleared");
+            hold = true;
             RegistryState::Unverified
         } else {
             RegistryState::Untagged
@@ -82,7 +111,8 @@ impl NcpNvRecords {
         if let RegistryState::Foreign { backend, why } = registry {
             warn!("hub: network records not ours: {backend}, {why}");
         }
-        Self { backend, store: Mutex::new(store), state: Mutex::new(State { registry, ..State::default() }) }
+        let st = State { registry, hold, ..State::default() };
+        Self { backend, store: Mutex::new(store), state: Mutex::new(st) }
     }
 
     /// The backend-scoped key of the operator's TX power.
@@ -122,6 +152,10 @@ impl NcpNvRecords {
     /// the operator made it, it becomes the records' network).
     fn decide(&self, store: &mut Store, st: &mut State, network: NetworkIdentity, force: bool) {
         st.observed = Some(network);
+        if st.hold && !force {
+            st.verified = false;
+            return;
+        }
         let tag = store.kv_get(OWNER_KEY);
         let state = match tag {
             _ if force => RegistryState::Owned,
@@ -135,6 +169,7 @@ impl NcpNvRecords {
                         info!("hub: network records owned (EPID {:02X?})", network.ext_pan_id);
                     }
                     st.registry = RegistryState::Owned;
+                    st.hold = false;
                     st.verified = true;
                 }
                 Err(e) => {
@@ -159,7 +194,7 @@ impl KvStore for NcpNvRecords {
     fn with_kv(&self, f: &mut dyn FnMut(&mut dyn Kv)) {
         let mut store = self.store();
         // The state is not held while `f` runs.
-        let g = gate(self.state().registry);
+        let g = gate(&self.state());
         match g {
             Gate::Open => f(&mut *store),
             g => f(&mut Guarded::new(&mut *store, g)),
@@ -181,6 +216,7 @@ impl Records for NcpNvRecords {
         let mut st = self.state();
         self.put_tag(&mut store, st.observed)?;
         st.registry = RegistryState::Owned;
+        st.hold = false;
         st.verified = st.observed.is_some();
         Ok(st.registry)
     }
@@ -391,16 +427,89 @@ mod tests {
         assert_eq!(r.store().kv_get("ezsp/tx_power"), Some(&b"-3"[..]));
     }
 
-    #[test]
-    fn untagged_network_records_are_tagged_at_open() {
+    fn zrhp_store(network: bool, kv: &[&str]) -> Store {
+        use hub_store::{Change, Meta, NetworkRecord};
         let mut s = Store::volatile();
-        s.kv_put("auto/r1", b"{}").unwrap();
-        let r = NcpNvRecords::open(BackendKind::Ezsp, s);
+        s.commit(Change::Meta(Meta { ncp_ieee: [0x5A, 0x51, 0, 0, 0, 0, 1, 2], ..Meta::default() })).unwrap();
+        if network {
+            let n = NetworkRecord {
+                pan_id: 0x1A2B,
+                ext_pan_id: [4, 3, 2, 1, 0, 0x4B, 0x12, 0],
+                channel: 15,
+                channel_mask: 1 << 15,
+                network_key: [0x42; 16],
+                key_seq: 0,
+                nwk_update_id: 0,
+                tx_power: 8,
+                nwk_manager: 0,
+            };
+            s.commit(Change::Network(n)).unwrap();
+        }
+        for k in kv {
+            s.kv_put(k, b"{}").unwrap();
+        }
+        s
+    }
+
+    /// (a) A ZRHP image's store without the tag (written before #71): tagged
+    /// as the ZRHP migration does, so another backend's records.
+    #[test]
+    fn a_zrhp_stored_network_makes_untagged_records_foreign() {
+        for kv in [&["dev/zb:1", "auto/r1"][..], &[]] {
+            let r = NcpNvRecords::open(BackendKind::Ezsp, zrhp_store(true, kv));
+            // The tag ZRHP's own migration writes for the same store.
+            let mut zrhp = zrhp_store(true, kv);
+            assert_eq!(hub_ncp::coord::owner::open(&mut zrhp, true), RegistryState::Owned);
+            assert_eq!(r.store().kv_get(OWNER_KEY), zrhp.kv_get(OWNER_KEY), "{kv:?}");
+            assert_eq!(
+                r.registry(),
+                RegistryState::Foreign { backend: "zrhp", why: "another coordinator backend" }
+            );
+            assert_eq!(kv::with(&r, |s| (s.gate(), s.get("dev/zb:1").is_some())), (Gate::Closed, false));
+            // The NCP runs the same network: still another backend's.
+            let n = zrhp_network(r.store().state()).unwrap();
+            r.observe(Some(&observed(n)));
+            assert!(!r.verified() && r.registry().as_str() == "foreign");
+            assert_eq!(r.ownership(&observed(n)).map(|o| o.as_str()), Some("mismatch"));
+            assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
+            assert!(r.verified());
+            assert_eq!(tag(&r), Some(OwnerTag::new(BackendKind::Ezsp, Some(n))));
+        }
+    }
+
+    /// (b) Network-scoped records without a tag or a stored network:
+    /// unverified and closed whatever the NCP runs, until the operator
+    /// decides; nothing written.
+    #[test]
+    fn untagged_records_of_unknown_origin_wait_for_the_operator() {
+        let open = || NcpNvRecords::open(BackendKind::Ezsp, zrhp_store(false, &["auto/r1", "udef/a"]));
+        let r = open();
         assert_eq!(r.registry(), RegistryState::Unverified);
-        assert_eq!(tag(&r), Some(OwnerTag::new(BackendKind::Ezsp, None)));
-        r.observe(Some(&observed(id(4, None))));
-        assert_eq!(r.registry(), RegistryState::Owned);
-        assert_eq!(tag(&r).unwrap().identity, Some(id(4, None)));
+        assert_eq!(tag(&r), None);
+        let denied = |e: io::Error| e.kind() == io::ErrorKind::PermissionDenied;
+        assert_eq!(kv::with(&r, |s| (s.gate(), s.get("auto/r1").is_some(), s.get("udef/a").is_some())), (Gate::Closed, false, true));
+        assert!(put(&r, "auto/r2").is_err_and(denied));
+        r.observe(Some(&observed(id(4, Some(1)))));
+        assert_eq!((r.registry(), r.verified(), tag(&r)), (RegistryState::Unverified, false, None));
+        r.replacing();
+        r.replaced(None);
+        assert_eq!((r.registry(), r.verified()), (RegistryState::Unverified, false), "a failed replacement decides nothing");
+        assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
+        assert!(r.verified());
+        assert_eq!(tag(&r).unwrap().identity, Some(id(4, Some(1))));
+        assert_eq!(kv::with(&r, |s| s.get("auto/r1").is_some()), true);
+
+        // Cleared instead: the records go.
+        let r = open();
+        r.observe(Some(&observed(id(4, Some(1)))));
+        assert_eq!(r.clear().unwrap(), 1);
+        assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
+        // A network formed over them takes them, as with ZRHP.
+        let r = open();
+        r.replacing();
+        r.replaced(Some(&observed(id(6, Some(3)))));
+        assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
+        assert!(kv::with(&r, |s| s.get("auto/r1").is_some()));
     }
 
     #[test]

@@ -553,7 +553,7 @@ choices: `docs/ezsp-backend.md`.
 | Terminal | **pinned:** `messageSentHandler` 0x003F (status last in 13, first from 14): success = `Delivered` only for a unicast with APS `RETRY`, else `Sent`; `DELIVERY_FAILED` → `NotDelivered(NoAck)` | `AF_DATA_CONFIRM(endpoint, TransID, status)`; none if the SRSP failed |
 | Busy / in-flight | **pinned:** `MAX_MESSAGE_LIMIT_REACHED` (0x72; `sl_status` 0x0C03 from 14), `NO_BUFFERS`, `NETWORK_BUSY` → `Refused(Busy)`; `EZSP_CONFIG_APS_UNICAST_MESSAGE_COUNT` (0x03, set to 32) = `max_in_flight`, excess waits in the worker FIFO | no capacity report: fixed per pinned firmware |
 | Max ASDU | **pinned:** `maximumPayloadLength` 0x0033 after NETWORK_UP | AF limit; `_EXT` for larger |
-| Indications, joins | **pinned:** `incomingMessageHandler` 0x0045 (separate fields in 13, `rx_packet_info` from 14; loopbacks dropped), `trustCenterJoinHandler` 0x0024 (`trustCenterPostJoinHandler` from 14, same layout) → `DeviceJoined`, DEVICE_LEFT → `DeviceLeft { rejoin: None }` (hub-app logs it until PR H), `childJoinHandler` 0x0023 | `AF_INCOMING_MSG`, `ZDO_TC_DEV_IND`, `ZDO_END_DEVICE_ANNCE_IND` |
+| Indications, joins | **pinned:** `incomingMessageHandler` 0x0045 (separate fields in 13, `rx_packet_info` from 14; loopbacks dropped), `trustCenterJoinHandler` 0x0024 (`trustCenterPostJoinHandler` from 14, same layout) → `DeviceJoined`, DEVICE_LEFT → `DeviceLeft { rejoin: None }` (the engine marks the device unavailable, reason `left`), `childJoinHandler` 0x0023 | `AF_INCOMING_MSG`, `ZDO_TC_DEV_IND`, `ZDO_END_DEVICE_ANNCE_IND` |
 | Session epoch | **pinned:** every session starts with an ASH reset; an unprompted RSTACK or ERROR ends it (UG101 §5, §6); epoch = a counter per session; `stackStatusHandler` 0x0019 reports the network | `SYS_RESET_IND`, `ZDO_STATE_CHANGE_IND` |
 | Endpoints | **pinned:** `addEndpoint` 0x0002 before `networkInit` 0x0017, in every session | `AF_REGISTER` after reset (duplicate = success) |
 | Groups | **pinned:** `setMulticastTableEntry` 0x0064; the table is written again in every session (RAM on the NCP; assumed, the replay is harmless either way) | `ZDO_EXT_ADD_GROUP` (NV: duplicates on resync) |
@@ -660,10 +660,13 @@ zrhp = ["dep:hub-ncp"]
 
   | Start | Records | Gate |
   |---|---|---|
-  | no tag, no network-scoped records | `untagged` | open |
-  | no tag, network-scoped records (migration) | tag `{backend, epid: null}`, `unverified` | read-only |
+  | no tag, nothing network-scoped, no stored ZRHP network | `untagged` (tagged at the first network, or by form/adopt) | open |
+  | no tag, a ZRHP image's stored `NetworkRecord` | tag derived as ZRHP's migration does (`{zrhp, epid of the record}`): `foreign` (another backend) | closed |
+  | no tag, network-scoped records, no stored network | `unverified` until `network/registry/adopt`, `clear`, or a network formed or restored over them | closed |
   | this backend's tag | `unverified` | read-only |
   | another backend's tag, unreadable tag | `foreign` | closed |
+
+  An untagged store is never taken silently.
 
   | The NCP reports | Records | Device traffic |
   |---|---|---|
@@ -681,8 +684,11 @@ zrhp = ["dep:hub-ncp"]
   `confirm`; EZSP forms only then anyway) tell the records that the
   operator replaces the network: reports meanwhile decide nothing, and
   the new network becomes the records' (the tag is rewritten, as ZRHP's
-  adapter does). A `DeviceLeft` is logged; the device stays until
-  `devices/remove`, as with ZRHP, which reports no leaves.
+  adapter does). A `DeviceLeft` keeps the device (EZSP does not say
+  whether it rejoins): the engine marks it unavailable with
+  `unavailable_reason: "left"` (`device_updated`, its entities' states)
+  until its next frame or rejoin; removal stays the operator's
+  (`devices/remove`). ZRHP reports no leaves.
 - **Tests.** `hub-app` `tests_backends` runs one suite on both simulated
   NCPs: join → interview → command → report, groups, permit join,
   `network/form` then `network/reset`, and on EZSP the `NcpNv` decision

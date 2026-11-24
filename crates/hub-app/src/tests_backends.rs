@@ -2,10 +2,11 @@
 //! core and on the EZSP backend, each with its simulated NCP and a device
 //! of the engine's device simulator behind it. Join → interview → command
 //! → report, groups, permit join, forming and resetting the network; on
-//! EZSP also the `NcpNv` ownership decision (design §2.5, §2.7): unverified
-//! records become the hub's once the NCP's network matches their tag,
-//! another network's are foreign (no device traffic) until adopted or
-//! cleared.
+//! EZSP also device leaves and the `NcpNv` ownership decision (design §2.5,
+//! §2.7): unverified records become the hub's once the NCP's network
+//! matches their tag, another network's are foreign (no device traffic)
+//! until adopted or cleared, records of unknown origin stay closed until
+//! the operator decides.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -47,6 +48,10 @@ trait SimLink: Send + Sync {
     fn indicate(&self, i: &ApsIndication);
     /// A device joins through the trust center.
     fn join(&self, ieee: u64, nwk: u16);
+    /// The trust center reports that a device left (EZSP only).
+    fn leave(&self, ieee: u64, nwk: u16) {
+        let _ = (ieee, nwk);
+    }
     /// Joining is open on the NCP.
     fn permit_open(&self) -> bool;
     /// Groups the hub endpoint is a member of on the NCP.
@@ -175,6 +180,18 @@ impl SimLink for Ezsp {
                 new_node_eui64: Eui64::from_u64(ieee),
                 status: DeviceUpdate::STANDARD_SECURITY_UNSECURED_JOIN,
                 policy_decision: JoinDecision::USE_PRECONFIGURED_KEY,
+                parent_of_new_node_id: 0,
+            })
+        });
+    }
+
+    fn leave(&self, ieee: u64, nwk: u16) {
+        self.sim.ncp(|n| {
+            n.callback(Callback::TrustCenterJoin {
+                new_node_id: nwk,
+                new_node_eui64: Eui64::from_u64(ieee),
+                status: DeviceUpdate::DEVICE_LEFT,
+                policy_decision: JoinDecision::NO_ACTION,
                 parent_of_new_node_id: 0,
             })
         });
@@ -370,6 +387,16 @@ fn join_interview_command_and_report() {
         rig.link.indicate(&report);
         wait(&format!("{kind:?}: reported off"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
         assert!(rig.app.status().aps.accepted > 0);
+        if kind == Kind::Ezsp {
+            // A leave: kept, unavailable with its reason, until heard again.
+            rig.link.leave(PLUG, PLUG_NWK);
+            let get = || ok(&call(&rig.app, sid, &rx, 5, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+            wait("the plug left", || get()["available"] == false);
+            assert_eq!(get()["unavailable_reason"], "left");
+            rig.link.indicate(&report);
+            wait("the plug back", || get()["available"] == true);
+            assert_eq!(get().get("unavailable_reason"), None);
+        }
         rig.finish();
     }
 }
@@ -499,7 +526,7 @@ fn ncp_held_networks_are_verified_against_the_records() {
     assert!(rig.app.wait(T, |s| s.devices == 1), "the plug's record kept");
     rig.finish();
 
-    // Records of another backend (a ZRHP image's): foreign whatever the network.
+    // Records of another backend (a ZRHP image's tag): foreign whatever the network.
     let mut s = flash.store();
     let zrhp = OwnerTag::new(BackendKind::Zrhp, None).encode();
     s.kv_put(OWNER_KEY, zrhp.as_bytes()).unwrap();
@@ -507,5 +534,78 @@ fn ncp_held_networks_are_verified_against_the_records() {
     let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
     let (sid, rx) = session(&rig.app);
     wait("foreign", || info(&rig.app, sid, &rx)["registry"]["backend"] == "zrhp");
+    rig.finish();
+}
+
+/// EZSP: a store without the ownership tag is never taken silently. A ZRHP
+/// image's stored network makes its records another backend's (tagged as
+/// ZRHP's migration does); records of unknown origin stay hidden and
+/// unwritable, with no device traffic, until the operator adopts them.
+#[test]
+fn untagged_records_wait_for_the_operator() {
+    use hub_store::{Change, Meta, NetworkRecord};
+    let flash = SharedFlash::new();
+    let rule = json!({"type": "automations/create", "rule": {"id": "r1", "triggers": [], "actions": [{"type": "notify", "message": "x"}]}});
+    let rules = |app: &App, sid, rx: &Receiver<String>| -> usize {
+        let l = call(app, sid, rx, 70, json!({"type": "automations/list"}));
+        ok(&l)["rules"].as_array().unwrap().len()
+    };
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    ok(&call(&rig.app, sid, &rx, 1, rule.clone()));
+    rig.finish();
+    let untag = || {
+        let mut s = flash.store();
+        s.kv_delete(OWNER_KEY).unwrap();
+        s
+    };
+
+    // (b) No tag, no stored network: unknown origin.
+    drop(untag());
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    let i = info(&rig.app, sid, &rx);
+    assert_eq!(i["registry"]["state"], "unverified", "{i}");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(info(&rig.app, sid, &rx)["registry"]["state"], "unverified", "the NCP's network decides nothing");
+    assert_eq!(rules(&rig.app, sid, &rx), 0, "hidden");
+    assert_eq!(call(&rig.app, sid, &rx, 2, rule.clone())["error"]["code"], "registry_read_only");
+    let pj = call(&rig.app, sid, &rx, 3, json!({"type": "network/permit_join", "duration_s": 30}));
+    assert_eq!(pj["success"], false, "no device traffic: {pj}");
+    assert!(rig.tag().is_none(), "nothing written");
+    let a = call(&rig.app, sid, &rx, 4, json!({"type": "network/registry/adopt", "confirm": true}));
+    assert_eq!(ok(&a)["registry"]["state"], "owned", "{a}");
+    assert_eq!(rules(&rig.app, sid, &rx), 1, "loaded once adopted");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    ok(&call(&rig.app, sid, &rx, 5, json!({"type": "network/permit_join", "duration_s": 30})));
+    rig.finish();
+
+    // (a) No tag, a ZRHP image's stored network: that image's records.
+    let mut s = untag();
+    s.commit(Change::Meta(Meta { ncp_ieee: [0x5A, 0x51, 0, 0, 0, 0, 1, 2], ..Meta::default() })).unwrap();
+    let n = NetworkRecord {
+        pan_id: 0x1A2B,
+        ext_pan_id: [0xDD; 8],
+        channel: 15,
+        channel_mask: 1 << 15,
+        network_key: [0x42; 16],
+        key_seq: 0,
+        nwk_update_id: 0,
+        tx_power: 8,
+        nwk_manager: 0,
+    };
+    s.commit(Change::Network(n)).unwrap();
+    drop(s);
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    let i = info(&rig.app, sid, &rx);
+    assert_eq!((&i["registry"]["state"], &i["registry"]["backend"]), (&json!("foreign"), &json!("zrhp")), "{i}");
+    assert_eq!(kv::with(&*rig.kv, |s| s.get(OWNER_KEY).and_then(OwnerTag::decode)).unwrap().backend, "zrhp");
+    assert_eq!(rules(&rig.app, sid, &rx), 0);
+    let a = call(&rig.app, sid, &rx, 6, json!({"type": "network/registry/adopt", "confirm": true}));
+    assert_eq!(ok(&a)["registry"]["state"], "owned", "{a}");
+    assert_eq!(rules(&rig.app, sid, &rx), 1);
+    assert_eq!(info(&rig.app, sid, &rx)["ownership"], "owned");
     rig.finish();
 }

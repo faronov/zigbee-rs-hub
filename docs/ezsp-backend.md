@@ -240,9 +240,13 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
 **Ownership flow** (design §2.5, §2.7; `NcpNvRecords`):
 
 1. Start: this backend's tag makes the records `unverified` (loaded,
-   read-only); no tag and no network-scoped records `untagged`; records
-   without a tag get `{"backend":"ezsp","epid":null}` (migration, as ZRHP
-   does); another backend's tag makes them `foreign` (hidden).
+   read-only); another backend's tag makes them `foreign` (hidden). An
+   untagged store is never taken silently: a ZRHP image's stored network
+   gets the tag ZRHP's migration would write (`{"backend":"zrhp",…}`, so
+   `foreign`); network-scoped records without a stored network stay
+   `unverified` and hidden (closed, no device traffic) until the operator
+   adopts or clears them (or forms or restores a network over them); an
+   empty store is `untagged` until the first network.
 2. The session's `Ownership(Observed(identity))` (before `Session::Up`):
    matching the tag (EPID; the key ID too when both are known, else the
    EPID alone, design §8.5), or no tag yet → `owned`, the tag written or
@@ -267,7 +271,8 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
 
 The operator's TX power is kept as `ezsp/tx_power` (backend-scoped) and
 applied in every session (`EzspOptions::tx_power`). A device leave
-(`DeviceLeft`) is logged; the device stays until `devices/remove`.
+(`DeviceLeft`) keeps the device: unavailable with `unavailable_reason:
+"left"` until its next frame or rejoin; removal is `devices/remove`.
 
 ## Diagnostics
 
@@ -288,8 +293,8 @@ devices left, route records, GP frames ignored).
 - The XOFF timeout (1 s) and the 10 ms UART slice are choices.
 - Leaves: `trustCenterJoinHandler` DEVICE_LEFT becomes
   `CoordEvent::DeviceLeft` with `rejoin: None` (the trust center's update
-  does not say); hub-app logs it and keeps the device (as with ZRHP, which
-  does not emit it). The ZRHP adapter does not emit it yet.
+  does not say); the engine keeps the device, unavailable with the reason
+  `left` until it is heard again. The ZRHP adapter does not emit it yet.
 - `TxOptions::extended_timeout` is not applied (EmberZNet sets it per
   destination with `setExtendedTimeout`).
 - Beacons of an active scan carry no sender address (0xFFFF).

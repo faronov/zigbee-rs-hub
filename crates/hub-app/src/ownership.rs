@@ -87,7 +87,11 @@ impl Runner {
         self.automations.read_only = !matches!(state, RegistryState::Untagged | RegistryState::Owned);
         #[cfg(feature = "ota")]
         self.ota.set_writable(!self.automations.read_only);
-        if !self.registry.loaded && !matches!(state, RegistryState::Foreign { .. }) {
+        // Not while they are hidden (foreign, or of unknown origin).
+        if !self.registry.loaded
+            && !matches!(state, RegistryState::Foreign { .. })
+            && kv::with(&*self.records, |s| s.gate()) != hub_store::Gate::Closed
+        {
             self.load_network(now);
         }
     }
