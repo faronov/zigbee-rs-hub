@@ -54,7 +54,7 @@ configuration):
 | Ethernet REF_CLK | 0 | 50 MHz from the board's oscillator, `CLK_EXT_IN`; GPIO0 is the download strap |
 | Ethernet PHY power | 5 | driven high after boot, before the EMAC starts |
 | RMII data (fixed) | 19, 21, 22, 25, 26, 27 | TXD0, TX_EN, TXD1, RXD0, RXD1, CRS_DV |
-| Reserved | 6–11, 16 | SPI flash; GPIO16 = the in-package PSRAM's CS (ESP-IDF `esp_psram_impl_quad.c`) |
+| Reserved | 6–11, 16; 1, 3 | SPI flash; GPIO16 = the in-package PSRAM's CS (ESP-IDF `esp_psram_impl_quad.c`); GPIO1/3 = UART0, the console (no override may take them) |
 
 **GPIO12 (MTDI)** selects the flash/PSRAM supply voltage at every ESP32
 reset, and this unit has no eFuse override (`VDD_SDIO_FORCE` = 0): it must
@@ -176,7 +176,7 @@ target `xtensa-esp32-espidf`, ESP-IDF v5.5.1, Xtensa Rust 1.90 (`esp`).
 | PSRAM | quad, 40 MHz, `CONFIG_SPIRAM_USE_MALLOC`, C mallocs > 1 KiB and Wi-Fi/lwIP buffers to PSRAM, 32 KiB internal kept for DMA | 80 MHz PSRAM would need 80 MHz flash; heap policy of `firmware/hub` and `hub_core::resources` |
 | `CONFIG_ESP32_REV_MIN_3` | v3.0 | no PSRAM cache workaround: smaller, faster code |
 | Rust heap | prefers PSRAM (`firmware/hub/src/alloc.rs`, shared) | as `firmware/hub` |
-| Atomics | `-C target-feature=-s32c1i` + the same compile-time guard | S32C1I is not atomic between the cores on PSRAM; ESP-IDF's `__atomic_*` lock PSRAM addresses (`CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND`, on for SPIRAM on the ESP32). The build has no S32C1I in Rust code; `atomics` measures it |
+| Atomics | `-C target-feature=-s32c1i` + the same compile-time guard | S32C1I is not atomic between the cores on PSRAM; ESP-IDF's `__atomic_*` lock PSRAM addresses (`CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND`, on for SPIRAM on the ESP32). CI checks the target features and disassembles the ELF: no S32C1I/SCOMPARE1 attributed to a Rust source (`tools/check-s32c1i.sh`); `atomics` measures it on hardware |
 | Bluetooth | off | not in the feature set |
 | Panic | recorder in RTC memory (`firmware/hub/src/cpanic.rs`, shared, `--wrap=esp_panic_handler`); no core dump | the stock table has no `coredump` partition |
 | App rollback | off | as SONOFF's build (above) |
@@ -313,7 +313,7 @@ changed since.
 | Command | What it does |
 |---|---|
 | `info` | firmware, chip, memory mode, partitions and layout verdict, running/boot slot, what `ota_0` holds, what `files` holds, straps, last panic |
-| `board`, `board set <k=v …>`, `board clear` | profile pins; NCP wiring overrides (e.g. `baud=460800`), next boot |
+| `board`, `board set <k=v …>`, `board clear` | profile pins; NCP wiring overrides (e.g. `baud=460800`), next boot. Overrides that take flash/PSRAM or console pins are refused; **holding the button while the dongle powers up or resets ignores stored overrides for that boot** (then `board clear`) |
 | `net`, `wifi set <ssid> [pw]`, `wifi clear` | Ethernet/Wi-Fi state; station credentials (the station starts when Ethernet has had no address for 10 s; next boot) |
 | `led <0-100>` | LED brightness |
 | `mg24` | line levels, UART rate and errors |
