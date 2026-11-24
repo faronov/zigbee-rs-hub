@@ -12,12 +12,14 @@
 pub mod crc;
 pub mod flash;
 pub mod journal;
+pub mod kv;
 pub mod state;
 
 use std::io;
 
 pub use flash::{FileFlash, Flash, MemFlash};
 pub use journal::{Journal, JournalStats};
+pub use kv::{Kv, KvStore};
 pub use state::{Change, DeviceRecord, EndpointRecord, FcRecord, FwPending, HostState, Meta, NetworkRecord};
 
 /// Journal size in `hubdata` (spec 3.4: 32 × 4 KiB).

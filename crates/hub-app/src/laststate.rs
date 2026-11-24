@@ -16,7 +16,7 @@ use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
 use hub_devices::model::Category;
 use hub_devices::transport::ZigbeeTransport;
-use hub_ncp::Hub as Ncp;
+use hub_store::{KvStore, kv};
 use log::{info, warn};
 
 /// Key prefix.
@@ -47,9 +47,9 @@ pub struct LastValues {
 impl LastValues {
     /// Puts the kept values back (after the registry restored the devices).
     #[inline(never)]
-    pub fn load<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &mut Engine<T>, now: Millis) {
+    pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) {
         let recs: Vec<(String, Vec<u8>)> =
-            ncp.with_store(|s| s.kv_prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect());
+            kv::with(kv, |s| s.prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect());
         for (id, v) in recs {
             if let Ok(t) = std::str::from_utf8(&v) {
                 self.restored += engine.restore_last_values(&id, t, now);
@@ -92,7 +92,7 @@ impl LastValues {
 
     /// Writes the changed devices every [`SAVE_MS`] (`force`: now).
     #[inline(never)]
-    pub fn flush<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &Engine<T>, now: Millis, force: bool) {
+    pub fn flush<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis, force: bool) {
         let slow = force || now.saturating_sub(self.last_slow) >= SLOW_MS;
         if !slow && now.saturating_sub(self.last_save) < SAVE_MS {
             return;
@@ -116,12 +116,12 @@ impl LastValues {
             .collect();
         let dels: Vec<String> = std::mem::take(&mut self.removed).into_iter().map(|id| format!("{KEY}{id}")).collect();
         let (mut w, mut b, mut e) = (0, 0, 0);
-        ncp.with_store(|s| {
+        kv::with(kv, |s| {
             for (k, t) in &puts {
-                if s.kv_get(k) == Some(t.as_bytes()) {
+                if s.get(k) == Some(t.as_bytes()) {
                     continue;
                 }
-                match s.kv_put(k, t.as_bytes()) {
+                match s.put(k, t.as_bytes()) {
                     Ok(()) => {
                         w += 1;
                         b += (k.len() + t.len()) as u64;
@@ -130,7 +130,7 @@ impl LastValues {
                 }
             }
             for k in &dels {
-                if s.kv_get(k).is_some() && s.kv_delete(k).is_err() {
+                if s.get(k).is_some() && s.delete(k).is_err() {
                     e += 1;
                 }
             }
