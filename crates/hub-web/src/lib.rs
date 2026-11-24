@@ -14,6 +14,10 @@ mod variant;
 /// The page, gzip-compressed at build time (`Content-Encoding: gzip`).
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
 
+/// The setup access point's page (`web/setup.html`, Wi-Fi credentials;
+/// talks to `/setup/*`), gzip-compressed (`Content-Encoding: gzip`).
+pub const SETUP_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/setup.html.gz"));
+
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
 pub const ETAG: &str = include_str!(concat!(env!("OUT_DIR"), "/etag"));
 
@@ -36,7 +40,10 @@ mod tests {
     use std::string::{String, ToString};
 
     fn page() -> std::vec::Vec<u8> {
-        let gz = INDEX_HTML_GZ;
+        gunzip(INDEX_HTML_GZ)
+    }
+
+    fn gunzip(gz: &[u8]) -> std::vec::Vec<u8> {
         assert_eq!(&gz[..4], &[0x1f, 0x8b, 8, 0], "gzip, deflate, no optional fields");
         let body = &gz[10..gz.len() - 8];
         let html = miniz_oxide::inflate::decompress_to_vec(body).expect("deflate stream");
@@ -103,6 +110,75 @@ mod tests {
         assert!(super::minify::minify("<script>\nlet s=`a\nb`\n</script>\n").is_err());
         assert!(super::minify::minify("<style>\na{b:\nc}\n</style>\n").is_err());
         assert!(super::minify::minify("<script>\nx\n").is_err());
+    }
+
+    #[test]
+    fn setup_page_is_the_source_small_and_uses_only_the_setup_endpoints() {
+        let html = gunzip(SETUP_HTML_GZ);
+        assert_eq!(html, include_bytes!("../web/setup.html"));
+        // 1.9 KB of page and 0.9 KB of SHA-256/HMAC (no WebCrypto on http://).
+        assert!(SETUP_HTML_GZ.len() <= 3 * 1024, "{} B compressed", SETUP_HTML_GZ.len());
+        let html = String::from_utf8(html).unwrap();
+        for external in ["src=", "<link", "import("] {
+            assert!(!html.contains(external), "external reference {external:?}");
+        }
+        let fetches: std::vec::Vec<&str> = html.split("fetch(\"").skip(1).map(|s| s.split('"').next().unwrap()).collect();
+        assert_eq!(fetches, ["/setup/state", "/setup/scan", "/setup/wifi"]);
+        // The page runs on the open AP: it never gets or sends the API token
+        // (only a proof), nor the setup key (only its commitment).
+        for leak in ["token=", ".token", "token:"] {
+            assert!(!html.contains(leak), "{leak:?} on the setup page");
+        }
+        let body = r#"JSON.stringify({ssid,pass,nonce,proof:st.need_token?X(M($("tok").value.trim(),nonce+"\n"+ssid+"\n"+pass)):"",commit:X(H(E(key)))})"#;
+        assert!(html.contains(body), "the credentials request carries only a proof and a commitment");
+        assert!(html.contains("#claim="));
+    }
+
+    /// The setup page's SHA-256 and HMAC (its first script) give what the
+    /// hub checks (when Node is installed).
+    #[test]
+    fn setup_page_proof_and_commitment_match_the_hub() {
+        use hub_core::setup::{Claim, token_proof};
+        use std::io::Write;
+        let html = String::from_utf8(gunzip(SETUP_HTML_GZ)).unwrap();
+        let a = html.find("<script>").unwrap() + "<script>".len();
+        let crypto = &html[a..a + html[a..].find("</script>").unwrap()];
+        let (token, nonce, ssid, pass, key) = ("0123456789abcdef01234567", "9f8e7d6c5b4a3210", "Home Wi-Fi ü", "pa ss\"word", "00ff00ff00ff00ff");
+        let args = serde_args(&[token, nonce, ssid, pass, key]);
+        let js = std::format!("{crypto}\nconst [t,n,s,p,k]={args};console.log(X(M(t,n+\"\\n\"+s+\"\\n\"+p))+\" \"+X(H(E(k))))");
+        let Ok(mut node) = std::process::Command::new("node")
+            .args(["-e", "eval(require('fs').readFileSync(0,'utf8'))"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        node.stdin.take().unwrap().write_all(js.as_bytes()).unwrap();
+        let out = node.wait_with_output().unwrap();
+        assert!(out.status.success(), "script failed");
+        let hex = |b: [u8; 32]| -> String { b.iter().map(|x| std::format!("{x:02x}")).collect() };
+        let want = std::format!(
+            "{} {}\n",
+            hex(token_proof(token, nonce, ssid, pass)),
+            hex(Claim::commitment(key.as_bytes().try_into().unwrap()))
+        );
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), want);
+    }
+
+    /// A JS array literal of strings.
+    fn serde_args(items: &[&str]) -> String {
+        let quoted: std::vec::Vec<String> = items
+            .iter()
+            .map(|s| {
+                let esc: String = s.chars().flat_map(|c| match c {
+                    '"' | '\\' => std::vec!['\\', c],
+                    c => std::vec![c],
+                }).collect();
+                std::format!("\"{esc}\"")
+            })
+            .collect();
+        std::format!("[{}]", quoted.join(","))
     }
 
     #[test]

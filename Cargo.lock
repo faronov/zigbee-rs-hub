@@ -1149,6 +1149,7 @@ dependencies = [
 name = "hub-core"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "zigbee-zrhp",
 ]
 
@@ -1195,6 +1196,7 @@ dependencies = [
 name = "hub-web"
 version = "0.1.0"
 dependencies = [
+ "hub-core",
  "miniz_oxide 0.8.9",
  "sha2",
 ]

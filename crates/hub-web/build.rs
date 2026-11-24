@@ -1,8 +1,10 @@
 //! `web/index.html` → `$OUT_DIR/index.html.gz` (deterministic gzip: no
 //! file name, mtime 0, OS "unknown") and `$OUT_DIR/etag` (quoted strong
-//! ETag from the SHA-256 of the compressed bytes). No node toolchain: the
-//! page is hand-written, minified line by line (`src/minify.rs`) and
-//! compressed.
+//! ETag from the SHA-256 of the compressed bytes); `web/setup.html` (the
+//! setup access point's page) → `$OUT_DIR/setup.html.gz`. No node
+//! toolchain: the pages are hand-written; the main page is minified line
+//! by line (`src/minify.rs`) before it is compressed, the small setup page
+//! is compressed as is.
 
 use std::{env, fs, path::Path};
 
@@ -24,20 +26,30 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// `$OUT_DIR/<name>.gz`.
+fn gzip(name: &str, html: &[u8]) -> Vec<u8> {
+    let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff];
+    gz.extend(miniz_oxide::deflate::compress_to_vec(html, 10));
+    gz.extend(crc32(html).to_le_bytes());
+    gz.extend((html.len() as u32).to_le_bytes());
+    let out = env::var("OUT_DIR").unwrap();
+    fs::write(Path::new(&out).join(format!("{name}.gz")), &gz).unwrap();
+    gz
+}
+
 fn main() {
+    let setup = Path::new("web/setup.html");
+    println!("cargo:rerun-if-changed={}", setup.display());
+    gzip("setup.html", &fs::read(setup).expect("web/setup.html"));
     let src = Path::new("web/index.html");
     println!("cargo:rerun-if-changed={}", src.display());
     println!("cargo:rerun-if-changed=src/minify.rs");
     println!("cargo:rerun-if-changed=src/variant.rs");
     let html = fs::read_to_string(src).expect("web/index.html");
     let html = variant::select(&html, cfg!(feature = "advanced")).expect("web feature sections");
-    let html = minify::minify(&html).unwrap_or_else(|e| panic!("web/index.html: {e}")).into_bytes();
-    let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff];
-    gz.extend(miniz_oxide::deflate::compress_to_vec(&html, 10));
-    gz.extend(crc32(&html).to_le_bytes());
-    gz.extend((html.len() as u32).to_le_bytes());
+    let html = minify::minify(&html).unwrap_or_else(|e| panic!("web/index.html: {e}"));
+    let gz = gzip("index.html", html.as_bytes());
     let out = env::var("OUT_DIR").unwrap();
-    fs::write(Path::new(&out).join("index.html.gz"), &gz).unwrap();
     let digest = Sha256::digest(&gz);
     let etag: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     fs::write(Path::new(&out).join("etag"), format!("\"{etag}\"")).unwrap();

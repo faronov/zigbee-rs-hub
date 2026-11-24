@@ -10,6 +10,8 @@ publish = false
 
 [dependencies]
 zigbee-zrhp = { workspace = true }
+# The setup AP's token proof and claim commitment (`setup`).
+sha2 = { version = "0.10", default-features = false }
 
 [features]
 default = []
