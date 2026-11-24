@@ -1,0 +1,57 @@
+{
+  "app": {
+    "aps": {
+      "accepted": 2,
+      "busy": 0,
+      "delivered": 2,
+      "failed": 0,
+      "not_delivered": 0,
+      "unconfirmed": 0
+    },
+    "devices": 1,
+    "imported": 0,
+    "last_values": [
+      5,
+      2,
+      "<volatile>",
+      0
+    ],
+    "registry_errors": 0,
+    "registry_writes": "<volatile>",
+    "restored": 2,
+    "sessions": 1
+  },
+  "heap": {
+    "free": 65000,
+    "largest_block": 31000,
+    "min_free": 57000
+  },
+  "ncp": {
+    "fw": "sim-ncp 0.1.0",
+    "last_error": null,
+    "restarts": 1,
+    "resumes": 2,
+    "slots": [
+      {
+        "slot": 0,
+        "state": 1,
+        "version": "0x00010000"
+      },
+      {
+        "slot": 1,
+        "state": 0,
+        "version": "0x00000000"
+      }
+    ]
+  },
+  "store": {
+    "journal_generation": 0,
+    "journal_live_sectors": "<volatile>",
+    "journal_sectors": 32,
+    "volatile": false
+  },
+  "time": "<volatile>",
+  "time_synced": true,
+  "uptime_s": 12,
+  "version": "baseline"
+}

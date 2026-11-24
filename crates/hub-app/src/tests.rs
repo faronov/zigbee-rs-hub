@@ -34,8 +34,15 @@ pub(crate) struct Rig {
 }
 
 pub(crate) fn rig(store: Store) -> Rig {
+    rig_with(store, |_| {})
+}
+
+/// [`rig`] with `prepare` applied to the simulated NCP before the host
+/// connects.
+pub(crate) fn rig_with(store: Store, prepare: impl FnOnce(&SimNcp)) -> Rig {
     let (host, ncp_end) = pipe::pair();
     let sim = SimNcp::start(ncp_end);
+    prepare(&sim);
     let (rx, tx) = host.split();
     let mut cfg = HubConfig::default();
     cfg.driver.lines = vec![Line::BR_DEFAULT];

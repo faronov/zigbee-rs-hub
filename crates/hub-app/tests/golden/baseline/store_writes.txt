@@ -1,0 +1,55 @@
+# Records the host store committed per scenario step (SharedMem's log of the journal's record writes),
+# sorted within a step (threads interleave). The app writes its registry and last values at the end of
+# every step (hub/reboot). kv_put: key, part/parts, length; device: without last_seen.
+@ boot: session and resume without a network
+meta 5a510000000001020100e0e0000000000000000001000051
+@ app start: endpoint registration, NCP device import
+endpoint 01040105000004000003000a0019000a0000030004000500060008000003000502040504
+@ form: network/reset on an empty NCP
+fc 01000004000001000000
+network 2b1a04030201004b12000000800000bcac9b8a7968584736251504f3e2d1c10000000000
+network 2b1a04030201004b12000f00800000bcac9b8a7968584736251504f3e2d1c10000000000
+@ resume: NCP restart, replay, import
+meta 5a510000000001020100e0e00000000000000000b379379f
+@ permit join: open 60 s
+@ join: device joined, interview, configure
+device b0c0000000006b6d 44448e00
+kv_put dev/zb:6d6b00000000c0b0 0/1 1385 B
+kv_put st/zb:6d6b00000000c0b0 0/1 152 B
+@ permit join: close
+@ group: create, add member
+kv_put grp/0001 0/1 157 B
+kv_put st/zb:6d6b00000000c0b0 0/1 152 B
+@ group: delete
+kv_del grp/0001
+kv_put st/zb:6d6b00000000c0b0 0/1 152 B
+@ gp: sink config, commissioning
+kv_put dev/gp:00f40002 0/1 1152 B
+kv_put st/gp:00f40002 0/1 97 B
+@ gp: remote pairing (binding on the light)
+kv_put dev/zb:6d6b00000000c0b0 0/1 1437 B
+kv_put st/zb:6d6b00000000c0b0 0/1 152 B
+@ app stop
+@ app restart: registry restored, NCP device import
+kv_put st/zb:6d6b00000000c0b0 0/1 186 B
+@ topology: network map
+kv_put st/zb:6d6b00000000c0b0 0/1 186 B
+@ remove: the light
+kv_del dev/zb:6d6b00000000c0b0
+kv_del st/zb:6d6b00000000c0b0
+@ api: network/info, hub/info, hub/system, network/diagnostics
+@ backup: export
+kv_put bkp/last 0/1 1055 B
+@ reset: backup, leave, form, NCP device import
+device_del b0c0000000006b6d
+kv_put bkp/last 0/1 895 B
+network 3c2bddccbbaa004b12000000000002b09f8e7d6d5c4b3a2a1908f7e6d6c5b40000000000
+network 3c2bddccbbaa004b12001900000002b09f8e7d6d5c4b3a2a1908f7e6d6c5b40000000000
+network_clear
+@ restore: backup onto the NCP, import, interview
+fc 0100104f000000000000
+fc 0200102f000000000000
+kv_put dev/zb:5a52530000000001 0/1 1352 B
+kv_put st/zb:5a52530000000001 0/1 141 B
+network 2b1a04030201004b12000f00800000bcac9b8a7968584736251504f3e2d1c10000080000
+@ shutdown

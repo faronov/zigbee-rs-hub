@@ -47,6 +47,10 @@ pub use platform::{LogRing, Platform};
 #[cfg(all(test, feature = "ota"))]
 mod ota_tests;
 #[cfg(test)]
+mod baseline;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_baseline;
 #[cfg(test)]
 mod tests_groups;

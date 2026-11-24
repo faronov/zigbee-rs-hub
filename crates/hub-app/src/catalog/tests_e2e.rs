@@ -46,6 +46,15 @@ fn items() -> Vec<Item> {
 /// in the shards, for the on-demand fetch).
 fn release(dir: &Path, generation: u32) -> Vec<u8> {
     std::fs::create_dir_all(dir).unwrap();
+    let files = release_files(generation);
+    for (name, bytes) in &files {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+    files["bank-4m.zdb"].clone()
+}
+
+/// The files of [`release`] by name.
+fn release_files(generation: u32) -> BTreeMap<String, Vec<u8>> {
     let all = items();
     let refs: Vec<&Item> = all.iter().collect();
     let bank_items: Vec<&Item> = all.iter().filter(|i| !i.name.contains("sml001")).collect();
@@ -61,7 +70,12 @@ fn release(dir: &Path, generation: u32) -> Vec<u8> {
     let (shards, digest) = zdefc::bank::build_shards(&refs).unwrap();
     let mut m = zdefc::bank::manifest(
         &params,
-        &[BankFile { name: "bank-4m.zdb".into(), bytes: &bank, definitions: bank_items.len() as u32, generation }],
+        &[BankFile {
+            name: "bank-4m.zdb".into(),
+            bytes: &bank,
+            definitions: bank_items.len() as u32,
+            generation,
+        }],
         &shards,
         vec![],
         Some(digest),
@@ -75,13 +89,17 @@ fn release(dir: &Path, generation: u32) -> Vec<u8> {
         definitions: 0,
         generation: 0,
     });
-    std::fs::write(dir.join("zdefc-web.zwb"), &tools).unwrap();
-    std::fs::write(dir.join("manifest.cose"), key().cose_sign1(&m.encode(), false)).unwrap();
-    std::fs::write(dir.join("bank-4m.zdb"), &bank).unwrap();
-    for (n, s) in &shards {
-        std::fs::write(dir.join(format!("shard-{n:02x}.cbor")), s).unwrap();
+    let mut files = BTreeMap::new();
+    files.insert("zdefc-web.zwb".to_string(), tools);
+    files.insert(
+        "manifest.cose".to_string(),
+        key().cose_sign1(&m.encode(), false),
+    );
+    files.insert("bank-4m.zdb".to_string(), bank);
+    for (n, s) in shards {
+        files.insert(format!("shard-{n:02x}.cbor"), s);
     }
-    bank
+    files
 }
 
 fn sml001_snapshot() -> DeviceSnapshot {
@@ -319,4 +337,101 @@ fn sha256(b: &[u8]) -> [u8; 32] {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Coordinator-boundary baseline (`docs/coordinator-boundary.md` §7 PR A):
+/// the catalog areas of `hubdata` after installing a release (manifest,
+/// bank, web tools) and the on-demand fetch of a definition from its
+/// shards, byte for byte. The release is frozen in
+/// `tests/golden/baseline/catalog/` (built from `definitions/examples` when
+/// that directory is absent), so that the golden pins the catalog store,
+/// not the compiler or the examples.
+#[test]
+fn catalog_areas_golden() {
+    let dir = crate::baseline::path("catalog");
+    let generated = (!dir.join("manifest.cose").exists()).then(|| release_files(3));
+    let file = |n: &str| {
+        if let Some(files) = &generated {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(n), &files[n]).unwrap();
+        }
+        std::fs::read(dir.join(n)).unwrap_or_else(|e| {
+            panic!("{n}: {e} (remove {} to rebuild the release)", dir.display())
+        })
+    };
+    let store =
+        Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    r.ncp
+        .with_store(|s| s.kv_put(&format!("dev/{SML}"), &sml001_snapshot().to_bytes()))
+        .unwrap();
+    let flash: SharedFlash = Arc::new(Mutex::new(
+        Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>
+    ));
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    for (target, name) in [
+        ("manifest", "manifest.cose"),
+        ("bank", "bank-4m.zdb"),
+        ("web", "zdefc-web.zwb"),
+    ] {
+        let c = upload(&app, sid, &rx, &mut id, target, &file(name), 0, json!({}));
+        assert_eq!(c["success"], true, "{target}: {c}");
+    }
+    let f = call(
+        &app,
+        sid,
+        &rx,
+        900,
+        json!({"type": "definitions/fetch", "device": SML}),
+    );
+    let shards = f["result"]["shards"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!shards.is_empty(), "{f}");
+    for n in shards {
+        let n = n.as_u64().unwrap();
+        let s = upload(
+            &app,
+            sid,
+            &rx,
+            &mut id,
+            "shard",
+            &file(&format!("shard-{n:02x}.cbor")),
+            0,
+            json!({"shard": n}),
+        );
+        assert_eq!(s["success"], true, "shard {n}: {s}");
+    }
+    assert_eq!(
+        layers(&app, sid, &rx, 901)
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["source"],
+        "fetched"
+    );
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+
+    let map = hub_core::layout::HubdataMap::for_size(1 << 20).unwrap();
+    let mut text = String::from(
+        "# hubdata catalog areas after the install and fetch of catalog_areas_golden (erased runs collapsed).\n",
+    );
+    for (name, a) in [
+        ("catalog_state", map.catalog_state),
+        ("manifest", map.manifest),
+        ("bank_a", map.bank_a),
+        ("bank_b", map.bank_b),
+        ("local", map.local),
+        ("scratch", map.scratch),
+        ("web", map.web),
+    ] {
+        text += &format!("@ {name} offset 0x{:06x} size 0x{:06x}\n", a.offset, a.size);
+        text += &crate::baseline::hexdump(flash.lock().unwrap().map(a.offset, a.size));
+    }
+    crate::baseline::assert_all(vec![crate::baseline::check("catalog_areas.hex", &text)]);
 }

@@ -1,0 +1,74 @@
+{
+  "counters": [
+    {
+      "group": "link",
+      "id": "0x0101",
+      "name": "tx_frames",
+      "value": 120
+    },
+    {
+      "group": "link",
+      "id": "0x0103",
+      "name": "tx_retransmissions",
+      "value": 2
+    },
+    {
+      "group": "link",
+      "id": "0x0111",
+      "name": "rx_frames",
+      "value": 118
+    },
+    {
+      "group": "link",
+      "id": "0x0113",
+      "name": "rx_bad_frame",
+      "value": 1
+    },
+    {
+      "group": "queues",
+      "id": "0x0701",
+      "name": "aps_queue_high_water",
+      "value": 3
+    },
+    {
+      "group": "queues",
+      "id": "0x0702",
+      "name": "busy_responses",
+      "value": 0
+    },
+    {
+      "group": "queues",
+      "id": "0x0703",
+      "name": "indications_dropped",
+      "value": 0
+    }
+  ],
+  "errors": [],
+  "frame_counters": {
+    "aps": 1024,
+    "aps_limit": 2048,
+    "nwk": 9216,
+    "nwk_limit": 10240,
+    "stride": 1024
+  },
+  "host_link": "<volatile>",
+  "ncp": {
+    "dirty_writebacks": 0,
+    "free_aps_slots": 4,
+    "gp_commissioning": false,
+    "host_absent_queue": 0,
+    "key_export_locked": false,
+    "network_state": 2,
+    "paging_active": false,
+    "permit_join": false,
+    "pta_coex": false,
+    "restore_in_progress": false,
+    "uptime_s": 3600
+  },
+  "pta": {
+    "capable": false,
+    "enabled": false
+  },
+  "tx_power_set": null,
+  "unsupported": []
+}
