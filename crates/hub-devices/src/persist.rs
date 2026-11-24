@@ -221,7 +221,7 @@ impl DeviceSnapshot {
             reporting: d
                 .report_overrides
                 .iter()
-                .map(|(&(ep, cluster, attr, mfr), &report)| ReportSnap {
+                .map(|&((ep, cluster, attr, mfr), report)| ReportSnap {
                     ep,
                     cluster,
                     attr,

@@ -23,6 +23,7 @@ use crate::hub::OpKind;
 use crate::hub::{ApiError, Hub, HubEvent, Purpose, device_of_uid};
 use crate::model::{Binding, ConfigureOp, EntityDef, LayerSource, PowerKind, ReportSpec, ValueDef};
 use crate::transport::ZigbeeTransport;
+use crate::vecmap::VecMap;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
 use crate::zcl::{FrameType, Status, ZclFrame, ZclType, cluster as cl};
 
@@ -424,7 +425,7 @@ fn values_mut(e: &mut EntityDef) -> impl Iterator<Item = &mut ValueDef> {
 /// The global defaults: edits of the built-in table by class.
 #[derive(Debug, Clone, Default)]
 pub struct ReportDefaults {
-    edits: BTreeMap<&'static str, ReportSetting>,
+    edits: VecMap<&'static str, ReportSetting>,
     /// Bumped on every change (the store writes when it moved).
     pub generation: u64,
 }

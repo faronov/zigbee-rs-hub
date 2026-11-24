@@ -423,7 +423,7 @@ pub struct Hub<T: ZigbeeTransport> {
     /// Global reporting defaults (5.2).
     pub(crate) report_defaults: crate::reporting::ReportDefaults,
     /// Reporting readbacks in progress.
-    pub(crate) reporting_reads: BTreeMap<u64, crate::reporting::ReportingRead>,
+    pub(crate) reporting_reads: crate::vecmap::VecMap<u64, crate::reporting::ReportingRead>,
     /// Last readback number.
     pub(crate) reporting_seq: u64,
 }
@@ -512,7 +512,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             features: HUB_FEATURES.to_vec(),
             zg: Default::default(),
             report_defaults: Default::default(),
-            reporting_reads: BTreeMap::new(),
+            reporting_reads: Default::default(),
             reporting_seq: 0,
         }
     }
