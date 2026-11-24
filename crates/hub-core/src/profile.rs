@@ -51,6 +51,15 @@ impl HostChip {
         }
     }
 
+    /// UART0's default TX and RX pins: the console when it is
+    /// [`Console::Uart0`] (and the ROM loader's port).
+    pub const fn uart0_pins(self) -> [u8; 2] {
+        match self {
+            HostChip::Esp32 => [1, 3],
+            HostChip::Esp32S3 => [43, 44],
+        }
+    }
+
     /// Whether `gpio` exists and can drive an output.
     pub const fn is_output_capable(self, gpio: u8) -> bool {
         match self {
@@ -434,7 +443,8 @@ pub fn by_id(id: &str) -> Option<&'static BoardProfile> {
 pub enum Issue {
     /// Two functions share a GPIO.
     Conflict(u8),
-    /// The GPIO is flash/PSRAM.
+    /// The GPIO is flash/PSRAM, or the console's (UART0 TX/RX, the S3's
+    /// USB D-/D+).
     Reserved(u8),
     /// An output on an input-only or missing GPIO.
     NotOutput(u8),
@@ -452,7 +462,7 @@ impl fmt::Display for Issue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Issue::Conflict(g) => write!(f, "GPIO{g} is used twice"),
-            Issue::Reserved(g) => write!(f, "GPIO{g} belongs to flash/PSRAM"),
+            Issue::Reserved(g) => write!(f, "GPIO{g} belongs to flash/PSRAM or the console"),
             Issue::NotOutput(g) => write!(f, "GPIO{g} cannot drive an output"),
             Issue::NotInput(g) => write!(f, "GPIO{g} is not an input"),
             Issue::FlowWithoutPins => write!(f, "flow control needs both RTS and CTS"),
@@ -565,8 +575,10 @@ impl BoardProfile {
     pub fn check(&self) -> Result<(), Issue> {
         let mut seen = 0u64;
         let mut issue = None;
-        // The S3's USB D-/D+ belong to the USB console.
+        // The console's pins: the S3's USB D-/D+, or UART0 TX/RX. An
+        // override that took them would leave no console to undo it.
         let usb = self.host == HostChip::Esp32S3 && self.console == Console::TinyUsbCdc;
+        let uart0 = self.console == Console::Uart0;
         self.pins(|g, out| {
             if issue.is_some() {
                 return;
@@ -576,7 +588,10 @@ impl BoardProfile {
                 Some(Issue::NotInput(g))
             } else if seen & bit != 0 {
                 Some(Issue::Conflict(g))
-            } else if self.host.reserved_pins().contains(&g) || (usb && matches!(g, 19 | 20)) {
+            } else if self.host.reserved_pins().contains(&g)
+                || (usb && matches!(g, 19 | 20))
+                || (uart0 && self.host.uart0_pins().contains(&g))
+            {
                 Some(Issue::Reserved(g))
             } else if out && !self.host.is_output_capable(g) {
                 Some(Issue::NotOutput(g))
@@ -714,6 +729,10 @@ mod tests {
         assert_eq!(d.apply("tx=34"), Err(OverrideError::Wiring(Issue::NotOutput(34))));
         assert_eq!(d.apply("rx=25"), Err(OverrideError::Wiring(Issue::Conflict(25))));
         assert_eq!(d.apply("rx=16"), Err(OverrideError::Wiring(Issue::Reserved(16))));
+        // GPIO1/GPIO3 are the UART0 console's TX/RX.
+        assert_eq!(d.apply("tx=3"), Err(OverrideError::Wiring(Issue::Reserved(3))));
+        assert_eq!(d.apply("reset=1"), Err(OverrideError::Wiring(Issue::Reserved(1))));
+        assert_eq!(d.apply("rts=3"), Err(OverrideError::Wiring(Issue::Reserved(3))));
         assert_eq!(d.apply("flow=1"), Err(OverrideError::Wiring(Issue::FlowWithoutPins)));
         assert_eq!(d.apply("reset=none"), Err(OverrideError::Wiring(Issue::LoaderLines)));
         assert_eq!(d.apply("speed=1"), Err(OverrideError::Key("speed")));
