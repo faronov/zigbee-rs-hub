@@ -22,7 +22,7 @@ use hub_devices::model::LayerSource;
 use hub_devices::persist::DeviceSnapshot;
 use hub_devices::transport::ZigbeeTransport;
 use hub_devices::zdef_adapter::{ZdefSchemaDecoder, load_cbor};
-use hub_ncp::Hub as Ncp;
+use hub_store::{KvStore, kv};
 use log::{info, warn};
 
 /// Device key prefix.
@@ -72,12 +72,12 @@ pub struct Registry {
 
 impl Registry {
     /// Restores user definitions, then devices, from the store.
-    pub fn load<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &mut Engine<T>, now: Millis) {
-        let (udefs, devs, srcs): (Records, Records, Records) = ncp.with_store(|s| {
+    pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) {
+        let (udefs, devs, srcs): (Records, Records, Records) = kv::with(kv, |s| {
             (
-                s.kv_prefix(UDEF).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
-                s.kv_prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
-                s.kv_prefix(USRC).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
+                s.prefix(UDEF).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
+                s.prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
+                s.prefix(USRC).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
             )
         });
         // `<format>\n<text>`.
@@ -104,9 +104,9 @@ impl Registry {
                 Err(e) => warn!("registry: {key}: {e}"),
             }
         }
-        let zg: Records = ncp.with_store(|s| {
-            s.kv_prefix(GROUP_KEY)
-                .chain(s.kv_prefix(BIND_KEY))
+        let zg: Records = kv::with(kv, |s| {
+            s.prefix(GROUP_KEY)
+                .chain(s.prefix(BIND_KEY))
                 .map(|(k, v)| (k.to_string(), v.to_vec()))
                 .collect()
         });
@@ -163,7 +163,7 @@ impl Registry {
 
     /// Writes what changed: coalesced event-driven writes, and a sweep of
     /// every device and user definition every [`SWEEP_MS`].
-    pub fn flush<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &Engine<T>, now: Millis, force: bool) {
+    pub fn flush<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis, force: bool) {
         let sweep = force || now.saturating_sub(self.last_sweep) >= SWEEP_MS;
         let due = force || self.dirty_since.is_some_and(|t| now.saturating_sub(t) >= FLUSH_MS);
         if !sweep && !due {
@@ -182,10 +182,10 @@ impl Registry {
             std::mem::take(&mut self.removed).into_iter().map(|id| format!("{DEV}{id}")).collect();
         if sweep || std::mem::take(&mut self.zg_dirty) {
             let zg = engine.zg_export();
-            ncp.with_store(|s| {
+            kv::with(kv, |s| {
                 dels.extend(
-                    s.kv_prefix(GROUP_KEY)
-                        .chain(s.kv_prefix(BIND_KEY))
+                    s.prefix(GROUP_KEY)
+                        .chain(s.prefix(BIND_KEY))
                         .filter(|(k, _)| !zg.iter().any(|(x, _)| x == k))
                         .map(|(k, _)| k.to_string()),
                 );
@@ -210,25 +210,25 @@ impl Registry {
                 .filter(|(id, _)| defs.contains_key(&format!("{UDEF}{id}")))
                 .map(|(id, (f, t))| (format!("{USRC}{id}"), format!("{f}\n{t}").into_bytes()))
                 .collect();
-            ncp.with_store(|s| {
+            kv::with(kv, |s| {
                 dels.extend(
-                    s.kv_prefix(USRC)
+                    s.prefix(USRC)
                         .filter(|(k, _)| srcs.binary_search_by(|(x, _)| x.as_str().cmp(k)).is_err())
                         .map(|(k, _)| k.to_string()),
                 );
-                dels.extend(s.kv_prefix(UDEF).filter(|(k, _)| !defs.contains_key(*k)).map(|(k, _)| k.to_string()));
-                dels.extend(s.kv_prefix(DEV).filter(|(k, _)| !live.contains(*k)).map(|(k, _)| k.to_string()));
+                dels.extend(s.prefix(UDEF).filter(|(k, _)| !defs.contains_key(*k)).map(|(k, _)| k.to_string()));
+                dels.extend(s.prefix(DEV).filter(|(k, _)| !live.contains(*k)).map(|(k, _)| k.to_string()));
             });
             puts.extend(defs);
             puts.extend(srcs);
         }
         self.dirty_since = None;
-        ncp.with_store(|s| {
+        kv::with(kv, |s| {
             for (k, v) in &puts {
-                if s.kv_get(k) == Some(v.as_slice()) {
+                if s.get(k) == Some(v.as_slice()) {
                     continue;
                 }
-                match s.kv_put(k, v) {
+                match s.put(k, v) {
                     Ok(()) => self.writes += 1,
                     Err(e) => {
                         self.errors += 1;
@@ -237,7 +237,7 @@ impl Registry {
                 }
             }
             for k in &dels {
-                if let Err(e) = s.kv_delete(k) {
+                if let Err(e) = s.delete(k) {
                     self.errors += 1;
                     warn!("registry: delete {k}: {e}");
                 }

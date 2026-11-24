@@ -23,6 +23,7 @@ use hub_devices::resolve::{Catalog, MemoryCatalog};
 use hub_devices::zdef_adapter::ZdefSchemaDecoder;
 use hub_ncp::store::EndpointRecord;
 use hub_ncp::{Hub as Ncp, Message, SessionState};
+use hub_store::kv;
 use log::{info, warn};
 
 use crate::admin::{self, Admin, JobOut};
@@ -549,7 +550,7 @@ fn open_catalog(ncp: &Ncp, setup: CatalogSetup, web: SharedWeb) -> Option<(Store
     if let Some(c) = &store.active {
         info!("catalog: bank generation {} ({} definitions, key {})", c.generation, c.definitions, c.kid);
     }
-        let cfg = load_config(ncp.with_store(|s| s.kv_get(CONFIG_KEY).map(<[u8]>::to_vec)));
+        let cfg = load_config(kv::with(ncp, |s| s.get(CONFIG_KEY).map(<[u8]>::to_vec)));
     let cat = StoreCatalog { bank, fetched: store.local.catalog(), ..Default::default() };
     Some((cat, CatalogService::new(setup.flash, store, cfg, web)))
 }
@@ -625,9 +626,8 @@ impl Runner {
         let mut last = std::mem::take(&mut r.last);
         last.load(&r.ncp, &mut r.engine, now);
         r.last = last;
-        let records: Vec<(String, Vec<u8>)> = r
-            .ncp
-            .with_store(|s| s.kv_prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
+        let records: Vec<(String, Vec<u8>)> =
+            kv::with(&r.ncp, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
         let n = r.automations.load(records);
         if n > 0 {
             info!("automations: {n} rules restored");
@@ -672,12 +672,12 @@ impl Runner {
         let dirty = std::mem::take(&mut self.automations.dirty);
         if !dirty.is_empty() {
             let a = &self.automations;
-            self.ncp.with_store(|s| {
+            kv::with(&self.ncp, |s| {
                 for id in &dirty {
                     let k = format!("{}{id}", automations::PREFIX);
                     let r = match a.rule(id) {
-                        Some(rule) => s.kv_put(&k, rule.src.as_bytes()),
-                        None => s.kv_delete(&k),
+                        Some(rule) => s.put(&k, rule.src.as_bytes()),
+                        None => s.delete(&k),
                     };
                     if let Err(e) = r {
                         warn!("automations: {k}: {e}");
@@ -1084,7 +1084,7 @@ impl Runner {
         if c.config_dirty {
             c.config_dirty = false;
             let v = c.cfg.to_json().to_string();
-            if let Err(e) = self.ncp.with_store(|s| s.kv_put(CONFIG_KEY, v.as_bytes())) {
+            if let Err(e) = kv::with(&self.ncp, |s| s.put(CONFIG_KEY, v.as_bytes())) {
                 warn!("catalog: saving the settings: {e}");
             }
         }
