@@ -222,6 +222,16 @@ impl Records for NcpNvRecords {
         self.state().verified
     }
 
+    fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {
+        let NetworkOwnership::Observed(n) = reported else { return None };
+        let st = self.state();
+        match st.registry {
+            _ if st.verified => Some(NetworkOwnership::Owned(*n)),
+            RegistryState::Foreign { why, .. } => Some(NetworkOwnership::Mismatch { found: Some(*n), why: why.into() }),
+            _ => None,
+        }
+    }
+
     fn replacing(&self) {
         let mut st = self.state();
         st.replacing = true;

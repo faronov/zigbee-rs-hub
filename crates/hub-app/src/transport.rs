@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin, NetworkOwnership, OwnershipModel, RegistryState};
+use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin, RegistryState};
 use hub_devices::transport::{CoordError, Outcome, Request, RequestId, Terminal, ZigbeeTransport};
 
 use crate::backend::Records;
@@ -227,16 +227,9 @@ impl ZigbeeTransport for CoordTransport {
     fn network_info(&mut self) -> Option<serde_json::Value> {
         let mut st = self.coord.status();
         let registry = self.records.as_ref().map(|r| r.registry());
-        // An NCP-held network as the hub decided it: its own (the records
-        // vouch for it) or another one.
-        if st.caps.as_ref().is_some_and(|c| c.ownership == OwnershipModel::NcpNv)
-            && let (NetworkOwnership::Observed(n), Some(r)) = (&st.ownership, &self.records)
-        {
-            if r.verified() {
-                st.ownership = NetworkOwnership::Owned(*n);
-            } else if let Some(RegistryState::Foreign { why, .. }) = registry {
-                st.ownership = NetworkOwnership::Mismatch { found: Some(*n), why: why.into() };
-            }
+        // An NCP-held network as the hub decided it.
+        if let Some(o) = self.records.as_ref().and_then(|r| r.ownership(&st.ownership)) {
+            st.ownership = o;
         }
         Some(network_info(&st, self.admin.tx_power_setting(), registry.as_ref()))
     }

@@ -54,6 +54,13 @@ pub trait Records: KvStore {
         true
     }
 
+    /// `network/info.ownership` when the hub decides it (`NcpNv`: owned or
+    /// mismatch instead of the backend's `observed`); `None`: as reported.
+    fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {
+        let _ = reported;
+        None
+    }
+
     /// The operator replaces the NCP's network (`network/reset`,
     /// `network/restore`, `network/form`; on a job thread): until
     /// [`replaced`](Self::replaced), what the NCP reports decides nothing.

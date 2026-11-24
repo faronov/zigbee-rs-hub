@@ -1017,7 +1017,7 @@ impl Runner {
             Input::Hook(h) => {
                 self.hooks.push(h);
                 if self.maintenance_for.is_some() {
-                    self.set_maintenance();
+                    self.set_maintenance(self.engine.transport.status().caps.as_deref());
                 }
             }
             Input::Text(sid, text) => {
@@ -1139,9 +1139,8 @@ impl Runner {
     }
 
     /// `hub/info` `maintenance`: the admin features and the hooks'.
-    fn set_maintenance(&mut self) {
-        let caps = self.engine.transport.status().caps;
-        let mut f = self.admin.features(caps.as_deref());
+    fn set_maintenance(&mut self, caps: Option<&hub_coord::Capabilities>) {
+        let mut f = self.admin.features(caps);
         f.extend(self.hooks.iter().filter_map(|h| h.feature()));
         self.api.set_info("maintenance", f.into());
     }
@@ -1360,7 +1359,7 @@ impl Runner {
             self.maintenance_for = cookie;
             #[cfg(feature = "ota")]
             self.ota.set_asdu(st.caps.as_ref().map(|c| u32::from(c.max_asdu)));
-            self.set_maintenance();
+            self.set_maintenance(st.caps.as_deref());
         }
         // Group memberships of the hub endpoint, once per NCP session.
         if self.registered && ready && verified && self.groups_for != cookie {
