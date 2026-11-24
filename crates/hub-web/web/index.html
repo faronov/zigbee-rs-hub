@@ -150,6 +150,7 @@ progress{width:12em}
 <div class="row acts"><button class="p" id="aus">Save</button><button id="aux">Test run</button><button id="aun">New</button><button class="d hide" id="aud">Delete</button><span id="aum" class="mut"></span></div></section>
 <section class="card"><h2>Run history</h2><ul class="ents" id="aur"></ul><pre id="aurd" class="hide"></pre></section>
 </div>
+<!-- ota:start -->
 <div data-tab="ota" data-title="Updates" data-need="ota" class="tab">
 <!-- stream:start -->
 <p id="otk" class="badge bad hide"></p>
@@ -165,6 +166,7 @@ progress{width:12em}
 <div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div></section>
 <!-- stream:end -->
 </div>
+<!-- ota:end -->
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
 <div class="row acts"><label>Channel <select id="ch"></select></label><button id="chb">Change channel</button></div>
@@ -241,13 +243,23 @@ function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
  if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
-  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();tabs();otRe();if(hub.automations){call("subscribe",{topics:["automations"]}).catch(()=>{});if($("#aul").offsetParent)onTab.auto()}}).catch(()=>{});
-  call("subscribe",{topics:["devices","entities","network","gp","catalog","groups","ota"]}).catch(e=>toast(e.message));
+  call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();tabs();
+// ota:start
+  otRe();
+// ota:end
+  if(hub.automations){call("subscribe",{topics:["automations"]}).catch(()=>{});if($("#aul").offsetParent)onTab.auto()}}).catch(()=>{});
+  call("subscribe",{topics:["devices","entities","network","gp","catalog","groups",
+// ota:start
+  "ota",
+// ota:end
+  ]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
+// ota:start
  if(m.type=="ota/block_needed"){otNeed(m);return}
+// ota:end
  if(m.type=="event")onEvent(m.event);
 }
 function onEvent(e){
@@ -277,7 +289,9 @@ function onEvent(e){
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
+// ota:start
  case"ota_device":case"ota_images":otEv(e);break;
+// ota:end
  default:if(/^automation_/.test(e.topic))auEv(e);else if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
  }
 }
@@ -880,6 +894,7 @@ $("#aus").onclick=()=>{const r=auSrc();act(auId?"automations/update":"automation
 $("#aux").onclick=()=>{if(!auId)return toast("Save first");act("automations/run",{automation:auId}).then(x=>{$("#aum").textContent=x.trace?x.trace.result:"";auTr()}).catch(()=>{})};
 $("#aun").onclick=()=>auEdit(null);
 $("#aud").onclick=()=>{if(auId&&confirm("Delete "+auId+"?"))act("automations/delete",{automation:auId}).then(()=>{delete au.rules[auId];auEdit(null);auRender()}).catch(()=>{})};
+// ota:start
 // ---- Updates (OTA) tab ----
 let otD={},otI=[],otA={},otStr={};
 const ver=v=>v==null?"?":hex(v,8),kb=n=>Math.round((n||0)/1024)+" KiB";
@@ -919,7 +934,7 @@ async function otUp(b,name){const u=otCut(b),p=$("#otp"),r=await call("ota/uploa
 $("#otb").onclick=e=>{const f=$("#otf").files[0];if(f)busy(e.target,f.arrayBuffer().then(b=>otUp(b,f.name)).catch(x=>toast(x.message)))};
 // store:end
 // stream:start
-// No store (4 MB): this tab serves the file while the device downloads.
+// No store: this tab serves the file while the device downloads.
 function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: it serves "+n+" image(s)";k.classList.toggle("hide",!n)}
 const otOffer=(u,name)=>call("ota/stream/offer",{size:u.length,name,header:b64(u.subarray(0,256))}).then(o=>{otStr[o.session]=u;otKeep();return o});
 // After a reconnect: offer the images again (the hub keeps the sessions for a while).
@@ -928,6 +943,7 @@ addEventListener("beforeunload",e=>{if(Object.keys(otStr).length){e.preventDefau
 $("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otOffer(otCut(b),f.name)).then(o=>call("ota/start",{device:d,image:o.session})).then(()=>toast("Started")).catch(x=>toast(x.message)))};
 // stream:end
 // ---- end of Updates tab ----
+// ota:end
 connect();
 </script>
 </body>

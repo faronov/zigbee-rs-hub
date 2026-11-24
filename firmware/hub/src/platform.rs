@@ -130,7 +130,8 @@ impl hub_app::Platform for S3 {
         };
         let boot = crate::BOOT.get().copied();
         let r = crate::resources::get();
-        json!({
+        #[allow(unused_mut)]
+        let mut v = json!({
             "version": format!("tbr-hub {}", env!("CARGO_PKG_VERSION")),
             "uptime_s": unsafe { sys::esp_timer_get_time() } / 1_000_000,
             "heap": {"free": free, "min_free": min, "largest_block": largest, "psram": psram},
@@ -144,9 +145,13 @@ impl hub_app::Platform for S3 {
                 "http_sockets": r.http_sockets,
                 "ws_client_bytes": r.ws_client_bytes,
                 "ws_total_bytes": r.ws_total_bytes,
-                "ota_streams": r.ota_streams,
             },
-        })
+        });
+        #[cfg(feature = "ota")]
+        {
+            v["limits"]["ota_streams"] = r.ota_streams.into();
+        }
+        v
     }
     fn heap(&self) -> Option<(usize, usize)> {
         let caps = sys::MALLOC_CAP_INTERNAL;

@@ -137,6 +137,55 @@ fn mqtt_requests_without_the_bridge_answer_unsupported() {
     r.sim.stop();
 }
 
+/// Without the OTA server (the 4 MB images): `ota/*` answers
+/// `unsupported`, `hub/info` has no `ota`, and a device's Query Next Image
+/// takes the engine's generic path as before the server existed: the
+/// Default Response it asks for (SUCCESS), no Query Next Image Response.
+#[cfg(not(feature = "ota"))]
+#[test]
+fn without_the_ota_server_ota_requests_are_unsupported_and_queries_get_a_default_response() {
+    use std::sync::Mutex;
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let info = call(&app, sid, &rx, 1, json!({"type": "hub/info"}));
+    assert_eq!(info["success"], true, "{info}");
+    assert!(info["result"].get("ota").is_none(), "{info}");
+    for (id, ty) in [(2, "ota/status"), (3, "ota/start"), (4, "ota/block_data")] {
+        let f = call(&app, sid, &rx, id, json!({"type": ty, "device": "zb:00158d0001a2b3c4"}));
+        assert_eq!(f["error"]["code"], "unsupported", "{f}");
+    }
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let seen = sent.clone();
+    r.sim.set_aps_hook(Box::new(move |a: &hub_ncp::sim::SimAps<'_>| {
+        if a.cluster == 0x0019 {
+            seen.lock().unwrap().push(a.asdu.to_vec());
+        }
+        Vec::new()
+    }));
+    join(&r.sim);
+    assert!(app.wait(T, |s| s.devices == 1));
+    // Query Next Image (cluster-specific, client to server, Default
+    // Response wanted, TSN 0x42): field control, manufacturer, image type,
+    // file version.
+    let mut q = vec![0x01, 0x42, 0x01, 0x00];
+    q.extend(0x115Fu16.to_le_bytes());
+    q.extend(0x0001u16.to_le_bytes());
+    q.extend(0x0000_0010u32.to_le_bytes());
+    r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, hub_ncp::sim::indication(0x1234, DEV, 1, 1, 0x0104, 0x0019, &q));
+    let t = std::time::Instant::now();
+    while sent.lock().unwrap().is_empty() && t.elapsed() < T {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    // Global Default Response, server to client, for command 0x01: SUCCESS.
+    assert_eq!(*sent.lock().unwrap(), vec![vec![0x18, 0x42, 0x0B, 0x01, 0x00]]);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 #[test]
 fn aps_confirms_are_counted_and_failures_reach_the_engine() {
     let r = rig(Store::volatile());

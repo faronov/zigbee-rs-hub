@@ -24,9 +24,9 @@ jobs:
       # hubctl enables `advanced`; the images without it build hub-mqtt alone.
       - name: hub-mqtt without the advanced console
         run: cargo test -p hub-mqtt
-      # The 4 MB images: the OTA server with streamed images only (no store).
+      # The OTA server with streamed images only (feature `ota` without `ota-store`).
       - name: hub-ota and hub-app without the OTA image store
-        run: cargo test -p hub-ota --no-default-features && cargo test -p hub-app --no-default-features
+        run: cargo test -p hub-ota --no-default-features && cargo test -p hub-app --no-default-features --features ota
       - run: cargo fmt -p hub-ota -- --check
       - run: cargo clippy -p hub-ota --all-targets -- -D warnings
       - run: cargo clippy -p hub-ota --no-default-features --all-targets -- -D warnings
@@ -71,7 +71,10 @@ jobs:
       - run: cargo clippy -p hub-devices --all-targets -- -D warnings
       - run: cargo test -p hub-devices
       - run: cargo test -p hub-devices --features advanced
+      # The 4 MB images: no Zigbee device OTA.
       - run: cargo test -p hub-app -p hub-web --no-default-features
+      - name: hub-app without `ota` links no hub-ota
+        run: "! cargo tree -p hub-app --no-default-features -e normal | grep -q ' hub-ota v'"
       - run: cargo test -p hub-web --features advanced
 
   zdef:
@@ -181,7 +184,7 @@ jobs:
       - name: Build tbr-hub with the MQTT bridge on its own client (option mqtt-lite, in no image)
         working-directory: firmware/hub
         run: cargo build --release --features mqtt-lite
-      - name: Build tbr-hub (8 MB images with MQTT, the advanced console and the OTA image store; 4 MB images with MQTT; quad and octal PSRAM)
+      - name: Build tbr-hub (8 MB images with MQTT, the advanced console and Zigbee OTA with its image store; 4 MB images with MQTT only; quad and octal PSRAM)
         run: tools/build-hub-firmware.sh
       - name: App images (tbr-hub must fit the 3 MiB production slot, with MQTT, and the 2 944 KiB dev slot)
         run: |

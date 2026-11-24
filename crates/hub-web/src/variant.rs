@@ -1,20 +1,24 @@
 use std::string::String;
+use std::vec::Vec;
 
 /// Feature sections of the page, `<!-- NAME:start -->` … `<!-- NAME:end -->`
 /// (or `// NAME:start` in the script): `advanced` (the manual ZCL/Tuya
-/// console), `store` (uploads into the OTA image store) and `stream`
-/// (serving an OTA file from the browser tab, for images without a store).
-pub const SECTIONS: [&str; 3] = ["advanced", "store", "stream"];
+/// console), `ota` (the Updates tab: Zigbee device OTA), and inside it
+/// `store` (uploads into the OTA image store) and `stream` (serving an OTA
+/// file from the browser tab, for images without a store).
+pub const SECTIONS: [&str; 4] = ["advanced", "ota", "store", "stream"];
 
-/// The sections a build includes.
-pub fn enabled(advanced: bool, ota_store: bool) -> [(&'static str, bool); 3] {
-    [("advanced", advanced), ("store", ota_store), ("stream", !ota_store)]
+/// The sections a build includes (`ota_store` implies `ota`).
+pub fn enabled(advanced: bool, ota: bool, ota_store: bool) -> [(&'static str, bool); 4] {
+    let ota = ota || ota_store;
+    [("advanced", advanced), ("ota", ota), ("store", ota_store), ("stream", ota && !ota_store)]
 }
 
 /// The page with the sections of `on` kept and the others left out.
 pub fn select(src: &str, on: &[(&str, bool)]) -> Result<String, &'static str> {
     let mut out = String::with_capacity(src.len());
-    let mut inside: Option<(&str, bool)> = None;
+    // Open sections, outermost first; a line is kept when all are.
+    let mut open: Vec<(&str, bool)> = Vec::new();
     for line in src.lines() {
         let t = line.trim();
         let marker = t
@@ -25,26 +29,26 @@ pub fn select(src: &str, on: &[(&str, bool)]) -> Result<String, &'static str> {
             .filter(|(name, _)| SECTIONS.contains(name));
         match marker {
             Some((name, "start")) => {
-                if inside.is_some() {
-                    return Err("nested feature section");
+                if open.iter().any(|(n, _)| *n == name) {
+                    return Err("feature section inside itself");
                 }
                 let keep = on.iter().find(|(n, _)| *n == name).ok_or("feature section not selected")?.1;
-                inside = Some((name, keep));
+                open.push((name, keep));
             }
             Some((name, "end")) => {
-                if inside.is_none_or(|(n, _)| n != name) {
+                if open.last().is_none_or(|(n, _)| *n != name) {
                     return Err("unexpected feature section end");
                 }
-                inside = None;
+                open.pop();
             }
-            _ if inside.is_none_or(|(_, keep)| keep) => {
+            _ if open.iter().all(|(_, keep)| *keep) => {
                 out.push_str(line);
                 out.push('\n');
             }
             _ => {}
         }
     }
-    if inside.is_some() {
+    if !open.is_empty() {
         return Err("unterminated feature section");
     }
     Ok(out)
