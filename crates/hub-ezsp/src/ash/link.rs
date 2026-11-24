@@ -249,6 +249,8 @@ pub struct AshStats {
     pub rx_cancelled: u32,
     pub rx_substituted: u32,
     pub rx_discarded: u32,
+    /// RSTACKs ignored while resetting: not the answer to our RST.
+    pub rx_stale_rstack: u32,
     pub ack_timeouts: u32,
     pub resets: u32,
 }
@@ -334,7 +336,6 @@ pub struct Ash {
     remote_not_ready_until: Option<u64>,
     // NCP role.
     rstack_pending: Option<u8>,
-    rst_reply_code: u8,
     error_pending: bool,
     // Output.
     events: VecDeque<AshEvent>,
@@ -376,7 +377,6 @@ impl Ash {
             last_not_ready_tx: 0,
             remote_not_ready_until: None,
             rstack_pending: None,
-            rst_reply_code: ResetCode::SOFTWARE.0,
             error_pending: false,
             events: VecDeque::new(),
             data_events: 0,
@@ -415,8 +415,9 @@ impl Ash {
     }
 
     /// Host-initiated reset (UG101 §5): drops every queued frame and event,
-    /// sends Cancel + RST and waits for RSTACK, retrying
-    /// [`AshConfig::reset_retries`] times.
+    /// sends Cancel + RST and waits for an RSTACK with the software reset
+    /// code, retrying [`AshConfig::reset_retries`] times. Other RSTACKs are
+    /// stale and discarded ([`AshStats::rx_stale_rstack`]).
     pub fn reset(&mut self, _now: u64) {
         if self.role != Role::Host {
             return;
@@ -496,10 +497,15 @@ impl Ash {
         self.error_pending = true;
     }
 
-    /// NCP role: the reset code RSTACK reports after an RST.
+    /// NCP role: reboot silently (simulated boot time); frames are
+    /// discarded until [`ncp_spontaneous_reset`](Self::ncp_spontaneous_reset).
     #[cfg(any(test, feature = "sim"))]
-    pub(crate) fn set_rst_reply_code(&mut self, code: ResetCode) {
-        self.rst_reply_code = code.0;
+    pub(crate) fn ncp_reboot(&mut self) {
+        self.restart_link();
+        self.events.clear();
+        self.data_events = 0;
+        self.rstack_pending = None;
+        self.state = State::Disconnected;
     }
 
     /// NCP role: reboot without an RST and announce it with RSTACK.
@@ -614,14 +620,21 @@ impl Ash {
 
     fn on_frame_host(&mut self, frame: Frame, now: u64) {
         match self.state {
-            State::Resetting { .. } => {
-                // UG101 §5: discard everything until a valid RSTACK.
+            State::Resetting { rst_pending, .. } => {
+                // UG101 §5: discard everything until a valid RSTACK. Only an
+                // RSTACK with the software reset code answers our RST; any
+                // other (hardware reset, earlier boot) is stale. UG101 does
+                // not say this; the SDK reference host `ash-host.c` filters
+                // the same way for its RST reset method.
                 if let Frame::RstAck {
                     version,
                     reset_code,
                 } = frame
                 {
-                    if version != ASH_VERSION {
+                    if rst_pending || reset_code != ResetCode::SOFTWARE.0 {
+                        self.stats.rx_discarded += 1;
+                        self.stats.rx_stale_rstack += 1;
+                    } else if version != ASH_VERSION {
                         self.fail(FailReason::AshVersion(version));
                     } else {
                         self.restart_link();
@@ -655,7 +668,7 @@ impl Ash {
             self.events.clear();
             self.data_events = 0;
             self.state = State::Connected;
-            self.rstack_pending = Some(self.rst_reply_code);
+            self.rstack_pending = Some(ResetCode::SOFTWARE.0);
             self.push_control_event(AshEvent::PeerReset);
             return;
         }

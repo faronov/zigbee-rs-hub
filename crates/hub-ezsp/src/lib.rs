@@ -60,7 +60,11 @@
 //!   frmNum + 1); otherwise it is discarded and, when connected and the
 //!   Reject Condition was clear, a NAK is sent (§4, §5).
 //! - Reset: Cancel + RST, every frame before a valid RSTACK is discarded,
-//!   RSTACK version must be 2, up to five retries (§3, §5).
+//!   RSTACK version must be 2, up to five retries (§3, §5). Input pending
+//!   before the reset is discarded, and only an RSTACK with the software
+//!   reset code (0x0B) answers the RST; an unprompted RSTACK after nRESET
+//!   or power-on is stale. UG101 does not state these two rules; the SDK
+//!   reference host `ash-host.c` applies both for its RST reset method.
 //! - CONNECTED: 3-bit frame numbers, sliding window < 8, ackNum always
 //!   processed, immediate ACK (the host never piggybacks), duplicates
 //!   (reTx set, already received) ACKed without Reject, out-of-sequence

@@ -9,6 +9,13 @@
 //! acknowledged is retransmitted, and after ACK_TIMEOUTS (4) consecutive
 //! timeouts the NCP enters the FAILED state (UG101 §5, §6, §7).
 //!
+//! Errors: a command that fails for any reason (timeout, link failure,
+//! I/O error) is abandoned, so its late response is ignored and the next
+//! call can proceed. A link failure that arrives behind a response is
+//! reported by the next call or [`EzspHost::pump`]; the session is reset
+//! and [`HostEvent::LinkLost`] is queued. `ErrorKind::Interrupted` from
+//! the transport is retried.
+//!
 //! Flow control: when the event queue holds
 //! [`HostConfig::event_not_ready_at`] entries, ASH advertises nRdy so the
 //! NCP pauses callback frames while responses keep flowing (UG101 §5
@@ -21,7 +28,9 @@ use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::ash::{Ash, AshConfig, AshEvent, ConfigError, FailReason, ResetCode, SendError};
+use crate::ash::{
+    Ash, AshConfig, AshEvent, ConfigError, FailReason, LinkState, ResetCode, SendError,
+};
 use crate::ezsp::command::{Callback, Command, EncodeError, Endpoint, Response, id};
 use crate::ezsp::session::{Inbound, Session, SessionError};
 use crate::ezsp::types::*;
@@ -36,7 +45,34 @@ pub trait Transport: Send {
     fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
     /// Waits up to `timeout` for at least one byte; `Ok(0)` on timeout.
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
+
+    /// Discards input that arrived before a reset (stale frames, e.g. the
+    /// unprompted RSTACK after a hardware reset). The default reads until
+    /// the line has been quiet for [`DRAIN_QUIET`], at most
+    /// [`DRAIN_MAX_READS`] reads; a driver with an input flush should
+    /// override it. The SDK reference host flushes its serial input before
+    /// starting ASH (`ash-host.c`).
+    fn discard_input(&mut self) -> io::Result<()> {
+        let mut buf = [0u8; 64];
+        for _ in 0..DRAIN_MAX_READS {
+            match self.read(&mut buf, DRAIN_QUIET) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
+
+/// Quiet time that ends the default [`Transport::discard_input`].
+pub const DRAIN_QUIET: Duration = Duration::from_millis(20);
+/// Read bound of the default [`Transport::discard_input`], so that a
+/// noisy line cannot stall the start.
+pub const DRAIN_MAX_READS: usize = 256;
+/// Retries of a write interrupted by a signal (`ErrorKind::Interrupted`).
+const WRITE_RETRIES: usize = 8;
 
 /// Monotonic millisecond clock.
 pub trait Clock: Send {
@@ -95,6 +131,7 @@ impl Default for HostConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NcpInfo {
     pub ash_version: u8,
+    /// Always the software reset code: the answer to our RST.
     pub reset_code: ResetCode,
     pub ezsp_version: EzspVersion,
     pub stack_type: u8,
@@ -372,9 +409,14 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
     /// negotiates the EZSP version (UG100 successor §2, §3): a legacy-format
     /// `version(desired)`; if the NCP answers with another version that
     /// the policy accepts, an extended-format `version(that)` confirms it.
+    ///
+    /// Input pending before the reset is discarded first
+    /// ([`Transport::discard_input`]); while resetting, only an RSTACK with
+    /// the software reset code is accepted (see [`Ash::reset`]).
     pub fn start(&mut self) -> Result<NcpInfo, HostError> {
         self.info = None;
         self.session.reset();
+        self.transport.discard_input()?;
         let now = self.clock.now_ms();
         self.ash.reset(now);
         let a = self.ash.config();
@@ -452,8 +494,9 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
     }
 
     fn call_inner(&mut self, cmd: &Command) -> Result<Response, HostError> {
+        self.check_link()?;
         let frame_id = cmd.frame_id();
-        let (_, bytes) = self.session.encode(cmd).map_err(|e| match e {
+        let (sequence, bytes) = self.session.encode(cmd).map_err(|e| match e {
             SessionError::Encode(e) => HostError::Encode(e),
             e => HostError::Session(e),
         })?;
@@ -462,6 +505,39 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
             return Err(HostError::Send(e));
         }
         self.stats.commands += 1;
+        let result = self.await_response(frame_id);
+        // Whatever ended the wait (I/O error included), the command is no
+        // longer awaited; a late response becomes `Unexpected`.
+        if result.is_err() && self.session.outstanding() == Some(sequence) {
+            self.session.abandon();
+        }
+        result
+    }
+
+    /// Processes link events left from earlier reads (a failure can arrive
+    /// in the same chunk as the previous response) and refuses to send on
+    /// a link that is not connected.
+    fn check_link(&mut self) -> Result<(), HostError> {
+        while let Some(step) = self.drain_link_events() {
+            if let Step::Failed(r) = step {
+                return Err(HostError::Link(r));
+            }
+        }
+        match self.ash.state() {
+            LinkState::Connected => Ok(()),
+            LinkState::Failed(r) => {
+                if self.session.version().is_some() {
+                    self.session.reset();
+                    self.info = None;
+                    self.deliver(HostEvent::LinkLost(r));
+                }
+                Err(HostError::Link(r))
+            }
+            LinkState::Disconnected | LinkState::Resetting => Err(HostError::NotStarted),
+        }
+    }
+
+    fn await_response(&mut self, frame_id: u16) -> Result<Response, HostError> {
         let timeout = self.cfg.command_timeout.as_millis() as u64;
         let deadline = self.clock.now_ms() + timeout;
         loop {
@@ -476,10 +552,7 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
                 }
                 Some(Step::Failed(r)) => return Err(HostError::Link(r)),
                 Some(Step::Connected { .. }) => {}
-                None => {
-                    self.session.abandon();
-                    return Err(HostError::Timeout { frame_id });
-                }
+                None => return Err(HostError::Timeout { frame_id }),
             }
         }
     }
@@ -506,7 +579,7 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
             self.tx.clear();
             while self.ash.poll_transmit(now, &mut self.tx) {}
             if !self.tx.is_empty() {
-                self.transport.write_all(&self.tx)?;
+                self.write_tx()?;
             }
             if let Some(step) = self.drain_link_events() {
                 return Ok(Some(step));
@@ -518,12 +591,30 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
                 .ash
                 .next_timeout()
                 .map_or(deadline, |t| t.clamp(now, deadline));
-            let n = self
+            let n = match self
                 .transport
-                .read(&mut self.rx, Duration::from_millis(wake - now))?;
+                .read(&mut self.rx, Duration::from_millis(wake - now))
+            {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => 0,
+                other => other?,
+            };
             if n > 0 {
                 let now = self.clock.now_ms();
                 self.ash.handle_rx(&self.rx[..n], now);
+            }
+        }
+    }
+
+    /// Writes the pending frames; a signal interruption is retried (ASH
+    /// recovers from a partially written frame by CRC failure and NAK).
+    fn write_tx(&mut self) -> io::Result<()> {
+        let mut tries = 0;
+        loop {
+            match self.transport.write_all(&self.tx) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted && tries < WRITE_RETRIES => {
+                    tries += 1
+                }
+                other => return other,
             }
         }
     }

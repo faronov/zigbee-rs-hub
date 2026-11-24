@@ -27,6 +27,15 @@ use crate::host::{Clock, Transport};
 
 pub use pipe::{Fault, Faults, Pipe, PipeStats, Rng};
 
+/// A link fault the NCP raises right after its next response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkFault {
+    /// Reboot and send RSTACK unprompted.
+    Reset(ResetCode),
+    /// Enter the FAILED state and send ERROR.
+    Error(ResetCode),
+}
+
 /// Outcome reported by `messageSentHandler` for unicasts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -40,8 +49,9 @@ pub struct SimConfig {
     /// EZSP protocol version of the NCP image (may be < 13 to test refusal).
     pub ezsp_version: u8,
     pub stack_version: StackVersion,
-    /// Reported by RSTACK.
-    pub reset_code: ResetCode,
+    /// Boot time after RST or a hardware reset. The NCP ignores the UART
+    /// while booting and then sends RSTACK (software reset code after RST).
+    pub boot_ms: u64,
     /// A network is stored: `networkInit` succeeds.
     pub network_formed: bool,
     pub eui64: Eui64,
@@ -60,7 +70,7 @@ impl Default for SimConfig {
         SimConfig {
             ezsp_version: 18,
             stack_version: StackVersion(0x8230),
-            reset_code: ResetCode::SOFTWARE,
+            boot_ms: 0,
             network_formed: true,
             eui64: Eui64::from_u64(0x00_0B_57_FF_FE_12_34_56),
             node_id: 0x0000,
@@ -112,6 +122,9 @@ pub struct SimNcp {
     commands: Vec<u16>,
     sent: Vec<SentMessage>,
     dropped_callbacks: u32,
+    booting: Option<(u64, ResetCode)>,
+    fault_after_response: Option<LinkFault>,
+    pending_fault: Option<LinkFault>,
 }
 
 fn default_config() -> BTreeMap<u8, u16> {
@@ -145,8 +158,7 @@ fn default_config() -> BTreeMap<u8, u16> {
 
 impl SimNcp {
     pub fn new(cfg: SimConfig) -> SimNcp {
-        let mut link = Ash::new_ncp(cfg.ash.clone()).expect("valid simulator ASH config");
-        link.set_rst_reply_code(cfg.reset_code);
+        let link = Ash::new_ncp(cfg.ash.clone()).expect("valid simulator ASH config");
         let multicast = vec![MulticastTableEntry::default(); cfg.multicast_table_size];
         SimNcp {
             cfg,
@@ -163,6 +175,9 @@ impl SimNcp {
             commands: Vec::new(),
             sent: Vec::new(),
             dropped_callbacks: 0,
+            booting: None,
+            fault_after_response: None,
+            pending_fault: None,
         }
     }
 
@@ -223,14 +238,69 @@ impl SimNcp {
     }
 
     fn handle_rx(&mut self, bytes: &[u8], now: u64) {
+        if self.booting.is_some() {
+            return;
+        }
         self.link.handle_rx(bytes, now);
         while let Some(ev) = self.link.poll_event() {
             match ev {
-                AshEvent::PeerReset => self.reset_ezsp(),
+                AshEvent::PeerReset => {
+                    self.reset_ezsp();
+                    if self.cfg.boot_ms > 0 {
+                        self.reboot(now, ResetCode::SOFTWARE);
+                        return;
+                    }
+                }
                 AshEvent::Data(frame) => self.on_ezsp(&frame),
                 AshEvent::Connected { .. } | AshEvent::Failed(_) => {}
             }
         }
+    }
+
+    fn reboot(&mut self, now: u64, code: ResetCode) {
+        self.link.ncp_reboot();
+        self.booting = Some((now + self.cfg.boot_ms, code));
+    }
+
+    fn handle_timeout(&mut self, now: u64) {
+        if let Some((t, code)) = self.booting
+            && now >= t
+        {
+            self.booting = None;
+            self.link.ncp_spontaneous_reset(code);
+        }
+        self.link.handle_timeout(now);
+    }
+
+    fn next_timeout(&self) -> Option<u64> {
+        [self.link.next_timeout(), self.booting.map(|(t, _)| t)]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// Applies a fault armed with [`fail_after_next_response`](Self::fail_after_next_response)
+    /// once the response is on the wire.
+    fn after_transmit(&mut self) -> bool {
+        match self.pending_fault.take() {
+            Some(LinkFault::Reset(code)) => self.spontaneous_reset(code),
+            Some(LinkFault::Error(code)) => self.fail(code),
+            None => return false,
+        }
+        true
+    }
+
+    /// Raises `fault` right after the response to the next command, so
+    /// that both reach the host back to back.
+    pub fn fail_after_next_response(&mut self, fault: LinkFault) {
+        self.fault_after_response = Some(fault);
+    }
+
+    /// Hardware reset (nRESET): the NCP reboots for `boot_ms` and then
+    /// sends an unprompted RSTACK with `code` (UG101 §5, AN706 successor §5).
+    pub fn hardware_reset(&mut self, now: u64, code: ResetCode) {
+        self.reset_ezsp();
+        self.reboot(now, code);
     }
 
     fn on_ezsp(&mut self, bytes: &[u8]) {
@@ -293,6 +363,10 @@ impl SimNcp {
             ),
         };
         self.respond(h.sequence, resp);
+        if let Some(fault) = self.fault_after_response.take() {
+            self.pending_fault = Some(fault);
+            return;
+        }
         for cb in callbacks {
             self.callback(cb);
         }
@@ -691,7 +765,16 @@ impl World {
             let chunk = self.rx[..n].to_vec();
             self.ncp.handle_rx(&chunk, now);
         }
-        self.ncp.link.handle_timeout(now);
+        self.ncp.handle_timeout(now);
+        loop {
+            self.transmit(now);
+            if !self.ncp.after_transmit() {
+                break;
+            }
+        }
+    }
+
+    fn transmit(&mut self, now: u64) {
         loop {
             self.out.clear();
             if !self.ncp.link.poll_transmit(now, &mut self.out) {
@@ -707,7 +790,7 @@ impl World {
         [
             self.to_ncp.next_due(),
             self.to_host.next_due(),
-            self.ncp.link.next_timeout(),
+            self.ncp.next_timeout(),
         ]
         .into_iter()
         .flatten()
@@ -801,6 +884,35 @@ impl Sim {
 
     pub fn now_ms(&self) -> u64 {
         lock(&self.world).now()
+    }
+
+    /// Hardware-resets the NCP now (see [`SimNcp::hardware_reset`]).
+    pub fn hardware_reset(&self, code: ResetCode) {
+        let mut w = lock(&self.world);
+        let now = w.now();
+        w.ncp.hardware_reset(now, code);
+    }
+
+    /// Runs the NCP side for `ms` of virtual time without the host reading:
+    /// whatever the NCP sends waits in the host's input.
+    pub fn advance(&self, ms: u64) {
+        let mut w = lock(&self.world);
+        let end = w.now() + ms;
+        loop {
+            w.step();
+            let now = w.now();
+            if now >= end {
+                return;
+            }
+            let next = [w.to_ncp.next_due(), w.ncp.next_timeout()]
+                .into_iter()
+                .flatten()
+                .filter(|&t| t > now)
+                .min()
+                .unwrap_or(end)
+                .min(end);
+            w.now.store(next, Ordering::SeqCst);
+        }
     }
 }
 

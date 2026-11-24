@@ -1,14 +1,17 @@
 //! Host against the simulated NCP: negotiation, the core-stage scenario,
 //! failures, flow control; all on the virtual clock.
 
+use std::collections::VecDeque;
+use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::ash::{FailReason, ResetCode};
 use crate::ezsp::command::id;
 use crate::ezsp::version::VersionError;
 use crate::ezsp::*;
-use crate::host::{EventReceiver, EzspHost, HostConfig, HostError, HostEvent};
-use crate::sim::{Delivery, Fault, Faults, Sim, SimClock, SimConfig, SimTransport};
+use crate::host::{EventReceiver, EzspHost, HostConfig, HostError, HostEvent, Transport};
+use crate::sim::{Delivery, Fault, Faults, LinkFault, Sim, SimClock, SimConfig, SimTransport};
 
 type Host = EzspHost<SimTransport, SimClock>;
 
@@ -565,4 +568,159 @@ fn ncp_overflow_flag_is_surfaced() {
     host.network_state().unwrap();
     assert!(events.drain().contains(&HostEvent::NcpOverflow));
     assert_eq!(host.stats().ncp_overflows, 1);
+}
+
+/// The simulator's transport with scripted driver behaviour: input
+/// discard on or off, bursts coalesced into one read, injected read
+/// errors.
+struct Scripted {
+    inner: SimTransport,
+    discard: bool,
+    coalesce: Option<Duration>,
+    read_errors: Arc<Mutex<VecDeque<io::ErrorKind>>>,
+}
+
+impl Scripted {
+    fn new(inner: SimTransport) -> Scripted {
+        Scripted {
+            inner,
+            discard: true,
+            coalesce: None,
+            read_errors: Arc::default(),
+        }
+    }
+}
+
+impl Transport for Scripted {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        self.inner.write_all(data)
+    }
+
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        if let Some(kind) = self.read_errors.lock().unwrap().pop_front() {
+            return Err(kind.into());
+        }
+        let mut n = self.inner.read(buf, timeout)?;
+        if let Some(window) = self.coalesce {
+            while n > 0 && n < buf.len() {
+                match self.inner.read(&mut buf[n..], window)? {
+                    0 => break,
+                    m => n += m,
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    fn discard_input(&mut self) -> io::Result<()> {
+        if self.discard {
+            self.inner.discard_input()
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// After nRESET the NCP sends RSTACK(power-on) unprompted. If that stale
+/// RSTACK is taken as the answer to our RST, the host sends `version`
+/// while the NCP reboots for the RST, and the real RSTACK(software) then
+/// fails the link. Both defences are checked on their own: the RSTACK
+/// filter (input not discarded) and the input discard.
+#[test]
+fn stale_rstack_after_a_hardware_reset_does_not_break_start() {
+    for discard in [false, true] {
+        let cfg = SimConfig {
+            boot_ms: 200,
+            ..sim_version(13)
+        };
+        let (sim, transport, clock) = Sim::new(cfg, Faults::none());
+        sim.hardware_reset(ResetCode::POWER_ON);
+        sim.advance(500);
+        let transport = Scripted {
+            discard,
+            ..Scripted::new(transport)
+        };
+        let (mut host, _) = EzspHost::new(transport, clock, HostConfig::default()).unwrap();
+        let info = host
+            .start()
+            .unwrap_or_else(|e| panic!("discard {discard}: {e}"));
+        assert_eq!(info.reset_code, ResetCode::SOFTWARE);
+        assert_eq!(info.version_exchanges, 2);
+        let stale = host.ash().stats().rx_stale_rstack;
+        assert_eq!(stale, u32::from(!discard), "discard {discard}");
+        assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+    }
+
+    // The NCP is still booting when the host starts: the RST is lost, the
+    // unprompted RSTACK arrives while resetting and is ignored, the retry
+    // connects.
+    let cfg = SimConfig {
+        boot_ms: 300,
+        ..sim_version(18)
+    };
+    let (sim, transport, clock) = Sim::new(cfg, Faults::none());
+    sim.hardware_reset(ResetCode::EXTERNAL);
+    let (mut host, _) = EzspHost::new(transport, clock, HostConfig::default()).unwrap();
+    assert_eq!(host.start().unwrap().reset_code, ResetCode::SOFTWARE);
+    assert_eq!(host.ash().stats().rx_stale_rstack, 1);
+    assert_eq!(host.ash().stats().tx_rst, 2);
+}
+
+/// A response and an RSTACK/ERROR in the same read: the call returns the
+/// response, the next call reports the failure (not `Send(NotConnected)`),
+/// the session is reset and `LinkLost` is delivered.
+#[test]
+fn link_failure_behind_a_response_is_reported_by_the_next_call() {
+    for fault in [
+        LinkFault::Reset(ResetCode::WATCHDOG),
+        LinkFault::Error(ResetCode::ASSERT),
+    ] {
+        let (sim, transport, clock) = Sim::new(sim_version(18), Faults::none());
+        let transport = Scripted {
+            coalesce: Some(Duration::from_millis(20)),
+            ..Scripted::new(transport)
+        };
+        let (mut host, events) = EzspHost::new(transport, clock, HostConfig::default()).unwrap();
+        host.start().unwrap();
+        sim.ncp(|n| n.fail_after_next_response(fault));
+        assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+        let reason = match fault {
+            LinkFault::Reset(c) => FailReason::NcpReset(c),
+            LinkFault::Error(c) => FailReason::NcpError(c),
+        };
+        match host.network_state() {
+            Err(HostError::Link(r)) => assert_eq!(r, reason),
+            other => panic!("{fault:?}: {other:?}"),
+        }
+        assert!(host.info().is_none());
+        assert!(events.drain().contains(&HostEvent::LinkLost(reason)));
+        assert!(matches!(host.network_state(), Err(HostError::NotStarted)));
+        host.start().unwrap();
+        assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+    }
+}
+
+/// An I/O error while waiting abandons the command: later calls are not
+/// refused as `Busy`, and the late response is ignored. `Interrupted` is
+/// retried inside the pump.
+#[test]
+fn io_error_during_a_command_does_not_wedge_the_session() {
+    let (_, transport, clock) = Sim::new(sim_version(18), Faults::none());
+    let transport = Scripted::new(transport);
+    let errors = transport.read_errors.clone();
+    let (mut host, _) = EzspHost::new(transport, clock, HostConfig::default()).unwrap();
+    host.start().unwrap();
+    errors.lock().unwrap().push_back(io::ErrorKind::BrokenPipe);
+    match host.network_state() {
+        Err(HostError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::BrokenPipe),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+    assert_eq!(host.stats().unexpected_responses, 1);
+    errors
+        .lock()
+        .unwrap()
+        .extend([io::ErrorKind::Interrupted, io::ErrorKind::Interrupted]);
+    assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+    assert!(errors.lock().unwrap().is_empty());
 }

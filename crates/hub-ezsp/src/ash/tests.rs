@@ -385,17 +385,23 @@ fn connected_host(cfg: AshConfig) -> Ash {
         vec![hex("1A C0 38 BC 7E")],
         "Cancel + RST (UG101 §4)"
     );
-    h.handle_rx(&hex(RSTACK), 5);
+    feed(&mut h, &SOFTWARE_RSTACK, 5);
     assert_eq!(
         events(&mut h),
         vec![AshEvent::Connected {
             version: 2,
-            reset_code: ResetCode::POWER_ON
+            reset_code: ResetCode::SOFTWARE
         }]
     );
     assert_eq!(h.state(), LinkState::Connected);
     h
 }
+
+/// The answer to RST: version 2, software reset (0x0B).
+const SOFTWARE_RSTACK: Frame = Frame::RstAck {
+    version: 2,
+    reset_code: 0x0B,
+};
 
 fn feed(ash: &mut Ash, f: &Frame, now: u64) {
     ash.handle_rx(&encode(f, true), now);
@@ -421,12 +427,46 @@ fn reset_discards_frames_before_rstack() {
     assert!(events(&mut h).is_empty());
     assert!(transmit(&mut h, 2).is_empty(), "no NAK while resetting");
     assert_eq!(h.stats().rx_discarded, 2);
-    h.handle_rx(&hex(RSTACK), 3);
+    feed(&mut h, &SOFTWARE_RSTACK, 3);
     assert_eq!(
         events(&mut h),
         vec![AshEvent::Connected {
             version: 2,
-            reset_code: ResetCode::POWER_ON
+            reset_code: ResetCode::SOFTWARE
+        }]
+    );
+}
+
+/// After nRESET or a power cycle the NCP sends RSTACK(external/power-on)
+/// unprompted. Such an RSTACK, or any RSTACK before our RST went out, is
+/// not the answer to our RST and must not connect the link.
+#[test]
+fn stale_rstack_is_ignored_while_resetting() {
+    let mut h = Ash::new(AshConfig::default()).unwrap();
+    h.reset(0);
+    feed(&mut h, &SOFTWARE_RSTACK, 0);
+    assert_eq!(h.state(), LinkState::Resetting, "RST not sent yet");
+    transmit(&mut h, 0);
+    h.handle_rx(&hex(RSTACK), 1);
+    feed(
+        &mut h,
+        &Frame::RstAck {
+            version: 2,
+            reset_code: ResetCode::EXTERNAL.0,
+        },
+        2,
+    );
+    assert!(events(&mut h).is_empty());
+    assert_eq!(h.state(), LinkState::Resetting);
+    assert_eq!(h.stats().rx_stale_rstack, 3);
+    assert_eq!(h.stats().rx_discarded, 3);
+    feed(&mut h, &SOFTWARE_RSTACK, 3);
+    assert_eq!(h.state(), LinkState::Connected);
+    assert_eq!(
+        events(&mut h),
+        vec![AshEvent::Connected {
+            version: 2,
+            reset_code: ResetCode::SOFTWARE
         }]
     );
 }
