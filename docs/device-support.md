@@ -344,7 +344,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `power` | mains / battery / energy_harvesting | battery / energy_harvesting | (diagnostic) |
 | `availability`, `last_seen`, `lqi`, `rssi` | 4.6 | 4.6 | device availability |
 | `warnings` | e.g. configure failures | `gp_unsecured` (13.1) | repair issues (15) |
-| `definition` | resolved layer sources and revisions | same | diagnostics only |
+| `definition` | resolved layers, bottom (`generic`, always) to top: `source`, `id`, `revision`, `content_hash`; `partial: true` on a partially translated catalog definition (`x-partial`, 17.2: generic support gives what it lacks) | same | diagnostics only |
 
 ### 4.2 Entity record
 
@@ -1557,7 +1557,19 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   records with those devices' keys that score against their fingerprints
   and need no feature it lacks, appends them to the local area and
   re-resolves the devices. Uploads survive a dropped connection
-  (`catalog/status` `upload.written`).
+  (`catalog/status` `upload.written`). Shards are checked against the
+  *installed* manifest, so after the mirror moved to a newer release a
+  client installs its manifest (and what it then `wants`) first: the web
+  UI compares the signed manifest's version (`date << 16 | serial`) with
+  `catalog/status` `manifest.version` before fetching shards and, after a
+  shard refused with `verification_failed` (SHA-256 differs), installs a
+  newer one and retries once; an older or the same manifest is not
+  uploaded and nothing loops. With the same release online it completes
+  what `wants` still lists (an interrupted bank or web tools upload
+  continues from `upload.written`); a newer release's manifest replaces
+  such an upload (the hub drops it), and its files start at offset 0. A
+  `busy` hub (another target's upload advanced in the last 30 s) gets one
+  retry 30 s later; a failed update does not stop the shard fetch.
 - Without Internet anywhere: the UI offers "upload a definition" and
   "update the catalog from files" (the same upload API).
 
@@ -1566,7 +1578,10 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
 The catalog is versioned and released independently of the hub app:
 
 1. A client (web UI, Home Assistant, `hubctl`) checks `manifest.cose` on
-   the mirror (daily when the hub's `auto_update` setting is on), uploads
+   the mirror (Home Assistant daily when the hub's `auto_update` setting is
+   on; the web UI when its Catalog tab opens with `auto_update` on, before
+   the shards of Find definition / Fetch, and before the shards of a
+   `definition_needed` with `auto_update` on), uploads
    it, and uploads the bank (`bank-4m.zdb` / `bank-8m.zdb`, the one built
    for the hub's slot size) when `catalog/status` `wants` it, and the web
    tools (`zdefc-web.zwb`).
@@ -3463,7 +3478,7 @@ exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
 size table (definitions, strings, index) per run. The hub CI checks the app
 against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
 D24; README). The web page (`hub-web`, gzip as embedded) must stay within
-34 KiB (34 816 B, `hub_web::PAGE_BUDGET`) in every image variant; its
+36 KiB (36 864 B, `hub_web::PAGE_BUDGET`) in every image variant; its
 tests build each variant and fail above it.
 
 ### 18.6 Hardware

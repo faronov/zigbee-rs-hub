@@ -256,6 +256,76 @@ fn fetched_definitions_resolve_and_pin() {
     let _ = Arc::new(());
 }
 
+/// A partially translated catalog definition (identity only, as the
+/// generator emits IKEA's STYRBAR remote) is applied over the generic
+/// layer, which gives every entity; the device record says it is partial.
+#[test]
+fn partial_fetched_definition_is_applied_and_marked() {
+    let src = "zdef: 1\nid: ikea/e2001-e2002-e2313\nrevision: 1\nvendor: IKEA\nmodel: E2001/E2002/E2313\n\
+               match: [{model: Remote Control N2}]\ndevice: {ota: true}\nx-partial: true\n";
+    let c = zdefc::compile_str(src, zdefc::Format::Yaml, &zdefc::Options::default()).unwrap();
+    let remote = SimDevice::new(
+        0x8c8b48fffe010203,
+        0x6004,
+        LogicalType::EndDevice,
+        false,
+        0x117C,
+    )
+    .endpoint(
+        1,
+        0x0104,
+        0x0820,
+        &[0x0000, 0x0001, 0x0003, 0x1000],
+        &[0x0003, 0x0006, 0x0008],
+    )
+    .basic("IKEA of Sweden", "Remote Control N2", 0x03);
+    let fp = crate::fingerprint::Fingerprint {
+        model_id: Some("Remote Control N2".into()),
+        ..Default::default()
+    };
+    let fetched = FetchedCatalog {
+        defs: vec![Fetched {
+            keys: fingerprint_keys(&fp),
+            cbor: Box::leak(c.cbor.into_boxed_slice()),
+        }],
+    };
+    let mut hub = Hub::new(
+        MockTransport::default(),
+        HubConfig::default(),
+        Box::new(StoreCatalog {
+            fetched,
+            ..Default::default()
+        }),
+    );
+    let mut sim = Sim::default();
+    sim.devices.push(remote);
+    sim.join(&mut hub, 0x8c8b48fffe010203, T0);
+    let d = hub.device("zb:8c8b48fffe010203").unwrap();
+    let layers: Vec<_> = d
+        .resolution
+        .layers
+        .iter()
+        .map(|l| (l.source, l.id.as_str(), l.partial))
+        .collect();
+    assert_eq!(
+        layers,
+        [
+            (LayerSource::Generic, "generic", false),
+            (LayerSource::Fetched, "ikea/e2001-e2002-e2313", true)
+        ]
+    );
+    assert!(
+        d.entities
+            .iter()
+            .all(|e| e.r.source == LayerSource::Generic)
+    );
+    assert!(d.entity_index("zb:8c8b48fffe010203:1:action").is_some());
+    let rec = d.record();
+    assert_eq!(rec["definition_model"], "E2001/E2002/E2313");
+    assert_eq!(rec["definition"][1]["partial"], true, "{rec}");
+    assert!(rec["definition"][0].get("partial").is_none(), "{rec}");
+}
+
 fn sml001_fp() -> crate::fingerprint::Fingerprint {
     crate::fingerprint::Fingerprint {
         manufacturer_name: Some("Signify Netherlands B.V.".into()),

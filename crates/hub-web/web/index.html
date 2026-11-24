@@ -62,6 +62,7 @@ nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-botto
 nav#tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:.5em .8em;color:var(--mut);white-space:nowrap}
 nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
 .card h3{font-size:.9em;margin:.8em 0 0;color:var(--mut)}
+.dev .gh{font-size:.75em;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin:1.6em 0 .3em;cursor:default}.gh+.ents{margin:0;border-top:0}
 #gcw{display:inline-block;margin:.6em 0 0}
 @media(max-width:600px){#gpl li,#gpb li{flex-wrap:wrap}#gpl .n,#gpb .n{flex-basis:100%}}
 textarea{width:100%;font:.85em/1.35 ui-monospace,Menlo,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:.5em}
@@ -345,18 +346,20 @@ const devSet=d=>{d.image_url=picL(d)[0]||null;devs[d.id]=d};
 function pic(d,c){const us=picL(d),i=el("img",{class:"pic"+(c?" "+c:""),alt:"",loading:"lazy",referrerpolicy:"no-referrer"});
  const next=()=>{const u=us.shift();i.dataset.u=u||"";i.src=u||PICI};
  i.onerror=()=>{if(i.dataset.u){PICB.add(i.dataset.u);next()}};next();return i}
-// A device without a definition: fetch the catalog shard that may hold one.
-function findDef(id){ctSerial(async()=>{try{ct=await call("catalog/status");const m=(ct.missing||[]).find(x=>x.device==id);
- if(!m||!(m.shards||[]).length)return toast("The catalog has no definition for this device");
- await ctShards(m.shards);toast("Catalog checked for "+(devs[id]&&devs[id].name||id))}catch(e){toast(e.message)}})}
+// A device without a definition: fetch the catalog shard that may hold one
+// (after the mirror's newer manifest, if any).
+function findDef(id){ctSerial(async()=>{try{toast(await ctFind(id))}catch(e){toast(e.message)}})}
 // Device cards (#/devices): sensors, controls, battery and signal; a click
 // outside the controls opens the device page (#device/<id>) with the rest.
-// Entity groups: 0 sensors, 1 controls, 2 config, 3 diagnostic.
-const eg=e=>e.category=="diagnostic"?3:e.category?2:/sensor/.test(e.platform)?0:1,
+// Entity groups (HA's categories, and events): 0 sensors, 1 controls,
+// 2 events, 3 config, 4 diagnostic; the card shows the first three.
+const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/sensor/.test(e.platform)?0:1,
  dEnts=id=>Object.values(ents).filter(e=>e.device==id&&!e.orphaned).sort((a,b)=>eg(a)-eg(b)||(a.uid>b.uid?1:-1)),
- onCard=e=>eg(e)<2&&e.enabled_default!==false,
- // No definition matched: generic ZCL support only (the picture needs one).
- gn=d=>d.interview=="complete"&&!d.definition_model,
+ onCard=e=>eg(e)<3&&e.enabled_default!==false,
+ // Definition layers over the generic one (always the base).
+ dL=d=>(d.definition||[]).filter(l=>l.source!="generic"),
+ // No definition matched: generic ZCL support only.
+ gn=d=>d.interview=="complete"&&!dL(d).length,
  bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
   gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
   el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
@@ -372,15 +375,21 @@ function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen}
 function netLine(id,f){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.s<20;
  return el("div",{class:"row mut acts",id:"n-"+id},v.s!=null||v.b!=null?el("span",{class:lo?"warn":null},"🔋"+(v.s!=null?" "+Math.round(v.s)+" %":"")+(lo?" low":"")):"",
   el("span",{class:"dot "+(q>=150?"on":q>=80?"wait":"")}),"LQI "+(q??"–")+(v.rssi!=null?" · RSSI "+v.rssi+" dBm":"")+(f?" · seen "+ago(v.t)+" · "+d.power:""))}
+// The definition (vendor and model, else its id) and its source, over the
+// generic layer; partial (17.2): the catalog could not translate all of
+// it, generic support gives the rest.
+function defLn(d){const l=dL(d),pa=l.some(x=>x.partial),S={fetched:"catalog",self_description:"self-description"};
+ return el("div",{class:"mut",title:(d.definition||[]).map(x=>x.id+" ("+x.source+", rev "+x.revision+")").join(" + ")},"definition: "+(l.length?(d.definition_model?(d.model==d.definition_model?d.manufacturer+" ":"")+d.definition_model:l[l.length-1].id)+
+  " ("+[...new Set(l.map(x=>S[x.source]||x.source))].join(" + ")+(pa?", partial: generic support for the rest":"")+")":"generic only"))}
 // f: the device page (everything, entities grouped), else the card.
 function devCard(id,f){
  const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),c=[];let ul,k;
- for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{},["Sensors","Controls","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
+ for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{class:"gh"},["Sensors","Controls","Events","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
  return el("article",{class:"card dev",id:"d-"+id,onclick:f?null:x=>{x=x.target;if(!x.closest("button,input,select")){sy=scrollY;if(!x.closest("a"))location.hash=h}}},
   el("div",{class:"top"},f?el("button",{"aria-label":"Back",onclick:()=>sy!=null?history.back():location.hash="#/devices"},"←"):"",pic(d),f?el("b",{},d.name||id):el("a",{href:h},el("b",{},d.name||id)),...bdg(d)),...f?[
    // Definition vendor/model (white label first), then the device's own Basic model ID.
    el("div",{class:"mut"},[d.manufacturer,d.model,d.model_id&&d.model_id!=d.model?"("+d.model_id+")":""].filter(Boolean).join(" · ")||"unknown model"),
-   el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):"")+" · definition: "+((d.definition||[]).map(l=>l.id+" ("+l.source+")").join(", ")||"none")),
+   el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):"")),defLn(d),
    netLine(id,f),el("div",{class:"row acts"},
    bt("Rename",()=>{const n=prompt("Device name",d.name||"");return n!=null?act("devices/update",{device:id,name:n.trim()}):Promise.resolve()}),
    bt("Re-interview",()=>act("devices/reinterview",{device:id})),
@@ -391,7 +400,9 @@ function devCard(id,f){
   ...c,f?"":netLine(id),f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
 }
 onTab.devices=()=>{const p=pgId(),o=pgOn;pgOn=p;renderAll();if(p!=o)scrollTo(0,p?0:sy)};
+// Events: the last one and when (the state is its time), — before any.
 function fmt(e,s){
+ if(e.platform=="event")return s&&s.state!=null?[(s.attributes||{}).event_type,ago(s.state)].filter(Boolean).join(" · "):"—";
  if(!s||s.state==null)return"–";let v=s.state;
  if(e.device_class=="timestamp"&&typeof v=="number")return ago(v);
  if(typeof v=="number"){const p=e.precision??(e.capabilities&&e.capabilities.suggested_display_precision);if(p!=null)v=v.toFixed(p)}
@@ -838,7 +849,7 @@ async function cvLoad(id){
 $("#cvp").onchange=e=>act("devices/pin_definition",{device:cvDev,definition:e.target.value||null}).then(()=>cvLoad(cvDev)).catch(()=>{});
 async function cvShow(id){const g=await act("definitions/get",{definition:id});$("#cvt").value=g.source_text||(await zdefc()).decompile(unb64(g.cbor),"yaml")}
 for(const[b,t]of[["cvr","devices/reinterview"],["cvc","devices/reconfigure"]])$("#"+b).onclick=()=>act(t,{device:cvDev}).then(()=>toast(t+": ok")).catch(()=>{});
-$("#cvf").onclick=()=>act("definitions/fetch",{device:cvDev}).then(r=>ctSerial(()=>ctShards(r.shards))).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message));
+$("#cvf").onclick=()=>ctSerial(()=>ctGo(()=>act("definitions/fetch",{device:cvDev}).then(r=>r.shards),1)).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message));
 $("#cvs").onclick=()=>act("definitions/scaffold",{device:cvDev}).then(s=>{
  const q=v=>JSON.stringify(v),i=s.identity||{},m=(s.match||[])[0]||{},y=["zdef: 1","id: "+q(((i.manufacturer||"vendor")+"/"+(i.model||"model")).toLowerCase().replace(/[^a-z0-9/_-]+/g,"-")),"revision: 1","vendor: "+q(i.manufacturer||""),"model: "+q(i.model||""),"match:","  - "+q(m),"entities:"];
  for(const e of s.generic_entities||[])y.push("  # generic: "+e.key+" ("+e.platform+", ep "+e.ep+")");
@@ -853,7 +864,7 @@ $("#cvk").onclick=()=>cvCompile().then(({c})=>$("#cvo").textContent="ok · "+c.s
 $("#cvv").onclick=()=>cvCompile().then(x=>act("definitions/preview",{device:cvDev,cbor:b64(x.cbor)})).then(p=>$("#cvo").textContent=p.matches?["layers: "+p.layers.map(l=>l.id).join(" < "),"added: "+p.added.join(", "),"changed: "+p.changed.join(", "),"removed: "+p.removed.join(", ")].join("\n"):"does not match this device").catch(cvErr);
 $("#cvu").onclick=()=>cvCompile().then(x=>act("definitions/upload",{cbor:b64(x.cbor),source:x.src,source_format:"yaml"})).then(r=>{toast("uploaded "+r.id);if(cvDev)cvLoad(cvDev)}).catch(cvErr);
 $("#cvx").onclick=()=>{if(cvDev&&cvDef&&confirm("Delete the user definition "+cvDef+"?"))act("definitions/delete",{definition:cvDef}).then(()=>cvLoad(cvDev)).catch(()=>{})};
-onTab.catalog=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.installed,m=s.manifest,w=s.wants||{};kv.textContent="";
+const ctLoad=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.installed,m=s.manifest,w=s.wants||{};kv.textContent="";
  kvAdd(kv,"Bank",i?i.catalog_date+"."+i.catalog_serial+" · "+i.definitions+" definitions · slot "+s.active_slot+" · key "+i.kid:"none");
  kvAdd(kv,"Manifest",m&&m.catalog_date+"."+m.catalog_serial+(m.source?" · zhc "+m.source:""));
  kvAdd(kv,"To install",[w.bank&&w.bank.name,w.web&&w.web.name].filter(Boolean).join(", "));
@@ -862,29 +873,67 @@ onTab.catalog=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.in
  kvAdd(kv,"Without definition",(s.missing||[]).map(x=>devs[x.device]&&devs[x.device].name||x.device).join(", "));
  for(const x of s.warnings||[])kvAdd(kv,"Warning",x);
  V("ctb",s.config.base_url);$("#cta").checked=s.config.auto_update;$("#ctx").checked=s.config.auto_fetch}).catch(()=>{});
-$("#cts").onclick=()=>act("catalog/config",{base_url:V("ctb"),auto_update:$("#cta").checked,auto_fetch:$("#ctx").checked}).then(onTab.catalog).catch(()=>{});
-const ctMsg=m=>$("#ctm").textContent=m;
-async function ctGet(n){const r=await fetch(ct.config.base_url+"/"+n,{cache:"no-cache"});if(!r.ok)throw new Error(n+": HTTP "+r.status);return new Uint8Array(await r.arrayBuffer())}
+// With daily updates on, opening the tab installs the mirror's newer
+// release (and, with fetching on, the definitions it has for new devices).
+onTab.catalog=()=>ctLoad().then(()=>{if(ct.config.auto_update)ctSerial(async()=>{const m=await ctNewer();if(m){if(ct.config.auto_fetch)await ctGo(()=>ctMiss(),0);ctMsg(ctTxt(m))}}).catch(e=>ctMsg(e.message)).then(ctLoad)});
+$("#cts").onclick=()=>act("catalog/config",{base_url:V("ctb"),auto_update:$("#cta").checked,auto_fetch:$("#ctx").checked}).then(ctLoad).catch(()=>{});
+const ctMsg=m=>$("#ctm").textContent=m,ctSay=m=>{ctMsg(m);toast(m)},ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
+async function ctGet(n){if(!ct.config.base_url)ct=await call("catalog/status");const r=await fetch(ct.config.base_url+"/"+n,{cache:"no-cache"});if(!r.ok)throw new Error(n+": HTTP "+r.status);return new Uint8Array(await r.arrayBuffer())}
 // Chunked upload (resumable: `from` = the hub's `upload.written`), then commit.
-async function ctPut(target,u,extra={},from=0){const p=$("#ctp");p.max=u.length;p.classList.remove("hide");
+// Once more from the start when the hub lost the upload to resume, or, 30 s
+// later, when another target's upload (another client) made it busy.
+async function ctPut(target,u,extra={},from=0,again){const p=$("#ctp");p.max=u.length;p.classList.remove("hide");
  try{for(let o=from;o==from||o<u.length;o+=4096){await call("catalog/upload_chunk",Object.assign({target,offset:o,data:b64(u.subarray(o,o+4096))},o?{}:{size:u.length}));p.value=o}
- return await call("catalog/commit",Object.assign({target},extra))}finally{p.classList.add("hide")}}
+ return await call("catalog/commit",Object.assign({target},extra))}catch(e){const b=/is in progress/.test(e.message);if(again||!b&&!(from&&/offset/.test(e.message)))throw e;
+  if(b){ctSay("the hub is busy with another catalog upload, trying again in 30 s…");await new Promise(r=>setTimeout(r,31e3))}return await ctPut(target,u,extra,0,1)}finally{p.classList.add("hide")}}
 // One catalog transfer at a time (the hub keeps one upload): the update,
 // definition_needed fetches and file uploads queue up behind each other.
 let ctQ=Promise.resolve();const ctSerial=f=>ctQ=ctQ.catch(()=>{}).then(f);
 async function ctShards(sh){for(const n of sh||[]){const h=n.toString(16).padStart(2,"0");ctMsg("shard "+h+"…");const r=await ctPut("shard",await ctGet("shard-"+h+".cbor"),{shard:n});ctMsg("shard "+h+": "+(r.definitions.join(", ")||"nothing new"))}}
-async function ctFetch(){const s=await call("catalog/status");await ctShards([...new Set((s.missing||[]).flatMap(x=>x.shards))])}
-$("#ctu").onclick=()=>ctSerial(async()=>{try{const s=await call("catalog/status");ct=s;ctMsg("manifest…");const m=await ctPut("manifest",await ctGet("manifest.cose"));
- for(const t of["bank","web"]){const a=m.wants&&m.wants[t];if(!a)continue;ctMsg(a.name+"…");await ctPut(t,await ctGet(a.name),{},s.upload&&s.upload.target==t?s.upload.written:0)}
- await ctFetch();ctMsg("catalog "+m.catalog_date+"."+m.catalog_serial+" installed")}catch(e){ctMsg(e.message)}onTab.catalog()});
-$("#ctf").onclick=()=>ctSerial(ctFetch).then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(onTab.catalog);
+// Shards with a definition for device id (no id: for every device without one).
+const ctMiss=async id=>{ct=await call("catalog/status");return[...new Set((ct.missing||[]).filter(x=>!id||x.device==id).flatMap(x=>x.shards))]};
+// Installs what s (a status or a manifest commit) wants: bank, web tools;
+// an interrupted upload of one (s.upload) first, where it stopped. The
+// number installed.
+async function ctWants(s){const u=s.upload||{},w=s.wants||{};let n=0;
+ for(const t of[u.target,"bank","web"])if((t=="bank"||t=="web")&&w[t]){ctMsg(w[t].name+"…");await ctPut(t,await ctGet(w[t].name),{},t==u.target?u.written:0);delete w[t];n++}
+ return n}
+// Catalog version of a signed manifest as the hub's (date << 16 | serial):
+// its payload map starts 0: 1, 1: date (uint32), 2: serial.
+const ctVer=u=>{for(let i=1;i<u.length-10;i++)if((u[i-1]&224)==160&&u[i]==0&&u[i+1]==1&&u[i+2]==1&&u[i+3]==26&&u[i+8]==2){const d=new DataView(u.buffer,u.byteOffset+i+4),s=u[i+9];return d.getUint32(0)*65536+(s<24?s:s==24?u[i+10]:d.getUint16(6))}};
+// The mirror's release when newer than the hub's: its manifest (which drops
+// an interrupted upload of the old release: the mirror no longer has those
+// files), then what it wants. The same release: what the hub still lacks
+// of it (an interrupted install continues). The manifest installed or
+// completed, else 0; an older or the same manifest is not sent.
+async function ctNewer(){const s=ct=await call("catalog/status"),o=(s.manifest||{}).version||0,u=await ctGet("manifest.cose"),v=ctVer(u);let m;
+ if(v<o)return 0;
+ if(v!=o){ctMsg("manifest…");m=await ctPut("manifest",u).catch(e=>{if(v)throw e});if(!m||m.version<o)return 0;if(m.version>o){await ctWants(m);return m}}
+ return await ctWants(m?await call("catalog/status"):s)&&s.manifest}
+// Shards (get(): their numbers, asked again after an update). The hub checks
+// them against its manifest: with upd the mirror's newer one goes first —
+// a failed update does not stop the shards, which may still match —, also
+// after a refused shard, and the shards are tried once more: at most twice.
+// {n: shards, m: the manifest installed}.
+async function ctGo(get,upd){let m=0,er;if(upd)m=await ctNewer().catch(e=>{er=Error("catalog update: "+e.message);ctMsg(er.message)});
+ for(;;){const sh=await get()||[];if(!sh.length){if(er)throw er;return{n:0,m}}
+  try{await ctShards(sh);return{n:sh.length,m}}catch(e){if(m||!upd||!/differs/.test(e.message))throw e;if(er||!(m=await ctNewer()))throw er||e;ctSay(ctTxt(m)+", retrying…")}}}
+// Find definition: then what the device resolves to (a bank the update
+// installed may hold its definition: no shard needed); by the name it had.
+async function ctFind(id){const n=devs[id]&&devs[id].name||id,r=await ctGo(()=>ctMiss(id),1),l=dL(await call("devices/get",{device:id}));
+ return(r.m?ctTxt(r.m)+"; ":"")+(l.length?n+" now uses "+l[l.length-1].id:"the catalog has no definition for "+n)}
+const ctFetch=()=>ctGo(()=>ctMiss(),1);
+$("#ctu").onclick=()=>ctSerial(async()=>{try{const m=await ctNewer();await ctGo(()=>ctMiss(),0);ctMsg(m?ctTxt(m):"nothing newer on the mirror")}catch(e){ctMsg(e.message)}ctLoad()});
+$("#ctf").onclick=()=>ctSerial(ctFetch).then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(ctLoad);
 $("#ctfi").onchange=e=>ctSerial(async()=>{const fs=[...e.target.files].sort((a,b)=>(b.name=="manifest.cose")-(a.name=="manifest.cose"));
  try{for(const f of fs){const n=f.name,sh=/^shard-([0-9a-f]{2})\.cbor$/.exec(n),t=n=="manifest.cose"?"manifest":/\.zdb$/.test(n)?"bank":/\.zwb$/.test(n)?"web":sh&&"shard";
-  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";onTab.catalog()});
+  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";ctLoad()});
 $("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r=>{const ul=$("#ctr");ul.textContent="";
  for(const d of r.items)ul.append(el("li",{},el("span",{class:"n"},d.vendor+" "+d.model),el("span",{class:"mut"},d.id+" · "+d.source)));
  if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
-function ctEv(e){if(e.topic=="definition_needed"&&ct.config.auto_fetch)ctSerial(()=>ctShards(e.shards));if($("#ctl").offsetParent)onTab.catalog()}
+// A new device without a definition: its shards when fetching is on (and
+// the mirror's newer release first with daily updates on).
+function ctEv(e){if(e.topic=="definition_needed")ctSerial(async()=>{ct=await call("catalog/status");if(ct.config.auto_fetch)await ctGo(()=>ctMiss(e.device),ct.config.auto_update)}).catch(x=>ctMsg(x.message));if($("#ctl").offsetParent)ctLoad()}
 // ---- end of converters and catalog tabs ----
 // ---- automations tab (device-support 14.8) ----
 let au={rules:{}},auId=null;
