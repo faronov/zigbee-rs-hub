@@ -830,6 +830,21 @@ fn a_reset_right_after_the_response_ends_the_request_unknown() {
     rig.finish();
 }
 
+/// The operator's TX power of an earlier run (the hub keeps it) is applied
+/// in the first session already.
+#[test]
+fn a_kept_tx_power_is_applied_from_the_first_session() {
+    let o = EzspOptions {
+        tx_power: Some(-3),
+        ..opts()
+    };
+    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    rig.next_up();
+    assert_eq!(rig.admin.tx_power_setting(), Some(-3));
+    assert_eq!(rig.sim.ncp(|n| n.config().network.radio_tx_power), -3);
+    rig.finish();
+}
+
 /// The multicast table and the endpoints are RAM on the NCP: written again
 /// in the next session; so is the operator's TX power.
 #[test]
