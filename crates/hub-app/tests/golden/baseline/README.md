@@ -37,6 +37,11 @@ Normalized (they follow the clock or thread timing, not the code):
   values (Unix times in s or ms: `c`, `r`, `seen`, the `last_seen` entity),
   `creation_time` in `bkp/last`, and `last_seen` of the NCP device records.
 
+Build-independent inputs: the hub endpoint is the one with OTA Upgrade
+(0x0019) in every build (`hub_endpoint(true)`, the default with feature
+`ota`), so `wire_trace.txt` (`NWK_ADD_ENDPOINT`), `store_writes.txt` and
+`store_mid/end` hold the same endpoint record without `ota` too.
+
 Deterministic inputs: the hub's RNG is the tests' counter, the simulated
 devices (hub-devices' `SimDevice`) answer at once, the GP answers are
 injected by the test, and every step waits for its effects and 300 ms

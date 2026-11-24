@@ -144,6 +144,62 @@ fn mqtt_requests_without_the_bridge_answer_unsupported() {
     r.sim.stop();
 }
 
+/// The hub endpoint follows the build: OTA Upgrade (0x0019) is a server
+/// cluster only with the OTA server. A stored endpoint of an image with the
+/// other feature set (a 4 MB hub updated from an image with OTA) is
+/// registered again (`NWK_ADD_ENDPOINT` replaces an endpoint on the NCP)
+/// and replaces the stored record, which the host core replays after an
+/// NCP restart: no factory reset.
+#[test]
+fn a_changed_hub_endpoint_is_registered_again_and_replayed() {
+    use zigbee_zrhp::codec::List;
+    use zigbee_zrhp::msg::network::NwkAddEndpoint;
+    assert_eq!(AppConfig::default().endpoint.in_clusters.contains(&0x0019), cfg!(feature = "ota"));
+    let wire = |e: &hub_ncp::store::EndpointRecord| {
+        let body = NwkAddEndpoint {
+            ep: e.ep,
+            profile: e.profile,
+            device_id: e.device_id,
+            version: e.version,
+            in_clusters: List::new(&e.in_clusters),
+            out_clusters: List::new(&e.out_clusters),
+        };
+        hub_ncp::driver::encode_body(&body).unwrap()
+    };
+    let added = |r: &Rig| -> Vec<Vec<u8>> {
+        r.sim.with(|s| s.trace.iter().flatten().filter(|(id, _)| *id == ids::NWK_ADD_ENDPOINT).map(|(_, p)| p.clone()).collect())
+    };
+    let (with_ota, without) = (crate::app::hub_endpoint(true), crate::app::hub_endpoint(false));
+    assert!(with_ota.in_clusters.contains(&0x0019) && !without.in_clusters.contains(&0x0019));
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), AppConfig { endpoint: with_ota.clone(), ..cfg() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    assert_eq!(r.ncp.store_state().endpoints.get(&1), Some(&with_ota));
+    app.shutdown();
+
+    // The image without OTA on the same store and NCP.
+    r.sim.with(|s| s.trace = Some(Vec::new()));
+    let app = App::start(r.ncp.clone(), AppConfig { endpoint: without.clone(), ..cfg() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    assert_eq!(added(&r), [wire(&without)]);
+    assert_eq!(r.ncp.store_state().endpoints.get(&1), Some(&without));
+    // Its start again: nothing to register.
+    app.shutdown();
+    r.sim.with(|s| s.trace = Some(Vec::new()));
+    let app = App::start(r.ncp.clone(), AppConfig { endpoint: without.clone(), ..cfg() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    assert!(added(&r).is_empty());
+    // An NCP restart replays the stored endpoint: the new one.
+    let resumes = r.ncp.status().resumes;
+    r.sim.reboot();
+    assert!(r.ncp.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(added(&r), [wire(&without)]);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 /// Without the OTA server (the 4 MB images): `ota/*` answers
 /// `unsupported`, `hub/info` has no `ota`, and a device's Query Next Image
 /// takes the engine's generic path as before the server existed: the

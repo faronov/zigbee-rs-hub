@@ -21,7 +21,15 @@ refuses a 4 MB image with Zigbee OTA and an 8 MB one without it. Without
 `unsupported`, the web page has no Updates tab and a device's OTA cluster
 commands take the engine's generic path as before the server existed (a
 Query Next Image gets the Default Response it asks for, SUCCESS, and no
-Query Next Image Response). The hub endpoint still lists 0x0019 as before.
+Query Next Image Response, unchanged for devices that found the server
+before). The hub endpoint lists OTA Upgrade (0x0019) as a server cluster
+only with `ota` (decided 2026-11-24): the endpoint is stored in the host
+store and replayed on every NCP resume, so at start the app compares the
+stored record with this image's and, when they differ (a 4 MB hub updated
+from an image with OTA, or the other way), sends `NWK_ADD_ENDPOINT` again
+and stores the new record; the zigbee-rs NCP replaces an endpoint with the
+same number (`upsert_endpoint`, since ncp-v0.1.0), no removal and no
+factory reset needed.
 
 **The hub downloads nothing.** There is no TLS on the hub. Images reach
 the devices in one of two ways:
@@ -255,7 +263,7 @@ HA default to; our own devices covered. Not done in this change.
      `APS_MAX_PAYLOAD {dst}` or a capacity for the source-route budget.
   2. No `APS_FRAGMENTATION` in the NCP image (not needed for OTA).
   3. The NCP answers Match_Desc_req from the host endpoint registry
-     (`NWK_ADD_ENDPOINT`: the hub's endpoint 1 lists 0x0019 as a server
+     (`NWK_ADD_ENDPOINT`: with `ota` the hub's endpoint 1 lists 0x0019 as a server
      cluster); devices that look for the OTA server with Match_Desc find
      the hub — to verify on hardware.
   4. Hub side, not ZRHP (solved with the ticketed engine transport, #64):
@@ -341,6 +349,12 @@ newer than the running one; the image inside is what the product's
   `RequestId`s, their outcomes go to it and are never retried by the
   engine; a refusal, a frame queued for a sleepy device (its ID when sent)
   and an outcome that never comes (`Unknown` after 10 minutes).
+- `hub-app` endpoint: OTA Upgrade (0x0019) in the hub endpoint only with
+  `ota`; an endpoint stored with the other cluster list is registered
+  again once (`NWK_ADD_ENDPOINT` with the new descriptor), stored, and
+  replayed after an NCP restart (`a_changed_hub_endpoint_is_registered_again_and_replayed`).
+  The baseline scenario pins the endpoint with 0x0019 in every build, so
+  its goldens do not depend on the feature.
 - `hub-app`: upload, query, start, download and confirmation through the
   simulated NCP (`SimNcp::set_aps_hook` with the simulated OTA client;
   every frame ≤ the simulated NCP's 82-B `max_asdu`), app restart, no

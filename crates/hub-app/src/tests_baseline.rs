@@ -438,6 +438,9 @@ fn config() -> AppConfig {
         api_token: "secret".into(),
         builtin_catalog: false,
         platform: Some(Arc::new(Platform)),
+        // The endpoint with OTA Upgrade (the default with `ota`) in every
+        // build: its clusters are a build feature, like `hub/info.ota`.
+        endpoint: crate::app::hub_endpoint(true),
         ..AppConfig::default()
     }
 }

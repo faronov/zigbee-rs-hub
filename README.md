@@ -1173,8 +1173,10 @@ flash: header, sub-elements, SHA-256) go to the **inactive app slot**
 (3 MiB) — locked against hub self-updates both ways, lost when the hub
 updates itself, re-checked at boot. **Zigbee OTA is in the 8 MB images
 only** (feature `ota`, implied by `ota-store`): the 4 MB images are built
-without it (`ota/*` answers `unsupported`, a device's Query Next Image
-gets only the Default Response it asks for, as before the server). The
+without it (`ota/*` answers `unsupported`, the hub endpoint does not list
+0x0019 — an endpoint stored by an older image is registered again at
+start — and a device's Query Next Image gets only the Default Response it
+asks for, as before the server). The
 Koenkk/zigbee-OTA index is fetched by Home Assistant (the web page has no
 index search: the page budget stays 32 KiB gzip). Per device: policy
 `manual` (default), `auto` (schedule window) or `off` (never: `ota/start`

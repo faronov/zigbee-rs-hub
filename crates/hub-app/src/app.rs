@@ -198,17 +198,7 @@ impl Default for AppConfig {
             hub_name: "zigbee-rs-hub".into(),
             api_token: String::new(),
             tz_offset_s: 0,
-            endpoint: EndpointRecord {
-                ep: 1,
-                profile: 0x0104,
-                device_id: 0x0005,
-                version: 0,
-                // Basic, Identify, Time, OTA server.
-                in_clusters: vec![0x0000, 0x0003, 0x000A, 0x0019],
-                // Clients the hub drives: On/Off, Level, Scenes, Groups,
-                // Color, IAS Zone (CIE), measurement reads.
-                out_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0300, 0x0500, 0x0402, 0x0405],
-            },
+            endpoint: hub_endpoint(cfg!(feature = "ota")),
             builtin_catalog: true,
             stack_size: 96 * 1024,
             import_ncp_devices: true,
@@ -219,6 +209,28 @@ impl Default for AppConfig {
             #[cfg(feature = "ota")]
             ota_streams: hub_ota::stream::MAX_STREAMS,
         }
+    }
+}
+
+/// The hub endpoint (1, HA profile). Server clusters: Basic, Identify, Time
+/// and, with the OTA server (`ota`: the 8 MB images), OTA Upgrade (0x0019),
+/// so devices without it find no OTA server. A stored endpoint that
+/// differs (an image with the other feature set ran before) is registered
+/// again at start (`NWK_ADD_ENDPOINT` replaces it on the NCP) and stored.
+pub fn hub_endpoint(ota: bool) -> EndpointRecord {
+    let mut in_clusters = vec![0x0000, 0x0003, 0x000A];
+    if ota {
+        in_clusters.push(0x0019);
+    }
+    EndpointRecord {
+        ep: 1,
+        profile: 0x0104,
+        device_id: 0x0005,
+        version: 0,
+        in_clusters,
+        // Clients the hub drives: On/Off, Level, Scenes, Groups, Color, IAS
+        // Zone (CIE), measurement reads.
+        out_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0300, 0x0500, 0x0402, 0x0405],
     }
 }
 
@@ -1212,7 +1224,11 @@ impl Runner {
             self.api.set_info("ncp_board", info.board.clone().into());
             self.api.set_info("ncp_product", info.product.clone().into());
         }
-        let known = self.ncp.store_state().endpoints.get(&self.cfg.endpoint.ep) == Some(&self.cfg.endpoint);
+        let stored = self.ncp.store_state().endpoints.get(&self.cfg.endpoint.ep).cloned();
+        let known = stored.as_ref() == Some(&self.cfg.endpoint);
+        if stored.is_some() && !known {
+            info!("app: hub endpoint {} differs from the stored one: registered again", self.cfg.endpoint.ep);
+        }
         let result = if known { Ok(()) } else { self.ncp.add_endpoint(self.cfg.endpoint.clone()) };
         match result {
             Ok(()) => {

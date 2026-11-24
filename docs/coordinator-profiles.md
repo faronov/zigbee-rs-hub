@@ -131,7 +131,7 @@ explicit error and are not advertised by the API/UI.
 | Local automations, groups/scenes/bindings | Kept | Kept | Planned through shared engine |
 | Signed catalog and user definitions | Compact catalog/storage areas | Larger areas | Larger areas, after layout integration |
 | Hub application A/B slots | No: existing single-slot layout | Yes | Planned 16 MB board layout |
-| Zigbee device OTA server (`ota`; branch `zigbee-ota-v2`) | **Not included** (it would fill the slot to 95 %); `ota/*` answers `unsupported` | Included: streamed images and the image store in the inactive app slot (`ota-store`) | Separate OTA qualification |
+| Zigbee device OTA server (`ota`; branch `zigbee-ota-v2`) | **Not included** (it would fill the slot to 95 %); `ota/*` answers `unsupported`, the hub endpoint does not advertise 0x0019 | Included: streamed images and the image store in the inactive app slot (`ota-store`) | Separate OTA qualification |
 | Wi-Fi | Open and WPA2/WPA3-Personal | same | same |
 
 The `advanced` flag does not control normal Tuya datapoint decoding or

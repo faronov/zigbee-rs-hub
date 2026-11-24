@@ -2850,9 +2850,11 @@ file versions as numbers. Image IDs: stored images 1–65535, streams
 `unsupported`. Only the 8 MB images have the server (tbr-hub feature
 `ota`, with the store `ota-store`); the 4 MB images are built without it:
 no `ota` in `hub/info`, every `ota/*` request answers `unsupported`, the
-web page has no Updates tab, and OTA cluster commands from devices take
-the engine's generic path (a Query Next Image gets the Default Response it
-asks for, no Query Next Image Response).
+web page has no Updates tab, the hub endpoint does not list 0x0019 (a
+stored endpoint that still does is registered again at start), and OTA
+cluster commands from devices take the engine's generic path (a Query
+Next Image gets the Default Response it asks for, no Query Next Image
+Response).
 
 | Type | Parameters | Result |
 |---|---|---|
