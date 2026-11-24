@@ -251,6 +251,8 @@ jobs:
       - name: Build zrh-donglem
         working-directory: firmware/donglem
         run: cargo build --release
+      - name: No S32C1I in Rust code (disassembly, attributed through the line table)
+        run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" target/xtensa-esp32-espidf/release/zrh-donglem
       - name: App image (DIO 40 MHz, chip v3.0+; must fit the 6 MiB ota_1 slot of SONOFF's stock table)
         run: |
           pip install --quiet "esptool>=5,<6"
