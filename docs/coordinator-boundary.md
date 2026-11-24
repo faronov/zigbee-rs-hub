@@ -104,7 +104,20 @@ pub trait Coordinator: Send {
 **Contract** (tested by `hub-coord::testkit`):
 - A terminal never precedes an indication that the NCP sent before it.
 - `Progress` precedes `Terminal`.
-- `Session::Down` ends every in-flight request with `Unknown(DeliveryUnknown)`.
+- Every request gets exactly one terminal, also across a session loss.
+  Requests submitted before `Session::Down` may be executed, and report
+  their terminal, after the next `Session::Up`.
+  - Backends that lose requests across an NCP reset (EZSP, ZNP) end the
+    in-flight ones with `Unknown(DeliveryUnknown)` at `Down`.
+  - ZRHP holds them (seamless resume, the host protocol's resync and
+    resume) and reports their real terminal after `Up`:
+    - after a resync (same NCP cookie), requests are sent again (`RETRY`)
+      or released;
+    - after an NCP restart, the ones already on the wire end
+      `Unknown(DeliveryUnknown)` (`LinkReset`), and those not sent yet are
+      executed after `Up`;
+    - a control request is executed after `Up` too, and so are the
+      requests behind it.
 - Control requests are **barriers**: nothing submitted later reaches the NCP
   before they complete. This is today's order, which the blocking app thread
   produces.
@@ -114,12 +127,11 @@ today's `CallOpts`.
 
 **Engine side (PR F).** hub-devices' `ZigbeeTransport::submit(Request)`
 returns the `RequestId` or refuses; `Hub::on_outcome(id, Outcome, now)`
-takes the `Progress` and the `Terminal`. Until PR G, hub-app's
-`NcpTransport` still makes today's blocking calls inside `submit` and
-queues the outcomes. The app passes APS terminals on in the 1 s tick,
-before `Hub::tick`, as `poll` did. It passes control outcomes on as soon
-as the engine returns from the call that submitted them, including the
-automations' internal requests. Details:
+takes the `Progress` and the `Terminal`. Since PR G, hub-app's
+`CoordTransport` submits to a `Coordinator` and the outcomes come back as
+events (§4, "Implemented in PR G"). The app passes APS terminals on in the
+1 s tick, before `Hub::tick`, as `poll` did. It passes control outcomes on
+as soon as it has them. Details:
 - An API request that a control request decides answers through
   `HubEvent::Answer` and the existing deferred results, with the same
   JSON. It answers at once when the outcome is already known.
@@ -367,6 +379,11 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 - **Readiness checks unchanged.** Control requests return `LinkDown` at
   once unless `Ready` (`transport.rs:73-78`); APS is refused only when
   `Stopped` or `Incompatible` (140-142).
+- **Session loss.** The pump emits `Session::Down` when the session leaves
+  `Ready`, and `Up` once it is back (and the endpoints are registered). It
+  ends no request at `Down`: the driver holds them across a resume, as
+  before (§2.2 contract). The app routes outcomes by `RequestId` alone, so
+  terminals that come after `Down`/`Up` reach the engine as any other.
 - **Terminal mapping and counters.** `CoordTransport` (hub-app, neutral)
   counts per a pinned table that covers every branch of `transport.rs:89-133`:
 
@@ -410,6 +427,50 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 - **Sim and tests.** `hub_ncp::sim` gains only the trace field. hub-app,
   hub-mqtt and hubctl tests build the backend through `hub_ncp::coord` on
   the existing `rig()`.
+
+**Implemented in PR G.**
+- `hub_ncp::coord::ZrhpCoordinator` with the `zrhp-pump` thread
+  (`PUMP_STACK` = 8 KiB: it makes the control calls, store commits and
+  logging the 96 KiB app thread made). It replaces the 4 KiB forwarder, so
+  the thread count is unchanged. The bounded queue is
+  `hub_coord::EventQueue` (64 slots, 48 B each on the S3).
+- The doorbell `Input::Coord` drains up to 64 events. Each event is handled
+  as one input (settle, tick when due, `after_input`), as each NCP message
+  was before.
+- `submit` checks readiness and encodes on the app thread, so refusals and
+  encoding errors stay immediate. The command cap is 2048, with a
+  high-water mark (`ZrhpCoordinator::queued`). `cancel` ends a request the
+  pump has not taken with `Cancelled`.
+- Endpoints: the pump adds the hub endpoints the store lacks once per
+  process (retried a second later on failure), then emits
+  `SessionEvent::Up`. The app registers on the first `Up` (coordinator
+  IEEE, `endpoint_registered`, automations `started`).
+- The device inventory is the app's own `Request::DeviceInventory`
+  (`CoordTransport::submit_own`); its outcome imports the devices. The
+  unknown states of restored devices are read after that outcome, so the
+  imported devices' interviews go first, as before.
+- `CoordEvent::NetworkState` carries `NetChange` (down, forming, up,
+  leaving: the `network_state` API event); `NetState` stays the snapshot.
+- `network/info` is rendered from `CoordStatus` plus
+  `NetworkAdmin::tx_power_setting`.
+- Automations: a `request` action whose control requests are still open
+  waits for them (the run resumes when no control request is open), so the
+  rule's next action still sees what they decided. An `automations/run`
+  answer waits for such a run, so its trace is the same as before. Other
+  triggers of the rule that come meanwhile fire once the run goes on, as
+  they would have after a run that finished in place.
+- A confirm the pump parked expires after 2 s only while its channel is
+  empty, so time spent blocked does not let an APS outcome overtake the
+  indications queued before it.
+- Size (tbr-hub `mqtt,advanced`, local build): app image +15.4 KB (text
+  +12.2 KB), above the 2–6 KB estimate of §6. `AtomicUsize::fetch_max` is
+  avoided: the Xtensa backend of Rust 1.90 miscompiles it ("Undefined
+  temporary symbol").
+- `zb_status_text`, `legacy_zb_status` and `zrhp_not_delivered` moved from
+  hub-devices into `hub_ncp::coord`. ZRHP decoding and encoding
+  (`convert.rs`) moved there from hub-app.
+- `RadioControl`: `hub_ncp::coord::ZrhpRadio`. The firmware keeps calling
+  `Hub::set_coex` until PR H wires the backend.
 
 ## 5. EZSP and ZNP mapping (validates the abstraction)
 

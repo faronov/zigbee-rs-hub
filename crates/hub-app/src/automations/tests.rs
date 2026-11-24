@@ -21,6 +21,8 @@ struct Fake {
     fail: Option<ApiError>,
     deferred: bool,
     ticket: u64,
+    /// Request results follow later ([`Automations::request_result`]).
+    requests_wait: bool,
 }
 
 impl Fake {
@@ -55,9 +57,9 @@ impl World for Fake {
         self.ticket += 1;
         Ok((self.ticket, if self.deferred { "pending" } else { "ok" }))
     }
-    fn request(&mut self, req: &J) -> Result<J, ApiError> {
+    fn request(&mut self, req: &J) -> Result<(u64, Option<J>), ApiError> {
         self.requests.push(req.clone());
-        Ok(J::Null)
+        Ok((self.requests.len() as u64, (!self.requests_wait).then_some(J::Null)))
     }
 }
 
@@ -426,6 +428,109 @@ fn errors_and_late_command_results_reach_the_trace() {
     r.w.deferred = false;
     let out = r.req("automations/run", json!({"automation": "x"})).unwrap();
     assert_eq!(out["trace"]["actions"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn a_waiting_request_action_holds_its_run_and_later_triggers() {
+    let mut r = Rig::new();
+    r.w.requests_wait = true;
+    r.w.states.insert("s".into(), json!("off"));
+    let req = json!({"type": "request", "request": {"type": "network/permit_join", "duration_s": 30}});
+    r.create(json!({"id": "pj", "triggers": [{"type": "state", "uid": "s", "op": "changed"}], "actions": [req, cmd("x", "turn_on")]}));
+    r.state("s", json!("on"));
+    // The command waits for the request's result; so does the next trigger.
+    r.state("s", json!("off"));
+    assert_eq!(r.w.requests.len(), 1);
+    assert!(r.cmds().is_empty());
+    assert_eq!(r.a.waiting_requests(), [1]);
+    let err = ApiError::new("busy", "ZRHP status 0x04");
+    r.a.request_result(1, Err(err), &mut r.w, &r.clk);
+    // The first run went on, then the deferred trigger ran its own.
+    assert_eq!(r.cmds(), [("x", "turn_on")]);
+    assert_eq!(r.w.requests.len(), 2);
+    assert_eq!(r.a.waiting_requests(), [2]);
+    r.a.request_result(2, Ok(J::Null), &mut r.w, &r.clk);
+    let t = r.traces("pj");
+    assert_eq!((t[1]["result"].as_str(), t[0]["result"].as_str()), (Some("error"), Some("done")), "{t:?}");
+    assert_eq!(t[1]["actions"][0]["error"]["message"], "ZRHP status 0x04");
+    assert_eq!(t[1]["actions"][1]["result"], "ok");
+    assert_eq!(t[0]["trigger"]["to"], "off");
+}
+
+/// A rule whose request action waits for its result (permit join), then
+/// turns `x` on.
+fn waiting_rule(r: &mut Rig, mode: &str) {
+    r.w.requests_wait = true;
+    r.w.states.insert("s".into(), json!("off"));
+    let req = json!({"type": "request", "request": {"type": "network/permit_join", "duration_s": 30}});
+    r.create(json!({"id": "pj", "mode": mode, "triggers": [{"type": "state", "uid": "s", "op": "changed"}],
+        "actions": [req, cmd("x", "turn_on")]}));
+}
+
+/// Results for every request action runs wait for, until none waits.
+fn answer_all(r: &mut Rig) {
+    loop {
+        let keys = r.a.waiting_requests();
+        if keys.is_empty() {
+            return;
+        }
+        for k in keys {
+            r.a.request_result(k, Ok(J::Null), &mut r.w, &r.clk);
+        }
+    }
+}
+
+#[test]
+fn a_manual_run_while_a_run_waits_starts_after_it_and_answers_then() {
+    let mut r = Rig::new();
+    waiting_rule(&mut r, "single");
+    r.state("s", json!("on"));
+    let v = r.req("automations/run", json!({"automation": "pj"})).unwrap();
+    let run = v["run"].as_u64().unwrap() as u32;
+    assert!(r.a.pending(run), "{v}");
+    assert_eq!(r.a.waiting_requests(), [1]);
+    r.a.request_result(1, Ok(J::Null), &mut r.w, &r.clk);
+    // The first run is done; the manual one runs and waits in its turn.
+    assert_eq!(r.cmds(), [("x", "turn_on")]);
+    assert!(r.a.pending(run));
+    answer_all(&mut r);
+    assert!(!r.a.pending(run));
+    let a = r.a.run_result(run);
+    assert_eq!((a["run"].as_u64(), a["trace"]["result"].as_str()), (Some(run.into()), Some("done")), "{a}");
+    assert_eq!(a["trace"]["trigger"]["type"], "manual");
+    assert_eq!(r.cmds(), [("x", "turn_on"), ("x", "turn_on")]);
+}
+
+#[test]
+fn restart_mode_does_not_cancel_a_run_that_waits() {
+    let mut r = Rig::new();
+    waiting_rule(&mut r, "restart");
+    r.state("s", json!("on"));
+    r.state("s", json!("off"));
+    answer_all(&mut r);
+    // Both runs went through, as when the request answered in place.
+    assert_eq!(r.cmds(), [("x", "turn_on"), ("x", "turn_on")]);
+    let t = r.traces("pj");
+    let results: Vec<_> = t.iter().map(|t| t["result"].as_str().unwrap()).collect();
+    assert_eq!(results, ["done", "done"], "{t:?}");
+    assert_eq!(r.w.requests.len(), 2);
+}
+
+#[test]
+fn triggers_beyond_the_deferral_bound_are_dropped_visibly() {
+    let mut r = Rig::new();
+    waiting_rule(&mut r, "single");
+    for i in 0..20 {
+        r.state("s", json!(if i % 2 == 0 { "on" } else { "off" }));
+    }
+    // One run waits, MAX_DEFERRED triggers wait for it, the rest are dropped.
+    let t = r.traces("pj");
+    assert_eq!((t[0]["result"].as_str(), t[0]["count"].as_u64()), (Some("deferred_overflow"), Some(3)), "{t:?}");
+    answer_all(&mut r);
+    assert_eq!(r.w.commands.len(), 1 + MAX_DEFERRED);
+    let t = r.traces("pj");
+    assert_eq!(t.iter().filter(|t| t["result"] == "done").count(), 1 + MAX_DEFERRED);
+    assert!(t.iter().all(|t| t["result"] != "already_running" && t["result"] != "cancelled"), "{t:?}");
 }
 
 #[test]

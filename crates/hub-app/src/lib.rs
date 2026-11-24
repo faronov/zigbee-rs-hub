@@ -3,8 +3,7 @@
 //!
 //! | Module | Contents |
 //! |---|---|
-//! | [`convert`] | ZRHP wire events/requests ⇄ the engine's owned types |
-//! | [`transport`] | the engine's `ZigbeeTransport` on `hub_ncp::Client` |
+//! | [`transport`] | the engine's `ZigbeeTransport` on a `hub_coord::Coordinator` (ZRHP: `hub_ncp::coord::ZrhpCoordinator`) |
 //! | [`registry`] | device registry and user definitions in the host store journal (`hubdata`) |
 //! | [`app`] | the app thread: engine, `ApiServer` sessions, registry, 1 s tick |
 //! | [`catalog`] | the definitions catalog: trusted keys (slot 0, slot 1 for rotation), bank/manifest verification, the store in `hubdata` (bank slots A/B, active-bank record, manifest, local definitions) and the service (update checks, downloads, on-demand fetch, uploads, `catalog/*` API) |
@@ -26,7 +25,6 @@ pub mod clock;
 pub mod jobs;
 pub mod jw;
 pub mod laststate;
-pub mod convert;
 pub mod ocb;
 pub mod platform;
 pub mod registry;

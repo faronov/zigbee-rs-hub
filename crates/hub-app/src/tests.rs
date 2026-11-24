@@ -166,6 +166,39 @@ fn aps_confirms_are_counted_and_failures_reach_the_engine() {
     r.sim.stop();
 }
 
+/// Outcomes that come after the NCP session was lost and is back (ZRHP
+/// holds requests across a resume): a request the restarted NCP lost is
+/// counted, and the engine goes on.
+#[test]
+fn outcomes_after_an_ncp_restart_reach_the_engine() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    // The interview's first request is on the wire, unanswered, when the
+    // NCP restarts: its outcome is unknown.
+    r.sim.with(|s| s.stall = Some(ids::APS_DATA_REQUEST));
+    join(&r.sim);
+    let t = std::time::Instant::now();
+    while !r.sim.state().requests.iter().any(|(id, _)| *id == ids::APS_DATA_REQUEST) {
+        assert!(t.elapsed() < T);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    r.sim.with(|s| s.stall = None);
+    let resumes = r.ncp.status().resumes;
+    r.sim.reboot();
+    assert!(r.ncp.wait_status(T, |s| s.resumes > resumes));
+    assert!(app.wait(T, |s| s.aps.failed == 1), "{:?}", app.status().aps);
+    // The engine takes new requests and their outcomes after the resume.
+    let (sid, rx) = session(&app);
+    let re = call(&app, sid, &rx, 1, json!({"type": "devices/reinterview", "device": "zb:00158d0001a2b3c4"}));
+    assert_eq!(re["success"], true, "{re}");
+    assert!(app.wait(T, |s| s.aps.delivered > 0), "{:?}", app.status().aps);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 #[test]
 fn registry_survives_an_app_restart() {
     let flash: Box<dyn hub_ncp::store::Flash> = Box::new(MemFlash::new(32, 4096));
@@ -334,6 +367,45 @@ fn refused_control_requests_answer_as_before() {
     let a = &c["result"]["trace"]["actions"][0];
     assert_eq!(a["result"], "error", "{c}");
     assert_eq!(a["error"], json!({"code": "busy", "message": "ZRHP status 0x04"}), "{c}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// The NCP never answers `GP_SINK_CONFIG`: meanwhile the app answers API
+/// requests at once, and the GP request ends as it always did, without an
+/// answer after the 10 s call timeout.
+#[test]
+fn api_answers_while_the_ncp_stalls_a_control_request() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    r.sim.with(|s| s.stall = Some(ids::GP_SINK_CONFIG));
+    let t0 = std::time::Instant::now();
+    app.text(sid, json!({"type": "gp/config", "security_level": 1, "id": 1}).to_string());
+    while !r.sim.state().requests.iter().any(|(id, _)| *id == ids::GP_SINK_CONFIG) {
+        assert!(t0.elapsed() < T);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for (id, ty) in [(2, "devices/list"), (3, "network/info"), (4, "groups/list"), (5, "gp/config/get")] {
+        let t = std::time::Instant::now();
+        let f = call(&app, sid, &rx, id, json!({"type": ty}));
+        assert_eq!(f["success"], true, "{f}");
+        assert!(t.elapsed() < Duration::from_millis(500), "{ty} answered after {:?}", t.elapsed());
+    }
+    assert!(t0.elapsed() < Duration::from_secs(5));
+    let gp = loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(15)).unwrap()).unwrap();
+        if f["type"] == "result" && f["id"] == 1 {
+            break f;
+        }
+    };
+    assert!(t0.elapsed() >= Duration::from_secs(10), "{:?}", t0.elapsed());
+    assert_eq!(gp["error"], json!({"code": "busy", "message": "NCP link down"}), "{gp}");
+    let c = call(&app, sid, &rx, 6, json!({"type": "gp/config/get"}));
+    assert_eq!(c["result"]["security_level"], 0, "{c}");
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();
