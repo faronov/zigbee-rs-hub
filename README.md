@@ -822,7 +822,13 @@ definitions when a lookup loads them) and switches banks A/B atomically (`hub_co
 device-support 9 and 16). `catalog/status` tells clients what to fetch:
 `wants` (a newer bank for this slot size, the web tools) and `missing`
 (devices that resolve to generic only, with the shards holding their
-keys; event `definition_needed`). Lookups read the memory-mapped bank:
+keys; event `definition_needed`). Shards are checked against the installed
+manifest, so the web UI installs the mirror's newer manifest (and the bank
+and web tools it then wants) before fetching shards — for Find definition,
+Fetch, and for `definition_needed` and on opening the Catalog tab when
+`auto_update` is on — and once more after a shard refused as not matching,
+retrying the shards once; an older or the same manifest is not uploaded.
+Lookups read the memory-mapped bank:
 format 2 banks (zdefc default since 2026-11-21) keep even their string
 table in flash, so a lookup only allocates the inflater, a 4 KiB block
 buffer and the decoded candidates (7.3 KB median, 33.7 KB for the largest

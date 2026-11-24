@@ -1557,7 +1557,14 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   records with those devices' keys that score against their fingerprints
   and need no feature it lacks, appends them to the local area and
   re-resolves the devices. Uploads survive a dropped connection
-  (`catalog/status` `upload.written`).
+  (`catalog/status` `upload.written`). Shards are checked against the
+  *installed* manifest, so after the mirror moved to a newer release a
+  client installs its manifest (and what it then `wants`) first: the web
+  UI compares the signed manifest's version (`date << 16 | serial`) with
+  `catalog/status` `manifest.version` before fetching shards and, after a
+  shard refused with `verification_failed` (SHA-256 differs), installs a
+  newer one and retries once; an older or the same manifest is not
+  uploaded and nothing loops.
 - Without Internet anywhere: the UI offers "upload a definition" and
   "update the catalog from files" (the same upload API).
 
@@ -1566,7 +1573,10 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
 The catalog is versioned and released independently of the hub app:
 
 1. A client (web UI, Home Assistant, `hubctl`) checks `manifest.cose` on
-   the mirror (daily when the hub's `auto_update` setting is on), uploads
+   the mirror (Home Assistant daily when the hub's `auto_update` setting is
+   on; the web UI when its Catalog tab opens with `auto_update` on, before
+   the shards of Find definition / Fetch, and before the shards of a
+   `definition_needed` with `auto_update` on), uploads
    it, and uploads the bank (`bank-4m.zdb` / `bank-8m.zdb`, the one built
    for the hub's slot size) when `catalog/status` `wants` it, and the web
    tools (`zdefc-web.zwb`).

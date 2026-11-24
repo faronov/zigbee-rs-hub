@@ -154,6 +154,69 @@ eq(Number.isNaN(chR("x",1,false)),true);
         assert!(out.status.success(), "conversion checks failed");
     }
 
+    /// Shard fetches against an older installed manifest (the mirror moved
+    /// on): the page reads the signed manifest's version, installs a newer
+    /// one first or after a refused shard and retries once; an older or the
+    /// same one is never sent and nothing loops. The page's catalog code
+    /// runs in Node against a mock hub and mirror (when Node is installed).
+    #[test]
+    fn shards_follow_a_newer_catalog_manifest_once() {
+        let src = include_str!("../web/index.html");
+        let (a, b) = (src.find("async function ctShards(").unwrap(), src.find("const ctFetch=").unwrap());
+        let signed = include_bytes!("../../hub-app/tests/golden/baseline/catalog/manifest.cose");
+        let mock = r#"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+// A COSE_Sign1 around a canonical manifest map (0: 1, 1: date, 2: serial, ...).
+const man=(date,serial)=>{const s=serial<24?[serial]:serial<256?[24,serial]:[25,serial>>8,serial&255];
+ return Uint8Array.from([0xD2,0x84,0x43,0xA1,0x01,0x27,0xA1,0x04,0x48,0,1,1,26,0,1,1,26,0x59,0,40,0xA6,0,1,1,26,date>>>24,date>>16&255,date>>8&255,date&255,2,...s,3,0x80,4,0x80,5,0x80,0x58,0x40,...Array(64).fill(0)])};
+const V=(d,s)=>d*65536+s,old=V(20261121,1),cur=V(20261124,1);
+eq(ctVer(SIGNED),V(20261121,3));
+for(const s of [0,23,24,255,256,65535])eq(ctVer(man(20261124,s)),V(20261124,s));
+eq(ctVer(Uint8Array.from([1,2,3])),undefined);
+// The hub: anti-rollback, shards checked against its manifest. The mirror:
+// manifests in turn (the last one stays), shards of one version.
+let hub,mirror,log,toasts;
+const ct0={config:{base_url:"m"}};let ct=ct0;
+const ctMsg=()=>{},toast=m=>toasts.push(m),ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
+const call=async t=>({manifest:{version:hub},missing:[{device:"d",shards:[0x44]}],config:ct0.config});
+const ctGet=async n=>{log.push("get "+n);if(n=="manifest.cose"){const v=mirror.man.length>1?mirror.man.shift():mirror.man[0];return man(Math.floor(v/65536),v%65536)}return{shard:mirror.shard}};
+const ctPut=async(t,u)=>{log.push("put "+t);if(t=="manifest"){const v=ctVer(u);if(v<hub)throw new Error("manifest version "+v+" is older than the installed "+hub);hub=v;return{version:v,catalog_date:Math.floor(v/65536),catalog_serial:v%65536,wants:{}}}
+ if(u.shard!=hub)throw new Error("shard 44: SHA-256 differs from the installed manifest");return{definitions:["x/y"]}};
+const run=async(h,m,s,upd)=>{hub=h;mirror={man:m,shard:s};log=[];toasts=[];try{const r=await ctGo(()=>ctMiss("d"),upd);return[r.n,r.m&&r.m.version]}catch(e){return e.message}};
+(async()=>{
+ // Newer online: installed first, then the shard.
+ eq(await run(old,[cur],cur,1),[1,cur]);eq(log,["get manifest.cose","put manifest","get shard-44.cbor","put shard"]);eq(hub,cur);
+ // The mirror's manifest still old at first, its shard new: refused, update, one retry.
+ eq(await run(old,[old,cur],cur,1),[1,cur]);
+ eq(log,["get manifest.cose","get shard-44.cbor","put shard","get manifest.cose","put manifest","get shard-44.cbor","put shard"]);
+ eq(toasts,["catalog updated to 20261124.1, retrying…"]);
+ // Older online: never sent, the shard error once, no loop.
+ eq(await run(cur,[old],old,1),"shard 44: SHA-256 differs from the installed manifest");
+ eq(log,["get manifest.cose","get shard-44.cbor","put shard","get manifest.cose"]);eq(hub,cur);
+ // A mirror that keeps moving on: one update and one retry only.
+ eq(await run(old,[old,cur,V(20261125,1)],V(20261126,1),1),"shard 44: SHA-256 differs from the installed manifest");
+ eq(log,["get manifest.cose","get shard-44.cbor","put shard","get manifest.cose","put manifest","get shard-44.cbor","put shard"]);eq(hub,cur);
+ // The same online: nothing sent but the shard.
+ eq(await run(cur,[cur],cur,1),[1,0]);eq(log,["get manifest.cose","get shard-44.cbor","put shard"]);
+ // Without updates (fetching for new devices, daily updates off): the error.
+ eq(await run(old,[cur],cur,0),"shard 44: SHA-256 differs from the installed manifest");eq(log,["get shard-44.cbor","put shard"]);
+})().catch(e=>{console.error(e);process.exit(1)});
+"#;
+        let js = std::format!("{}\nconst SIGNED=Uint8Array.from({signed:?});\n{mock}", &src[a..b]);
+        use std::io::Write;
+        let Ok(node) = std::process::Command::new("node")
+            .args(["-e", &js])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let out = node.wait_with_output().unwrap();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        assert!(out.status.success(), "catalog update checks failed");
+    }
+
     #[test]
     fn basic_page_omits_manual_console_but_keeps_normal_device_controls() {
         let plain = select(false, false, false);
