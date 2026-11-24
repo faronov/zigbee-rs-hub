@@ -11,6 +11,11 @@
 //! `partitions-4mb-dev.csv`. A table that does not belong to the detected
 //! flash size is a fatal configuration error; any other table (the stock
 //! Thread BR table during bring-up) runs with the host store in RAM.
+//!
+//! The SONOFF Dongle-M's 16 MB product table
+//! (`firmware/donglem/partitions-16mb.csv`: 4 MiB slots, 2 MiB `hubdata`)
+//! is a [`Layout::Production`] with the 8 MB `hubdata` map; its stock
+//! table (no `hubdata`) is foreign.
 
 /// App partition subtypes.
 pub mod subtype {
@@ -226,6 +231,21 @@ mod tests {
         app("ota_1", subtype::OTA_1, 0x1B0000, 0x190000),
         data("rcp_fw", 0x340000, 0x7D000),
     ];
+    // firmware/donglem/partitions-16mb.csv (product) and partitions.csv (stock).
+    const DONGLE_PRODUCT: [Part<'static>; 6] = [
+        data("nvs", 0x9000, 0x14000),
+        app("ota_0", subtype::OTA_0, 0x30000, 0x400000),
+        app("ota_1", subtype::OTA_1, 0x430000, 0x400000),
+        data("hubdata", 0x830000, 0x200000),
+        data("otastore", 0xA30000, 0x400000),
+        data("radio", 0xE30000, 0x1D0000),
+    ];
+    const DONGLE_STOCK: [Part<'static>; 4] = [
+        data("nvs", 0x1C000, 0x40000),
+        app("ota_0", subtype::OTA_0, 0x60000, 0x600000),
+        app("ota_1", subtype::OTA_1, 0x660000, 0x600000),
+        data("files", 0xC60000, 0x3A0000),
+    ];
     const MB4: u32 = 4 << 20;
     const MB8: u32 = 8 << 20;
 
@@ -258,5 +278,14 @@ mod tests {
         assert_eq!(check(MB4, &PRODUCTION), Verdict::Fatal(Mismatch::BeyondFlash));
         assert_eq!(check(MB8, &DEV), Verdict::Fatal(Mismatch::WrongSize(Layout::Dev)));
         assert_eq!(check(MB4, &STOCK), Verdict::Foreign);
+    }
+
+    #[test]
+    fn dongle_m_product_table_is_a_production_layout_and_the_stock_one_foreign() {
+        let mb16 = 16 << 20;
+        assert_eq!(check(mb16, &DONGLE_PRODUCT), Verdict::Ok(Layout::Production));
+        assert_eq!(HubdataMap::for_size(0x200000), HubdataMap::for_size(PRODUCTION_HUBDATA));
+        assert_eq!(check(MB8, &DONGLE_PRODUCT), Verdict::Fatal(Mismatch::BeyondFlash));
+        assert_eq!(check(mb16, &DONGLE_STOCK), Verdict::Foreign);
     }
 }
