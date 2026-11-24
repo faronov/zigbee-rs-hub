@@ -258,9 +258,16 @@ HA default to; our own devices covered. Not done in this change.
      (`NWK_ADD_ENDPOINT`: the hub's endpoint 1 lists 0x0019 as a server
      cluster); devices that look for the OTA server with Match_Desc find
      the hub — to verify on hardware.
-  4. Hub side, not ZRHP: the engine's transport does not hand
-     `EVT_APS_DATA_CONFIRM` per request to the app, so an Image Notify that
-     never reached a sleepy device is only noticed by the missing query.
+  4. Hub side, not ZRHP (solved with the ticketed engine transport, #64):
+     every frame of the server is a request with a `RequestId`
+     (`Hub::send_app_zcl`: submitted, queued for a sleepy device, or
+     refused); its outcome (`EVT_APS_DATA_CONFIRM`, collected in the 1 s
+     tick) returns through `Hub::on_outcome` to `Hub::take_app_outcomes`,
+     never to the engine's retries. The server only counts it
+     (`ota/status` `tx`, `tx_failed` per device): pacing stays time-based
+     and a device asks again for a block that did not arrive. An Image
+     Notify that never reached a sleepy device now shows as
+     `not_delivered` or `unknown` instead of only a missing query.
 
 ## zigbee-rs devices
 
@@ -329,10 +336,18 @@ newer than the running one; the image inside is what the product's
   WAIT_FOR_DATA, a download in pages, the client away and back, ABORT
   after the grace time, the hub's stream limit. Both with and without the
   `store` feature.
+- `hub-devices` (`scenarios/app_frames.rs`): an OTA command goes to the
+  application without a Default Response; the application's frames get
+  `RequestId`s, their outcomes go to it and are never retried by the
+  engine; a refusal, a frame queued for a sleepy device (its ID when sent)
+  and an outcome that never comes (`Unknown` after 10 minutes).
 - `hub-app`: upload, query, start, download and confirmation through the
   simulated NCP (`SimNcp::set_aps_hook` with the simulated OTA client;
   every frame ≤ the simulated NCP's 82-B `max_asdu`), app restart, no
-  store; a streamed download served by the test's API session. Without
+  store; a streamed download served by the test's API session; the
+  outcomes of the server's frames in `ota/status` `tx` and `tx_failed`
+  (delivered, then a device out of reach: the frames of a check not
+  delivered). Without
   `ota` (`--no-default-features`, the 4 MB combination): `ota/*` answers
   `unsupported`, `hub/info` has no `ota`, a Query Next Image gets the
   generic Default Response; CI checks with `cargo tree` that this build

@@ -256,6 +256,39 @@ fn without_an_area_queries_are_answered_and_uploads_refused() {
     assert_eq!(client.lock().unwrap().state, hub_ota::sim::ClientState::Idle, "NO_IMAGE_AVAILABLE received");
     let list = call(&app, sid, &rx, &mut ev, 2, json!({"type": "ota/devices/list"}));
     assert_eq!(list["result"][0]["current_version"], 7, "{list}");
+    assert_eq!(list["result"][0]["tx_failed"], 0, "{list}");
+
+    // The server's frames are requests of the ticketed transport: their
+    // outcomes (collected in the 1 s tick) are counted, nothing else.
+    let mut id = 10;
+    let mut tx = |ev: &mut Vec<J>, until: &dyn Fn(&J) -> bool| -> J {
+        let t = std::time::Instant::now();
+        loop {
+            id += 1;
+            let st = call(&app, sid, &rx, ev, id, json!({"type": "ota/status"}));
+            let tx = st["result"]["tx"].clone();
+            if until(&tx) || t.elapsed() > T {
+                return tx;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let ok = tx(&mut ev, &|t| t["delivered"].as_u64() >= Some(1) && t["in_flight"] == 0);
+    assert_eq!((ok["submitted"].as_u64(), ok["in_flight"].as_u64()), (ok["delivered"].as_u64(), Some(0)), "{ok}");
+    assert_eq!(ok["not_delivered"], 0, "{ok}");
+    // The device out of reach: the frames of a check (Image Notify, the
+    // version read) are not delivered.
+    sim.set_aps_hook(Box::new(|_| Vec::new()));
+    sim.with(|s| s.undeliverable.push((NWK, 0xA7)));
+    let chk = call(&app, sid, &rx, &mut ev, 3, json!({"type": "ota/devices/check", "device": "zb:00124b0012345678"}));
+    assert_eq!(chk["success"], true, "{chk}");
+    let before = ok["submitted"].as_u64().unwrap();
+    let bad = tx(&mut ev, &|t| t["submitted"].as_u64() > Some(before) && t["in_flight"] == 0);
+    let failed = bad["submitted"].as_u64().unwrap() - before;
+    assert!(failed >= 1 && bad["in_flight"] == 0, "{bad}");
+    assert_eq!((bad["not_delivered"].as_u64(), bad["delivered"].as_u64()), (Some(failed), ok["delivered"].as_u64()), "{bad}");
+    let list = call(&app, sid, &rx, &mut ev, 4, json!({"type": "ota/devices/list"}));
+    assert_eq!(list["result"][0]["tx_failed"], failed, "{list}");
     app.shutdown();
     ncp.shutdown();
     sim.stop();

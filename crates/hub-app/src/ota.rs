@@ -15,12 +15,17 @@
 //!   images in the inactive app slot of the 8 MB layout.
 //!
 //! The hub downloads nothing itself.
+//!
+//! Every frame the server sends is a request of the engine's ticketed
+//! transport ([`Engine::send_app_zcl`]); its outcome only counts
+//! (`ota/status` `tx`, `tx_failed` per device): the device's own requests
+//! and the server's timers drive the transfer, as before.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hub_devices::device::{Device as EngineDevice, Millis};
 use hub_devices::hub::{ApiError, Hub as Engine};
-use hub_devices::transport::ZigbeeTransport;
+use hub_devices::transport::{RequestId, Terminal, ZigbeeTransport};
 use hub_devices::zcl::frame::global;
 use hub_devices::zcl::{Direction, FrameType, ZclFrame, ZclHeader, ZclValue};
 use hub_ota::images::{Images, Offer, Sources, View};
@@ -29,7 +34,7 @@ use hub_ota::server::{Action, CLUSTER, Command, DEFAULT_ASDU, attr};
 use hub_ota::stream::{CHUNK as STREAM_CHUNK, Streams};
 use hub_ota::{Device, Policy, Server, Settings};
 use hub_store::{KvStore, kv};
-use log::{info, warn};
+use log::{debug, info, warn};
 use serde_json::{Value as J, json};
 
 /// Journal key of the settings.
@@ -133,6 +138,32 @@ pub struct Ota {
     last_sweep: Millis,
     /// Free heap probe (`None`: the desktop).
     platform: Option<std::sync::Arc<dyn crate::platform::Platform>>,
+    /// The server's frames in flight: device and ZCL command (`global`,
+    /// `cmd`).
+    tx: BTreeMap<RequestId, (String, bool, u8)>,
+    /// Outcomes of the server's frames.
+    tx_counts: TxCounters,
+    /// Frames per device not delivered or refused, since the start.
+    tx_failed: BTreeMap<String, u32>,
+}
+
+/// What became of the server's frames (`ota/status` `tx`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TxCounters {
+    /// Handed to the transport.
+    pub submitted: u64,
+    /// Queued for a sleepy device (submitted when it is awake).
+    pub queued: u64,
+    /// Confirmed delivered.
+    pub delivered: u64,
+    /// Accepted without a delivery confirmation.
+    pub sent: u64,
+    /// Confirmed not delivered.
+    pub not_delivered: u64,
+    /// Refused by the transport (nothing sent).
+    pub refused: u64,
+    /// Outcome unknown (no confirm in time, NCP reset).
+    pub unknown: u64,
 }
 
 /// Streams ask for no chunk while the heap has less free than this, or no
@@ -177,6 +208,9 @@ impl Ota {
             snapshot_dirty: true,
             last_sweep: 0,
             platform: cfg.platform.clone(),
+            tx: BTreeMap::new(),
+            tx_counts: TxCounters::default(),
+            tx_failed: BTreeMap::new(),
         }
     }
 
@@ -329,6 +363,7 @@ impl Ota {
     /// topic snapshot.
     pub fn poll<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, kv: &dyn KvStore, now: Millis) {
         self.heap_guard();
+        self.outcomes(engine);
         let gone = self.streams.poll(now);
         if !gone.is_empty() {
             for o in &gone {
@@ -427,7 +462,7 @@ impl Ota {
                         tsn,
                         cmd,
                     };
-                    engine.send_app_zcl(&device, ep, CLUSTER, ZclFrame { header, payload }, now);
+                    self.send(engine, &device, ep, ZclFrame { header, payload }, now);
                 }
                 Action::DefaultRsp { device, ep, tsn, cmd, status } => {
                     let header = ZclHeader {
@@ -438,7 +473,7 @@ impl Ota {
                         tsn,
                         cmd: global::DEFAULT_RSP,
                     };
-                    engine.send_app_zcl(&device, ep, CLUSTER, ZclFrame { header, payload: vec![cmd, status] }, now);
+                    self.send(engine, &device, ep, ZclFrame { header, payload: vec![cmd, status] }, now);
                 }
                 Action::ReadVersion { device, ep } => {
                     // A fresh answer replaces the cached value.
@@ -455,7 +490,7 @@ impl Ota {
                         cmd: global::READ_ATTRIBUTES,
                     };
                     let payload = attr::CURRENT_FILE_VERSION.to_le_bytes().to_vec();
-                    engine.send_app_zcl(&device, ep, CLUSTER, ZclFrame { header, payload }, now);
+                    self.send(engine, &device, ep, ZclFrame { header, payload }, now);
                     if let Some(d) = self.server.devices.get_mut(&device) {
                         d.reading = Some(ep);
                     }
@@ -473,6 +508,64 @@ impl Ota {
         }
     }
 
+    /// Sends a frame of the server: a request of the ticketed transport,
+    /// kept until its outcome.
+    fn send<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, device: &str, ep: u8, frame: ZclFrame, now: Millis) {
+        let (global, cmd) = (frame.header.frame_type == FrameType::Global, frame.header.cmd);
+        match engine.send_app_zcl(device, ep, CLUSTER, frame, now) {
+            Ok(Some(id)) => {
+                self.tx_counts.submitted += 1;
+                self.tx.insert(id, (device.to_string(), global, cmd));
+            }
+            Ok(None) => self.tx_counts.queued += 1,
+            Err(e) => {
+                self.tx_counts.refused += 1;
+                *self.tx_failed.entry(device.to_string()).or_default() += 1;
+                debug!("ota: {device}: {} 0x{cmd:02X} refused: {e}", if global { "global" } else { "command" });
+            }
+        }
+    }
+
+    /// Outcomes of the server's frames: counted, nothing else changes (a
+    /// device asks again for what did not arrive).
+    fn outcomes<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>) {
+        for o in engine.take_app_outcomes() {
+            if o.cluster != CLUSTER {
+                continue;
+            }
+            // A queued frame's ID is new to the server.
+            let sent = o.id.and_then(|id| self.tx.remove(&id));
+            let c = &mut self.tx_counts;
+            let failed = match &o.terminal {
+                Terminal::Delivered => {
+                    c.delivered += 1;
+                    None
+                }
+                Terminal::Sent | Terminal::Done(_) => {
+                    c.sent += 1;
+                    None
+                }
+                Terminal::NotDelivered(e) => {
+                    c.not_delivered += 1;
+                    Some(e)
+                }
+                Terminal::Refused(e) => {
+                    c.refused += 1;
+                    Some(e)
+                }
+                Terminal::Unknown(_) | Terminal::Cancelled => {
+                    c.unknown += 1;
+                    None
+                }
+            };
+            if let Some(e) = failed {
+                *self.tx_failed.entry(o.device.clone()).or_default() += 1;
+                let what = sent.map(|(_, g, cmd)| format!(" {} 0x{cmd:02X}", if g { "global" } else { "command" })).unwrap_or_default();
+                debug!("ota: {}:{what} not delivered: {e}", o.device);
+            }
+        }
+    }
+
     fn device_text<T: ZigbeeTransport>(&self, engine: &Engine<T>, id: &str, now: Millis) -> Option<String> {
         let d = engine.device(id)?;
         let ep = self.server.devices.get(id).and_then(|s| s.ep).or_else(|| ota_ep(d));
@@ -483,7 +576,8 @@ impl Ota {
                 .ostr("manufacturer", d.manufacturer().as_deref())
                 .ostr("sw_version", d.fp.sw_build_id.as_deref())
                 .bool("sleepy", d.sleepy())
-                .bool("available_device", d.available);
+                .bool("available_device", d.available)
+                .num("tx_failed", self.tx_failed.get(id).copied().unwrap_or(0));
         }))
     }
 
@@ -579,6 +673,7 @@ impl Ota {
                     "stream_chunk": STREAM_CHUNK,
                     "stream_paused": self.streams.low_heap(),
                     "streams": streams,
+                    "tx": self.tx_json(),
                 });
                 #[cfg(feature = "ota-store")]
                 self.store.status(&mut r);
@@ -675,6 +770,21 @@ impl Ota {
             #[cfg(not(feature = "ota-store"))]
             _ => Err(err("unsupported", "this hub has no image store (4 MB layout): stream the image (ota/stream/offer)")),
         }
+    }
+
+    /// `ota/status` `tx`.
+    fn tx_json(&self) -> J {
+        let c = &self.tx_counts;
+        json!({
+            "submitted": c.submitted,
+            "queued": c.queued,
+            "in_flight": self.tx.len(),
+            "delivered": c.delivered,
+            "sent": c.sent,
+            "not_delivered": c.not_delivered,
+            "refused": c.refused,
+            "unknown": c.unknown,
+        })
     }
 
     /// The NCP's `max_asdu` (blocks are cut to fit unfragmented frames).
