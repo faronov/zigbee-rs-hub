@@ -75,13 +75,18 @@ fn show(on: [bool; 3]) {
 }
 
 fn configure_in(i: &Input) {
+    // gpio_config, not gpio_reset_pin: the latter always enables the pull-up,
+    // which input-only pads (ESP32 GPIO34–39, the Dongle-M button) lack.
+    let cfg = sys::gpio_config_t {
+        pin_bit_mask: 1u64 << i.gpio,
+        mode: sys::gpio_mode_t_GPIO_MODE_INPUT,
+        pull_up_en: if i.pull_up { sys::gpio_pullup_t_GPIO_PULLUP_ENABLE } else { sys::gpio_pullup_t_GPIO_PULLUP_DISABLE },
+        pull_down_en: sys::gpio_pulldown_t_GPIO_PULLDOWN_DISABLE,
+        intr_type: sys::gpio_int_type_t_GPIO_INTR_DISABLE,
+        ..Default::default()
+    };
     unsafe {
-        let g = i32::from(i.gpio);
-        sys::gpio_reset_pin(g);
-        sys::gpio_set_direction(g, sys::gpio_mode_t_GPIO_MODE_INPUT);
-        if i.pull_up {
-            sys::gpio_set_pull_mode(g, sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY);
-        }
+        sys::gpio_config(&cfg);
     }
 }
 
