@@ -18,6 +18,24 @@ version that must work first. The UART runs at 115 200 Bd without RTS/CTS;
 the NCP image contains XON/XOFF strings, so software flow control is
 assumed possible (see "Flow control").
 
+### Verified on hardware
+
+The probe image on a Dongle Max (stock NCP, the `hub-ezsp` host core, not
+yet this backend) confirmed:
+
+- ASH version 2; the RSTACK answering RST carries reset code 0x0B
+  (software).
+- EZSP 13 after two version exchanges (the host asks for 18, the NCP
+  answers 13, the host confirms 13).
+- Stack version 7.4.5.0 (`VERSION_INFO`: EmberZNet 7.4.5, build 0, type
+  170 = 0xAA, GA).
+- `getEui64` (B0E8E8FFFE5D4D03), manufacturing tokens `STRING` "SONOFF" and
+  `BOARD_NAME` "Dongle-M".
+- `networkInit` on the fresh NCP answers `NOT_JOINED`.
+- 115 200 Bd without flow control: no retransmission, NAK or CRC error over
+  the probe's exchanges.
+- Gecko Bootloader v2.04.02 (for the firmware update follow-up).
+
 ## Versions
 
 | SDK | EmberZNet | EZSP | |
@@ -220,7 +238,8 @@ devices left, route records, GP frames ignored).
 
 ## Not verified, known gaps
 
-- Everything behavioural is checked against the simulator only: callback
+- Beyond the session start above, everything behavioural is checked
+  against the simulator only: callback
   ordering and timing, error statuses of a real NCP (table index past the
   end, key not exportable, no network), whether NETWORK_OPENED/CLOSED
   follow `permitJoining`, CHANNEL_CHANGED after a channel change of the

@@ -484,7 +484,10 @@ specification; pin them per firmware version. The EZSP column is
 SONOFF Dongle Max NCP)** and checked for 14–18: frame IDs and layouts from
 the SDK headers (Gecko SDK 4.4.6, Simplicity SDK 2024.6.0/2025.6.3
 `ezsp-enum.h`, `command-functions.h`, `ezsp-frame-utilities.{c,h}`), the
-semantics from UG100/UG101. Behaviour against a real NCP is not verified
+semantics from UG100/UG101. On a Dongle Max (stock 7.4.5 NCP) the ASH
+reset, the EZSP 13 negotiation, `VERSION_INFO`, the EUI64, the
+manufacturing tokens and `networkInit` NOT_JOINED are confirmed (see
+`docs/ezsp-backend.md`); other behaviour against a real NCP is not verified
 yet (host tests against the simulated NCP; HIL on the Dongle Max is a
 follow-up). Implemented in `hub_ezsp::coord` (EZSP backend PR); details and
 choices: `docs/ezsp-backend.md`.
