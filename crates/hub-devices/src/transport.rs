@@ -1,27 +1,42 @@
-//! The narrow boundary between the engine and the ZRHP host core
-//! (branch `phase1`): APS data out, indications in, GP requests and
-//! events, group membership.
+//! The narrow boundary between the engine and the coordinator backend:
+//! ticketed requests out ([`Request`]: APS data, GP requests, group
+//! membership, device removal, permit join), outcomes and indications in.
 //!
-//! The engine is sans-IO: it never blocks. Outgoing traffic goes through
-//! [`ZigbeeTransport`]; everything that arrives (APS indications, GP
-//! events, joins) is fed into [`crate::hub::Hub`] methods with the current
-//! time. Responses are matched by ZCL/ZDO transaction sequence numbers the
-//! engine allocates itself.
+//! The engine is sans-IO: it never blocks. [`ZigbeeTransport::submit`]
+//! returns a [`RequestId`] at once (or refuses the request); what happens
+//! to the request follows through [`crate::hub::Hub::on_outcome`]: at most
+//! one [`Progress`] (`Accepted`, with the ZCL TSN of a remote GP request),
+//! then exactly one [`Terminal`]. Everything else that arrives (APS
+//! indications, GP events, joins) is fed into [`crate::hub::Hub`] methods
+//! with the current time. Responses are matched by ZCL/ZDO transaction
+//! sequence numbers the engine allocates itself.
 
 use crate::gp::types::GpRequest;
-pub use hub_coord::{ApsDst, ApsIndication, ApsRequest, TxOptions};
+pub use hub_coord::{
+    ApsDst, ApsIndication, ApsRequest, CoordError, Progress, Reply, Request, RequestId, Terminal,
+    TxOptions,
+};
 
-/// An `APS_DATA_REQUEST` the NCP could not deliver.
+/// What [`crate::hub::Hub::on_outcome`] takes: a request's progress or its
+/// final outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApsFailure {
-    /// The request as the engine sent it.
-    pub req: ApsRequest,
-    /// `EVT_APS_DATA_CONFIRM.zb_status` (no APS ACK, no route, …); `None`:
-    /// the NCP refused the request (queue full, network down).
-    pub zb_status: Option<u8>,
-    /// The NCP numbers APS statuses as zigbee-rs NCP images up to 0.1.1
-    /// ([`zb_status_text`]).
-    pub legacy_codes: bool,
+pub enum Outcome {
+    /// Intermediate outcome (at most once, before the terminal one).
+    Progress(Progress),
+    /// Final outcome (exactly once).
+    Done(Terminal),
+}
+
+impl From<Progress> for Outcome {
+    fn from(p: Progress) -> Self {
+        Self::Progress(p)
+    }
+}
+
+impl From<Terminal> for Outcome {
+    fn from(t: Terminal) -> Self {
+        Self::Done(t)
+    }
 }
 
 /// What an `EVT_APS_DATA_CONFIRM.zb_status` means (host protocol 7.3, the
@@ -43,6 +58,16 @@ pub fn zb_status_text(zb_status: u8, legacy: bool) -> Option<&'static str> {
     })
 }
 
+/// The outcome of an `EVT_APS_DATA_CONFIRM` with a failed `zb_status`,
+/// named in the NCP's numbering ([`zb_status_text`]).
+pub fn zrhp_not_delivered(zb_status: u8, legacy: bool) -> Terminal {
+    Terminal::NotDelivered(CoordError::NoAck(hub_coord::Code {
+        backend: hub_coord::BackendKind::Zrhp,
+        value: u16::from(zb_status),
+        text: zb_status_text(zb_status, legacy),
+    }))
+}
+
 /// `true` for a zigbee-rs NCP firmware version up to 0.1.1 (the version is
 /// the last word of `fw`, e.g. `0.1.1` or `sim-ncp 0.1.0`).
 pub fn legacy_zb_status(fw: &str) -> bool {
@@ -57,65 +82,26 @@ pub fn legacy_zb_status(fw: &str) -> bool {
     v.len() == 3 && (v[0], v[1], v[2]) <= (0, 1, 1)
 }
 
-/// Transport failure (the request was not queued).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransportError {
-    /// The NCP link is down.
-    LinkDown,
-    /// Queue full / busy.
-    Busy,
-    /// Any other error with a ZRHP status.
-    Status(u8),
-}
-
-impl std::fmt::Display for TransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LinkDown => write!(f, "NCP link down"),
-            Self::Busy => write!(f, "busy"),
-            Self::Status(s) => write!(f, "ZRHP status 0x{s:02X}"),
-        }
-    }
-}
-
-impl std::error::Error for TransportError {}
-
-/// What the engine needs from the host core.
+/// What the engine needs from the coordinator backend.
 pub trait ZigbeeTransport {
-    /// Queues an `APS_DATA_REQUEST` (ZCL or ZDO; ZDO on profile 0,
-    /// endpoint 0).
-    fn aps_send(&mut self, req: ApsRequest) -> Result<(), TransportError>;
+    /// Queues a request: its ID at once, its outcome later through
+    /// [`crate::hub::Hub::on_outcome`]; `Err`: refused at once, nothing
+    /// was sent. Every request but [`Request::Aps`] is a barrier: nothing
+    /// submitted later reaches the NCP before it completes.
+    fn submit(&mut self, req: Request) -> Result<RequestId, CoordError>;
 
-    /// Sends a GP request. Remote provisioning requests (0x0A08–0x0A0D)
-    /// return the ZCL TSN the NCP used (`GpRemoteRsp.zcl_tsn`), which the
-    /// matching `EVT_GP_REMOTE_*` carries; other requests return `None`.
-    fn gp_request(&mut self, req: GpRequest) -> Result<Option<u8>, TransportError>;
-
-    /// `NWK_GROUP_MEMBERSHIP` add for one hub endpoint.
-    fn group_add(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError>;
-
-    /// `NWK_GROUP_MEMBERSHIP` remove for one hub endpoint.
-    fn group_remove(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
-        let _ = (endpoint, group);
-        Err(TransportError::Status(0x05))
+    /// An outcome the transport decided itself in [`Self::submit`], which
+    /// the engine applies right after the request that produced it (the
+    /// mock's automatic completion). Backends hand their outcomes to
+    /// [`crate::hub::Hub::on_outcome`] instead and return `None`.
+    fn completed(&mut self) -> Option<(RequestId, Outcome)> {
+        None
     }
-
-    /// Removes a device from the network (`NWK_REMOVE_DEVICE`).
-    fn remove_device(&mut self, ieee: u64) -> Result<(), TransportError>;
-
-    /// `NWK_PERMIT_JOIN` for `duration_s` (0 closes), on one router or all.
-    fn permit_join(&mut self, duration_s: u8, target: Option<u16>) -> Result<(), TransportError>;
 
     /// Network and NCP facts for `network/info` (a JSON object; `None`:
     /// the host core does not know them).
     fn network_info(&mut self) -> Option<serde_json::Value> {
         None
-    }
-
-    /// Requests that failed since the last call (`EVT_APS_DATA_CONFIRM`
-    /// with a failure, or a refusal after [`Self::aps_send`] returned).
-    fn take_failures(&mut self) -> Vec<ApsFailure> {
-        Vec::new()
     }
 }
 
@@ -137,18 +123,29 @@ pub enum Sent {
 }
 
 /// Recording transport for host tests.
+///
+/// By default it completes every control request at once (GP remote
+/// requests are `Accepted` with the next [`Self::next_gp_tsn`]), as a
+/// coordinator that answers before the engine sends anything else; APS
+/// requests get no outcome unless a test passes one to
+/// [`crate::hub::Hub::on_outcome`]. With [`Self::manual`], nothing
+/// completes on its own: the requests wait in [`Self::open`].
 #[derive(Debug, Default)]
 pub struct MockTransport {
     /// Everything sent, in order.
     pub sent: Vec<Sent>,
     /// Next ZCL TSN returned for remote GP requests.
     pub next_gp_tsn: u8,
-    /// Fail every send with this error.
-    pub fail: Option<TransportError>,
+    /// Refuse every APS and GP request with this error.
+    pub fail: Option<CoordError>,
     /// What `network_info` returns.
     pub network: Option<serde_json::Value>,
-    /// Delivery failures `take_failures` returns.
-    pub failures: Vec<ApsFailure>,
+    /// Complete nothing automatically.
+    pub manual: bool,
+    /// [`Self::manual`]: the requests submitted, for the test to complete.
+    pub open: Vec<(RequestId, Request)>,
+    next_id: u32,
+    done: std::collections::VecDeque<(RequestId, Outcome)>,
 }
 
 impl MockTransport {
@@ -166,56 +163,61 @@ impl MockTransport {
             })
             .collect()
     }
+    /// The ID of the last request submitted.
+    pub fn last_id(&self) -> Option<RequestId> {
+        self.next_id.checked_sub(1).map(RequestId)
+    }
 }
 
 impl ZigbeeTransport for MockTransport {
-    fn aps_send(&mut self, req: ApsRequest) -> Result<(), TransportError> {
-        if let Some(e) = &self.fail {
+    fn submit(&mut self, req: Request) -> Result<RequestId, CoordError> {
+        if let (Some(e), Request::Aps(_) | Request::Gp(_)) = (&self.fail, &req) {
             return Err(e.clone());
         }
-        self.sent.push(Sent::Aps(req));
-        Ok(())
-    }
-
-    fn gp_request(&mut self, req: GpRequest) -> Result<Option<u8>, TransportError> {
-        if let Some(e) = &self.fail {
-            return Err(e.clone());
-        }
-        let tsn = req.is_remote().then(|| {
-            let t = self.next_gp_tsn;
-            self.next_gp_tsn = self.next_gp_tsn.wrapping_add(1);
-            t
+        let id = RequestId(self.next_id);
+        self.next_id += 1;
+        let mut tsn = None;
+        self.sent.push(match &req {
+            Request::Aps(a) => Sent::Aps(a.clone()),
+            Request::Gp(g) => {
+                tsn = g.is_remote().then(|| {
+                    let t = self.next_gp_tsn;
+                    self.next_gp_tsn = self.next_gp_tsn.wrapping_add(1);
+                    t
+                });
+                Sent::Gp(g.clone(), tsn)
+            }
+            Request::Group {
+                endpoint,
+                group,
+                add: true,
+            } => Sent::Group(*endpoint, *group),
+            Request::Group {
+                endpoint, group, ..
+            } => Sent::GroupRemove(*endpoint, *group),
+            Request::RemoveDevice { ieee, .. } => Sent::Remove(*ieee),
+            Request::PermitJoin { duration_s, target } => Sent::PermitJoin(*duration_s, *target),
+            Request::DeviceInventory => return Err(CoordError::Unsupported),
         });
-        self.sent.push(Sent::Gp(req, tsn));
-        Ok(tsn)
+        if self.manual {
+            self.open.push((id, req));
+        } else if !matches!(req, Request::Aps(_)) {
+            if tsn.is_some() {
+                let p = Progress::Accepted { zcl_tsn: tsn };
+                self.done.push_back((id, p.into()));
+            }
+            self.done
+                .push_back((id, Terminal::Done(Reply::None).into()));
+        }
+        Ok(id)
     }
 
-    fn group_add(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
-        self.sent.push(Sent::Group(endpoint, group));
-        Ok(())
-    }
-
-    fn group_remove(&mut self, endpoint: u8, group: u16) -> Result<(), TransportError> {
-        self.sent.push(Sent::GroupRemove(endpoint, group));
-        Ok(())
-    }
-
-    fn remove_device(&mut self, ieee: u64) -> Result<(), TransportError> {
-        self.sent.push(Sent::Remove(ieee));
-        Ok(())
-    }
-
-    fn permit_join(&mut self, duration_s: u8, target: Option<u16>) -> Result<(), TransportError> {
-        self.sent.push(Sent::PermitJoin(duration_s, target));
-        Ok(())
+    fn completed(&mut self) -> Option<(RequestId, Outcome)> {
+        self.done.pop_front()
     }
 
     fn network_info(&mut self) -> Option<serde_json::Value> {
         self.network.clone()
-    }
-
-    fn take_failures(&mut self) -> Vec<ApsFailure> {
-        std::mem::take(&mut self.failures)
     }
 }
 

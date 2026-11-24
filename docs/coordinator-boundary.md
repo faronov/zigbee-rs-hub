@@ -112,6 +112,22 @@ pub trait Coordinator: Send {
 `deadline: None` means the backend default; for ZRHP these are exactly
 today's `CallOpts`.
 
+**Engine side (PR F).** hub-devices' `ZigbeeTransport::submit(Request)`
+returns the `RequestId` or refuses; `Hub::on_outcome(id, Outcome, now)`
+takes the `Progress` and the `Terminal`. Until PR G, hub-app's
+`NcpTransport` still makes today's blocking calls inside `submit` and
+queues the outcomes. The app passes APS terminals on in the 1 s tick,
+before `Hub::tick`, as `poll` did. It passes control outcomes on as soon
+as the engine returns from the call that submitted them, including the
+automations' internal requests. Details:
+- An API request that a control request decides answers through
+  `HubEvent::Answer` and the existing deferred results, with the same
+  JSON. It answers at once when the outcome is already known.
+- Error texts stay as before ("ZRHP status 0x..", "NCP link down"). The
+  text change of §2.3 is left for a later PR.
+- A remote GP answer that arrives before its `Accepted` is kept (up to
+  four) until its TSN is known.
+
 **Endpoints** are backend configuration given at construction
 (`BackendConfig { endpoints }`), not a request:
 - EZSP accepts `addEndpoint` only before `networkInit`.
@@ -129,6 +145,8 @@ app thread.
 pub enum CoordError {
     Unsupported, Busy, LinkDown, NoAck(Code), Timeout, DeliveryUnknown,
     Backend { code: Code, kind: Kind },
+    Other(Cow<'static, str>),        // any other failure, in the backend's words
+    Described(Box<Described>),       // { error, text }: classify by meaning(), show text
 }
 pub struct Code { pub backend: BackendKind, pub value: u16, pub text: Option<&'static str> }
 pub enum Kind { NoRoute, TableFull, TooLarge, Security, InvalidParameter, InvalidState,
@@ -144,6 +162,13 @@ API codes stay **per context** and are pinned by JSON goldens:
 as `Code.text`, so messages stay byte-identical. The only visible text
 change is the old "ZRHP status 0x.." display. The default `group_remove`
 becomes `Unsupported`.
+
+The ZRHP adapter (`hub_ncp::coord::coord_error`, PR E) keeps every host
+core message: NCP statuses become `Backend` with `Code.text` = "NCP status
+…"; errors with a neutral meaning but ZRHP wording (`UnsupportedCommand`,
+`Busy`, link reset, driver stopped) become `Described`; host-local
+failures with dynamic text become `Other`. Callers classify with
+`CoordError::meaning()`.
 
 ### 2.4 Capabilities
 
@@ -202,7 +227,7 @@ pub trait NetworkAdmin: Send + Sync {        // debug_assert!: never on the app 
     fn set_tx_power(&self, dbm: i8) -> Result<i8, CoordError>;
     fn tx_power_setting(&self) -> Option<i8>;
     fn coordinator_tables(&self, routes: bool) -> TablesRead;          // per-table Result
-    fn zdo_request(&self, nwk: u16, cluster: u16, args: &[u8], t: Duration) -> Result<Vec<u8>, CoordError>;
+    fn zdo_request(&self, nwk: u16, cluster: u16, zdp: &[u8], t: Duration) -> Result<Vec<u8>, CoordError>; // zdp[0] = caller's TSN
     fn diagnostics(&self, groups: u8, reset: bool) -> Diagnostics;    // neutral struct; hub-app renders the JSON
     fn backup_export(&self, keys: bool, sink: &mut dyn BackupSink) -> Result<(), CoordError>;
     fn restore_encoder(&self) -> Result<Box<dyn RestoreEncoder>, CoordError>;

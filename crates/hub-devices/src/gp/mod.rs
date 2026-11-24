@@ -18,9 +18,10 @@ use serde_json::{Value as J, json};
 use crate::device::{Device, DeviceKind, GpState, Millis, ts};
 use crate::expr::Value;
 use crate::fingerprint::{EndpointFp, GpFingerprint};
+use crate::hub::control::{AnswerTo, GpRemoved, Then};
 use crate::hub::{ApiError, DKey, DevEnv, Hub, HubEvent, eval_trigger, set_value};
 use crate::model::{Binding, DeviceField, TriggerSource};
-use crate::transport::ZigbeeTransport;
+use crate::transport::{Request, ZigbeeTransport};
 use crate::zcl::PROFILE_GP;
 use types::{GpEvent, GpFrame, GpRequest, GpSinkRecord, GpdId, frame_result};
 
@@ -149,6 +150,8 @@ pub struct GpHubState {
     pub caps: BTreeMap<String, bindings::TargetCaps>,
     /// Outstanding remote requests by ZCL TSN.
     pub remote: BTreeMap<u8, bindings::RemoteWait>,
+    /// Remote answers that came before their request was accepted.
+    pub early: VecDeque<GpEvent>,
     /// Next binding ID.
     pub next_id: u32,
     /// Commissioning window.
@@ -205,6 +208,9 @@ fn fp_from_payload(
 impl<T: ZigbeeTransport> Hub<T> {
     /// GP events from the NCP.
     pub fn on_gp_event(&mut self, ev: GpEvent, now: Millis) {
+        let Some(ev) = self.gp_early(ev) else {
+            return;
+        };
         match ev {
             GpEvent::Frame(f) => self.gp_frame(f, now),
             GpEvent::Commissioning {
@@ -650,13 +656,15 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// Removes a GPD: its on-device bindings first, then the Sink Table
-    /// entry (`gp/devices/remove`).
+    /// entry, then (once the NCP took that) its record as `removed` says.
     pub(crate) fn gp_remove(
         &mut self,
         gpd_id: GpdId,
         send_remove: bool,
+        removed: GpRemoved,
         now: Millis,
-    ) -> Result<(), ApiError> {
+    ) -> Result<J, ApiError> {
+        let ticket = self.answer_ticket();
         let ids: Vec<u32> = self
             .gp
             .bindings
@@ -667,13 +675,12 @@ impl<T: ZigbeeTransport> Hub<T> {
         for b in ids {
             let _ = self.delete_binding(b, now);
         }
-        self.transport
-            .gp_request(GpRequest::SinkRemove {
-                gpd_id,
-                flags: u8::from(send_remove),
-            })
-            .map_err(|e| ApiError::new("busy", e.to_string()))?;
-        Ok(())
+        let req = GpRequest::SinkRemove {
+            gpd_id,
+            flags: u8::from(send_remove),
+        };
+        self.control(Request::Gp(req), Then::GpRemove(removed), Some(ticket), now);
+        self.answer(ticket)
     }
 
     /// `gp/commissioning/open`.
@@ -687,14 +694,49 @@ impl<T: ZigbeeTransport> Hub<T> {
         if duration_s > 600 {
             return Err(ApiError::new("invalid_value", "duration_s must be ≤ 600"));
         }
+        let ticket = self.answer_ticket();
+        self.gp_open(
+            duration_s,
+            involve_proxies,
+            exit_on_first_pairing,
+            Some(ticket),
+            now,
+        );
+        self.answer(ticket).map(drop)
+    }
+
+    /// `GP_SINK_COMMISSIONING` open; `answer` follows from it.
+    pub(crate) fn gp_open(
+        &mut self,
+        duration_s: u16,
+        involve_proxies: bool,
+        exit_on_first_pairing: bool,
+        answer: Option<AnswerTo>,
+        now: Millis,
+    ) {
         let flags = u8::from(involve_proxies) | (u8::from(exit_on_first_pairing) << 1);
-        self.transport
-            .gp_request(GpRequest::SinkCommissioning {
-                action: 1,
-                flags,
-                window_s: duration_s,
-            })
-            .map_err(|e| ApiError::new("busy", e.to_string()))?;
+        let req = GpRequest::SinkCommissioning {
+            action: 1,
+            flags,
+            window_s: duration_s,
+        };
+        let then = Then::GpOpen {
+            duration_s,
+            involve_proxies,
+            exit_on_first_pairing,
+            at: now,
+        };
+        self.control(Request::Gp(req), then, answer, now);
+    }
+
+    /// The NCP opened the commissioning window.
+    pub(crate) fn gp_window_opened(
+        &mut self,
+        duration_s: u16,
+        involve_proxies: bool,
+        exit_on_first_pairing: bool,
+        now: Millis,
+    ) {
         // The hub keeps its own deadline: an NCP image need not report
         // `EVT_GP_COMMISSIONING` (as for permit join, 14.2).
         self.gp.window = GpWindow {
@@ -705,23 +747,21 @@ impl<T: ZigbeeTransport> Hub<T> {
             exit_reason: 0,
         };
         self.gp_window_event(now);
-        Ok(())
     }
 
     /// `gp/commissioning/close`.
     pub fn gp_commissioning_close(&mut self, now: Millis) -> Result<(), ApiError> {
-        self.transport
-            .gp_request(GpRequest::SinkCommissioning {
-                action: 0,
-                flags: 0,
-                window_s: 0,
-            })
-            .map_err(|e| ApiError::new("busy", e.to_string()))?;
-        self.gp_window_closed(1, now);
-        Ok(())
+        let ticket = self.answer_ticket();
+        let req = GpRequest::SinkCommissioning {
+            action: 0,
+            flags: 0,
+            window_s: 0,
+        };
+        self.control(Request::Gp(req), Then::GpClose, Some(ticket), now);
+        self.answer(ticket).map(drop)
     }
 
-    fn gp_window_closed(&mut self, reason: u8, now: Millis) {
+    pub(crate) fn gp_window_closed(&mut self, reason: u8, now: Millis) {
         let w = &mut self.gp.window;
         w.open = false;
         w.deadline = None;
@@ -828,6 +868,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         &mut self,
         security_level: Option<u8>,
         communication_mode: Option<u8>,
+        now: Millis,
     ) -> Result<J, ApiError> {
         let level = security_level.unwrap_or(self.gp.sink.security_level);
         let mode = communication_mode.unwrap_or(self.gp.sink.communication_mode);
@@ -840,27 +881,33 @@ impl<T: ZigbeeTransport> Hub<T> {
                 "communication_mode must be 0–3",
             ));
         }
-        self.transport
-            .gp_request(GpRequest::SinkConfig {
-                mode: 1,
-                communication_mode: mode,
-                group: self.cfg.gp_group,
-                exit_mode: 0x02,
-                window_s: 180,
-                security_level: level,
-                groupcast_radius: 0,
-            })
-            .map_err(|e| ApiError::new("busy", e.to_string()))?;
-        self.gp.sink = GpSinkSettings {
+        let req = GpRequest::SinkConfig {
+            mode: 1,
+            communication_mode: mode,
+            group: self.cfg.gp_group,
+            exit_mode: 0x02,
+            window_s: 180,
+            security_level: level,
+            groupcast_radius: 0,
+        };
+        let s = GpSinkSettings {
             security_level: level,
             communication_mode: mode,
             from_api: true,
         };
+        let ticket = self.answer_ticket();
+        self.control(Request::Gp(req), Then::GpConfig(s), Some(ticket), now);
+        self.answer(ticket)
+    }
+
+    /// The sink settings written: kept, announced; the `gp/config` result.
+    pub(crate) fn gp_sink_set(&mut self, s: GpSinkSettings) -> J {
+        self.gp.sink = s;
         let body = self.gp_config();
         self.emit(HubEvent::Gp {
             kind: "gp/config".into(),
             body: body.clone(),
         });
-        Ok(body)
+        body
     }
 }

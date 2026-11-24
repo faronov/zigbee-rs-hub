@@ -1133,6 +1133,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-compact",
+ "hub-coord",
  "hub-core",
  "hub-devices",
  "hub-ncp",
@@ -1201,6 +1202,7 @@ dependencies = [
 name = "hub-ncp"
 version = "0.1.0"
 dependencies = [
+ "hub-coord",
  "hub-store",
  "log",
  "sha2",

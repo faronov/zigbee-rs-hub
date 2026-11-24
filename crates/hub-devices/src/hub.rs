@@ -18,7 +18,10 @@ use crate::generic::{GenericInput, generic_entities};
 use crate::gp::types::GpdId;
 use crate::model::*;
 use crate::resolve::{Catalog, FpEnv, HUB_FEATURES, MemoryCatalog, ResolveInput, resolve};
-use crate::transport::{ApsDst, ApsIndication, ApsRequest, TxOptions, ZigbeeTransport};
+use crate::transport::{
+    ApsDst, ApsIndication, ApsRequest, CoordError, Request, RequestId, Terminal, TxOptions,
+    ZigbeeTransport,
+};
 use crate::values;
 use crate::zcl::frame::{self as zf, global};
 use crate::zcl::{
@@ -26,6 +29,7 @@ use crate::zcl::{
 };
 use crate::zdo::{self, ZdoMessage};
 
+pub(crate) mod control;
 pub mod zgroups;
 
 /// Hub configuration.
@@ -155,6 +159,15 @@ pub enum HubEvent {
         ticket: u64,
         /// `Ok("ok")` or the error.
         result: Result<String, ApiError>,
+    },
+    /// Deferred result of a request that a control request decided
+    /// (permit join, groups, GP sink): the result as it would have been
+    /// answered at once.
+    Answer {
+        /// Ticket.
+        ticket: u64,
+        /// The result or the error.
+        result: Result<J, ApiError>,
     },
     /// Deferred result of a ZCL console request (14.7): the decoded answer.
     #[cfg(feature = "advanced")]
@@ -323,6 +336,8 @@ pub(crate) struct Pending {
     sent_at: Millis,
     retries: u8,
     req: ApsRequest,
+    /// The request in flight (a retry has its own).
+    rid: RequestId,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -381,6 +396,15 @@ pub struct Hub<T: ZigbeeTransport> {
     zdo_tsn: u8,
     pub(crate) pending: BTreeMap<(bool, u8), Pending>,
     pub(crate) tickets: BTreeMap<u64, Ticket>,
+    /// Control requests in flight.
+    pub(crate) controls: BTreeMap<RequestId, control::Control>,
+    /// Answer tickets issued.
+    answers: u64,
+    /// Times the events were drained.
+    drains: u64,
+    /// The answer ticket of the request being handled, when its result
+    /// follows later.
+    pub(crate) deferred: Option<u64>,
     /// Emit [`HubEvent::Frame`] for every frame (set while the API has
     /// `frames` subscribers).
     #[cfg(feature = "advanced")]
@@ -491,6 +515,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             zdo_tsn: 0,
             pending: BTreeMap::new(),
             tickets: BTreeMap::new(),
+            controls: BTreeMap::new(),
+            answers: 0,
+            drains: 0,
+            deferred: None,
             #[cfg(feature = "advanced")]
             frame_tap: false,
             next_ticket: 1,
@@ -548,6 +576,7 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Takes the outbox.
     pub fn drain_events(&mut self) -> Vec<HubEvent> {
+        self.drains += 1;
         std::mem::take(&mut self.events)
     }
 
@@ -738,7 +767,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         zdo: bool,
         now: Millis,
     ) {
-        if self.transport.aps_send(req.clone()).is_err() {
+        let Ok(rid) = self.transport.submit(Request::Aps(req.clone())) else {
             self.fail_purpose(
                 dev_id,
                 &purpose,
@@ -746,7 +775,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 now,
             );
             return;
-        }
+        };
         #[cfg(feature = "advanced")]
         self.tap_tx(dev_id, &req, now);
         if purpose != Purpose::None {
@@ -758,6 +787,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     sent_at: now,
                     retries: 0,
                     req,
+                    rid,
                 },
             );
         }
@@ -2172,50 +2202,57 @@ impl<T: ZigbeeTransport> Hub<T> {
     // ------------------------------------------------------------------
     // Tick: timeouts, availability, timers.
 
-    /// Delivery failures reported by the transport: one immediate retry
-    /// (the NCP already retried at APS level; a sleepy device's request
-    /// waits for its next frame), then the request fails with
-    /// `not_delivered` instead of waiting for the response timeout.
-    fn delivery_failures(&mut self, now: Millis) {
-        for f in self.transport.take_failures() {
-            let Some(k) = self
-                .pending
-                .iter()
-                .find(|(_, p)| p.req == f.req)
-                .map(|(k, _)| *k)
-            else {
-                continue; // answered meanwhile, or nothing waits for it
-            };
-            let Some(mut p) = self.pending.remove(&k) else {
-                continue;
-            };
-            let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
-            if sleepy {
-                if let Some(d) = self.devices.get_mut(&p.device) {
-                    d.queue.push_back(Queued {
-                        req: p.req,
-                        purpose: p.purpose,
-                        tsn: k.1,
-                    });
-                }
-                continue;
+    /// The final outcome of an APS request. A delivery failure: one
+    /// immediate retry (the NCP already retried at APS level; a sleepy
+    /// device's request waits for its next frame), then the request fails
+    /// with `not_delivered` instead of waiting for the response timeout.
+    /// Other outcomes leave it to the response.
+    fn aps_done(&mut self, id: RequestId, t: Terminal, now: Millis) {
+        let err = match &t {
+            Terminal::NotDelivered(e) => not_delivered(e),
+            Terminal::Refused(_) => ApiError::new(
+                "not_delivered",
+                "the NCP refused the request (queue full or network down)",
+            ),
+            _ => return,
+        };
+        let Some(k) = self
+            .pending
+            .iter()
+            .find(|(_, p)| p.rid == id)
+            .map(|(k, _)| *k)
+        else {
+            return; // answered meanwhile, or nothing waits for it
+        };
+        let Some(mut p) = self.pending.remove(&k) else {
+            return;
+        };
+        let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
+        if sleepy {
+            if let Some(d) = self.devices.get_mut(&p.device) {
+                d.queue.push_back(Queued {
+                    req: p.req,
+                    purpose: p.purpose,
+                    tsn: k.1,
+                });
             }
-            if p.retries == 0 && p.purpose != Purpose::Check {
-                p.retries = 1;
-                p.sent_at = now;
-                if self.transport.aps_send(p.req.clone()).is_ok() {
-                    self.pending.insert(k, p);
-                    continue;
-                }
-            }
-            let dev = p.device.clone();
-            self.fail_purpose(&dev, &p.purpose, not_delivered(&f), now);
+            return;
         }
+        if p.retries == 0 && p.purpose != Purpose::Check {
+            p.retries = 1;
+            p.sent_at = now;
+            if let Ok(rid) = self.transport.submit(Request::Aps(p.req.clone())) {
+                p.rid = rid;
+                self.pending.insert(k, p);
+                return;
+            }
+        }
+        let dev = p.device.clone();
+        self.fail_purpose(&dev, &p.purpose, err, now);
     }
 
     /// Advances timers.
     pub fn tick(&mut self, now: Millis) {
-        self.delivery_failures(now);
         // Request timeouts.
         let expired: Vec<(bool, u8)> = self
             .pending
@@ -2248,7 +2285,8 @@ impl<T: ZigbeeTransport> Hub<T> {
                             tsn: k.1,
                         });
                     }
-                } else if self.transport.aps_send(p.req.clone()).is_ok() {
+                } else if let Ok(rid) = self.transport.submit(Request::Aps(p.req.clone())) {
+                    p.rid = rid;
                     self.pending.insert(k, p);
                 }
                 continue;
@@ -2660,11 +2698,24 @@ impl<T: ZigbeeTransport> Hub<T> {
                         now,
                     );
                 }
-                let _ = self.transport.remove_device(ieee);
+                let req = Request::RemoveDevice {
+                    ieee,
+                    nwk: Some(nwk),
+                };
+                self.control(req, control::Then::Nothing, None, now);
                 self.nwk_index.remove(&nwk);
             }
-            DeviceKind::Gp { gpd_id } => self.gp_remove(gpd_id, true, now)?,
+            DeviceKind::Gp { gpd_id } => {
+                let removed = control::GpRemoved::Device(id.to_string());
+                return self.gp_remove(gpd_id, true, removed, now).map(drop);
+            }
         }
+        self.forget_device(id);
+        Ok(())
+    }
+
+    /// Drops a removed device, its entities and what waits for it.
+    pub(crate) fn forget_device(&mut self, id: &str) {
         if let Some(d) = self.devices.remove(id) {
             for e in &d.entities {
                 self.emit(HubEvent::EntityRemoved(e.uid.clone()));
@@ -2673,7 +2724,6 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.dispatch.remove(id);
         self.pending.retain(|_, p| p.device != id);
         self.emit(HubEvent::DeviceRemoved(id.to_string()));
-        Ok(())
     }
 
     /// Uploads (or replaces) a user definition; affected devices
@@ -2945,14 +2995,15 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 }
 
-/// The error of an undeliverable request.
-fn not_delivered(f: &crate::transport::ApsFailure) -> ApiError {
-    let message = match f.zb_status {
-        None => "the NCP refused the request (queue full or network down)".to_string(),
-        Some(s) => match crate::transport::zb_status_text(s, f.legacy_codes) {
-            Some(t) => format!("not delivered: {t} (zb_status 0x{s:02X})"),
-            None => format!("not delivered (zb_status 0x{s:02X})"),
+/// The error of an undeliverable request: the delivery status (ZRHP:
+/// `EVT_APS_DATA_CONFIRM.zb_status`, named in the NCP's numbering).
+fn not_delivered(e: &CoordError) -> ApiError {
+    let message = match e.meaning() {
+        CoordError::NoAck(c) | CoordError::Backend { code: c, .. } => match c.text {
+            Some(t) => format!("not delivered: {t} (zb_status 0x{:02X})", c.value),
+            None => format!("not delivered (zb_status 0x{:02X})", c.value),
         },
+        _ => format!("not delivered: {e}"),
     };
     ApiError::new("not_delivered", message)
 }

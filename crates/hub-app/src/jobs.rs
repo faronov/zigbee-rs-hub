@@ -1,7 +1,7 @@
 //! Background maintenance jobs: the board of running jobs per lane, their
-//! progress (estimated from time, refined by passes and by the NCP's
-//! optional `EVT_SCAN_PROGRESS`), cancellation, and the last result of each
-//! kind for clients that (re)connect while or after a job ran.
+//! progress (estimated from time, refined by passes and by the
+//! coordinator's optional scan progress), cancellation, and the last result
+//! of each kind for clients that (re)connect while or after a job ran.
 //!
 //! Two lanes: `heavy` (anything that uses the radio or rewrites the
 //! network: scans, map, channel change, backup/restore/reset) and `light`
@@ -19,11 +19,6 @@ use serde_json::Value as J;
 
 use crate::admin::{JobOut, Out};
 use crate::jw::{Jw, oom};
-
-/// Message ID of the optional `EVT_SCAN_PROGRESS` (NETWORK event, proposed:
-/// `u16 req_tid, u8 scan (0 energy, 1 active), u8 channel, u8 done, u8
-/// total, u8 networks_found`).
-pub const EVT_SCAN_PROGRESS: u16 = 0x018B;
 
 /// Results kept for `network/job/result`, all kinds together (the oldest
 /// go first; larger ones only go to the session that started the job).
@@ -153,12 +148,9 @@ impl Board {
         self.running.iter().filter(|r| r.background).map(Running::event).collect()
     }
 
-    /// `EVT_SCAN_PROGRESS` from the NCP: the fraction of the current pass
-    /// of the running scan.
-    pub fn ncp_progress(&mut self, payload: &[u8]) {
-        let (Some(&done), Some(&total)) = (payload.get(4), payload.get(5)) else {
-            return;
-        };
+    /// Scan progress from the coordinator (`done` of `total` channels):
+    /// the fraction of the current pass of the running scan.
+    pub fn scan_progress(&mut self, done: u8, total: u8) {
         if total == 0 {
             return;
         }
@@ -454,8 +446,8 @@ mod tests {
         assert_eq!(b.start(Lane::Heavy, "topology", true, 1, Duration::ZERO).unwrap_err().code, "busy");
         assert!(b.start(Lane::Light, "diagnostics", false, 1, Duration::ZERO).is_ok());
         b.get(job).unwrap().done = 2;
-        // EVT_SCAN_PROGRESS: tid, scan 0, channel 18, 8 of 16 channels.
-        b.ncp_progress(&[1, 0, 0, 18, 8, 16, 0]);
+        // 8 of 16 channels.
+        b.scan_progress(8, 16);
         let ev = &b.progress_events()[0];
         assert_eq!((ev["job"].as_u64(), ev["pass"].as_u64(), ev["progress"].as_f64()), (Some(job), Some(2), Some(0.625)));
         let list: J = serde_json::from_str(&b.list_frame(7).unwrap()).unwrap();

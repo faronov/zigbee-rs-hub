@@ -1,6 +1,7 @@
 //! Open ZigBee Coordinator Backup (`zigpy/open-coordinator-backup` v1, the
-//! format of zigpy/ZHA and zigbee-herdsman/Z2M; ZRHP spec 9.1/9.2) ⇄ ZRHP
-//! record streams (spec 9.3).
+//! format of zigpy/ZHA and zigbee-herdsman/Z2M; ZRHP spec 9.1/9.2) ⇄ the
+//! coordinator backend's backup items ([`BackupItem`]; the backend encodes
+//! them, ZRHP as record streams, spec 9.3).
 //!
 //! Encoding rules: IEEE, PAN ID, EPID and NWK addresses are big-endian hex
 //! (reversed from the wire), keys are hex in key-byte order. Import
@@ -14,13 +15,8 @@
 
 use std::fmt::Write as _;
 
+use hub_coord::{BackupChild, BackupDevice, BackupItem, BackupLinkKey, BackupSink, CoordError, RestoreEncoder};
 use serde_json::Value as J;
-use zigbee_zrhp::codec::{Reader, Wire, Writer};
-use zigbee_zrhp::records::{
-    ChildInfo, DeviceRecord, LinkBlock, NetworkKeyRecord, NetworkRecord, NodeRecord, RawRecords, Record, RsParamsRecord,
-    TcLinkKeyRecord, device_flags, record_type,
-};
-use zigbee_zrhp::types::Ieee;
 
 /// `metadata.format`.
 pub const FORMAT: &str = "zigpy/open-coordinator-backup";
@@ -29,11 +25,10 @@ pub const ZIGBEE_ALLIANCE_09: [u8; 16] = *b"ZigBeeAlliance09";
 /// APS margin when the backup has no TCLK frame counter (spec 9.4 rule 6).
 pub const UNKNOWN_APS_MARGIN: u32 = 1 << 20;
 
-/// A backup converted for `BKP_RESTORE_*`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A backup converted for the backend's restore.
 pub struct Restore {
-    /// Records (no `END`; the host core adds it).
-    pub stream: Vec<u8>,
+    /// The backend's encoding of the items so far.
+    pub encoder: Box<dyn RestoreEncoder>,
     /// The backup carries a TCLK frame counter (else use
     /// [`UNKNOWN_APS_MARGIN`]).
     pub tclk_counter_known: bool,
@@ -95,22 +90,16 @@ fn u32_of(o: &J, k: &str) -> Result<u32, String> {
     Ok(uint(o, k, 0)?.min(u64::from(u32::MAX)) as u32)
 }
 
-/// Append one record (TLV) to a stream.
-fn push(stream: &mut Vec<u8>, r: &Record<'_>) -> Result<(), String> {
-    let mut buf = [0u8; 64];
-    let mut w = Writer::new(&mut buf);
-    r.write(&mut w).map_err(|e| format!("encoding: {e:?}"))?;
-    let n = w.len();
-    stream.try_reserve(n).map_err(|_| "out of memory".to_string())?;
-    stream.extend_from_slice(&buf[..n]);
-    Ok(())
+/// Append one item to the restore.
+fn push(enc: &mut dyn RestoreEncoder, item: BackupItem) -> Result<(), String> {
+    enc.push(&item).map_err(|e| e.to_string())
 }
 
 /// Validate a backup (OCB JSON value, spec 9.1/9.2) and convert it into
-/// restore records (9.3). `devices` may be absent: a large backup's devices
-/// can follow in batches ([`add_devices`]), so no request needs the whole
-/// file in RAM.
-pub fn to_records(o: &J) -> Result<Restore, String> {
+/// restore items, encoded by `encoder`. `devices` may be absent: a large
+/// backup's devices can follow in batches ([`add_devices`]), so no request
+/// needs the whole file in RAM.
+pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>) -> Result<Restore, String> {
     let meta = o.get("metadata").ok_or("not an open coordinator backup (no metadata)")?;
     let (format, version) = (meta.get("format").and_then(J::as_str).unwrap_or(""), uint(meta, "version", 0)?);
     if format != FORMAT || version != 1 {
@@ -150,16 +139,16 @@ pub fn to_records(o: &J) -> Result<Restore, String> {
         Some(a) => be_wire(a, "tc_address")?,
         None => ieee,
     };
-    let tx_power = path(internal, &["tx_power"]).and_then(J::as_i64).map_or(0x7F, |p| p.clamp(-128, 127) as i8);
+    let tx_power = path(internal, &["tx_power"]).and_then(J::as_i64).map(|p| p.clamp(-128, 127) as i8);
     let mask = o
         .get("channel_mask")
         .and_then(J::as_array)
         .map_or(0, |a| a.iter().filter_map(J::as_u64).filter(|c| (11..=26).contains(c)).fold(0u32, |m, c| m | 1 << c));
-    let mut r = Restore { stream: Vec::new(), tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, channel, devices: Vec::new() };
-    push(&mut r.stream, &Record::Node(NodeRecord { ieee: Ieee(ieee), nwk: 0, logical_type: 0, flags: 1 }))?;
+    let mut r = Restore { encoder, tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, channel, devices: Vec::new() };
+    push(&mut *r.encoder, BackupItem::Node { ieee, ieee_override: true })?;
     push(
-        &mut r.stream,
-        &Record::Network(NetworkRecord {
+        &mut *r.encoder,
+        BackupItem::Network {
             pan_id,
             ext_pan_id: epid,
             channel,
@@ -168,33 +157,33 @@ pub fn to_records(o: &J) -> Result<Restore, String> {
             nwk_manager: 0,
             security_level: 5,
             tx_power,
-        }),
+        },
     )?;
     let seq = uint(nk, "sequence_number", 0)? as u8;
-    push(&mut r.stream, &Record::NetworkKey(NetworkKeyRecord { key, seq, tx_counter: u32_of(nk, "frame_counter")?, flags: 1 }))?;
+    push(&mut *r.encoder, BackupItem::NetworkKey { key, seq, tx_counter: u32_of(nk, "frame_counter")?, active: true })?;
     push(
-        &mut r.stream,
-        &Record::TcLinkKey(TcLinkKeyRecord {
+        &mut *r.encoder,
+        BackupItem::TcLinkKey {
             key: tclk_key,
-            tc_ieee: Ieee(tc_ieee),
+            tc_ieee,
             tx_counter: tclk_counter.map_or(0, |c| c.min(u64::from(u32::MAX)) as u32),
-            flags: 0,
-        }),
+            hashed: false,
+        },
     )?;
     let ss = o.get("stack_specific");
     if let Some(seed) = path(ss, &["ezsp", "hashed_tclk"]).and_then(J::as_str) {
-        push(&mut r.stream, &Record::EzspHashedTclk(key_bytes::<16>(seed, "hashed_tclk")?))?;
+        push(&mut *r.encoder, BackupItem::HashedTclkSeed(key_bytes::<16>(seed, "hashed_tclk")?))?;
     }
     if let Some(rs) = path(ss, &["zigbee_rs"]) {
         push(
-            &mut r.stream,
-            &Record::RsParams(RsParamsRecord {
+            &mut *r.encoder,
+            BackupItem::RsParams {
                 fc_stride: u32_of(rs, "frame_counter_stride")?,
                 table_epoch: u32_of(rs, "table_epoch")?,
                 nwk_fc_limit: u32_of(rs, "nwk_frame_counter_limit")?,
                 aps_fc_limit: u32_of(rs, "aps_frame_counter_limit")?,
-                flags: u8::from(rs.get("host_backed_tables").and_then(J::as_bool).unwrap_or(false)),
-            }),
+                host_backed_tables: rs.get("host_backed_tables").and_then(J::as_bool).unwrap_or(false),
+            },
         )?;
     }
     if let Some(devices) = o.get("devices").filter(|d| !d.is_null()) {
@@ -212,7 +201,7 @@ pub fn add_devices(r: &mut Restore, devices: &J) -> Result<(), String> {
         let nwk = d.get("nwk_address").and_then(J::as_str).map(|a| be_wire::<2>(a, "nwk_address").map(u16::from_le_bytes)).transpose()?;
         let is_child = d.get("is_child").and_then(J::as_bool).unwrap_or(true);
         let link = match d.get("link_key").filter(|l| l.is_object()) {
-            Some(l) => Some(LinkBlock {
+            Some(l) => Some(BackupLinkKey {
                 key: key_bytes::<16>(text(l, "key")?, "link_key")?,
                 key_seq: 0,
                 attrs: 2,
@@ -222,24 +211,14 @@ pub fn add_devices(r: &mut Restore, devices: &J) -> Result<(), String> {
             }),
             None => None,
         };
-        let mut flags = 0;
-        if nwk.is_some() {
-            flags |= device_flags::NWK_VALID;
-        }
-        if is_child {
-            flags |= device_flags::IS_CHILD | device_flags::CHILD_INFO;
-        }
-        if link.is_some() {
-            flags |= device_flags::LINK;
-        }
         push(
-            &mut r.stream,
-            &Record::Device(DeviceRecord {
-                ieee: Ieee(dev_ieee),
-                nwk: nwk.unwrap_or(0xFFFF),
-                flags,
+            &mut *r.encoder,
+            BackupItem::Device(BackupDevice {
+                ieee: dev_ieee,
+                nwk,
+                is_child,
                 // OCB has no capability: rx-off end device, 256 min (spec 9.3).
-                child: is_child.then_some(ChildInfo { capability: 0x80, timeout_exp: 8 }),
+                child: is_child.then_some(BackupChild { capability: 0x80, timeout_exp: 8 }),
                 link,
             }),
         )?;
@@ -249,7 +228,7 @@ pub fn add_devices(r: &mut Restore, devices: &J) -> Result<(), String> {
     Ok(())
 }
 
-/// Facts the export adds besides the NCP's records.
+/// Facts the export adds besides the NCP's items.
 #[derive(Debug, Clone, Default)]
 pub struct ExportInfo {
     /// `metadata.source` (`zigbee-rs-hub <version>`).
@@ -299,12 +278,12 @@ pub struct ExportSummary {
     pub complete: bool,
 }
 
-/// Why [`from_records`] failed.
+/// Why [`from_export`] failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportError {
     /// The output buffer could not be reserved.
     NoMemory,
-    /// The record stream is not a usable export.
+    /// The items are not a usable export.
     Invalid(String),
 }
 
@@ -320,48 +299,55 @@ impl From<&str> for ExportError {
     }
 }
 
-/// Append the backup file for a record stream from `BKP_EXPORT_*` to
-/// `out` (its room is reserved fallibly first).
-pub fn from_records(stream: &[u8], info: &ExportInfo, out: &mut String) -> Result<ExportSummary, ExportError> {
-    let mut node = None;
-    let mut network = None;
-    let mut nkey = None;
-    let mut tclk = None;
-    let mut rs = None;
-    let mut seed = None;
-    let mut devices: Vec<DeviceRecord> = Vec::new();
-    for item in RawRecords::new(stream) {
-        let (rtype, tlv) = item.map_err(|e| format!("record stream: {e:?}"))?;
-        if rtype == record_type::END {
-            break;
-        }
-        match Reader::new(tlv).read::<Record>() {
-            Ok(Record::Node(n)) => node = Some(n),
-            Ok(Record::Network(n)) => network = Some(n),
-            Ok(Record::NetworkKey(k)) => nkey = Some(k),
-            Ok(Record::TcLinkKey(k)) => tclk = Some(k),
-            Ok(Record::RsParams(p)) => rs = Some(p),
-            Ok(Record::EzspHashedTclk(s)) => seed = Some(s),
-            Ok(Record::Device(d)) => devices.push(d),
-            Ok(_) => {}
-            Err(e) => return Err(format!("record: {e:?}").into()),
-        }
+/// The items of a backup export (the last of each kind, every device), as
+/// the backend delivers them; [`from_export`] writes the file.
+#[derive(Debug, Default)]
+pub struct Export {
+    node: Option<BackupItem>,
+    network: Option<BackupItem>,
+    nkey: Option<BackupItem>,
+    tclk: Option<BackupItem>,
+    rs: Option<BackupItem>,
+    seed: Option<BackupItem>,
+    devices: Vec<BackupDevice>,
+}
+
+impl BackupSink for Export {
+    fn item(&mut self, item: &BackupItem) -> Result<(), CoordError> {
+        let slot = match item {
+            BackupItem::Node { .. } => &mut self.node,
+            BackupItem::Network { .. } => &mut self.network,
+            BackupItem::NetworkKey { .. } => &mut self.nkey,
+            BackupItem::TcLinkKey { .. } => &mut self.tclk,
+            BackupItem::RsParams { .. } => &mut self.rs,
+            BackupItem::HashedTclkSeed(_) => &mut self.seed,
+            BackupItem::Device(d) => {
+                self.devices.push(*d);
+                return Ok(());
+            }
+        };
+        *slot = Some(*item);
+        Ok(())
     }
-    let node = node.ok_or("no NODE record")?;
-    let network = network.ok_or("no NETWORK record")?;
+}
+
+/// Append the backup file for an export to `out` (its room is reserved
+/// fallibly first).
+pub fn from_export(export: Export, info: &ExportInfo, out: &mut String) -> Result<ExportSummary, ExportError> {
+    let Export { node, network, nkey, tclk, rs, seed, mut devices } = export;
+    let Some(BackupItem::Node { ieee: node_ieee, .. }) = node else {
+        return Err("no NODE record".into());
+    };
+    let Some(BackupItem::Network { pan_id, ext_pan_id, channel, channel_mask, nwk_update_id, security_level, tx_power, .. }) = network else {
+        return Err("no NETWORK record".into());
+    };
     for &(ieee, nwk) in &info.host_devices {
-        if ieee != node.ieee.0 && !devices.iter().any(|d| d.ieee.0 == ieee) {
-            devices.push(DeviceRecord {
-                ieee: Ieee(ieee),
-                nwk: nwk.unwrap_or(0xFFFF),
-                flags: if nwk.is_some() { device_flags::NWK_VALID } else { 0 },
-                child: None,
-                link: None,
-            });
+        if ieee != node_ieee && !devices.iter().any(|d| d.ieee == ieee) {
+            devices.push(BackupDevice { ieee, nwk, is_child: false, child: None, link: None });
         }
     }
     out.try_reserve(1200 + 230 * devices.len()).map_err(|_| ExportError::NoMemory)?;
-    let coord = be_hex(&node.ieee.0);
+    let coord = be_hex(&node_ieee);
     *out += "{\"metadata\":{\"format\":";
     *out += &js(FORMAT);
     *out += ",\"version\":1,\"source\":";
@@ -379,60 +365,60 @@ pub fn from_records(stream: &[u8], info: &ExportInfo, out: &mut String) -> Resul
         if info.groups.is_empty() { "" } else { ",\"groups\":" },
         info.groups
     );
-    if let Some(t) = &tclk {
+    if let Some(BackupItem::TcLinkKey { key, tc_ieee, tx_counter, .. }) = &tclk {
         let _ = write!(
             out,
             ",\"network\":{{\"tc_link_key\":{{\"key\":\"{}\",\"frame_counter\":{}}},\"tc_address\":\"{}\",\"nwk_manager\":\"0000\"}}",
-            hex(&t.key),
-            t.tx_counter,
-            be_hex(&t.tc_ieee.0)
+            hex(key),
+            tx_counter,
+            be_hex(tc_ieee)
         );
     }
-    if network.tx_power != 0x7F {
-        let _ = write!(out, ",\"tx_power\":{}", network.tx_power);
+    if let Some(p) = tx_power {
+        let _ = write!(out, ",\"tx_power\":{}", p);
     }
     if nkey.is_none() {
         *out += ",\"incomplete\":true";
     }
     *out += "}},\"stack_specific\":{";
     let mut first = true;
-    if let Some(p) = &rs {
+    if let Some(BackupItem::RsParams { fc_stride, table_epoch, nwk_fc_limit, aps_fc_limit, host_backed_tables }) = &rs {
         let _ = write!(
             out,
             "\"zigbee_rs\":{{\"version\":1,\"frame_counter_stride\":{},\"table_epoch\":{},\"nwk_frame_counter_limit\":{},\"aps_frame_counter_limit\":{},\"host_backed_tables\":{}}}",
-            p.fc_stride,
-            p.table_epoch,
-            p.nwk_fc_limit,
-            p.aps_fc_limit,
-            p.flags & 1 != 0
+            fc_stride,
+            table_epoch,
+            nwk_fc_limit,
+            aps_fc_limit,
+            host_backed_tables
         );
         first = false;
     }
-    if let Some(s) = &seed {
+    if let Some(BackupItem::HashedTclkSeed(s)) = &seed {
         let _ = write!(out, "{}\"ezsp\":{{\"hashed_tclk\":\"{}\"}}", if first { "" } else { "," }, hex(s));
     }
-    let channels: Vec<String> = (11..=26u8).filter(|c| network.channel_mask & (1 << c) != 0).map(|c| c.to_string()).collect();
+    let channels: Vec<String> = (11..=26u8).filter(|c| channel_mask & (1 << c) != 0).map(|c| c.to_string()).collect();
     let _ = write!(
         out,
         "}},\"coordinator_ieee\":\"{coord}\",\"pan_id\":\"{:04x}\",\"extended_pan_id\":\"{}\",\"nwk_update_id\":{},\"security_level\":{},\"channel\":{},\"channel_mask\":[{}],\"network_key\":",
-        network.pan_id,
-        be_hex(&network.ext_pan_id),
-        network.nwk_update_id,
-        network.security_level,
-        network.channel,
-        if channels.is_empty() { network.channel.to_string() } else { channels.join(",") }
+        pan_id,
+        be_hex(&ext_pan_id),
+        nwk_update_id,
+        security_level,
+        channel,
+        if channels.is_empty() { channel.to_string() } else { channels.join(",") }
     );
     match &nkey {
-        Some(k) => {
+        Some(BackupItem::NetworkKey { key, seq, tx_counter, .. }) => {
             let _ = write!(
                 out,
                 "{{\"key\":\"{}\",\"sequence_number\":{},\"frame_counter\":{}}}",
-                hex(&k.key),
-                k.seq,
-                k.tx_counter
+                hex(key),
+                seq,
+                tx_counter
             );
         }
-        None => *out += "null",
+        _ => *out += "null",
     }
     *out += ",\"devices\":[";
     let mut summary = ExportSummary { devices: devices.len(), link_keys: 0, complete: nkey.is_some() };
@@ -440,12 +426,15 @@ pub fn from_records(stream: &[u8], info: &ExportInfo, out: &mut String) -> Resul
         if i > 0 {
             out.push(',');
         }
-        let nwk = if d.flags & device_flags::NWK_VALID != 0 { format!("\"{:04x}\"", d.nwk) } else { "null".into() };
+        let nwk = match d.nwk {
+            Some(n) => format!("\"{n:04x}\""),
+            None => "null".into(),
+        };
         let _ = write!(
             out,
             "{{\"ieee_address\":\"{}\",\"nwk_address\":{nwk},\"is_child\":{}",
-            be_hex(&d.ieee.0),
-            d.flags & device_flags::IS_CHILD != 0
+            be_hex(&d.ieee),
+            d.is_child
         );
         if let Some(l) = &d.link {
             summary.link_keys += 1;
@@ -519,41 +508,70 @@ mod tests {
       "security_level":5,"channel":11,"channel_mask":[11],
       "network_key":{"key":"01030507090b0d0f00020406080a0c0d","sequence_number":0,"frame_counter":5000},"devices":[]}"#;
 
-    fn records(stream: &[u8]) -> Vec<Record<'_>> {
-        RawRecords::new(stream).flatten().map(|(_, t)| Reader::new(t).read::<Record>().unwrap()).collect()
+    /// A restore encoder that keeps the items.
+    #[derive(Clone, Default)]
+    struct Items(std::sync::Arc<std::sync::Mutex<Vec<BackupItem>>>);
+
+    impl RestoreEncoder for Items {
+        fn push(&mut self, item: &BackupItem) -> Result<(), CoordError> {
+            self.0.lock().unwrap().push(*item);
+            Ok(())
+        }
+
+        fn finish(self: Box<Self>) -> hub_coord::RestoreBlob {
+            hub_coord::RestoreBlob::default()
+        }
+    }
+
+    fn import(o: &J) -> Result<(Restore, Vec<BackupItem>), String> {
+        let items = Items::default();
+        let r = to_restore(o, Box::new(items.clone()))?;
+        let list = items.0.lock().unwrap().clone();
+        Ok((r, list))
+    }
+
+    fn export(items: &[BackupItem], info: &ExportInfo) -> (ExportSummary, String) {
+        let mut e = Export::default();
+        for i in items {
+            e.item(i).unwrap();
+        }
+        let mut text = String::new();
+        let summary = from_export(e, info, &mut text).unwrap();
+        (summary, text)
     }
 
     #[test]
-    fn zigpy_backup_becomes_records_with_wire_byte_order() {
+    fn zigpy_backup_becomes_items_with_wire_byte_order() {
         let o: J = serde_json::from_str(ZIGPY).unwrap();
-        let r = to_records(&o).unwrap();
+        let (r, items) = import(&o).unwrap();
         assert!(r.tclk_counter_known);
         assert_eq!(r.coordinator_ieee, [0x78, 0x56, 0x34, 0x12, 0x00, 0x4b, 0x12, 0x00]);
         assert_eq!((r.pan_id, r.channel), (0x1A62, 15));
-        let recs = records(&r.stream);
-        assert!(matches!(&recs[1], Record::Network(n) if n.pan_id == 0x1A62 && n.channel_mask == (1 << 15 | 1 << 20 | 1 << 25) && n.nwk_update_id == 2 && n.tx_power == 4));
-        assert!(matches!(&recs[2], Record::NetworkKey(k) if k.key[0] == 0x37 && k.key[15] == 0xab && k.seq == 1 && k.tx_counter == 112_233));
-        assert!(matches!(&recs[3], Record::TcLinkKey(k) if k.key == ZIGBEE_ALLIANCE_09 && k.tx_counter == 4096));
-        let Record::Device(d) = &recs[4] else { panic!() };
-        assert_eq!((d.ieee.0[0], d.nwk), (0x5b, 0x4D32));
-        assert_eq!(d.flags, device_flags::NWK_VALID | device_flags::IS_CHILD | device_flags::CHILD_INFO | device_flags::LINK);
-        assert_eq!(d.link.as_ref().unwrap().rx_floor, 6);
-        let Record::Device(d) = &recs[5] else { panic!() };
-        assert_eq!((d.flags, d.nwk), (0, 0xFFFF), "nwk null, not a child, no key");
-        let Record::Device(d) = &recs[6] else { panic!() };
-        assert_eq!(d.nwk, 0x0ABC, "unpadded NWK, is_child defaults to true");
-        assert!(d.flags & device_flags::IS_CHILD != 0);
+        assert_eq!(items[0], BackupItem::Node { ieee: r.coordinator_ieee, ieee_override: true });
+        assert!(matches!(items[1], BackupItem::Network { pan_id: 0x1A62, channel_mask, nwk_update_id: 2, tx_power: Some(4), .. } if channel_mask == (1 << 15 | 1 << 20 | 1 << 25)));
+        assert!(matches!(items[2], BackupItem::NetworkKey { key, seq: 1, tx_counter: 112_233, active: true } if key[0] == 0x37 && key[15] == 0xab));
+        assert!(matches!(items[3], BackupItem::TcLinkKey { key: ZIGBEE_ALLIANCE_09, tx_counter: 4096, hashed: false, .. }));
+        let BackupItem::Device(d) = items[4] else { panic!() };
+        assert_eq!((d.ieee[0], d.nwk), (0x5b, Some(0x4D32)));
+        assert_eq!(d.child, Some(BackupChild { capability: 0x80, timeout_exp: 8 }));
+        let l = d.link.unwrap();
+        assert_eq!((l.key[0], l.key_seq, l.attrs, l.origin, l.tx_counter, l.rx_floor), (0x0f, 0, 2, 3, 120, 6));
+        let BackupItem::Device(d) = items[5] else { panic!() };
+        assert_eq!(d, BackupDevice { ieee: d.ieee, nwk: None, is_child: false, child: None, link: None }, "nwk null, not a child, no key");
+        let BackupItem::Device(d) = items[6] else { panic!() };
+        assert_eq!(d.nwk, Some(0x0ABC), "unpadded NWK");
+        assert!(d.is_child, "is_child defaults to true");
         assert_eq!(r.devices.len(), 3);
     }
 
     #[test]
     fn z2m_backup_without_tclk_uses_the_default_and_the_large_margin() {
         let o: J = serde_json::from_str(Z2M).unwrap();
-        let r = to_records(&o).unwrap();
+        let (r, items) = import(&o).unwrap();
         assert!(!r.tclk_counter_known);
         assert_eq!(r.pan_id, 0x0A62, "left-padded PAN ID");
-        let recs = records(&r.stream);
-        assert!(matches!(&recs[3], Record::TcLinkKey(k) if k.key == ZIGBEE_ALLIANCE_09 && k.tx_counter == 0 && k.tc_ieee.0 == r.coordinator_ieee));
+        assert!(matches!(items[1], BackupItem::Network { tx_power: None, .. }));
+        assert_eq!(items[3], BackupItem::TcLinkKey { key: ZIGBEE_ALLIANCE_09, tc_ieee: r.coordinator_ieee, tx_counter: 0, hashed: false });
     }
 
     #[test]
@@ -567,14 +585,14 @@ mod tests {
             ("zigpy/open-coordinator-backup", "something/else"),
         ] {
             let o: J = serde_json::from_str(&ZIGPY.replace(from, to)).unwrap();
-            assert!(to_records(&o).is_err(), "{to}");
+            assert!(import(&o).is_err(), "{to}");
         }
     }
 
     #[test]
     fn export_round_trips_through_import() {
         let o: J = serde_json::from_str(ZIGPY).unwrap();
-        let r = to_records(&o).unwrap();
+        let (r, a) = import(&o).unwrap();
         let info = ExportInfo {
             source: "zigbee-rs-hub 0.1.1".into(),
             creation_time: rfc3339(1_700_000_000),
@@ -584,8 +602,7 @@ mod tests {
             host_devices: vec![([9; 8], Some(0x1234)), (r.devices[0].0, Some(0x4D32))],
             groups: r#"[{"id":1,"name":"Kitchen","members":[]}]"#.into(),
         };
-        let mut text = String::new();
-        let summary = from_records(&r.stream, &info, &mut text).unwrap();
+        let (summary, text) = export(&a, &info);
         assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true });
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["metadata"]["internal"]["creation_time"], "2023-11-14T22:13:20+00:00");
@@ -596,10 +613,8 @@ mod tests {
         assert_eq!(v["devices"][1]["nwk_address"], J::Null);
         assert_eq!(v["devices"][3]["ieee_address"], "0909090909090909");
         let back: J = serde_json::from_str(&text).unwrap();
-        let r2 = to_records(&back).unwrap();
-        // Same records apart from the host-only device.
-        let a = records(&r.stream);
-        let b = records(&r2.stream);
+        let (_, b) = import(&back).unwrap();
+        // Same items apart from the host-only device.
         assert_eq!(&a[..], &b[..a.len()]);
         assert_eq!(b.len(), a.len() + 1);
     }
@@ -607,18 +622,28 @@ mod tests {
     #[test]
     fn export_without_keys_is_marked_incomplete() {
         let o: J = serde_json::from_str(ZIGPY).unwrap();
-        let r = to_records(&o).unwrap();
-        let stream: Vec<u8> = RawRecords::new(&r.stream)
-            .flatten()
-            .filter(|(t, _)| *t != record_type::NETWORK_KEY && *t != record_type::TC_LINK_KEY)
-            .flat_map(|(_, tlv)| tlv.to_vec())
-            .collect();
-        let mut text = String::new();
-        let summary = from_records(&stream, &ExportInfo::default(), &mut text).unwrap();
+        let (_, items) = import(&o).unwrap();
+        let items: Vec<BackupItem> =
+            items.into_iter().filter(|i| !matches!(i, BackupItem::NetworkKey { .. } | BackupItem::TcLinkKey { .. })).collect();
+        let (summary, text) = export(&items, &ExportInfo::default());
         assert!(!summary.complete);
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["network_key"], J::Null);
         assert_eq!(v["metadata"]["internal"]["incomplete"], true);
-        assert!(to_records(&serde_json::from_str::<J>(&text).unwrap()).is_err());
+        assert!(import(&serde_json::from_str::<J>(&text).unwrap()).is_err());
+    }
+
+    #[test]
+    fn export_needs_the_node_and_the_network() {
+        let o: J = serde_json::from_str(ZIGPY).unwrap();
+        let (_, items) = import(&o).unwrap();
+        for (skip, why) in [(0, "no NODE record"), (1, "no NETWORK record")] {
+            let mut e = Export::default();
+            for (_, i) in items.iter().enumerate().filter(|(n, _)| *n != skip) {
+                e.item(i).unwrap();
+            }
+            let r = from_export(e, &ExportInfo::default(), &mut String::new());
+            assert_eq!(r, Err(ExportError::Invalid(why.into())));
+        }
     }
 }

@@ -104,7 +104,7 @@ fn kinds(events: &[HubEvent]) -> Vec<String> {
 }
 
 fn kitchen(hub: &mut Hub<MockTransport>, sim: &mut Sim, t: u64) {
-    let g = hub.group_create("Kitchen", None, true).unwrap();
+    let g = hub.group_create("Kitchen", None, true, t).unwrap();
     assert_eq!(g["id"], 1);
     assert!(
         hub.transport.sent.contains(&Sent::Group(1, 1)),
@@ -335,7 +335,7 @@ fn delete_group_leaves_members_and_hub_membership() {
     assert!(hub.groups_list().is_empty());
     assert!(kinds(&hub.drain_events()).contains(&"group_removed".to_string()));
     // The next group reuses the ID.
-    assert_eq!(hub.group_create("Hall", None, false).unwrap()["id"], 1);
+    assert_eq!(hub.group_create("Hall", None, false, T0).unwrap()["id"], 1);
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn membership_read_reconciles_and_failed_add() {
     let (mut hub, mut sim) = setup();
     sim.dev(L2).groups.insert((1, 0x0007));
     sim.dev(L1).group_capacity = 0;
-    hub.group_create("Existing", Some(7), false).unwrap();
+    hub.group_create("Existing", Some(7), false, T0).unwrap();
     hub.group_add_member(7, ID1, 11, T0).unwrap();
     sim.run(&mut hub, T0);
     let m = &hub.groups_list()[0]["members"][0];
@@ -368,11 +368,13 @@ fn membership_read_reconciles_and_failed_add() {
     hub.group_remove_member(7, ID1, 11, false, T0).unwrap();
     assert_eq!(hub.groups_list()[0]["members"].as_array().unwrap().len(), 1);
     assert_eq!(
-        hub.group_create("x", Some(7), true).unwrap_err().code,
+        hub.group_create("x", Some(7), true, T0).unwrap_err().code,
         "invalid_value"
     );
     assert_eq!(
-        hub.group_create("x", Some(0xFFF8), true).unwrap_err().code,
+        hub.group_create("x", Some(0xFFF8), true, T0)
+            .unwrap_err()
+            .code,
         "invalid_value"
     );
 }
@@ -474,7 +476,7 @@ fn bindings_on_a_sleepy_remote_wait_for_it() {
 #[test]
 fn persisted_groups_resend_what_was_not_confirmed() {
     let (mut hub, mut sim) = setup();
-    hub.group_create("Kitchen", None, true).unwrap();
+    hub.group_create("Kitchen", None, true, T0).unwrap();
     hub.group_add_member(1, ID1, 11, T0).unwrap();
     sim.run(&mut hub, T0);
     sim.dev(L2).responsive = false;
@@ -501,7 +503,7 @@ fn persisted_groups_resend_what_was_not_confirmed() {
     for (k, v) in &records {
         hub2.zg_import(k, v).unwrap();
     }
-    assert_eq!(hub2.groups_resync(), 1);
+    assert_eq!(hub2.groups_resync(T0 + 200_000), 1);
     assert!(hub2.transport.sent.contains(&Sent::Group(1, 1)));
     sim.dev(L2).responsive = true;
     sim.log.clear();
@@ -638,4 +640,53 @@ fn api_requests_snapshot_and_group_devices() {
     assert_eq!(r["success"], true);
     sim.run(&mut hub, T0 + 2000);
     assert!(hub.groups_list().is_empty());
+}
+
+#[test]
+fn configure_group_step_follows_the_membership_outcome() {
+    use crate::device::InterviewStep;
+    use crate::model::LayerSource;
+    use crate::testutil::yaml::load_definition;
+    use crate::transport::{CoordError, Reply, Request, Terminal};
+    let def = "zdef: 1\nid: test/gr1\nrevision: 1\nvendor: Test\nmodel: GR1\n\
+               match:\n  - {model: GR1}\nconfigure:\n  - group: {group: 0x0042}\n";
+    let mut cat = MemoryCatalog::default();
+    cat.insert(load_definition(def, LayerSource::Catalog).unwrap());
+    let mut hub = hub_with(&[]);
+    hub.set_catalog(Box::new(cat), T0);
+    hub.transport.manual = true;
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(REMOTE, 0x3001, LogicalType::Router, true, 0x1234)
+            .endpoint(1, 0x0104, 0x0820, &[0x0000], &[0x0006])
+            .basic("Test", "GR1", 0x01),
+    );
+    sim.join(&mut hub, REMOTE, T0);
+    let group_req = |hub: &mut Hub<MockTransport>| {
+        let i = hub
+            .transport
+            .open
+            .iter()
+            .position(|(_, r)| matches!(r, Request::Group { group: 0x0042, .. }))
+            .expect("membership request");
+        hub.transport.open.remove(i).0
+    };
+    let key = "group:1:0042";
+    // The step waits for the NCP's answer.
+    let id = group_req(&mut hub);
+    let d = hub.device(IDR).unwrap();
+    assert_eq!(d.interview, InterviewStep::Configure);
+    assert!(!d.diag.configure.contains_key(key));
+    hub.on_outcome(id, Terminal::Refused(CoordError::Busy).into(), T0);
+    let d = hub.device(IDR).unwrap();
+    assert_eq!(d.diag.configure[key], "FAILURE");
+    assert!(d.warnings.contains(&"configure_failed".to_string()));
+    // Retried after the back-off; done once the NCP took it.
+    hub.tick(T0 + 61_000);
+    let id = group_req(&mut hub);
+    hub.on_outcome(id, Terminal::Done(Reply::None).into(), T0 + 61_000);
+    let d = hub.device(IDR).unwrap();
+    assert_eq!(d.diag.configure[key], "SUCCESS");
+    assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+    assert_eq!(d.interview, InterviewStep::Done);
 }

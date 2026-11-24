@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use crate::device::{Device, InterviewStep, Millis};
+use crate::hub::control::Then;
 use crate::hub::{Hub, HubEvent, OpKind, OpRun, Purpose};
 use crate::model::*;
-use crate::transport::ZigbeeTransport;
+use crate::transport::{Request, ZigbeeTransport};
 use crate::values;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
 use crate::zcl::{FrameType, PROFILE_GP, TypedValue, ZclFrame, ZclType, ZclValue, cluster as cl};
@@ -589,19 +590,17 @@ impl<T: ZigbeeTransport> Hub<T> {
                     self.send_zcl(id, ep, cluster, f, purpose, now);
                 }
                 OpKind::Group { ep, group } => {
-                    let ok = self.transport.group_add(ep, group).is_ok();
-                    self.configure_done(
-                        id,
-                        &key,
-                        ok,
-                        if ok {
-                            "SUCCESS".into()
-                        } else {
-                            "FAILURE".into()
-                        },
-                        now,
-                    );
-                    continue;
+                    // `configure_done` follows the outcome.
+                    let req = Request::Group {
+                        endpoint: ep,
+                        group,
+                        add: true,
+                    };
+                    let then = Then::Configure {
+                        device: id.to_string(),
+                        key,
+                    };
+                    self.control(req, then, None, now);
                 }
             }
             return;

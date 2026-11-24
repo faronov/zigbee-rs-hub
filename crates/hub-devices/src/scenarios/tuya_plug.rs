@@ -150,7 +150,7 @@ fn plug_command_without_answer_times_out_with_an_error() {
 
 #[test]
 fn plug_command_fails_fast_when_not_delivered() {
-    use crate::transport::ApsFailure;
+    use crate::transport::zrhp_not_delivered;
     let (mut hub, mut sim) = joined();
     let sw = format!("{ID}:1:switch");
     sim.dev(IEEE).responsive = false;
@@ -159,21 +159,18 @@ fn plug_command_fails_fast_when_not_delivered() {
     let ack = hub
         .entity_command(&sw, "turn_on", &json!({}), T0 + 1000)
         .unwrap();
-    let fail = |hub: &mut Hub<MockTransport>| {
-        let sent = hub.transport.aps().into_iter().cloned().collect::<Vec<_>>();
-        assert_eq!(sent.len(), 1);
+    let first = hub.transport.last_id().unwrap();
+    let fail = |hub: &mut Hub<MockTransport>, now| {
+        assert_eq!(hub.transport.aps().len(), 1);
         hub.transport.take();
-        hub.transport.failures.push(ApsFailure {
-            req: sent[0].clone(),
-            zb_status: Some(0xD0),
-            legacy_codes: false,
-        });
+        let id = hub.transport.last_id().unwrap();
+        hub.on_outcome(id, zrhp_not_delivered(0xD0, false).into(), now);
     };
     // The first failure retries at once, the second fails the command.
-    fail(&mut hub);
+    fail(&mut hub, T0 + 1500);
     hub.tick(T0 + 1500);
     assert_eq!(result_of(&hub.drain_events(), ack.ticket), None);
-    fail(&mut hub);
+    fail(&mut hub, T0 + 2000);
     hub.tick(T0 + 2000);
     let e = result_of(&hub.drain_events(), ack.ticket)
         .expect("failed fast")
@@ -181,11 +178,42 @@ fn plug_command_fails_fast_when_not_delivered() {
     assert_eq!(e.code, "not_delivered");
     assert!(e.message.contains("no route"), "{}", e.message);
     // A failure of a request nobody waits for any more is ignored.
-    hub.transport.failures.push(ApsFailure {
-        req: sim.aps()[0].clone(),
-        zb_status: Some(0xA7),
-        legacy_codes: false,
-    });
+    hub.on_outcome(first, zrhp_not_delivered(0xA7, false).into(), T0 + 2500);
     hub.tick(T0 + 2500);
     assert!(hub.transport.aps().is_empty());
+}
+
+#[test]
+fn stale_failure_of_an_identical_request_spares_its_retry() {
+    use crate::transport::zrhp_not_delivered;
+    let (mut hub, mut sim) = joined();
+    let sw = format!("{ID}:1:switch");
+    sim.dev(IEEE).responsive = false;
+    hub.transport.take();
+    hub.drain_events();
+    let ack = hub
+        .entity_command(&sw, "turn_on", &json!({}), T0 + 1000)
+        .unwrap();
+    let first = hub.transport.last_id().unwrap();
+    let sent = hub.transport.take();
+    // No answer: the response timeout re-sends the same bytes.
+    hub.tick(T0 + 9500);
+    assert_eq!(hub.transport.take(), sent);
+    let retry = hub.transport.last_id().unwrap();
+    assert_ne!(first, retry);
+    // The first send's failure arrives late: it is not the retry's.
+    hub.on_outcome(first, zrhp_not_delivered(0xD0, false).into(), T0 + 9600);
+    hub.tick(T0 + 9600);
+    assert_eq!(result_of(&hub.drain_events(), ack.ticket), None);
+    assert!(hub.transport.aps().is_empty(), "no extra retry");
+    // The retry's own failure fails the command (it was retried once).
+    hub.on_outcome(retry, zrhp_not_delivered(0xD0, false).into(), T0 + 9700);
+    let e = result_of(&hub.drain_events(), ack.ticket)
+        .expect("failed fast")
+        .unwrap_err();
+    assert_eq!(e.code, "not_delivered");
+    assert_eq!(
+        e.message,
+        "not delivered: no route to the device (zb_status 0xD0)"
+    );
 }
