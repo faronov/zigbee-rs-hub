@@ -703,9 +703,10 @@ zrhp = ["dep:hub-ncp"]
   without hub-ncp or zigbee-zrhp; the `hub-app-ezsp` job (both backends,
   the EZSP-only app and its tree, the hubctl end to end).
 - **Size** (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths,
-  against `main` 9efb313): app image +2,848 B (2,787,552 → 2,790,400 B;
-  `.flash.text` +2,668 B, `.flash.rodata` +176 B, `.dram0.data` +16 B;
-  IRAM and bss unchanged). 857 B of it is a second copy of a BTreeMap
+  against `main` 9efb313): app image +3,312 B (2,787,552 → 2,790,864 B;
+  `.flash.text` +3,076 B, `.flash.rodata` +224 B, `.dram0.data` +16 B;
+  IRAM and bss unchanged); +464 B of it is the engine's handling of device
+  leaves, the rest (+2,848 B) the boundary. 857 B is a second copy of a BTreeMap
   rebalancing instance (`bulk_steal_left`/`_right`) that hub-store's
   `HostState::apply` now calls instead of the copy it shared with
   hub-devices (LTO's choice; no hub-store code changed). The rest is the
