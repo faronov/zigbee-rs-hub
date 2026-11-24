@@ -60,3 +60,6 @@ mod tests_baseline;
 mod tests_groups;
 #[cfg(all(test, feature = "zrhp"))]
 mod tests_owner;
+// One suite on both backends (ZRHP and EZSP, simulated NCPs).
+#[cfg(all(test, feature = "zrhp", feature = "ezsp"))]
+mod tests_backends;
