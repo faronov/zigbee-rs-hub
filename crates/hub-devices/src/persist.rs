@@ -6,7 +6,8 @@
 //! descriptions, colour capabilities, thermostat limits, metering and
 //! electrical scaling: [`persistent_value`]), the self-description fragment
 //! (as zdef CBOR, decoded again on restore), user settings (name, disabled,
-//! pinned definition, hub options, entity name/enable overrides), the
+//! pinned definition, hub options, entity name/enable/reporting
+//! overrides), the
 //! configure hash and results (so a restart does not reconfigure) and the GP
 //! sink record.
 //!
@@ -66,6 +67,10 @@ pub struct EntitySnap {
     /// Enable override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Reporting overrides by part (`""`: the own value); absent in
+    /// snapshots of earlier builds, ignored by them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub report: BTreeMap<String, crate::reporting::ReportSetting>,
 }
 
 /// GP specifics.
@@ -190,11 +195,17 @@ impl DeviceSnapshot {
             entities: d
                 .entities
                 .iter()
-                .filter(|e| !e.orphaned && (e.user_name.is_some() || e.user_enabled.is_some()))
+                .filter(|e| {
+                    !e.orphaned
+                        && (e.user_name.is_some()
+                            || e.user_enabled.is_some()
+                            || !e.user_report.is_empty())
+                })
                 .map(|e| EntitySnap {
                     uid: e.uid.clone(),
                     name: e.user_name.clone(),
                     enabled: e.user_enabled,
+                    report: e.user_report.clone(),
                 })
                 .collect(),
         }
@@ -305,6 +316,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if let Some(e) = d.entities.iter_mut().find(|e| e.uid == o.uid) {
                     e.user_name = o.name;
                     e.user_enabled = o.enabled;
+                    e.user_report = o.report;
                 }
             }
         }

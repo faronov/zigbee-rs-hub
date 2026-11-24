@@ -226,6 +226,18 @@ pub enum Purpose {
     },
     /// A groups, scenes or bindings request (14.9).
     Group(zgroups::ZgOp),
+    /// Read Reporting Configuration of `entities/reporting` (`ticket`:
+    /// its answer; `None` for a sleeping device, answered `queued`).
+    Reporting {
+        /// Answer ticket.
+        ticket: Option<u64>,
+        /// Device endpoint.
+        ep: u8,
+        /// Cluster.
+        cluster: u16,
+        /// Attributes asked.
+        attrs: Vec<u16>,
+    },
     /// No answer expected/tracked.
     None,
 }
@@ -405,6 +417,10 @@ pub struct Hub<T: ZigbeeTransport> {
     pub features: Vec<&'static str>,
     /// Groups, scenes and bindings (14.9).
     pub zg: zgroups::ZgState,
+    /// Global reporting defaults (5.2).
+    pub(crate) report_defaults: crate::reporting::ReportDefaults,
+    /// Reporting readbacks in progress by answer ticket.
+    pub(crate) reporting_reads: BTreeMap<u64, crate::reporting::ReportingRead>,
 }
 
 /// The ExprEnv of one device.
@@ -490,6 +506,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             gp_last_frame: None,
             features: HUB_FEATURES.to_vec(),
             zg: Default::default(),
+            report_defaults: Default::default(),
+            reporting_reads: BTreeMap::new(),
         }
     }
 
@@ -1124,7 +1142,12 @@ impl<T: ZigbeeTransport> Hub<T> {
         let gp_seen = d.gp.is_some();
         let res = {
             let attrs = &d.attrs;
-            let gen_zb = |power: PowerKind| generic_entities(&fp, &GenericInput { attrs, power });
+            let defaults = &self.report_defaults;
+            let gen_zb = |power: PowerKind| {
+                let mut v = generic_entities(&fp, &GenericInput { attrs, power });
+                defaults.apply(&mut v);
+                v
+            };
             let gen_gp = |_p: PowerKind| crate::gp::generic::gp_generic_entities(&fp, attrs);
             let generic: &dyn Fn(PowerKind) -> Vec<EntityDef> =
                 if gp_seen { &gen_gp } else { &gen_zb };
@@ -1185,6 +1208,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                         orphaned: false,
                         user_name: None,
                         user_enabled: None,
+                        user_report: BTreeMap::new(),
                     });
                 }
             }
@@ -1487,6 +1511,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
                 self.complete_tsn(id, h.tsn, Status::SUCCESS, now);
             }
+            (FrameType::Global, global::READ_REPORTING_CONFIG_RSP) => {
+                needs_default_rsp = false;
+                self.reporting_rsp(id, ep, ind.cluster, h.tsn, &frame.payload, now);
+            }
             (FrameType::Global, global::DEFAULT_RSP) => {
                 needs_default_rsp = false;
                 if let Ok((_, st)) = zf::parse_default_rsp(&frame.payload) {
@@ -1638,7 +1666,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.send_zcl(id, ep, cl::TIME, f, Purpose::None, now);
     }
 
-    fn take_pending(&mut self, id: &str, tsn: u8) -> Option<Pending> {
+    pub(crate) fn take_pending(&mut self, id: &str, tsn: u8) -> Option<Pending> {
         let p = self.pending.remove(&(false, tsn))?;
         if p.device == id {
             Some(p)
@@ -1664,6 +1692,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             ),
             Purpose::Configure(key) => self.configure_done(id, &key, true, st.name().into(), now),
             Purpose::Group(op) => self.zg_status(id, op, st),
+            r @ Purpose::Reporting { .. } => self.reporting_failed(id, &r, Ok(st), now),
             _ => {}
         }
     }
@@ -2265,6 +2294,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }),
             Purpose::GpProbe(nwk) => self.gp_probe_result(*nwk, &[], now),
             Purpose::Group(op) => self.zg_failed(id, op.clone(), err),
+            Purpose::Reporting { .. } => self.reporting_failed(id, purpose, Err(err), now),
             _ => {}
         }
     }
@@ -2342,7 +2372,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .find_map(|e| {
                     e.r.def
                         .values()
-                        .find_map(|(_, v)| match (&v.binding, v.report) {
+                        .find_map(|(p, v)| match (&v.binding, e.report_of(p, v)) {
                             (Binding::Zcl(z), Some(ReportSpec::Config { max, .. }))
                                 if z.cluster == c && z.attr == a =>
                             {
@@ -2398,7 +2428,12 @@ impl<T: ZigbeeTransport> Hub<T> {
             .entities
             .iter()
             .filter(|e| !e.orphaned)
-            .flat_map(|e| e.r.def.values().map(|(_, v)| v.report).collect::<Vec<_>>())
+            .flat_map(|e| {
+                e.r.def
+                    .values()
+                    .map(|(p, v)| e.report_of(p, v))
+                    .collect::<Vec<_>>()
+            })
             .filter_map(|r| match r {
                 Some(ReportSpec::Config { max, .. }) => Some(u64::from(max)),
                 _ => None,

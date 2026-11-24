@@ -66,17 +66,12 @@ pub fn build_ops(
         );
     }
     // Reporting configs by (ep, cluster, mfr).
-    let sleepy_cap = (d.power() != PowerKind::Mains || d.sleepy()).then(|| {
-        d.resolution
-            .device
-            .checkin_s
-            .map_or(21600, |c| c.min(21600)) as u16
-    });
+    let sleepy_cap = crate::reporting::max_cap(d);
     let mut reports: BTreeMap<(u8, u16, Option<u16>), Vec<ReportingConfig>> = BTreeMap::new();
     let mut reads: BTreeMap<(u8, u16, Option<u16>), Vec<u16>> = BTreeMap::new();
     let mut binds: Vec<(u8, u16)> = Vec::new();
     for e in d.entities.iter().filter(|e| !e.orphaned) {
-        for (_, v) in e.r.def.values() {
+        for (part, v) in e.r.def.values() {
             let (cluster, attr, ty, mfr) = match &v.binding {
                 Binding::Zcl(z) => (z.cluster, z.attr, z.ty, z.mfr),
                 Binding::Struct {
@@ -85,20 +80,31 @@ pub fn build_ops(
                 _ => continue,
             };
             let ep = e.r.ep;
-            if let Some(ReportSpec::Config { min, max, change }) = v.report {
-                let max = sleepy_cap.map_or(max, |c| max.min(c.max(min)));
-                let rec = ReportingConfig {
+            // A user's `off` (5.2): max 0xFFFF stops the device's reports.
+            let rec = match e.report_of(part, v) {
+                Some(ReportSpec::Config { min, max, change }) => Some(ReportingConfig {
                     attr,
                     ty,
                     min,
-                    max,
+                    max: crate::reporting::capped(min, max, sleepy_cap),
                     change,
-                };
+                }),
+                Some(ReportSpec::Disable) => Some(ReportingConfig {
+                    attr,
+                    ty,
+                    min: 0,
+                    max: 0xFFFF,
+                    change: None,
+                }),
+                _ => None,
+            };
+            if let Some(rec) = rec {
+                let bind = rec.max != 0xFFFF;
                 let l = reports.entry((ep, cluster, mfr)).or_default();
                 if !l.iter().any(|r| r.attr == attr) {
                     l.push(rec);
                 }
-                if !binds.contains(&(ep, cluster)) {
+                if bind && !binds.contains(&(ep, cluster)) {
                     binds.push((ep, cluster));
                 }
             }
@@ -472,6 +478,48 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         let ops = build_ops(d, coord, hub_ep, &crate::hub::DevEnv { dev: d, now, tz });
         d.configure.hash = Some(configure_hash(&ops));
+        if std::mem::take(&mut d.configure.reports_changed) {
+            // Reporting settings changed: forget the results of superseded
+            // Configure Reporting ops (so that going back re-sends the old
+            // one), drop them from the queue, and ignore the result of one
+            // already sent. An attribute that will be configured again
+            // learns anew whether the device refuses it.
+            let live = |k: &str| !k.starts_with("report:") || ops.iter().any(|o| o.key == k);
+            d.configure.done.retain(|k, _| live(k));
+            d.configure.queue.retain(|o| live(&o.key));
+            let in_flight = d
+                .queue
+                .iter()
+                .map(|q| &q.purpose)
+                .chain(
+                    self.pending
+                        .values()
+                        .filter(|p| p.device == id)
+                        .map(|p| &p.purpose),
+                )
+                .filter_map(|p| match p {
+                    Purpose::Configure(k) if !live(k) => Some(k.clone()),
+                    _ => None,
+                });
+            d.configure.stale.extend(in_flight);
+            let done = &d.configure.done;
+            d.configure.unreportable.retain(|&(ep, c, a)| {
+                !ops.iter().any(|o| match &o.kind {
+                    OpKind::Report {
+                        ep: e,
+                        cluster,
+                        records,
+                        ..
+                    } => {
+                        *e == ep
+                            && *cluster == c
+                            && records.iter().any(|r| r.attr == a)
+                            && done.get(&o.key) != Some(&true)
+                    }
+                    _ => false,
+                })
+            });
+        }
         let queued: Vec<String> = d.configure.queue.iter().map(|o| o.key.clone()).collect();
         for op in ops {
             if d.configure.done.get(&op.key) == Some(&true) || queued.contains(&op.key) {
@@ -620,6 +668,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         };
         d.configure.in_flight = false;
+        if let Some(i) = d.configure.stale.iter().position(|k| k == key) {
+            d.configure.stale.remove(i);
+            self.pump_configure(id, now);
+            return;
+        }
         d.configure.done.insert(key.to_string(), ok);
         d.diag.configure.insert(key.to_string(), status);
         if ok {

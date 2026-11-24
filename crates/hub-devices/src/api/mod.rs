@@ -642,11 +642,23 @@ impl ApiServer {
                 name,
                 enabled,
                 value,
-            } => hub.update_entity(&uid, name, enabled, value.as_ref(), now)?,
+                report,
+                part,
+            } => {
+                if let Some(r) = &report {
+                    hub.set_entity_report(&uid, part.as_deref(), r, now)?;
+                }
+                hub.update_entity(&uid, name, enabled, value.as_ref(), now)?
+            }
             R::EntitiesDelete { uid } => {
                 hub.delete_entity(&uid)?;
                 J::Null
             }
+            R::EntitiesReporting { uid, device, read } => {
+                hub.entity_reporting(uid.as_deref(), device.as_deref(), read, now)?
+            }
+            R::ReportingDefaultsGet => hub.reporting_defaults().record(),
+            R::ReportingDefaultsSet { defaults } => hub.set_reporting_defaults(&defaults, now)?,
             R::DefinitionsValidate { cbor } => Self::validate(hub, &b64(&cbor)?),
             R::DefinitionsUpload {
                 cbor,

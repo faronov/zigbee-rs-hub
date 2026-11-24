@@ -89,7 +89,13 @@ mod tests {
             assert!(!plain.contains(item), "{item} remains in the basic page");
             assert!(advanced.contains(item), "{item} missing from the advanced page");
         }
-        for item in ["entities/command", "data-tab=\"groups\"", "data-tab=\"conv\""] {
+        for item in [
+            "entities/command",
+            "data-tab=\"groups\"",
+            "data-tab=\"conv\"",
+            "entities/reporting",
+            "reporting/defaults/set",
+        ] {
             assert!(plain.contains(item), "normal functionality lost: {item}");
         }
         assert!(super::variant::select("// advanced:start\nx\n", false).is_err());

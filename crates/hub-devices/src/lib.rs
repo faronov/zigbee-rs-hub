@@ -33,6 +33,7 @@ pub mod hub;
 pub mod last_values;
 pub mod model;
 pub mod persist;
+pub mod reporting;
 pub mod resolve;
 pub mod transport;
 pub mod tuya;

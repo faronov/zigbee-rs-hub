@@ -188,6 +188,8 @@ pub struct Entity {
     pub user_name: Option<String>,
     /// User enable override.
     pub user_enabled: Option<bool>,
+    /// User reporting overrides by part name (`""`: the own value).
+    pub user_report: BTreeMap<String, crate::reporting::ReportSetting>,
 }
 
 /// Per-device diagnostics (14.2 `devices/diagnostics`).
@@ -267,6 +269,12 @@ pub struct ConfigureState {
     pub unreportable: Vec<(u8, u16, u16)>,
     /// Last poll (or failure) of an unreportable primary measurement.
     pub poll_at: BTreeMap<(u8, u16, u16), Millis>,
+    /// The user changed reporting settings: the next op rebuild forgets
+    /// superseded Configure Reporting results.
+    pub reports_changed: bool,
+    /// Superseded Configure Reporting ops still in flight: their results
+    /// are not recorded.
+    pub stale: Vec<String>,
 }
 
 /// Self-description progress (12.3).
@@ -357,6 +365,9 @@ pub struct Device {
     pub fp_hash: Option<String>,
     /// Next periodic Tuya query.
     pub tuya_query_at: Option<Millis>,
+    /// Reporting configurations the device answered (`entities/reporting`
+    /// with `read`) by `(ep, cluster, attr)`; not persisted.
+    pub reporting: BTreeMap<(u8, u16, u16), crate::reporting::Applied>,
 }
 
 impl Device {
@@ -395,6 +406,7 @@ impl Device {
             schema: SchemaState::default(),
             fp_hash: None,
             tuya_query_at: None,
+            reporting: BTreeMap::new(),
         }
     }
 
@@ -736,7 +748,7 @@ impl Entity {
                     .as_ref()
                     .map(|n| format!("{} {n}", e.key.replace('_', " ")))
             });
-        json!({
+        let mut r = json!({
             "uid": self.uid,
             "device": device_id,
             "endpoint": self.r.ep,
@@ -753,7 +765,11 @@ impl Entity {
             "capabilities": capabilities(e),
             "source": self.r.source,
             "orphaned": self.orphaned,
-        })
+        });
+        if !self.user_report.is_empty() {
+            r["report"] = self.report_json();
+        }
+        r
     }
 
     /// HA state + attributes (4.5).

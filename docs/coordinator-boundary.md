@@ -269,7 +269,7 @@ Keys are classified by exact key:
 | Class | Keys |
 |---|---|
 | network-scoped | `dev/`, `st/`, `grp/`, `bnd/`, `auto/` (rules name device IDs), `ota/d/`, `bkp/last` |
-| hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `ota/cfg` |
+| hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg` |
 | backend-scoped | `cfg/tx_power`, kept as is; future keys go under `zrhp/`, `ezsp/`, `znp/` |
 
 **Foreign gate.** It is enforced in the KV layer by a prefix guard that makes
