@@ -350,7 +350,7 @@ firmware would **not** honour an EZSP tag (documented limit).
   unwritable. `CoordTransport` refusing device traffic until then comes
   with the first `NcpNv` backend.
 - Size (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths): app
-  image +3,568 B (`.flash.text` +1,972 B, `.flash.rodata` +1,600 B, IRAM
+  image +3,632 B (`.flash.text` +2,036 B, `.flash.rodata` +1,600 B, IRAM
   and DRAM unchanged).
 
 ## 3. Threading model

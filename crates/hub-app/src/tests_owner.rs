@@ -13,7 +13,7 @@ use serde_json::{Value as J, json};
 
 use crate::App;
 use crate::baseline;
-use crate::tests::{T, call, cfg, form, ok, rig, session};
+use crate::tests::{T, call, cfg, form, ok, rig, rig_with, session};
 use crate::tests_baseline::SharedMem;
 
 const KV_PUT: u8 = 0x20;
@@ -188,4 +188,28 @@ fn a_network_formed_over_foreign_records_takes_them() {
     r.ncp.shutdown();
     r.sim.stop();
     assert_eq!(network_keys(&kv(&mem)).len(), 5, "kept");
+}
+
+#[test]
+fn a_backup_while_foreign_is_returned_but_not_kept() {
+    let mem = foreign();
+    let store = Store::open(Box::new(mem.clone())).unwrap();
+    let n = store.state().network.unwrap();
+    let before = kv(&mem);
+    // The NCP runs the stored network: the backend owns it, the records
+    // stay another backend's.
+    let r = rig_with(store, |sim| {
+        sim.with(|s| (s.network_state, s.pan_id, s.ext_pan_id, s.channel, s.key) = (2, n.pan_id, n.ext_pan_id, n.channel, n.network_key))
+    });
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let info = ok(&call(&app, sid, &rx, 1, json!({"type": "network/info"}))).clone();
+    assert_eq!((&info["ownership"], &info["registry"]["state"]), (&J::from("owned"), &J::from("foreign")), "{info}");
+    let b = call(&app, sid, &rx, 2, json!({"type": "network/backup"}));
+    assert_eq!(ok(&b)["metadata"]["format"], "zigpy/open-coordinator-backup", "{b}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+    assert_eq!(kv(&mem), before, "the other network's last backup stays");
 }

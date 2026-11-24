@@ -2516,7 +2516,8 @@ tags them with the coordinator backend and network they belong to
 PAN ID, channel, key sequence and coordinator are informative and follow
 the network). An image that finds another backend's records (an EZSP image
 ran on this flash), or a network whose extended PAN ID, or known key, is
-not the tag's, does not load them and cannot change or delete them:
+not the tag's, does not load them and cannot change or delete them
+(a backup taken meanwhile is returned but not kept as the last one):
 `network/info.registry.state` is `foreign`. The operator then adopts or
 clears them; `network/reset` and `network/restore` take them for the new
 network too. Records written before the tag existed are tagged for the

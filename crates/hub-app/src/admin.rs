@@ -480,7 +480,8 @@ fn take_backup(net: &dyn NetworkAdmin, ncp: &Ncp, keys: bool, known: &[Known], s
     frame.push('}');
     let b = Backup { frame, file: start..end };
     if summary.complete {
-        kv::with(ncp, |s| s.put(LAST_BACKUP_KEY, b.file().as_bytes()))
+        // A kept backup of another network (registry foreign) stays.
+        kv::with(ncp, |s| if s.gate() == hub_store::Gate::Open { s.put(LAST_BACKUP_KEY, b.file().as_bytes()) } else { Ok(()) })
             .map_err(|e| ApiError::new("failed", format!("backup not stored: {e}")))?;
     }
     info!("admin: backup taken ({} devices, {} link keys, complete {})", summary.devices, summary.link_keys, summary.complete);
