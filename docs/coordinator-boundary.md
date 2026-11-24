@@ -660,10 +660,11 @@ zrhp = ["dep:hub-ncp"]
 
   | Start | Records | Gate |
   |---|---|---|
-  | no tag, nothing network-scoped, no stored ZRHP network | `untagged` (tagged at the first network, or by form/adopt) | open |
+  | no tag, nothing network-scoped, no stored ZRHP network | `untagged`: the first network-scoped record written tags it `{backend, epid: null}` (owned, no network yet); else tagged at the first network, or by form/adopt | open |
   | no tag, a ZRHP image's stored `NetworkRecord` | tag derived as ZRHP's migration does (`{zrhp, epid of the record}`): `foreign` (another backend) | closed |
   | no tag, network-scoped records, no stored network | `unverified` until `network/registry/adopt`, `clear`, or a network formed or restored over them | closed |
-  | this backend's tag | `unverified` | read-only |
+  | this backend's tag naming no formed network (`epid: null`, or a network being formed: channel 0) | `owned` (`network/form` may take them) | open |
+  | this backend's tag of a formed network | `unverified` | read-only |
   | another backend's tag, unreadable tag | `foreign` | closed |
 
   An untagged store is never taken silently.
@@ -678,11 +679,17 @@ zrhp = ["dep:hub-ncp"]
   NCP's network of the session matches (`LinkDown`, "not verified"); the
   hub endpoint's group replay, the NCP device import and the state refresh
   wait for it too. The flag is shared with the backend
-  (`NcpNvRecords::traffic`, `EzspOptions::traffic`): the EZSP worker
-  clears it itself when a session ends and when the next one starts, and
-  ends the requests queued meanwhile `Refused(LinkDown)` instead of sending
-  them in the next session, which may run another network; the records
-  open it once that network matches. `network/info.ownership` shows the
+  (`NcpNvRecords::traffic`, `EzspOptions::traffic`) and carries the
+  session: `(epoch << 1) | open`. The EZSP worker stores `epoch << 1` when
+  a session starts (before its ownership report) and 0 when it ends, and
+  ends the requests queued while it is not open for its session
+  `Refused(LinkDown)` instead of sending them in the next session, which
+  may run another network. The records open it with a compare-and-swap for
+  the epoch whose report matched, and an `Ownership` event counts only
+  while the backend's status still shows it (`Records::reported`: `Ready`,
+  the same ownership; adopt and clear use the current status), so a late
+  report of an earlier session, handled after an NCP restart, opens
+  nothing. `network/info.ownership` shows the
   hub's decision for `NcpNv` backends (`owned`, `mismatch`) instead of the
   backend's `observed`. `network/reset`, `network/restore` and the new
   `network/form` tell the records that the operator replaces the network:
@@ -693,10 +700,15 @@ zrhp = ["dep:hub-ncp"]
   the network coming up later, or a reboot in between, leaves the records
   the new network's (as PR I's ZRHP fix does for ZRHP). `network/form`
   forms only where the backend reports `no_network` and takes no
-  `confirm`, so it refuses (`registry_read_only`) unless the records are
-  `untagged` or `owned`: foreign or unverified records (a blank EmberZNet
-  NCP over a ZRHP image's records is exactly that migration) need
-  adopt/clear with `confirm`, or `network/reset` with "RESET". A
+  `confirm`, so it refuses (`registry_read_only`) unless the records may
+  be formed over (`Records::may_form`): `untagged` or `owned` on ZRHP; on
+  `NcpNv` no tag (and no records of unknown origin), or this backend's
+  tag naming no formed network. Foreign or unverified records (a blank
+  EmberZNet NCP over a ZRHP image's records is exactly that migration),
+  or those of a network the NCP lost (mid-run or across a restart), need
+  adopt/clear with `confirm`, or `network/reset` with "RESET". Records
+  the hub makes before its first network (rules, groups) and the tag of a
+  form that failed thus stay the hub's own across restarts. A
   restore on an `NcpNv` backend (none restores yet) will need the backup's
   extended PAN ID for the same tag. A `DeviceLeft` keeps the device (EZSP does not say
   whether it rejoins): the engine marks it unavailable with
@@ -707,7 +719,12 @@ zrhp = ["dep:hub-ncp"]
   NCPs: join → interview → command → report, groups, permit join,
   `network/form` then `network/reset`, and on EZSP the `NcpNv` decision
   across restarts on one store (owned, unverified → owned, foreign until
-  clear or adopt, another backend's records). `hubctl --backend ezsp
+  clear or adopt, another backend's records, untagged records), the
+  `network/form` guard (another backend's or unknown records, a network
+  the NCP lost), the first setup across restarts (a rule before the first
+  network, a failed form) and queued requests across an NCP reset;
+  `NcpNvRecords` unit tests cover late reports of an earlier session.
+  `hubctl --backend ezsp
   --sim` runs the app on the EZSP simulator; the hubctl automations end
   to end and the Home Assistant end to end (`HUBCTL_BACKEND=ezsp`) run on
   it too. The ZRHP goldens of PR A are unchanged.
@@ -717,11 +734,14 @@ zrhp = ["dep:hub-ncp"]
   without hub-ncp or zigbee-zrhp; the `hub-app-ezsp` job (both backends,
   the EZSP-only app and its tree, the hubctl end to end).
 - **Size** (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths,
-  against `main` 9efb313): app image +3,792 B (2,787,552 → 2,791,344 B;
-  `.flash.text` +3,448 B, `.flash.rodata` +336 B, `.dram0.data` +16 B;
+  against `main` 9efb313): app image +4,608 B (2,787,552 → 2,792,160 B;
+  `.flash.text` +4,180 B, `.flash.rodata` +416 B, `.dram0.data` +16 B;
   IRAM and bss unchanged): the boundary +2,848 B, the engine's handling of
   device leaves +464 B, the review fixes (the `network/form` guard,
-  `Records::forming`) +480 B. 857 B is a second copy of a BTreeMap
+  `Records::forming`) +480 B, then reports per session (the current
+  status for events, adopt and clear) and `Records::may_form` +816 B (the
+  comparison itself lives in `NcpNvRecords::reported`, not linked into
+  ZRHP images). 857 B is a second copy of a BTreeMap
   rebalancing instance (`bulk_steal_left`/`_right`) that hub-store's
   `HostState::apply` now calls instead of the copy it shared with
   hub-devices (LTO's choice; no hub-store code changed). The rest is the

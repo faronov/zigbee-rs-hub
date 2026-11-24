@@ -241,32 +241,46 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
 
 **Ownership flow** (design §2.5, §2.7; `NcpNvRecords`):
 
-1. Start: this backend's tag makes the records `unverified` (loaded,
-   read-only); another backend's tag makes them `foreign` (hidden). An
+1. Start: this backend's tag of a formed network makes the records
+   `unverified` (loaded, read-only); its tag naming no formed network
+   (`epid: null`, or a network being formed: channel 0) makes them
+   `owned`; another backend's tag makes them `foreign` (hidden). An
    untagged store is never taken silently: a ZRHP image's stored network
    gets the tag ZRHP's migration would write (`{"backend":"zrhp",…}`, so
    `foreign`); network-scoped records without a stored network stay
    `unverified` and hidden (closed, no device traffic) until the operator
    adopts or clears them (or forms or restores a network over them); an
-   empty store is `untagged` until the first network.
+   empty store is `untagged` until the first network, and the first
+   network-scoped record written meanwhile (a rule, a group) tags it
+   `{"backend":"ezsp","epid":null}`, so a restart knows the records are
+   the hub's.
 2. The session's `Ownership(Observed(identity))` (before `Session::Up`):
    matching the tag (EPID; the key ID too when both are known, else the
    EPID alone, design §8.5), or no tag yet → `owned`, the tag written or
    its informative fields (PAN ID, channel, key sequence, coordinator)
    rewritten; a key ID already in the tag stays when the NCP does not
    export its key now. Another network → `foreign`, nothing written.
+   Only reports of the current session count: each with its session's
+   epoch, and only while the backend's status still shows it (not after
+   an NCP restart in between).
 3. Device traffic (APS, groups, permit join, removal, the device
    inventory) is refused until step 2 matched in the current session; a
    session loss, `NoNetwork` or `Unknown` stop it again until the next
-   match. The flag is shared with this backend (`EzspOptions::traffic`):
-   the worker clears it at the end and at the start of every session and
-   ends queued requests `Refused(LinkDown)` while it is clear, so nothing
-   queued before a reset reaches a network not decided yet. The hub
+   match. The flag is shared with this backend (`EzspOptions::traffic`)
+   and names the session: `(epoch << 1) | open`. The worker stores
+   `epoch << 1` when a session starts (before its ownership report) and 0
+   when it ends, and ends queued requests `Refused(LinkDown)` while it is
+   not open for its session; the records open it with a compare-and-swap
+   for the epoch whose report matched. So nothing queued before a reset,
+   and no late report of an earlier session, reaches a network not
+   decided yet. The hub
    endpoint's group replay, the import of the NCP's devices and the state
    refresh wait for it.
 4. `NoNetwork`: `network/info.ownership` `no_network`; `network/form`
-   forms a network (only then, and only over `untagged` or `owned` records;
-   no `confirm`), or `network/reset` ("RESET"). While the operator
+   forms a network (only then, and only over the hub's records of no
+   formed network: no tag, or its tag with `epid: null` or of a network
+   being formed; no `confirm`), or `network/reset` ("RESET"), which also
+   replaces a network the NCP lost. While the operator
    replaces the network (`network/form`, `network/reset`,
    `network/restore`), reports decide nothing; just before `formNetwork`
    the records are tagged with the extended PAN ID it forms (picked by the
