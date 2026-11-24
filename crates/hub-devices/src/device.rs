@@ -95,6 +95,16 @@ impl AttrCache {
             old.as_ref().map(|o| &o.value) != Some(&e.value),
         )
     }
+
+    /// A known numeric attribute without manufacturer code, on any
+    /// endpoint: the multipliers and divisors of the generic scaling (5.1).
+    pub fn number(&self, cluster: u16, attr: u16) -> Option<f64> {
+        self.map
+            .iter()
+            .find(|((_, c, a, m), _)| *c == cluster && *a == attr && m.is_none())
+            .and_then(|(_, e)| e.value.as_ref())
+            .and_then(ZclValue::as_f64)
+    }
 }
 
 impl AttrView for AttrCache {
