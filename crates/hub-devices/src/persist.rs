@@ -6,7 +6,8 @@
 //! descriptions, colour capabilities, thermostat limits, metering and
 //! electrical scaling: [`persistent_value`]), the self-description fragment
 //! (as zdef CBOR, decoded again on restore), user settings (name, disabled,
-//! pinned definition, hub options, entity name/enable overrides), the
+//! pinned definition, hub options, entity name/enable overrides,
+//! reporting overrides), the
 //! configure hash and results (so a restart does not reconfigure) and the GP
 //! sink record.
 //!
@@ -66,6 +67,22 @@ pub struct EntitySnap {
     /// Enable override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+}
+
+/// The reporting override of one attribute (device-support 5.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReportSnap {
+    /// Endpoint.
+    pub ep: u8,
+    /// Cluster.
+    pub cluster: u16,
+    /// Attribute.
+    pub attr: u16,
+    /// Manufacturer code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfr: Option<u16>,
+    /// Setting (`[min, max, change]`, `"off"`, `"revert"`).
+    pub report: crate::reporting::ReportSetting,
 }
 
 /// GP specifics.
@@ -129,6 +146,10 @@ pub struct DeviceSnapshot {
     pub schema: Option<SchemaSnap>,
     /// Entity user overrides.
     pub entities: Vec<EntitySnap>,
+    /// Reporting overrides; absent without any (and in snapshots of
+    /// earlier builds, which ignore the field).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reporting: Vec<ReportSnap>,
 }
 
 impl DeviceSnapshot {
@@ -197,6 +218,17 @@ impl DeviceSnapshot {
                     enabled: e.user_enabled,
                 })
                 .collect(),
+            reporting: d
+                .report_overrides
+                .iter()
+                .map(|(&(ep, cluster, attr, mfr), &report)| ReportSnap {
+                    ep,
+                    cluster,
+                    attr,
+                    mfr,
+                    report,
+                })
+                .collect(),
         }
     }
 
@@ -259,6 +291,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         d.user_name = s.user_name;
         d.disabled = s.disabled;
+        d.report_overrides = s
+            .reporting
+            .into_iter()
+            .map(|r| ((r.ep, r.cluster, r.attr, r.mfr), r.report))
+            .collect();
         d.pinned = s.pinned;
         d.options = s
             .options

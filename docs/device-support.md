@@ -233,7 +233,7 @@ bottom (lowest precedence) to top:
 | 2 | Catalog | Best-matching catalog definition: bank (built-in) or fetched-on-demand cache (9) | a definition matches |
 | 3 | Self-description | The device's own schema (12) | the device publishes one and no higher layer disables it |
 | 4 | User definition | Definition uploaded through the API (14.4); matched like catalog definitions | the user uploaded one that matches |
-| 5 | Device overrides | Per-device user settings: names, disabled entities, option values, a pinned definition | the user changed something |
+| 5 | Device overrides | Per-device user settings: names, disabled entities, option values, reporting overrides (5.2), a pinned definition | the user changed something |
 
 Precedence rules:
 
@@ -549,7 +549,11 @@ can change any of them (`report: [min, max, change]`), or set `report: off`.
 | Pressure 0x0403/0x0000 | 30 | 900 | 1 |
 | Illuminance 0x0400/0x0000 | 30 | 900 | 500 |
 | Occupancy 0x0406/0x0000 | 0 | 900 | — |
-| CO2 0x040D/0x0000 | 30 | 900 | 0.000025 (25 ppm) |
+| Soil moisture 0x0408/0x0000 | 30 | 900 | 100 (1 %) |
+| CO2 0x040D/0x0000 (and the other gases measured as a fraction, 0x040C–0x0416) | 30 | 900 | 0.000025 (25 ppm) |
+| Formaldehyde 0x042B/0x0000 (fraction) | 30 | 900 | 0.00000001 (0.01 ppm) |
+| TVOC 0x042E/0x0000 (fraction) | 30 | 900 | 0.0000001 (0.1 ppm) |
+| PM2.5 0x042A, PM1 0x042C, PM10 0x042D (µg/m³) | 30 | 900 | 1 (1 µg/m³) |
 | Battery % 0x0001/0x0021 | 3600 | 21600 | 2 (1 %) |
 | Battery voltage 0x0001/0x0020 | 3600 | 21600 | 1 |
 | ActivePower 0x0B04/0x050B | 5 | 900 | 10 (raw) |
@@ -568,6 +572,79 @@ whichever is shorter, so availability (4.6) has a signal. A failed Configure
 Reporting (UNSUPPORTED_ATTRIBUTE, UNREPORTABLE_ATTRIBUTE) is recorded and the
 entity is polled instead only if it is a primary measurement on a mains
 device (every `max` seconds); sleepy devices are never polled.
+
+**User settings.** The table is editable per attribute class (global
+defaults), and the reporting of any ZCL-bound value of an entity can be
+overridden (layer 5, `entities/update` `report`, 14.3). Configure
+Reporting is per attribute, so an override belongs to the attribute —
+`(endpoint, cluster, attribute, manufacturer code)` — and entities bound to
+the same attribute share it (Aqara's occupancy and illuminance on
+0xFCC0/0x0112, struct entities of one attribute): set through one of them,
+it applies to all, and `entities/reporting` lists the others as `shared`.
+Precedence for one attribute, highest first:
+
+1. the user's override;
+2. the definition: a `configure: - report:` op with `[min, max, change]`
+   (6.8; sent after the entity records; an op with `report: off` sends
+   nothing and does not count), then the `report` of the first entity
+   bound to it (a definition entity, or `generic.patch`);
+3. the edited global default of the attribute's class;
+4. the built-in table above.
+
+An override replaces a definition's `configure: report` op for its
+attribute: the op is not sent while the override exists, and is sent again
+once the override is removed.
+
+Global defaults apply where the built-in table does: to the generic tier's
+values (a definition entity without `report` still gets no Configure
+Reporting, 6.3). Classes and their attributes (`reporting/defaults/get`
+lists them with the built-in values): `on_off` (0x0006/0x0000), `level`
+(0x0008/0x0000), `color` (0x0300/0x0007, 0x0003, 0x0004, 0x0000, 0x0001),
+`temperature`, `humidity`, `pressure`, `illuminance`, `occupancy`,
+`soil_moisture` (0x0408), `co2` (0x040D), `pm25` (0x042A), `pm1`
+(0x042C), `pm10` (0x042D), `voc` (0x042E), `formaldehyde` (0x042B),
+`battery_pct`
+(0x0001/0x0021), `battery_voltage` (0x0001/0x0020), `power`
+(0x0B04/0x050B), `voltage` (0x0505), `current` (0x0508), `energy`
+(0x0702/0x0000), `demand` (0x0702/0x0400), `local_temperature`
+(0x0201/0x0000), `setpoint` (0x0011, 0x0012), `thermostat_state`
+(0x001C, 0x0029), `pi_heating_demand` (0x0008), `cover` (0x0102/0x0008,
+0x0009), `lock` (0x0101/0x0000), `fan` (0x0202/0x0000). Other attributes
+(manufacturer-specific ones too) are changed per entity.
+
+A setting is `[min, max, change]` (`change` may be left out: 0), `"off"`,
+or `"default"` / null (back to the inherited one). Checks, failing with
+`invalid_value` before anything changes: `min ≤ max`, `max ≤ 65534`
+(0xFFFF is what `off` sends), `change` only for analog types (integers,
+floats, time) and within the attribute's ZCL type, a non-negative number;
+on a battery or sleepy device an override's `max` must not exceed the cap
+above (a global default is capped per device instead, as the built-in
+values are). A composite entity names the part (`part`: `brightness`,
+`current_temperature`, …).
+
+`off` set by the user (override or global default) sends Configure
+Reporting with the maximum interval 0xFFFF, which tells the device to stop
+reporting the attribute; the hub binds nothing for it and never polls it,
+even if the device refuses (an explicit `off` means no reporting and no
+polling). `report: off` in a definition still means "send nothing".
+
+Removing an override sends what the attribute inherits. When it inherits
+no Configure Reporting at all (a definition entity without `report`, or
+with `report: off`), the hub sends the ZCL "revert to default" record
+(minimum 0xFFFF, maximum 0x0000, change 0; ZCL r8 2.5.7.1.5–6), so a
+device silenced by `off` goes back to its own default configuration. It
+stays part of the configure (a reconfigure sends it again) until a new
+override replaces it or a definition starts configuring the attribute.
+Devices older than ZCL r7 may take the record literally (no periodic
+reports, changes at most every 18 h); give them an explicit setting.
+
+Global defaults are kept in the host store as `cfg/report` (JSON, the
+edited classes only; no key while nothing is edited); overrides are part
+of the device's registry snapshot (`reporting`: [{`ep`, `cluster`, `attr`,
+`mfr`, `report`}], `report` also `"revert"` for a pending revert; absent
+without overrides, so snapshots of devices without overrides are
+unchanged; earlier builds ignore the field, and snapshots of earlier
+builds load without it).
 
 ### 5.3 Configure: binds, reporting, enrollment, sleepy devices
 
@@ -595,6 +672,27 @@ At configure (and when the configure hash changes), per endpoint:
 Every step is idempotent and its result is recorded per attribute, so a
 failed configure is retried (mains: after 60 s, then exponential up to 1 h;
 sleepy: on the next contact) without repeating what worked.
+
+Reporting settings (5.2) are part of the Configure Reporting op keys, so
+changing a global default or an override changes the configure hash, and
+the changed configuration is sent at once (mains) or at the next contact
+(sleepy), at most 3 records per frame as above, nothing else. Results of
+superseded reporting configs are forgotten, so going back to an earlier
+setting sends it again; a superseded frame already queued for a sleeping
+device still goes out, but its result is not recorded and the current
+config follows it. An attribute configured again learns anew whether the
+device refuses it.
+
+**Readback.** `entities/reporting` (14.3) with `read` asks the device what
+it applied: ZCL Read Reporting Configuration (0x08, direction 0, ≤ 3
+attributes per frame) on the bound endpoint. Each answer record is kept in
+the device state (not persisted): its status (`SUCCESS`;
+`UNSUPPORTED_ATTRIBUTE`; `UNREPORTABLE_ATTRIBUTE`; `NOT_FOUND`: nothing
+configured), `[min, max, change]` or `off` (max 0xFFFF), and the time. A
+device without the command answers a Default Response, whose status
+(`UNSUP_GENERAL_COMMAND`) is kept the same way. A sleeping device is asked
+when it is next heard from; when its answers are in, the event
+`entity_reporting` (topic `entities`) carries the result.
 
 ### 5.4 Client clusters → events (remotes)
 
@@ -719,7 +817,7 @@ Common fields:
 | `device_class`, `unit`, `state_class`, `category`, `name`, `enabled` | 4.4 |
 | `ep` | endpoint; default: the lowest endpoint whose Simple descriptor has the bound cluster (server for attributes, either for commands) |
 | `access` | letters `r` read, `w` write, `p` report/push; defaults per platform: sensor/binary_sensor `rp`, number/select/switch/text `rwp`, button `w` |
-| `report` | `[min, max, change]` or `off`. Generic entities get the 5.2 defaults; definition entities get Configure Reporting only when `report` is given (`p` in `access` only says that the device pushes the value) |
+| `report` | `[min, max, change]` or `off`. Generic entities get the 5.2 defaults (as edited by the user); definition entities get Configure Reporting only when `report` is given (`p` in `access` only says that the device pushes the value). A user's per-entity override wins over both (5.2) |
 | binding | exactly one of `zcl`, `tuya`, `struct`, `gp`, `hub`, or `parts` / `triggers` / `press` (below) |
 | transforms | `mul`, `div`, `offset`, `precision`, `invalid`, `map`, `value_on`/`value_off`, `from`, `to`, `codec` (6.4) |
 | limits | `min`, `max`, `step`, `mode` (number, text) |
@@ -2189,7 +2287,10 @@ code feels familiar:
   `groups/*`, `scenes/*`, `bindings/*`, the `groups` topic, group devices
   and the `scene` platform); the MQTT bridge's `mqtt/config/get`,
   `mqtt/config/set` and `mqtt/status` (14.10; 8 MB images, elsewhere
-  `unsupported`).
+  `unsupported`). Added later within 1.3, in every image: reporting
+  configuration (5.2, 14.3): `entities/reporting`,
+  `reporting/defaults/get`, `reporting/defaults/set`, the `report` and
+  `part` parameters of `entities/update` and the event `entity_reporting`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2245,11 +2346,17 @@ deadline, as an NCP image need not report `EVT_PERMIT_JOIN_STATE`) and `network_
 | `entities/states` | `uids` (optional) | states (4.5) |
 | `entities/command` | `uid`, `command` (HA service name), `params` | `{"status": "ok"}` after the device confirmed (write/command response, Tuya dataResponse), `"queued"` for sleepy devices |
 | `entities/refresh` | `uid` | reads the bound attribute(s) now (mains devices) |
-| `entities/update` | `uid`, `name`, `enabled`, `value` for `hub` bindings | entity record |
+| `entities/update` | `uid`, `name`, `enabled`, `value` for `hub` bindings, `report` (5.2: `[min, max, change]`, `"off"`, `"default"` or null) with `part` (the part of a composite entity; `""` or absent for the entity's own value) | entity record. `report` is checked first (an invalid one changes nothing) and sets the override of the attribute the value is bound to, shared by every entity bound to it; `entities/reporting` shows it |
 | `entities/delete` | `uid` | only orphaned entities (3.4) |
+| `entities/reporting` | `uid` (one entity) or `device` (all its entities), `read` (bool, default false) | `{status, records}`; one record per ZCL-bound value: `uid`, `part` (null: the own value), `endpoint`, `cluster`, `attribute`, `type` (ZCL type code), `manufacturer` (when set), `report` (the record the configure sends for the attribute — the last one, after overrides, definition ops and the battery cap: `[min, max, change]`, `"off"`, or null for none or a revert to the device's default), `source` (`override`, `definition`, `default`: where that record comes from), `default` (with an override: what the attribute inherits without it), `shared` (the other entities bound to the same attribute, which share its setting), `class` (5.2), `applied` (the last readback: `{status, report, time}`, absent before one). `status`: `cached` without `read`; with `read`, `ok` once the device answered (the result waits for it; `timeout` / `not_delivered` errors as for commands) or, for a sleeping device, `queued` at once (the read goes out at its next contact, and its answer comes as the event `entity_reporting`). `unsupported` for GP devices |
+| `reporting/defaults/get` | — | `classes`: [{`key`, `attributes` ([[cluster, attribute]]), `builtin`, `report` (effective), `edited`}] |
+| `reporting/defaults/set` | `defaults`: `{class: setting}` (a setting, `"default"` or null) | as `reporting/defaults/get`. All entries are checked first (`invalid_value` for an unknown class or setting; nothing applied); a setting equal to the built-in one removes the edit. Devices re-resolve and reconfigure what changed (5.3) |
 
 Events (topic `entities`): `entity_added`, `entity_updated`,
-`entity_removed`, `entity_state` (4.5). Topic `events`: `entity_event`
+`entity_removed`, `entity_state` (4.5), `entity_reporting` (5.3: a sleeping
+device answered a queued `entities/reporting` read; the result's body —
+`status` `ok` and `records`, or `failed` and `error` — plus `device` and
+`uid`, null for a whole-device read; nothing is written to flash). Topic `events`: `entity_event`
 `{uid, event_type, attributes, time}` for event entities.
 
 ### 14.4 Definitions and catalog
@@ -2457,7 +2564,13 @@ or `"0x21"`; the web UI also takes definition type names such as `u16`);
 | `tuya/send` | `dps: [{dp, type, value}]` (type `raw`, `bool`, `value`, `string`, `enum`, `bitmap`; hex string for raw) | `{status: "ok"}` once the device reported every DP (15 s, 10 min for a sleeping device) |
 
 Every result also has `tsn`, `frame` (`global`/`cluster`), `command`,
-`manufacturer` and `payload` (hex) of the answer. Argument errors
+`manufacturer` and `payload` (hex) of the answer. `zcl/configure_reporting`
+stays a one-off: the hub neither remembers it nor notices it, so the device
+keeps it only until the next reconfigure of that attribute
+(`devices/reconfigure`, or any change of the hub's own setting for it,
+5.2), which restores the hub's setting. Persistent settings are
+`entities/update` `report` and the global defaults (5.2), whose readback
+(`entities/reporting`) works in every image. Argument errors
 (`invalid_value`) answer at once, e.g. a write of an attribute whose type
 is not known.
 
@@ -2876,7 +2989,7 @@ API.
 
 | Area | Offset | Size | Content |
 |---|---:|---:|---|
-| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/ntp`), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8), automations (`auto/`, 14.8) |
+| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/ntp`), reporting defaults (`cfg/report`, 5.2), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8), automations (`auto/`, 14.8) |
 | Catalog state | 0x020000 | 8 KiB | active-bank record, two 4 KiB slots (9.1) |
 | Manifest | 0x022000 | 24 KiB | the installed, verified `manifest.cose` (9.3; 9 KB today) |
 | Converter bank A | 0x028000 | 256 KiB | catalog bank (9.1) |
@@ -3273,7 +3386,9 @@ The bank builder fails if a bank exceeds its partition size, a definition
 exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
 size table (definitions, strings, index) per run. The hub CI checks the app
 against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
-D24; README).
+D24; README). The web page (`hub-web`, gzip as embedded) must stay within
+34 KiB (34 816 B, `hub_web::PAGE_BUDGET`) in every image variant; its
+tests build each variant and fail above it.
 
 ### 18.6 Hardware
 

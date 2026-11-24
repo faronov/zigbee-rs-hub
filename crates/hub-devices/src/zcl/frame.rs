@@ -1,6 +1,6 @@
 //! ZCL frames (ZCL r8 2.4) and the foundation commands the hub sends and
 //! receives (2.5): Read Attributes, Write Attributes, Configure Reporting,
-//! Report Attributes, Default Response.
+//! Read Reporting Configuration, Report Attributes, Default Response.
 
 use super::types::{CodecError, Reader, TypedValue, ZclType, ZclValue, decode_value, encode_value};
 
@@ -391,6 +391,106 @@ pub fn parse_configure_reporting(p: &[u8]) -> Result<Vec<ReportingConfig>, Codec
     Ok(out)
 }
 
+/// One Read Reporting Configuration Response record (direction 0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportingRecord {
+    /// Status.
+    pub status: Status,
+    /// Attribute.
+    pub attr: u16,
+    /// The configuration, for `SUCCESS`.
+    pub config: Option<ReportingConfig>,
+}
+
+/// Payload of Read Reporting Configuration (direction 0: what the device
+/// reports).
+pub fn read_reporting_config(attrs: &[u16]) -> Vec<u8> {
+    attrs
+        .iter()
+        .flat_map(|a| {
+            let [lo, hi] = a.to_le_bytes();
+            [0x00, lo, hi]
+        })
+        .collect()
+}
+
+/// Parses Read Reporting Configuration (simulator side): the direction-0
+/// attributes.
+pub fn parse_read_reporting_config(p: &[u8]) -> Result<Vec<u16>, CodecError> {
+    if !p.len().is_multiple_of(3) {
+        return Err(CodecError::Truncated);
+    }
+    Ok(p.chunks(3)
+        .filter(|c| c[0] == 0)
+        .map(|c| u16::from_le_bytes([c[1], c[2]]))
+        .collect())
+}
+
+/// Parses Read Reporting Configuration Response (ZCL r8 2.5.10); records
+/// of direction 1 (timeouts of received reports) are skipped.
+pub fn parse_read_reporting_config_rsp(p: &[u8]) -> Result<Vec<ReportingRecord>, CodecError> {
+    let mut r = Reader::new(p);
+    let mut out = Vec::new();
+    while r.remaining() > 0 {
+        let status = Status(r.u8()?);
+        let dir = r.u8()?;
+        let attr = r.u16()?;
+        if status != Status::SUCCESS {
+            if dir == 0 {
+                out.push(ReportingRecord {
+                    status,
+                    attr,
+                    config: None,
+                });
+            }
+            continue;
+        }
+        if dir != 0 {
+            r.u16()?;
+            continue;
+        }
+        let ty = ZclType(r.u8()?);
+        let min = r.u16()?;
+        let max = r.u16()?;
+        let change = if ty.is_analog() {
+            decode_value(ty, &mut r)?.as_f64()
+        } else {
+            None
+        };
+        out.push(ReportingRecord {
+            status,
+            attr,
+            config: Some(ReportingConfig {
+                attr,
+                ty,
+                min,
+                max,
+                change,
+            }),
+        });
+    }
+    Ok(out)
+}
+
+/// Encodes Read Reporting Configuration Response (simulator side).
+pub fn read_reporting_config_rsp(recs: &[ReportingRecord]) -> Result<Vec<u8>, CodecError> {
+    let mut out = Vec::new();
+    for rec in recs {
+        out.push(rec.status.0);
+        out.push(0x00);
+        out.extend_from_slice(&rec.attr.to_le_bytes());
+        if let (Status::SUCCESS, Some(c)) = (rec.status, &rec.config) {
+            out.push(c.ty.0);
+            out.extend_from_slice(&c.min.to_le_bytes());
+            out.extend_from_slice(&c.max.to_le_bytes());
+            if c.ty.is_analog() {
+                encode_change(c.ty, c.change.unwrap_or(0.0), &mut out)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Parses Configure Reporting Response: one `SUCCESS` byte, or
 /// `(status, direction, attr)` records.
 pub fn parse_configure_reporting_rsp(p: &[u8]) -> Result<Vec<(Status, Option<u16>)>, CodecError> {
@@ -510,5 +610,56 @@ mod tests {
             parse_configure_reporting_rsp(&[0x8C, 0x00, 0x21, 0x00]).unwrap(),
             vec![(Status::UNREPORTABLE_ATTRIBUTE, Some(0x0021))]
         );
+    }
+
+    #[test]
+    fn read_reporting_configuration() {
+        assert_eq!(
+            read_reporting_config(&[0x0000, 0x0021]),
+            vec![0, 0, 0, 0, 0x21, 0]
+        );
+        assert_eq!(
+            parse_read_reporting_config(&[0, 0, 0, 1, 5, 0, 0, 0x21, 0]).unwrap(),
+            vec![0x0000, 0x0021]
+        );
+        // SUCCESS int16 [30, 900, 50], an unreportable attribute, a
+        // direction-1 record (timeout) and NOT_FOUND (nothing configured).
+        let p = [
+            0x00, 0x00, 0x00, 0x00, 0x29, 30, 0, 0x84, 0x03, 50, 0, //
+            0x8C, 0x00, 0x21, 0x00, //
+            0x00, 0x01, 0x05, 0x00, 0x10, 0x0E, //
+            0x8B, 0x00, 0x20, 0x00,
+        ];
+        let recs = parse_read_reporting_config_rsp(&p).unwrap();
+        let cfg = ReportingConfig {
+            attr: 0,
+            ty: ZclType::I16,
+            min: 30,
+            max: 900,
+            change: Some(50.0),
+        };
+        assert_eq!(
+            recs,
+            vec![
+                ReportingRecord {
+                    status: Status::SUCCESS,
+                    attr: 0,
+                    config: Some(cfg),
+                },
+                ReportingRecord {
+                    status: Status::UNREPORTABLE_ATTRIBUTE,
+                    attr: 0x0021,
+                    config: None,
+                },
+                ReportingRecord {
+                    status: Status::NOT_FOUND,
+                    attr: 0x0020,
+                    config: None,
+                },
+            ]
+        );
+        let back = read_reporting_config_rsp(&[recs[0].clone(), recs[1].clone()]).unwrap();
+        assert_eq!(back, p[..15]);
+        assert!(parse_read_reporting_config_rsp(&[0x00, 0x00, 0x00]).is_err());
     }
 }

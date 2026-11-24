@@ -146,6 +146,7 @@ fn sml001_snapshot() -> DeviceSnapshot {
         gp: None,
         schema: None,
         entities: vec![],
+        reporting: vec![],
     }
 }
 

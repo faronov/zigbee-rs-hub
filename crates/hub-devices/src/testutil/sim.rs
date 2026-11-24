@@ -375,6 +375,40 @@ impl SimDevice {
                     zf::configure_reporting_rsp(&fails),
                 ))
             }
+            // Read Reporting Configuration: the last configuration received.
+            (FrameType::Global, global::READ_REPORTING_CONFIG) => {
+                let recs: Vec<zf::ReportingRecord> = zf::parse_read_reporting_config(&f.payload)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|attr| {
+                        let last = self
+                            .reporting
+                            .iter()
+                            .rfind(|(e, c, r)| *e == ep && *c == req.cluster && r.attr == attr);
+                        let status = if self.unreportable.contains(&(req.cluster, attr)) {
+                            Status::UNREPORTABLE_ATTRIBUTE
+                        } else if last.is_some() {
+                            Status::SUCCESS
+                        } else if self.attrs.contains_key(&(ep, req.cluster, attr, h.mfr)) {
+                            Status::NOT_FOUND
+                        } else {
+                            Status::UNSUPPORTED_ATTRIBUTE
+                        };
+                        zf::ReportingRecord {
+                            status,
+                            attr,
+                            config: last
+                                .filter(|_| status == Status::SUCCESS)
+                                .map(|l| l.2.clone()),
+                        }
+                    })
+                    .collect();
+                Some(rsp(
+                    FrameType::Global,
+                    global::READ_REPORTING_CONFIG_RSP,
+                    zf::read_reporting_config_rsp(&recs).unwrap(),
+                ))
+            }
             // Discover Attributes: the simulated attributes of the cluster.
             (FrameType::Global, 0x0C) => {
                 let start = u16::from_le_bytes([f.payload[0], f.payload[1]]);
