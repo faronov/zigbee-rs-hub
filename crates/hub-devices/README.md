@@ -52,6 +52,13 @@ incoming is a method call with the current time.
   deferred results, with the same JSON.
 - A remote GP request waits by `RequestId` until `Accepted { zcl_tsn }`,
   then by the TSN; an `EVT_GP_REMOTE_*` that comes first is kept until then.
+- Clusters of the application (`Hub::app_clusters`, hub-app's OTA server):
+  device commands go to `Hub::take_app_frames`; the application's frames
+  (`Hub::send_app_zcl`) are APS requests with a `RequestId` (`None` while
+  queued for a sleepy device), whose final outcomes go to
+  `Hub::take_app_outcomes` (with the ID a queued frame got when sent), not
+  to the engine's retries; one missing for 10 minutes is reported
+  `Unknown`.
 - `MockTransport` completes control requests at once (`completed()`), or
   nothing with `manual`, for tests that pass outcomes themselves.
 

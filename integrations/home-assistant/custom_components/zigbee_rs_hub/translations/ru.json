@@ -186,6 +186,11 @@
       "automation": {
         "name": "Автоматизация {name}"
       }
+    },
+    "update": {
+      "firmware": {
+        "name": "Прошивка"
+      }
     }
   },
   "exceptions": {

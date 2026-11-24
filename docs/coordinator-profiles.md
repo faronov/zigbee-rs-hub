@@ -133,7 +133,7 @@ explicit error and are not advertised by the API/UI.
 | Local automations, groups/scenes/bindings | Kept | Kept | Planned through shared engine |
 | Signed catalog and user definitions | Compact catalog/storage areas | Larger areas | The 8 MB areas, in SONOFF's `files` region once claimed |
 | Hub application A/B slots | No: existing single-slot layout | Yes | Yes: `ota_0`/`ota_1` of SONOFF's table (6 MiB each); the first self-update replaces SONOFF's application |
-| Zigbee device OTA server | Not in this release | Not in this release | Yes: 1 MiB store in the claimed `files` region, larger images streamed; separate OTA qualification |
+| Zigbee device OTA server (`ota`; branch `zigbee-ota-v2`) | **Not included** (it would fill the slot to 95 %); `ota/*` answers `unsupported`, the hub endpoint does not advertise 0x0019 | Included: streamed images and the image store in the inactive app slot (`ota-store`) | Yes: 1 MiB store in the claimed `files` region, larger images streamed; separate OTA qualification |
 | Wi-Fi | Open and WPA2/WPA3-Personal | same | same, as the fallback of Ethernet; no Bluetooth |
 
 The `advanced` flag does not control normal Tuya datapoint decoding or

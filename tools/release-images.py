@@ -47,9 +47,11 @@ LAYOUTS = [
         "app_partition": "ota_0",
         "max_app": 3 * 1024 * 1024,
         "target": "target-8mb",
-        "features": ["mqtt", "advanced"],
+        # As marked in the image: `ota-store` implies `ota`.
+        "features": ["mqtt", "advanced", "ota", "ota-store"],
         "note": "Production layout: two 3 MiB app slots (A/B OTA) and 1 920 KiB hubdata; "
-        "with the Zigbee2MQTT-compatible MQTT bridge and advanced ZCL/Tuya console.",
+        "with the Zigbee2MQTT-compatible MQTT bridge, advanced ZCL/Tuya console and "
+        "the Zigbee device OTA server with its image store in the inactive app slot.",
     },
     {
         "id": "thread-br-s3-hub-4mb-dev",
@@ -62,7 +64,7 @@ LAYOUTS = [
         "target": "target",
         "features": ["mqtt"],
         "note": "Development layout: one 2 944 KiB app slot, no hub A/B OTA, 1 MiB hubdata; "
-        "esp-mqtt included, advanced console omitted.",
+        "esp-mqtt included, advanced console and Zigbee device OTA omitted.",
     },
 ]
 # ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
@@ -86,6 +88,9 @@ BOARDS = [
     for layout in LAYOUTS
     for v in PSRAM_VARIANTS
 ]
+# Zigbee device OTA (tbr-hub feature `ota`; `ota-store` implies it) is in
+# the 8 MB images only.
+ZIGBEE_OTA_LAYOUTS = {"partitions-8mb"}
 PRESERVED = {
     "nvs": "Wi-Fi credentials, boot mode, API token",
     "hubdata": "device registry, settings, ZRHP host store (network backup)",
@@ -141,6 +146,18 @@ def build_marker(image: bytes) -> tuple[list[str], str]:
     return [f for f in features.decode().split(",") if f], psram.decode()
 
 
+def check_build(spec: dict, features: list[str], psram: str) -> None:
+    """The features and PSRAM mode marked in an image against its board entry."""
+    ota = "ota" in features or "ota-store" in features
+    if ota != (spec["layout"] in ZIGBEE_OTA_LAYOUTS):
+        raise ReleaseError(f"{spec['id']}: image built {'with' if ota else 'without'} Zigbee device OTA "
+                           f"(features {features}); it belongs to the 8 MB images only")
+    if sorted(features) != sorted(spec["features"]) or psram != spec["psram"]:
+        raise ReleaseError(f"{spec['id']}: image built with features {features} for {psram} PSRAM, "
+                           f"the board entry says {spec['features']} for {spec['psram']} "
+                           "(rebuild with tools/build-hub-firmware.sh)")
+
+
 def idf_bootloader() -> Path:
     """The bootloader of the tbr-hub ESP-IDF build (the esp-idf-sys output
     whose sdkconfig names the hub)."""
@@ -170,8 +187,14 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     table = out / f"{stem}-partition-table.bin"
     boot = out / f"{stem}-bootloader.bin"
     merged = out / f"{stem}-merged.bin"
-    run("tools/make-app-image.sh", "release", str(app), "tbr-hub",
-        env={"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])})
+    env = {"FLASH_SIZE": size, "MAX_APP_BYTES": str(slot), "TARGET_DIR": str(ROOT / spec["target"])}
+    if "elf" in spec:
+        # In the variant's target directory (built first, see hub-release.yml).
+        elf = ROOT / spec["target"] / spec["elf"]
+        if not elf.is_file():
+            raise ReleaseError(f"{spec['id']}: {elf.relative_to(ROOT)} missing (build it first, see hub-release.yml)")
+        env["ELF"] = str(elf)
+    run("tools/make-app-image.sh", "release", str(app), "tbr-hub", env=env)
     run("tools/make-partition-table.sh", spec["csv"], str(table), size)
     # The bootloader configures the flash from its own header: give it the board's size.
     run("esptool", "--chip", "esp32s3", "merge-bin", "--flash-size", size, "-o", str(boot), "0x0", str(boot_src))
@@ -202,11 +225,7 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     reported = app_version(app.read_bytes())
     if reported != f"tbr-hub-{version}":
         raise ReleaseError(f"app reports {reported!r}, the tag says tbr-hub-{version}")
-    features, psram = build_marker(app.read_bytes())
-    if sorted(features) != sorted(spec["features"]) or psram != spec["psram"]:
-        raise ReleaseError(f"{spec['id']}: image built with features {features} for {psram} PSRAM, "
-                           f"the board entry says {spec['features']} for {spec['psram']} "
-                           "(rebuild with tools/build-hub-firmware.sh)")
+    check_build(spec, *build_marker(app.read_bytes()))
     return {
         "id": spec["id"],
         "title": spec["title"],

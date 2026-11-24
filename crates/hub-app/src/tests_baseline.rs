@@ -75,8 +75,8 @@ const LIGHT_NWK: u16 = 0x4444;
 const COMBO: u64 =
     0x1F | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 13) | (1 << 15) | (1 << 16) | (1 << 18);
 /// A plug only in the backup: imported and interviewed after the restore.
-const PLUG: u64 = 0x5a52_5300_0000_0001;
-const PLUG_NWK: u16 = 0x5A01;
+pub(crate) const PLUG: u64 = 0x5a52_5300_0000_0001;
+pub(crate) const PLUG_NWK: u16 = 0x5A01;
 /// The GP switch.
 const GPD: u32 = 0x00F4_0002;
 
@@ -102,7 +102,7 @@ fn light() -> SimDevice {
         .attr(242, 0x0021, 0x0006, TypedValue::uint(ZclType::MAP24, COMBO))
 }
 
-fn plug() -> SimDevice {
+pub(crate) fn plug() -> SimDevice {
     SimDevice::new(PLUG, PLUG_NWK, LogicalType::Router, true, 0x1234)
         .endpoint(1, 0x0104, 0x0051, &[0x0000, 0x0003, 0x0006], &[])
         .basic("zigbee-rs", "SIM-PLUG", 1)
@@ -276,14 +276,15 @@ fn event<'a, T: Wire<'a>>(sim: &SimNcp, id: u16, body: &T) {
     sim.inject_event(id, hub_ncp::driver::encode_body(body).unwrap());
 }
 
-/// The simulated devices answer the hub's APS requests (and nothing else).
-struct Air {
+/// The simulated devices answer the hub's APS requests (and nothing else;
+/// the simulated NCP's trace must be on).
+pub(crate) struct Air {
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Air {
-    fn start(sim: &SimNcp, devs: Arc<Mutex<Vec<SimDevice>>>) -> Air {
+    pub(crate) fn start(sim: &SimNcp, devs: Arc<Mutex<Vec<SimDevice>>>) -> Air {
         let stop = Arc::new(AtomicBool::new(false));
         let (sim, flag) = (sim.clone(), stop.clone());
         let worker = thread::spawn(move || {
@@ -438,6 +439,9 @@ fn config() -> AppConfig {
         api_token: "secret".into(),
         builtin_catalog: false,
         platform: Some(Arc::new(Platform)),
+        // The endpoint with OTA Upgrade (the default with `ota`) in every
+        // build: its clusters are a build feature, like `hub/info.ota`.
+        endpoint: crate::app::hub_endpoint(true),
         ..AppConfig::default()
     }
 }
@@ -915,6 +919,17 @@ fn coordinator_boundary_scenario() {
             // The build's feature (a workspace build with hubctl has it).
             assert_eq!(v["advanced"], cfg!(feature = "advanced"), "{v}");
             v["advanced"] = "<feature>".into();
+            // Zigbee OTA (feature `ota`, the 8 MB images) likewise.
+            assert_eq!(v.get("ota").is_some(), cfg!(feature = "ota"), "{v}");
+            #[cfg(feature = "ota")]
+            {
+                let store = cfg!(feature = "ota-store");
+                assert_eq!(v["ota"]["store"], store, "{v}");
+                assert_eq!(v["ota"]["stream"], true, "{v}");
+                assert_eq!(v["ota"]["max_streams"], 4, "{v}");
+                assert_eq!(v["ota"].get("capacity").is_some(), store, "{v}");
+            }
+            v["ota"] = "<feature>".into();
         }
         goldens.push(baseline::check(
             &format!("api/{name}.json"),

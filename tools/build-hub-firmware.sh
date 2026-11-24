@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds tbr-hub for every image (CI and hub-release.yml): the 8 MB
-# production images with MQTT and the advanced console, the 4 MB images
-# with MQTT but without the console, each for quad and octal PSRAM. One cargo target dir
+# production images with MQTT, the advanced console and the Zigbee device
+# OTA server with its image store (in the inactive app slot), the 4 MB
+# images with MQTT but without the console and without Zigbee OTA, each for
+# quad and octal PSRAM. One cargo target dir
 # per PSRAM mode (ESP-IDF is built once); the 8 MB ELF is kept as
 # target-8mb[-opi]/xtensa-esp32s3-espidf/release/tbr-hub, where
 # make-app-image.sh (TARGET_DIR) and release-images.py read it; the
@@ -44,7 +46,7 @@ for psram in quad octal; do
     target="$root/target" stash="$root/target-8mb"
   fi
   if [ "$layout" != 4mb ]; then
-    CARGO_TARGET_DIR="$target" cargo build --release --features mqtt,advanced ${cargo_args[@]+"${cargo_args[@]}"}
+    CARGO_TARGET_DIR="$target" cargo build --release --features mqtt,advanced,ota-store ${cargo_args[@]+"${cargo_args[@]}"}
     mkdir -p "$stash/$(dirname "$elf")"
     cp "$target/$elf" "$stash/$elf"
   fi

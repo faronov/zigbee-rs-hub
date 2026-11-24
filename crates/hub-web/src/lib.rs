@@ -50,10 +50,25 @@ mod tests {
         html
     }
 
+    /// Every combination of the page's features: `advanced`, `ota`,
+    /// `ota-store` (which implies `ota`).
+    fn variants() -> std::vec::Vec<(bool, bool, bool)> {
+        let mut v = std::vec::Vec::new();
+        for advanced in [false, true] {
+            for (ota, store) in [(false, false), (true, false), (true, true)] {
+                v.push((advanced, ota, store));
+            }
+        }
+        v
+    }
+
+    fn select(advanced: bool, ota: bool, ota_store: bool) -> String {
+        super::variant::select(include_str!("../web/index.html"), &super::variant::enabled(advanced, ota, ota_store)).unwrap()
+    }
+
     #[test]
     fn embedded_page_is_the_minified_source_and_small() {
-        let src = include_str!("../web/index.html");
-        let selected = super::variant::select(src, cfg!(feature = "advanced")).unwrap();
+        let selected = select(cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store"));
         assert_eq!(page(), super::minify::minify(&selected).unwrap().into_bytes());
         assert!(INDEX_HTML_GZ.len() <= PAGE_BUDGET, "{} B compressed", INDEX_HTML_GZ.len());
     }
@@ -62,12 +77,11 @@ mod tests {
     /// budget, compressed as `build.rs` does.
     #[test]
     fn every_variant_fits_the_budget() {
-        let src = include_str!("../web/index.html");
-        for advanced in [false, true] {
-            let html = super::minify::minify(&super::variant::select(src, advanced).unwrap()).unwrap();
+        for (advanced, ota, store) in variants() {
+            let html = super::minify::minify(&select(advanced, ota, store)).unwrap();
             let gz = 18 + miniz_oxide::deflate::compress_to_vec(html.as_bytes(), 10).len();
-            assert!(gz <= PAGE_BUDGET, "advanced {advanced}: {gz} B compressed");
-            if advanced == cfg!(feature = "advanced") {
+            assert!(gz <= PAGE_BUDGET, "advanced {advanced}, ota {ota}, ota-store {store}: {gz} B compressed");
+            if (advanced, ota, store) == (cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store")) {
                 assert_eq!(gz, INDEX_HTML_GZ.len());
             }
         }
@@ -76,16 +90,17 @@ mod tests {
     /// The page's scripts, minified and not, parse (when Node is installed).
     #[test]
     fn minified_script_parses() {
-        let src = include_str!("../web/index.html");
         let script = |html: &str| {
             let a = html.find("<script>").unwrap() + "<script>".len();
             html[a..a + html[a..].find("</script>").unwrap()].to_string()
         };
-        let plain = super::variant::select(src, false).unwrap();
-        let advanced = super::variant::select(src, true).unwrap();
-        let min_plain = super::minify::minify(&plain).unwrap();
-        let min_advanced = super::minify::minify(&advanced).unwrap();
-        for js in [script(&plain), script(&advanced), script(&min_plain), script(&min_advanced)] {
+        let mut scripts = std::vec::Vec::new();
+        for (advanced, ota, store) in variants() {
+            let html = select(advanced, ota, store);
+            scripts.push(script(&super::minify::minify(&html).unwrap()));
+            scripts.push(script(&html));
+        }
+        for js in scripts {
             use std::io::Write;
             let Ok(mut node) = std::process::Command::new("node")
                 .args(["-e", "new Function(require('fs').readFileSync(0,'utf8'))"])
@@ -140,9 +155,8 @@ eq(Number.isNaN(chR("x",1,false)),true);
 
     #[test]
     fn basic_page_omits_manual_console_but_keeps_normal_device_controls() {
-        let src = include_str!("../web/index.html");
-        let plain = super::variant::select(src, false).unwrap();
-        let advanced = super::variant::select(src, true).unwrap();
+        let plain = select(false, false, false);
+        let advanced = select(true, true, true);
         for item in ["data-tab=\"zcl\"", "zcl/read", "tuya/send", "zFrame(", "onTab.zcl"] {
             assert!(!plain.contains(item), "{item} remains in the basic page");
             assert!(advanced.contains(item), "{item} missing from the advanced page");
@@ -156,7 +170,53 @@ eq(Number.isNaN(chR("x",1,false)),true);
         ] {
             assert!(plain.contains(item), "normal functionality lost: {item}");
         }
-        assert!(super::variant::select("// advanced:start\nx\n", false).is_err());
+        let on = super::variant::enabled(false, false, false);
+        assert!(super::variant::select("// advanced:start\nx\n", &on).is_err());
+        assert!(super::variant::select("// store:start\n// stream:start\n", &on).is_err());
+        assert!(super::variant::select("// stream:end\n", &on).is_err());
+        assert!(super::variant::select("// ota:start\n// ota:start\n// ota:end\n// ota:end\n", &on).is_err());
+        assert!(super::variant::select("// ota:start\n// store:start\n// ota:end\n// store:end\n", &on).is_err());
+        // Sections nest: a line is kept when every enclosing section is.
+        let nested = "a\n// ota:start\nb\n// stream:start\nc\n// stream:end\n// ota:end\nd\n";
+        assert_eq!(super::variant::select(nested, &on).unwrap(), "a\nd\n");
+        let on = super::variant::enabled(false, true, false);
+        assert_eq!(super::variant::select(nested, &on).unwrap(), "a\nb\nc\nd\n");
+        let on = super::variant::enabled(false, true, true);
+        assert_eq!(super::variant::select(nested, &on).unwrap(), "a\nb\nd\n");
+    }
+
+    /// Images without the OTA server (4 MB) have no Updates tab and send
+    /// no `ota/*` request.
+    #[test]
+    fn page_without_ota_has_no_updates_tab() {
+        for advanced in [false, true] {
+            let page = select(advanced, false, false);
+            for item in ["data-tab=\"ota\"", "\"ota/", "\"ota\"", "otRe(", "otEv(", "otNeed(", "id=\"ot"] {
+                assert!(!page.contains(item), "{item} in the page without OTA (advanced {advanced})");
+            }
+            assert!(select(advanced, true, false).contains("\"ota\""), "the OTA pages subscribe to the ota topic");
+        }
+    }
+
+    /// The Updates tab offers the image source the firmware has: the store
+    /// (upload) or this browser tab (streaming).
+    #[test]
+    fn updates_tab_follows_the_image_store() {
+        for advanced in [false, true] {
+            let store = select(advanced, true, true);
+            let stream = select(advanced, true, false);
+            for item in ["ota/upload/begin", "id=\"otb\""] {
+                assert!(store.contains(item) && !stream.contains(item), "{item}");
+            }
+            for item in ["ota/stream/offer", "id=\"otsb\"", "beforeunload"] {
+                assert!(stream.contains(item) && !store.contains(item), "{item}");
+            }
+            for page in [&store, &stream] {
+                for item in ["data-tab=\"ota\"", "ota/start", "ota/block_data", "function otRe("] {
+                    assert!(page.contains(item), "{item}");
+                }
+            }
+        }
     }
 
     #[test]

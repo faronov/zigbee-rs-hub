@@ -1,6 +1,7 @@
 //! Golden scenarios: captured/synthesized frames through the full engine
 //! (interview → resolution → entities → configure → states → commands).
 
+mod app_frames;
 mod bank;
 #[cfg(feature = "advanced")]
 mod console;

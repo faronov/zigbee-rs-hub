@@ -31,10 +31,17 @@ Normalized (they follow the clock or thread timing, not the code):
   `duration_ms`, `seq`, OCB `metadata.internal.creation_time`,
   `host_link` (link frame counters), `app.registry_writes`,
   `app.last_values[2]` (bytes written: the times vary in length),
-  `store.journal_live_sectors`; `hub/info` `advanced` is the build feature (checked, then replaced);
+  `store.journal_live_sectors`; `hub/info` `advanced` and `ota` are build
+  features (checked, then replaced; `ota` is present only with feature
+  `ota`, the 8 MB images);
 - host store (`normalize_kv`): every number of at least 10^9 in `st/`
   values (Unix times in s or ms: `c`, `r`, `seen`, the `last_seen` entity),
   `creation_time` in `bkp/last`, and `last_seen` of the NCP device records.
+
+Build-independent inputs: the hub endpoint is the one with OTA Upgrade
+(0x0019) in every build (`hub_endpoint(true)`, the default with feature
+`ota`), so `wire_trace.txt` (`NWK_ADD_ENDPOINT`), `store_writes.txt` and
+`store_mid/end` hold the same endpoint record without `ota` too.
 
 Deterministic inputs: the hub's RNG is the tests' counter, the simulated
 devices (hub-devices' `SimDevice`) answer at once, the GP answers are

@@ -14,6 +14,7 @@
 //! does RTS/CTS towards the H2 itself; opening the port asserts DTR and
 //! RTS, which leaves the H2 running (esptool auto-reset mapping).
 
+mod ota;
 mod platform;
 mod push;
 mod serve;
@@ -37,7 +38,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices] [--sim-unsupported ID,…]) [--store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices] [--sim-ota] [--sim-unsupported ID,…]) [--store FILE] [--ota-store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -60,7 +61,9 @@ commands:
                             random); --wifi-channel: the Wi-Fi channel the
                             energy-scan advice avoids; the catalog store in a
                             1 MiB hubdata image (FILE, or RAM); an extra
-                            trusted signing key (raw Ed25519, hex)
+                            trusted signing key (raw Ed25519, hex);
+                            --ota-store FILE: the OTA images' area (512 KiB,
+                            RAM without it)
                 [--mqtt HOST[:PORT]] [--mqtt-base TOPIC] [--mqtt-discovery]
                 [--mqtt-user U --mqtt-password P] [--mqtt-settings FILE]
                             the Zigbee2MQTT-compatible MQTT bridge (plain
@@ -77,6 +80,8 @@ simulated NCP:
                             devices (sensor, light, plug) that answer the
                             interview and commands and report (Zigbee2MQTT
                             names, for the MQTT bridge)
+  --sim-ota                 a device with an OTA client (0x6D6B/0x0102,
+                            version 0x00010000) joins and queries
   --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.
                             0x0106,0x0108 (no energy scan / TX power, like the
                             current NCP image)
@@ -92,6 +97,17 @@ also, without a hub:
                             shards of devices that resolve to generic only
                             (from the hub's mirror setting, another URL or a
                             release directory)
+  hubctl ota-upload URL --token T FILE [--name N] [--min-file-version V]
+                 [--max-file-version V] [--replace]
+                            upload a Zigbee OTA file to the hub (4 KiB chunks;
+                            run again to continue an interrupted upload)
+  hubctl ota-stream URL --token T FILE [--device ID]
+                            serve a Zigbee OTA file on demand (no storage on the
+                            hub); with --device start that device's upgrade and
+                            exit when it runs the new version
+  hubctl ota-make IMAGE OUT --manufacturer 0xMMMM --image-type 0xTTTT
+                 --version 0xVVVVVVVV [--label TEXT] [--hw MIN-MAX]
+                            wrap a firmware image into a Zigbee OTA file
   hubctl catalog-verify FILE...
                             check catalog banks (.zdb) and manifest.cose with
                             the firmware's trusted keys
@@ -371,6 +387,23 @@ fn echo_round(hub: &Hub, i: u32) -> Result<Duration, hub_ncp::driver::Error> {
 }
 
 static HOLD_TRIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static OTA_STORE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// `serve`'s OTA area: `--ota-store FILE`, or RAM (512 KiB).
+fn ota_area() -> hub_app::OtaFlash {
+    const SECTORS: u32 = 128;
+    let flash: Box<dyn hub_ncp::store::Flash> = match OTA_STORE.get().cloned().flatten() {
+        Some(p) => match FileFlash::open(p.as_ref(), SECTORS, SECTOR) {
+            Ok(f) => Box::new(f),
+            Err(e) => {
+                log::warn!("{p}: {e}; OTA images in RAM");
+                Box::new(hub_ncp::store::MemFlash::new(SECTORS, SECTOR))
+            }
+        },
+        None => Box::new(hub_ncp::store::MemFlash::new(SECTORS, SECTOR)),
+    };
+    hub_app::OtaFlash::new(flash)
+}
 
 fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
     let cmd = if args.0.is_empty() {
@@ -576,7 +609,7 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
             };
             let catalog = catalog_setup(&mut args)?;
             let mqtt_store = mqtt_settings(&mut args)?;
-            let app = hub_app::App::start_with(hub.clone(), cfg, Some(catalog));
+            let app = hub_app::App::start_with(hub.clone(), hub_app::AppConfig { ota_flash: ota_area(), ..cfg }, Some(catalog));
             let transport: hub_mqtt::TransportFactory =
                 Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn hub_mqtt::Transport>);
             let mqtt = hub_mqtt::MqttService::start(&app, mqtt_store, transport, hub_mqtt::ServiceConfig::default());
@@ -706,6 +739,69 @@ fn main() -> ExitCode {
             }
         };
     }
+    if args.0.first().map(String::as_str) == Some("ota-upload") {
+        args.0.remove(0);
+        let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_default();
+        let name = args.value("--name");
+        let min = args.value("--min-file-version").and_then(|v| parse_u32(&v));
+        let max = args.value("--max-file-version").and_then(|v| parse_u32(&v));
+        let replace = args.flag("--replace");
+        let (Some(url), Some(path)) = (args.0.first().cloned(), args.0.get(1).cloned()) else {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match ota::upload(&url, &token, &path, name, (min, max), replace) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args.0.first().map(String::as_str) == Some("ota-stream") {
+        args.0.remove(0);
+        let token = args.value("--token").or_else(|| std::env::var("HUB_TOKEN").ok()).unwrap_or_default();
+        let device = args.value("--device");
+        let (Some(url), Some(path)) = (args.0.first().cloned(), args.0.get(1).cloned()) else {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match ota::stream(&url, &token, &path, device) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args.0.first().map(String::as_str) == Some("ota-make") {
+        args.0.remove(0);
+        let num = |a: &mut Args, k: &str| a.value(k).and_then(|v| parse_u32(&v));
+        let (m, t, v) = (num(&mut args, "--manufacturer"), num(&mut args, "--image-type"), num(&mut args, "--version"));
+        let label = args.value("--label").unwrap_or_default();
+        let hw = args.value("--hw").and_then(|r| {
+            let (a, b) = r.split_once('-')?;
+            Some((parse_u32(a)? as u16, parse_u32(b)? as u16))
+        });
+        let (Some(m), Some(t), Some(v), Some(input), Some(out)) = (m, t, v, args.0.first().cloned(), args.0.get(1).cloned()) else {
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        let image = match std::fs::read(&input) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{input}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let f = ota::make(&image, m as u16, t as u16, v, &label, hw);
+        if let Err(e) = std::fs::write(&out, &f) {
+            eprintln!("{out}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("{out}: {} B, manufacturer 0x{m:04X} image type 0x{t:04X} file version 0x{v:08X}", f.len());
+        return ExitCode::SUCCESS;
+    }
     if args.0.first().map(String::as_str) == Some("ws-call") {
         args.0.remove(0);
         let token = args
@@ -753,6 +849,8 @@ fn main() -> ExitCode {
     let demo = args.flag("--sim-demo");
     let sim_devices = args.flag("--sim-devices");
     let sim_z2m_devices = args.flag("--sim-z2m-devices");
+    let sim_ota = args.flag("--sim-ota");
+    let _ = OTA_STORE.set(args.value("--ota-store"));
     let serial = args.value("--serial");
     let baud = args
         .value("--baud")
@@ -769,6 +867,9 @@ fn main() -> ExitCode {
                 .map(|x| x as u16)
                 .collect();
             s.with(|st| st.unsupported = ids);
+        }
+        if sim_ota {
+            ota::sim_device(&s);
         }
         sim_ncp = Some(s);
         let (rx, tx) = host.split();

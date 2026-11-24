@@ -27,7 +27,8 @@ RECONNECT_MAX: Final = 60.0
 PERMIT_JOIN_DEFAULT: Final = 254
 
 # Hub platform names (spec 4.3, and `scene` of group scenes, 14.9) → HA
-# platforms; `update` is not served yet.
+# platforms; `update` comes from the hub's OTA server (`ota/*`, one entity
+# per device with an OTA client, 14.11).
 PLATFORMS: Final = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
@@ -44,6 +45,7 @@ PLATFORMS: Final = [
     Platform.SIREN,
     Platform.SWITCH,
     Platform.TEXT,
+    Platform.UPDATE,
     Platform.VALVE,
 ]
 

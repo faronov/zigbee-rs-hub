@@ -195,6 +195,21 @@ pub enum HubEvent {
         /// Body.
         body: J,
     },
+    /// Events of a service outside the engine (the OTA server: topic
+    /// `ota`).
+    App {
+        /// Topic.
+        topic: &'static str,
+        /// Body (with its own `topic` field naming the event).
+        body: J,
+    },
+    /// [`HubEvent::App`] with the body as JSON text (no `Value` tree).
+    AppText {
+        /// Topic.
+        topic: &'static str,
+        /// Body: a JSON object with its own `topic` field.
+        text: String,
+    },
     /// GP topic events (13.7).
     Gp {
         /// `gp/commissioning`, `gp/pending`, `gp/commissioned`, `gp/failed`, `gp/binding`.
@@ -230,6 +245,9 @@ pub enum Purpose {
     },
     /// A groups, scenes or bindings request (14.9).
     Group(zgroups::ZgOp),
+    /// A frame of the application ([`Hub::send_app_zcl`]): no answer
+    /// tracked, its outcome goes to [`Hub::take_app_outcomes`].
+    App,
     /// Read Reporting Configuration of `entities/reporting`.
     Reporting {
         /// The readback it belongs to.
@@ -371,6 +389,9 @@ pub trait SchemaDecoder {
 
 /// Timeouts.
 const TX_TIMEOUT_MS: Millis = 8_000;
+/// A frame of the application without an outcome this long is reported
+/// [`Terminal::Unknown`] (backends report every request within a minute).
+const APP_OUTCOME_MS: Millis = 10 * 60_000;
 const TX_TIMEOUT_SLEEPY_MS: Millis = 20_000;
 const AWAKE_AFTER_RX_MS: Millis = 5_000;
 const AWAKE_AFTER_JOIN_MS: Millis = 30_000;
@@ -426,6 +447,57 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) reporting_reads: crate::vecmap::VecMap<u64, crate::reporting::ReportingRead>,
     /// Last readback number.
     pub(crate) reporting_seq: u64,
+    /// Cluster commands devices send to the hub's server side of these
+    /// clusters go to the application ([`Hub::take_app_frames`]) instead
+    /// of the engine: no default response, no events. The OTA server
+    /// (0x0019) lives in the application.
+    pub app_clusters: Vec<u16>,
+    app_frames: Vec<AppFrame>,
+    /// Frames of the application in flight: their outcomes go to
+    /// [`Hub::take_app_outcomes`].
+    app_sent: Vec<AppSent>,
+    app_outcomes: Vec<AppOutcome>,
+    /// Snapshots of the topics of services outside the engine, sent on
+    /// `subscribe` (kept current by the application).
+    pub app_snapshots: BTreeMap<&'static str, String>,
+}
+
+/// A cluster command for the application (see [`Hub::app_clusters`]).
+#[derive(Debug, Clone)]
+pub struct AppFrame {
+    /// Device.
+    pub device: String,
+    /// Source endpoint.
+    pub ep: u8,
+    /// Cluster.
+    pub cluster: u16,
+    /// ZCL header.
+    pub header: ZclHeader,
+    /// Payload after the header.
+    pub payload: Vec<u8>,
+}
+
+/// A frame of the application in flight.
+#[derive(Debug, Clone)]
+struct AppSent {
+    id: RequestId,
+    device: String,
+    cluster: u16,
+    at: Millis,
+}
+
+/// The final outcome of a frame of the application ([`Hub::send_app_zcl`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppOutcome {
+    /// Device.
+    pub device: String,
+    /// Cluster.
+    pub cluster: u16,
+    /// The request; `None`: a frame queued for a sleepy device that the
+    /// transport refused when the device woke up (nothing was sent).
+    pub id: Option<RequestId>,
+    /// What happened to it.
+    pub terminal: Terminal,
 }
 
 /// The ExprEnv of one device.
@@ -514,7 +586,60 @@ impl<T: ZigbeeTransport> Hub<T> {
             report_defaults: Default::default(),
             reporting_reads: Default::default(),
             reporting_seq: 0,
+            app_clusters: Vec::new(),
+            app_frames: Vec::new(),
+            app_sent: Vec::new(),
+            app_outcomes: Vec::new(),
+            app_snapshots: BTreeMap::new(),
         }
+    }
+
+    /// Takes the frames of [`Hub::app_clusters`].
+    pub fn take_app_frames(&mut self) -> Vec<AppFrame> {
+        std::mem::take(&mut self.app_frames)
+    }
+
+    /// Sends a ZCL frame of the application to a device endpoint from the
+    /// hub's endpoint; no response is tracked. `Ok(Some(id))`: submitted,
+    /// its final outcome follows in [`Self::take_app_outcomes`];
+    /// `Ok(None)`: queued for a sleepy device until it is awake (submitted
+    /// then, its outcome carries the ID it got); `Err`: refused, nothing
+    /// was sent.
+    pub fn send_app_zcl(
+        &mut self,
+        dev_id: &str,
+        ep: u8,
+        cluster: u16,
+        frame: ZclFrame,
+        now: Millis,
+    ) -> Result<Option<RequestId>, CoordError> {
+        let Some(dev) = self.devices.get(dev_id) else {
+            return Err(CoordError::Other("unknown device".into()));
+        };
+        let req = self.zcl_request(dev, ep, cluster, &frame);
+        let tsn = frame.header.tsn;
+        self.send_or_queue(dev_id, req, Purpose::App, tsn, false, now)
+    }
+
+    /// The final outcomes of the application's frames since the last call,
+    /// in the order they arrived.
+    pub fn take_app_outcomes(&mut self) -> Vec<AppOutcome> {
+        std::mem::take(&mut self.app_outcomes)
+    }
+
+    /// A ZCL transaction sequence number from the engine's counter.
+    pub fn new_tsn(&mut self) -> u8 {
+        self.next_zcl_tsn()
+    }
+
+    /// An event of a service outside the engine on `topic`.
+    pub fn app_event(&mut self, topic: &'static str, body: J) {
+        self.emit(HubEvent::App { topic, body });
+    }
+
+    /// [`Self::app_event`] with the body as JSON text.
+    pub fn app_event_text(&mut self, topic: &'static str, text: String) {
+        self.emit(HubEvent::AppText { topic, text });
     }
 
     /// Installs the self-description decoder (zdef).
@@ -696,14 +821,27 @@ impl<T: ZigbeeTransport> Hub<T> {
         zdo: bool,
         now: Millis,
     ) {
+        let _ = self.send_or_queue(dev_id, req, purpose, tsn, zdo, now);
+    }
+
+    /// [`Self::send_tracked`]: the request's ID, `None` when queued.
+    fn send_or_queue(
+        &mut self,
+        dev_id: &str,
+        req: ApsRequest,
+        purpose: Purpose,
+        tsn: u8,
+        zdo: bool,
+        now: Millis,
+    ) -> Result<Option<RequestId>, CoordError> {
         let Some(dev) = self.devices.get_mut(dev_id) else {
-            return;
+            return Err(CoordError::Other("unknown device".into()));
         };
         if dev.sleepy() && now > dev.awake_until {
             dev.queue.push_back(Queued { req, purpose, tsn });
-            return;
+            return Ok(None);
         }
-        self.transmit(dev_id, req, purpose, tsn, zdo, now);
+        self.transmit(dev_id, req, purpose, tsn, zdo, now).map(Some)
     }
 
     fn transmit(
@@ -714,31 +852,44 @@ impl<T: ZigbeeTransport> Hub<T> {
         tsn: u8,
         zdo: bool,
         now: Millis,
-    ) {
-        let Ok(rid) = self.transport.submit(Request::Aps(req.clone())) else {
-            self.fail_purpose(
-                dev_id,
-                &purpose,
-                ApiError::new("busy", "transport refused the request"),
-                now,
-            );
-            return;
+    ) -> Result<RequestId, CoordError> {
+        let rid = match self.transport.submit(Request::Aps(req.clone())) {
+            Ok(rid) => rid,
+            Err(e) => {
+                self.fail_purpose(
+                    dev_id,
+                    &purpose,
+                    ApiError::new("busy", "transport refused the request"),
+                    now,
+                );
+                return Err(e);
+            }
         };
         #[cfg(feature = "advanced")]
         self.tap_tx(dev_id, &req, now);
-        if purpose != Purpose::None {
-            self.pending.insert(
-                (zdo, tsn),
-                Pending {
-                    device: dev_id.to_string(),
-                    purpose,
-                    sent_at: now,
-                    retries: 0,
-                    req,
-                    rid,
-                },
-            );
+        match purpose {
+            Purpose::None => {}
+            Purpose::App => self.app_sent.push(AppSent {
+                id: rid,
+                device: dev_id.to_string(),
+                cluster: req.cluster,
+                at: now,
+            }),
+            purpose => {
+                self.pending.insert(
+                    (zdo, tsn),
+                    Pending {
+                        device: dev_id.to_string(),
+                        purpose,
+                        sent_at: now,
+                        retries: 0,
+                        req,
+                        rid,
+                    },
+                );
+            }
         }
+        Ok(rid)
     }
 
     /// Sends a ZCL frame to a device endpoint.
@@ -814,7 +965,17 @@ impl<T: ZigbeeTransport> Hub<T> {
         let q: Vec<Queued> = dev.queue.drain(..).collect();
         for item in q {
             let zdo = item.req.profile == 0;
-            self.transmit(dev_id, item.req, item.purpose, item.tsn, zdo, now);
+            let (app, cluster) = (matches!(item.purpose, Purpose::App), item.req.cluster);
+            if let Err(e) = self.transmit(dev_id, item.req, item.purpose, item.tsn, zdo, now)
+                && app
+            {
+                self.app_outcomes.push(AppOutcome {
+                    device: dev_id.to_string(),
+                    cluster,
+                    id: None,
+                    terminal: Terminal::Refused(e),
+                });
+            }
         }
     }
 
@@ -1534,6 +1695,19 @@ impl<T: ZigbeeTransport> Hub<T> {
                 self.serve_time(id, ep, h.tsn, &attrs, now);
             }
             (FrameType::Global, _) => needs_default_rsp = false,
+            (FrameType::Cluster, _)
+                if h.direction == Direction::ClientToServer
+                    && self.app_clusters.contains(&ind.cluster) =>
+            {
+                self.app_frames.push(AppFrame {
+                    device: id.to_string(),
+                    ep,
+                    cluster: ind.cluster,
+                    header: h,
+                    payload: frame.payload,
+                });
+                return;
+            }
             (FrameType::Cluster, cmd) => {
                 let handled = match ind.cluster {
                     cl::TUYA => {
@@ -2146,6 +2320,16 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// with `not_delivered` instead of waiting for the response timeout.
     /// Other outcomes leave it to the response.
     fn aps_done(&mut self, id: RequestId, t: Terminal, now: Millis) {
+        if let Some(i) = self.app_sent.iter().position(|s| s.id == id) {
+            let s = self.app_sent.swap_remove(i);
+            self.app_outcomes.push(AppOutcome {
+                device: s.device,
+                cluster: s.cluster,
+                id: Some(id),
+                terminal: t,
+            });
+            return;
+        }
         let err = match &t {
             Terminal::NotDelivered(e) => not_delivered(e),
             Terminal::Refused(_) => ApiError::new(
@@ -2191,6 +2375,14 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Advances timers.
     pub fn tick(&mut self, now: Millis) {
+        // The application's frames whose outcome never came.
+        while let Some(s) = self
+            .app_sent
+            .iter()
+            .find(|s| now.saturating_sub(s.at) > APP_OUTCOME_MS)
+        {
+            self.aps_done(s.id, Terminal::Unknown(CoordError::Timeout), now);
+        }
         // Request timeouts.
         let expired: Vec<(bool, u8)> = self
             .pending

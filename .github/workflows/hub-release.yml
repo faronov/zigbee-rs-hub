@@ -92,7 +92,7 @@ jobs:
               run: |
                   set -euo pipefail
                   (cd firmware/bridge && cargo build --release --locked)
-                  # Both sizes include MQTT; only 8 MB enables advanced by default. Quad and
+                  # Both sizes include MQTT; only 8 MB enables advanced and the OTA image store. Quad and
                   # octal PSRAM (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
                   tools/build-hub-firmware.sh --locked
             - name: Release images

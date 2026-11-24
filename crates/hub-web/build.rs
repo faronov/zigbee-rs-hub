@@ -30,7 +30,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/minify.rs");
     println!("cargo:rerun-if-changed=src/variant.rs");
     let html = fs::read_to_string(src).expect("web/index.html");
-    let html = variant::select(&html, cfg!(feature = "advanced")).expect("web feature sections");
+    let on = variant::enabled(cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store"));
+    let html = variant::select(&html, &on).expect("web feature sections");
     let html = minify::minify(&html).unwrap_or_else(|e| panic!("web/index.html: {e}")).into_bytes();
     let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff];
     gz.extend(miniz_oxide::deflate::compress_to_vec(&html, 10));

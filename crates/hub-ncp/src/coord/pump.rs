@@ -507,9 +507,15 @@ impl Pump {
         }
         let known = self.hub.store_state().endpoints;
         for ep in std::mem::take(&mut self.endpoints) {
-            let r = if known.get(&ep.ep) == Some(&ep) {
+            let stored = known.get(&ep.ep);
+            let r = if stored == Some(&ep) {
                 Ok(())
             } else {
+                // Another image's descriptor (e.g. with OTA Upgrade): the
+                // NCP replaces an endpoint with the same number.
+                if stored.is_some() {
+                    info!("zrhp: hub endpoint {} differs from the stored one: registered again", ep.ep);
+                }
                 self.hub.add_endpoint(ep.clone())
             };
             match r {

@@ -140,8 +140,11 @@ pub trait RequestHook: Send {
 /// Request prefixes of optional services and why a build without their
 /// hook lacks them: such requests answer `unsupported`, not
 /// `invalid_format`.
-const OPTIONAL_SERVICES: &[(&str, &str)] =
-    &[("mqtt/", "the MQTT bridge is not enabled in this firmware build")];
+const OPTIONAL_SERVICES: &[(&str, &str)] = &[
+    ("mqtt/", "the MQTT bridge is not enabled in this firmware build"),
+    #[cfg(not(feature = "ota"))]
+    ("ota/", "Zigbee device OTA is not in this firmware build (8 MB images only)"),
+];
 
 /// The `unsupported` result of a request for an optional service this
 /// build does not have.
@@ -189,6 +192,13 @@ pub struct AppConfig {
     /// Stack of the maintenance job thread (network map, backup, …),
     /// started per job.
     pub admin_stack: usize,
+    /// The OTA image store's region (the inactive app slot on the hub; none:
+    /// streamed images only).
+    #[cfg(feature = "ota-store")]
+    pub ota_flash: crate::ota_store::OtaFlash,
+    /// OTA images streamed at once (`Resources::ota_streams` on the hub).
+    #[cfg(feature = "ota")]
+    pub ota_streams: usize,
 }
 
 impl Default for AppConfig {
@@ -197,23 +207,39 @@ impl Default for AppConfig {
             hub_name: "zigbee-rs-hub".into(),
             api_token: String::new(),
             tz_offset_s: 0,
-            endpoint: EndpointRecord {
-                ep: 1,
-                profile: 0x0104,
-                device_id: 0x0005,
-                version: 0,
-                // Basic, Identify, Time, OTA server.
-                in_clusters: vec![0x0000, 0x0003, 0x000A, 0x0019],
-                // Clients the hub drives: On/Off, Level, Scenes, Groups,
-                // Color, IAS Zone (CIE), measurement reads.
-                out_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0300, 0x0500, 0x0402, 0x0405],
-            },
+            endpoint: hub_endpoint(cfg!(feature = "ota")),
             builtin_catalog: true,
             stack_size: 96 * 1024,
             import_ncp_devices: true,
             platform: None,
             admin_stack: 16 * 1024,
+            #[cfg(feature = "ota-store")]
+            ota_flash: Default::default(),
+            #[cfg(feature = "ota")]
+            ota_streams: hub_ota::stream::MAX_STREAMS,
         }
+    }
+}
+
+/// The hub endpoint (1, HA profile). Server clusters: Basic, Identify, Time
+/// and, with the OTA server (`ota`: the 8 MB images), OTA Upgrade (0x0019),
+/// so devices without it find no OTA server. A stored endpoint that
+/// differs (an image with the other feature set ran before) is registered
+/// again at start (`NWK_ADD_ENDPOINT` replaces it on the NCP) and stored.
+pub fn hub_endpoint(ota: bool) -> EndpointRecord {
+    let mut in_clusters = vec![0x0000, 0x0003, 0x000A];
+    if ota {
+        in_clusters.push(0x0019);
+    }
+    EndpointRecord {
+        ep: 1,
+        profile: 0x0104,
+        device_id: 0x0005,
+        version: 0,
+        in_clusters,
+        // Clients the hub drives: On/Off, Level, Scenes, Groups, Color, IAS
+        // Zone (CIE), measurement reads.
+        out_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0300, 0x0500, 0x0402, 0x0405],
     }
 }
 
@@ -475,6 +501,9 @@ struct Runner {
     request_results: RequestResults,
     /// Requests served outside the engine (`mqtt/*`).
     hooks: Vec<Box<dyn RequestHook>>,
+    /// The OTA Upgrade server.
+    #[cfg(feature = "ota")]
+    ota: crate::ota::Ota,
 }
 
 /// The session automations send their `request` actions through.
@@ -651,7 +680,16 @@ impl Runner {
         let net: Arc<dyn NetworkAdmin> = Arc::new(hub_ncp::coord::ZrhpAdmin::new(ncp.clone()));
         let mut engine = Engine::new(CoordTransport::new(coord, net.clone()), hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
-        let api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        // Without the OTA server, OTA cluster commands take the engine's
+        // generic path (a requested Default Response, no OTA answer).
+        #[cfg(feature = "ota")]
+        engine.app_clusters.push(hub_ota::server::CLUSTER);
+        #[cfg(feature = "ota")]
+        let ota = crate::ota::Ota::new(&cfg);
+        #[allow(unused_mut)]
+        let mut api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        #[cfg(feature = "ota")]
+        api.set_info("ota", ota.info());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
         admin.start_worker();
@@ -688,6 +726,8 @@ impl Runner {
             run_answers: Vec::new(),
             request_results: Vec::new(),
             hooks: Vec::new(),
+            #[cfg(feature = "ota")]
+            ota,
         };
         let now = r.now();
         let mut registry = std::mem::take(&mut r.registry);
@@ -715,6 +755,8 @@ impl Runner {
         );
         let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
         r.engine.transport.nwk.extend(known);
+        #[cfg(feature = "ota")]
+        r.ota.load(&r.ncp, &r.engine, now);
         // Restored devices produce added events; nobody is subscribed yet,
         // and their snapshots are what the store holds.
         let _ = r.engine.drain_events();
@@ -787,6 +829,11 @@ impl Runner {
             // An automation's delay may end before the next tick.
             let due = self.automations.next_wake().map(|ms| self.t0 + Duration::from_millis(ms));
             let mut wait = due.map_or(next_tick, |d| d.min(next_tick)).saturating_duration_since(Instant::now());
+            // A paced OTA block response may be due before both.
+            #[cfg(feature = "ota")]
+            if let Some(due) = self.ota.next_due() {
+                wait = wait.min(Duration::from_millis(due.saturating_sub(self.now())));
+            }
             // A snapshot waits for its sink to send the previous pieces.
             if !self.outboxes.is_empty() {
                 wait = wait.min(Duration::from_millis(10));
@@ -952,6 +999,14 @@ impl Runner {
                 }
             }
             Input::Text(sid, text) => {
+                #[cfg(feature = "ota")]
+                if self.api.is_authed(sid)
+                    && let Some(frame) = self.ota_request(sid, &text, now)
+                {
+                    drop(text);
+                    self.send_owned(sid, frame);
+                    return;
+                }
                 if self.api.is_authed(sid)
                     && let Some(frame) = self.hook_request(&text)
                 {
@@ -1024,6 +1079,40 @@ impl Runner {
                 }
             },
             Input::Shutdown => {}
+        }
+    }
+
+    /// An `ota/*` request (`ota/block_data` read from the text): its
+    /// result frame, `None` for other requests.
+    #[cfg(feature = "ota")]
+    fn ota_request(&mut self, sid: SessionId, text: &str, now: Millis) -> Option<String> {
+        if let Some(frame) = self.ota.block_data_text(sid, text) {
+            return Some(frame);
+        }
+        let (id, ty, v) = crate::ota::head(text)?;
+        // A job and a device's policy are network records (see `ota`).
+        if matches!(ty.as_str(), "ota/start" | "ota/devices/policy")
+            && let Some(e) = self.registry_read_only()
+        {
+            return Some(hub_devices::api::ServerMessage::err(id, e).to_text());
+        }
+        Some(match self.ota.request(&mut self.engine, &self.ncp, sid, &ty, &v, now) {
+            Ok(r) => r.frame(id),
+            Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),
+        })
+    }
+
+    /// The OTA server: client commands, paced responses, persistence and
+    /// the streams' block requests.
+    #[cfg(feature = "ota")]
+    fn pump_ota(&mut self, now: Millis) {
+        self.ota.frames(&mut self.engine, now);
+        self.ota.poll(&mut self.engine, &self.ncp, now);
+        // Streams of sessions that are gone wait for a client.
+        let sinks = &self.sinks;
+        self.ota.prune(|sid| sinks.contains_key(&sid), now);
+        for (sid, frame) in self.ota.outbox() {
+            self.send_owned(sid, frame);
         }
     }
 
@@ -1123,6 +1212,9 @@ impl Runner {
 
     /// [`send`](Self::send) of a frame the caller no longer needs.
     fn send_owned(&mut self, sid: SessionId, frame: String) {
+        if sid == AUTOMATIONS_SESSION {
+            return self.send(sid, &frame);
+        }
         if self.outboxes.contains_key(&sid) {
             self.hold(sid, frame);
         } else if let Some(sink) = self.sinks.get_mut(&sid)
@@ -1238,6 +1330,8 @@ impl Runner {
         let cookie = st.epoch;
         if ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
+            #[cfg(feature = "ota")]
+            self.ota.set_asdu(st.caps.as_ref().map(|c| u32::from(c.max_asdu)));
             self.set_maintenance();
         }
         // Group memberships of the hub endpoint, once per NCP session.
@@ -1407,6 +1501,8 @@ impl Runner {
         if self.catalog.as_ref().is_some_and(|c| c.config_dirty || !c.events.is_empty()) {
             self.pump_catalog();
         }
+        #[cfg(feature = "ota")]
+        self.pump_ota(now);
         self.with_automations(|a, w, clk| a.resume(w, clk));
         // Automations act on the events; what their commands change follows
         // in the next round (a few rounds here, the rest at the next input
@@ -1420,7 +1516,7 @@ impl Runner {
             self.last.note(&events, &self.engine);
             self.with_automations(|a, w, clk| a.observe(&events, w, clk));
             for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
-                self.send(sid, &frame);
+                self.send_owned(sid, frame);
             }
         }
         self.pump_automations();

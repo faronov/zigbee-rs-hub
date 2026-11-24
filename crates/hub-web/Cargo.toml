@@ -10,6 +10,11 @@ publish = false
 
 [features]
 advanced = []
+# The Updates tab (Zigbee device OTA): images with the OTA server.
+ota = []
+# The page of an image with the OTA image store (8 MB): uploads to the
+# store instead of serving files from the browser tab.
+ota-store = ["ota"]
 
 [build-dependencies]
 miniz_oxide = "0.8"

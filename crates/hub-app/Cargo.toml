@@ -13,6 +13,7 @@ hub-coord = { workspace = true }
 hub-devices = { workspace = true }
 hub-ncp = { workspace = true }
 hub-store = { workspace = true }
+hub-ota = { workspace = true, optional = true }
 zigbee-zrhp = { workspace = true, features = ["std"] }
 log = "0.4"
 miniz_oxide = "0.8"
@@ -24,7 +25,15 @@ sha2 = "0.10"
 base64 = "0.22"
 
 [features]
+default = ["ota-store"]
 advanced = ["hub-devices/advanced"]
+# The Zigbee OTA Upgrade server (cluster 0x0019, `hub-ota`) with streamed
+# images. Without it `ota/*` requests answer `unsupported`, `hub/info` has
+# no `ota` and OTA cluster commands take the engine's generic path.
+ota = ["dep:hub-ota"]
+# The OTA image store (uploads into the inactive app slot of the 8 MB
+# layout). Without it the OTA server serves streamed images only.
+ota-store = ["ota", "hub-ota/store"]
 
 [dev-dependencies]
 zdefc = { path = "../zdefc" }

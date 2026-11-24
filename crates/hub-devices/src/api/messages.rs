@@ -23,6 +23,7 @@ pub const TOPICS: &[&str] = &[
     "frames",
     "automations",
     "groups",
+    "ota",
 ];
 
 /// The first frame from the client.

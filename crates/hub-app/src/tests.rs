@@ -144,6 +144,111 @@ fn mqtt_requests_without_the_bridge_answer_unsupported() {
     r.sim.stop();
 }
 
+/// The hub endpoint follows the build: OTA Upgrade (0x0019) is a server
+/// cluster only with the OTA server. A stored endpoint of an image with the
+/// other feature set (a 4 MB hub updated from an image with OTA) is
+/// registered again (`NWK_ADD_ENDPOINT` replaces an endpoint on the NCP)
+/// and replaces the stored record, which the host core replays after an
+/// NCP restart: no factory reset.
+#[test]
+fn a_changed_hub_endpoint_is_registered_again_and_replayed() {
+    use zigbee_zrhp::codec::List;
+    use zigbee_zrhp::msg::network::NwkAddEndpoint;
+    assert_eq!(AppConfig::default().endpoint.in_clusters.contains(&0x0019), cfg!(feature = "ota"));
+    let wire = |e: &hub_ncp::store::EndpointRecord| {
+        let body = NwkAddEndpoint {
+            ep: e.ep,
+            profile: e.profile,
+            device_id: e.device_id,
+            version: e.version,
+            in_clusters: List::new(&e.in_clusters),
+            out_clusters: List::new(&e.out_clusters),
+        };
+        hub_ncp::driver::encode_body(&body).unwrap()
+    };
+    let added = |r: &Rig| -> Vec<Vec<u8>> {
+        r.sim.with(|s| s.trace.iter().flatten().filter(|(id, _)| *id == ids::NWK_ADD_ENDPOINT).map(|(_, p)| p.clone()).collect())
+    };
+    let (with_ota, without) = (crate::app::hub_endpoint(true), crate::app::hub_endpoint(false));
+    assert!(with_ota.in_clusters.contains(&0x0019) && !without.in_clusters.contains(&0x0019));
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), AppConfig { endpoint: with_ota.clone(), ..cfg() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    assert_eq!(r.ncp.store_state().endpoints.get(&1), Some(&with_ota));
+    app.shutdown();
+
+    // The image without OTA on the same store and NCP.
+    r.sim.with(|s| s.trace = Some(Vec::new()));
+    let app = App::start(r.ncp.clone(), AppConfig { endpoint: without.clone(), ..cfg() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    assert_eq!(added(&r), [wire(&without)]);
+    assert_eq!(r.ncp.store_state().endpoints.get(&1), Some(&without));
+    // Its start again: nothing to register.
+    app.shutdown();
+    r.sim.with(|s| s.trace = Some(Vec::new()));
+    let app = App::start(r.ncp.clone(), AppConfig { endpoint: without.clone(), ..cfg() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    assert!(added(&r).is_empty());
+    // An NCP restart replays the stored endpoint: the new one.
+    let resumes = r.ncp.status().resumes;
+    r.sim.reboot();
+    assert!(r.ncp.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(added(&r), [wire(&without)]);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// Without the OTA server (the 4 MB images): `ota/*` answers
+/// `unsupported`, `hub/info` has no `ota`, and a device's Query Next Image
+/// takes the engine's generic path as before the server existed: the
+/// Default Response it asks for (SUCCESS), no Query Next Image Response.
+#[cfg(not(feature = "ota"))]
+#[test]
+fn without_the_ota_server_ota_requests_are_unsupported_and_queries_get_a_default_response() {
+    use std::sync::Mutex;
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let info = call(&app, sid, &rx, 1, json!({"type": "hub/info"}));
+    assert_eq!(info["success"], true, "{info}");
+    assert!(info["result"].get("ota").is_none(), "{info}");
+    for (id, ty) in [(2, "ota/status"), (3, "ota/start"), (4, "ota/block_data")] {
+        let f = call(&app, sid, &rx, id, json!({"type": ty, "device": "zb:00158d0001a2b3c4"}));
+        assert_eq!(f["error"]["code"], "unsupported", "{f}");
+    }
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let seen = sent.clone();
+    r.sim.set_aps_hook(Box::new(move |a: &hub_ncp::sim::SimAps<'_>| {
+        if a.cluster == 0x0019 {
+            seen.lock().unwrap().push(a.asdu.to_vec());
+        }
+        Vec::new()
+    }));
+    join(&r.sim);
+    assert!(app.wait(T, |s| s.devices == 1));
+    // Query Next Image (cluster-specific, client to server, Default
+    // Response wanted, TSN 0x42): field control, manufacturer, image type,
+    // file version.
+    let mut q = vec![0x01, 0x42, 0x01, 0x00];
+    q.extend(0x115Fu16.to_le_bytes());
+    q.extend(0x0001u16.to_le_bytes());
+    q.extend(0x0000_0010u32.to_le_bytes());
+    r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, hub_ncp::sim::indication(0x1234, DEV, 1, 1, 0x0104, 0x0019, &q));
+    let t = std::time::Instant::now();
+    while sent.lock().unwrap().is_empty() && t.elapsed() < T {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    // Global Default Response, server to client, for command 0x01: SUCCESS.
+    assert_eq!(*sent.lock().unwrap(), vec![vec![0x18, 0x42, 0x0B, 0x01, 0x00]]);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 #[test]
 fn aps_confirms_are_counted_and_failures_reach_the_engine() {
     let r = rig(Store::volatile());
@@ -435,6 +540,58 @@ fn automation_group_delete_is_done_before_the_next_action() {
     let groups = c["result"].as_array().unwrap();
     assert_eq!(groups.len(), 1, "{c}");
     assert_eq!((groups[0]["id"].as_u64(), groups[0]["name"].as_str()), (Some(5), Some("b")), "{c}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// A command action's result comes after its run (the delivery): it
+/// reaches the trace, also through the event loop's frames.
+#[test]
+fn automation_command_results_reach_the_trace() {
+    use crate::tests_baseline::{Air, PLUG, PLUG_NWK, plug};
+    let r = rig_with(Store::volatile(), |sim| {
+        sim.with(|s| {
+            s.trace = Some(Vec::new());
+            s.table_devices = vec![(PLUG.to_le_bytes(), PLUG_NWK, None)];
+        })
+    });
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let devs = Arc::new(std::sync::Mutex::new(vec![plug()]));
+    let _air = Air::start(&r.sim, devs.clone());
+    let app = App::start(r.ncp.clone(), cfg());
+    let (sid, rx) = session(&app);
+    let id = format!("zb:{PLUG:016x}");
+    let t = std::time::Instant::now();
+    while call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": id}))["result"]["interview"] != "complete" {
+        assert!(t.elapsed() < T, "interview of {id}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let rule = json!({"id": "c", "actions": [{"type": "command", "uid": format!("{id}:1:switch"), "command": "toggle"}]});
+    assert_eq!(call(&app, sid, &rx, 2, json!({"type": "automations/create", "rule": rule}))["success"], true);
+    let mut n = 10;
+    let mut last_trace = |want: &str| {
+        let t = std::time::Instant::now();
+        loop {
+            n += 1;
+            let c = call(&app, sid, &rx, n, json!({"type": "automations/traces", "automation": "c"}));
+            let trace = c["result"][0].clone();
+            if trace["actions"][0]["result"] == want || t.elapsed() > T {
+                return trace;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    call(&app, sid, &rx, 3, json!({"type": "automations/run", "automation": "c"}));
+    let trace = last_trace("ok");
+    assert_eq!((trace["actions"][0]["result"].as_str(), trace["result"].as_str()), (Some("ok"), Some("done")), "{trace}");
+    // Gone (not delivered, no answer): the action and the run end in an
+    // error.
+    devs.lock().unwrap().clear();
+    r.sim.with(|s| s.undeliverable.push((PLUG_NWK, 0xA8)));
+    call(&app, sid, &rx, 4, json!({"type": "automations/run", "automation": "c"}));
+    let trace = last_trace("error");
+    assert_eq!((trace["actions"][0]["result"].as_str(), trace["result"].as_str()), (Some("error"), Some("error")), "{trace}");
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

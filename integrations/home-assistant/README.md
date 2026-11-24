@@ -24,13 +24,28 @@ has, and the integration maps them 1:1 onto HA platforms.
   **Channel**; its hardware version shows the NCP board and firmware.
 - Entities for all platforms the hub serves: `sensor`, `binary_sensor`,
   `switch`, `light`, `number`, `select`, `button`, `text`, `event`, `cover`,
-  `climate`, `lock`, `fan`, `siren`, `valve`, `scene` (`update` is not
-  served by the hub yet).
+  `climate`, `lock`, `fan`, `siren`, `valve`, `scene`.
 - Zigbee groups of the hub (device-support 14.9): a device per group with
   members (`grp:<id>`, model "Zigbee group"), its `light` (or `switch`) with
   the aggregated state, commands sent as one groupcast, and its scenes as HA
   scenes (`scene.turn_on` → Recall Scene, with `transition`). Deleting the
   group device deletes the group on the hub.
+- **Firmware** (`update`), one per device with a Zigbee OTA client, on hubs
+  with the OTA server (`ota` in `hub/info`, device-support 14.11): installed
+  version (the device's OTA file version, `0x…` as ZHA shows it), the
+  newest image stored on the hub for it, install (`ota/start`; the device is
+  notified, a sleepy one when it wakes) and download progress. A newer
+  image in the OTA index the hub names (`index_url`, Koenkk/zigbee-OTA by
+  default; fetched daily by Home Assistant, not by the hub) counts as the
+  latest version: Install downloads it and checks its SHA-512, then
+  uploads it (hubs with an image store: the 8 MB images) or **streams** it
+  (a hub built without the store: Home Assistant serves the blocks while
+  the device downloads; the file is kept in `.storage/zigbee_rs_hub_ota/`
+  until the update is done and offered again after any reconnect, so a
+  hub or HA restart does not lose the download). Images can also be given
+  from the hub's web UI (Updates tab) or with `hubctl ota-upload` /
+  `ota-stream`. The 4 MB images have no Zigbee OTA (no `ota` in
+  `hub/info`): no update entities.
 - Services: `zigbee_rs_hub.permit_join` (duration, Green Power window, a
   router to join through), `zigbee_rs_hub.reinterview_device`,
   `zigbee_rs_hub.reconfigure_device`, `zigbee_rs_hub.update_catalog`.

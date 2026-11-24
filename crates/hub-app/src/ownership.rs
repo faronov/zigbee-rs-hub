@@ -37,6 +37,8 @@ impl Runner {
             self.forget_network(now).and_then(|forgotten| {
                 let deleted = self.ncp.registry_clear().map_err(failed)?;
                 self.registry.loaded = true;
+                #[cfg(feature = "ota")]
+                self.ota.forget_devices();
                 self.imported_in = None;
                 self.import_retry = None;
                 self.import_gen = self.import_gen.wrapping_add(1);
@@ -46,6 +48,8 @@ impl Runner {
         match r {
             Ok(fields) => {
                 self.automations.read_only = false;
+                #[cfg(feature = "ota")]
+                self.ota.set_writable(true);
                 let reason = if adopt { "registry_adopted" } else { "registry_cleared" };
                 self.engine.network_event(json!({"topic": "network_updated", "reason": reason}));
                 let registry = registry_json(&self.ncp.registry());
@@ -62,6 +66,11 @@ impl Runner {
         if !kind.strip_prefix("automations/").is_some_and(|k| changes.contains(&k)) {
             return None;
         }
+        self.registry_read_only()
+    }
+
+    /// Why the network records cannot be written now (`None`: they can).
+    pub(super) fn registry_read_only(&self) -> Option<ApiError> {
         let why = match self.ncp.registry() {
             RegistryState::Untagged | RegistryState::Owned => return None,
             RegistryState::Unverified => "the device registry is unverified",
@@ -76,6 +85,8 @@ impl Runner {
     pub(super) fn check_registry(&mut self, now: Millis) {
         let state = self.ncp.registry();
         self.automations.read_only = !matches!(state, RegistryState::Untagged | RegistryState::Owned);
+        #[cfg(feature = "ota")]
+        self.ota.set_writable(!self.automations.read_only);
         if !self.registry.loaded && !matches!(state, RegistryState::Foreign { .. }) {
             self.load_network(now);
         }
@@ -86,6 +97,8 @@ impl Runner {
     fn load_network(&mut self, now: Millis) -> usize {
         let n = self.registry.load_network(&self.ncp, &mut self.engine, now);
         self.last.load(&self.ncp, &mut self.engine, now);
+        #[cfg(feature = "ota")]
+        self.ota.load_devices(&self.ncp, &self.engine, now);
         let rules = kv::with(&self.ncp, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
         self.automations.load(rules);
         self.with_automations(|a, w, _| a.prime(w));
