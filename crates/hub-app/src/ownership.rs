@@ -48,6 +48,8 @@ impl Runner {
         match r {
             Ok(fields) => {
                 self.automations.read_only = false;
+                #[cfg(feature = "ota")]
+                self.ota.set_writable(true);
                 let reason = if adopt { "registry_adopted" } else { "registry_cleared" };
                 self.engine.network_event(json!({"topic": "network_updated", "reason": reason}));
                 let registry = registry_json(&self.ncp.registry());
@@ -83,6 +85,8 @@ impl Runner {
     pub(super) fn check_registry(&mut self, now: Millis) {
         let state = self.ncp.registry();
         self.automations.read_only = !matches!(state, RegistryState::Untagged | RegistryState::Owned);
+        #[cfg(feature = "ota")]
+        self.ota.set_writable(!self.automations.read_only);
         if !self.registry.loaded && !matches!(state, RegistryState::Foreign { .. }) {
             self.load_network(now);
         }

@@ -633,6 +633,29 @@ fn auto_policy_follows_the_window_and_needs_a_clock() {
 }
 
 #[test]
+fn held_auto_starts_nothing() {
+    // As `auto_policy_follows_the_window_and_needs_a_clock`, held.
+    let mut n = Net::new(
+        Settings {
+            policy: Policy::Auto,
+            window: Some((120, 240)),
+            ..fast()
+        },
+        1,
+    );
+    n.srv.hold_auto = true;
+    n.upload(&image(0x0001_0100, 1000));
+    n.query(0);
+    assert_eq!(n.clients[0].1.upgrades, 0, "not offered while held");
+    assert_eq!(n.record(0)["effective_policy"], "manual");
+    n.run(61_000);
+    assert_eq!(n.clients[0].1.upgrades, 0);
+    n.srv.hold_auto = false;
+    n.query(0);
+    assert_eq!(n.clients[0].1.upgrades, 1);
+}
+
+#[test]
 fn hardware_range_and_file_version_limits() {
     let mut n = Net::new(fast(), 1);
     n.clients[0].1.hw = Some(5);

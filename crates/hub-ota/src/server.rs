@@ -637,6 +637,9 @@ pub struct Server {
     pub devices: BTreeMap<String, DevState>,
     /// The NCP's largest unfragmented ASDU.
     pub asdu_max: usize,
+    /// The devices' own policies are unknown (their stored states are not
+    /// the host's yet): `auto` acts as `manual`, nothing starts by itself.
+    pub hold_auto: bool,
     /// Paced actions.
     due: Vec<(Millis, Action)>,
     /// Image Page Requests being answered, per device.
@@ -679,10 +682,16 @@ impl Server {
     }
 
     fn policy_of(&self, id: &str) -> Policy {
-        self.devices
+        let p = self
+            .devices
             .get(id)
             .and_then(|d| d.policy)
-            .unwrap_or(self.settings.policy)
+            .unwrap_or(self.settings.policy);
+        if self.hold_auto && p == Policy::Auto {
+            Policy::Manual
+        } else {
+            p
+        }
     }
 
     /// Policy `off`: the device's running job ends `aborted`. `None`: the

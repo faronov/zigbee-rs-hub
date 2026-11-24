@@ -143,8 +143,10 @@ deleted when the job is done.
   after `network/registry/adopt`), written only while the records are this
   hub's (meanwhile they stay in memory), and dropped by
   `network/registry/clear`; `ota/start` and `ota/devices/policy` answer
-  `registry_read_only` until then. `ota/cfg` is the hub's: always
-  written.
+  `registry_read_only` until then, and `auto` acts as `manual` (a
+  device's own `off` may be among the records not loaded). A job kept
+  when the records load takes the device's stored policy (`off` ends it).
+  `ota/cfg` is the hub's: always written.
 
 ## Image store (8 MB layout)
 

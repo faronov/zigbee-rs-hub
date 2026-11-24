@@ -24,7 +24,9 @@
 //! The device states are network records (`hub_store::kv::scope`): like
 //! the registry, they are loaded once the store's gate shows them and
 //! written and swept only once loaded with the gate open; meanwhile they
-//! stay in memory. Settings are the hub's and always written.
+//! stay in memory, and `auto` acts as `manual` (a device's own `off` may be
+//! among the records not loaded). Settings are the hub's and always
+//! written.
 
 use std::collections::BTreeSet;
 
@@ -141,6 +143,8 @@ pub struct Ota {
     dirty: BTreeSet<String>,
     /// The stored device states were loaded (the gate was not closed).
     loaded: bool,
+    /// The network records are this hub's (the registry is writable).
+    writable: bool,
     snapshot_dirty: bool,
     last_sweep: Millis,
     /// Free heap probe (`None`: the desktop).
@@ -203,6 +207,7 @@ impl Ota {
     pub fn new(cfg: &crate::AppConfig) -> Self {
         let mut server = Server::new(Settings::default());
         server.settings.tz_offset_s = cfg.tz_offset_s;
+        server.hold_auto = true;
         let mut streams = Streams::default();
         streams.set_limit(cfg.ota_streams);
         Self {
@@ -212,6 +217,7 @@ impl Ota {
             store: crate::ota_store::StoreState::open(&cfg.ota_flash),
             dirty: BTreeSet::new(),
             loaded: false,
+            writable: false,
             snapshot_dirty: true,
             last_sweep: 0,
             platform: cfg.platform.clone(),
@@ -296,27 +302,34 @@ impl Ota {
     /// The stored device states, once the gate shows them: at the start,
     /// or when the app loads the network's records later (adopted, or
     /// readable after the start). A stored state replaces the one made
-    /// meanwhile unless that one runs a job. Records of devices the engine
-    /// does not know are deleted (gate open).
+    /// meanwhile; one that runs a job is kept with the stored policy (a
+    /// stored `off` ends the job at the next tick). Records of devices the
+    /// engine does not know are deleted (gate open).
     pub fn load_devices<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis) {
         type Records = Vec<(String, Vec<u8>)>;
         let (gate, devs): (Gate, Records) =
             kv::with(kv, |s| (s.gate(), s.prefix(DEV_PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect()));
+        self.writable = gate == Gate::Open;
         if gate == Gate::Closed {
+            self.sync_hold();
             return;
         }
         self.loaded = true;
+        self.sync_hold();
         let mut stale = Vec::new();
         for (k, v) in devs {
             let id = &k[DEV_PREFIX.len()..];
             match hub_ota::server::DevState::from_bytes(&v, now) {
-                Some(st) if engine.device(id).is_some() => {
-                    let running = self.server.devices.get(id).and_then(|d| d.job.as_ref()).is_some_and(|j| j.state.active());
-                    if !running {
+                Some(st) if engine.device(id).is_some() => match self.server.devices.get_mut(id) {
+                    Some(d) if d.job.as_ref().is_some_and(|j| j.state.active()) => {
+                        d.policy = st.policy;
+                        self.dirty.insert(id.to_string());
+                    }
+                    _ => {
                         self.server.devices.insert(id.to_string(), st);
                         self.dirty.remove(id);
                     }
-                }
+                },
                 _ => stale.push(k),
             }
         }
@@ -338,6 +351,21 @@ impl Ota {
         self.tx_failed.clear();
         self.loaded = true;
         self.snapshot_dirty = true;
+    }
+
+    /// Whether the network records are this hub's (every tick, from the
+    /// registry state).
+    pub fn set_writable(&mut self, writable: bool) {
+        self.writable = writable;
+        self.sync_hold();
+    }
+
+    fn sync_hold(&mut self) {
+        let hold = !(self.loaded && self.writable);
+        if hold != self.server.hold_auto {
+            self.server.hold_auto = hold;
+            self.snapshot_dirty = true;
+        }
     }
 
     /// The next paced block response.
@@ -878,5 +906,45 @@ mod tests {
         assert!(r.contains("\"id\":7") && r.contains("no such stream"), "{r}");
         // Escaped data goes the generic way.
         assert!(ota.block_data_text(1, r#"{"id":7,"type":"ota/block_data","data":"QU\/D"}"#).is_none());
+    }
+
+    /// Loaded later (adopt): a job that ran meanwhile is kept with the
+    /// stored policy; a stored `off` ends it and stays stored.
+    #[test]
+    fn a_job_kept_at_load_takes_the_stored_policy() {
+        use hub_devices::hub::HubConfig;
+        use hub_devices::resolve::MemoryCatalog;
+        use hub_devices::transport::MockTransport;
+        use hub_ota::server::{DevState, Job, JobState};
+
+        let mut engine = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
+        engine.on_device_joined(0x5a52_5300_0000_0001, 0x5A01, 0);
+        let id = "zb:5a52530000000001";
+        let key = format!("{DEV_PREFIX}{id}");
+        let kv = std::sync::Mutex::new(hub_store::Store::volatile());
+        let off = DevState { policy: Some(Policy::Off), ..Default::default() };
+        kv::with(&kv, |s| s.put(&key, &off.to_bytes())).unwrap();
+        let mut ota = Ota::new(&crate::AppConfig::default());
+        let job = Job {
+            target: None,
+            size: 1000,
+            state: JobState::Downloading,
+            offset: 100,
+            manual: false,
+            force: false,
+            error: None,
+            started_s: 0,
+            updated: 0,
+            notified: 0,
+            poked: 0,
+            installing_since: 0,
+            period_told: false,
+        };
+        ota.server.devices.insert(id.into(), DevState { ep: Some(1), job: Some(job), ..Default::default() });
+        ota.load_devices(&kv, &engine, 0);
+        assert_eq!(ota.server.devices[id].policy, Some(Policy::Off));
+        ota.poll(&mut engine, &kv, 2_000);
+        let stored = DevState::from_bytes(&kv::with(&kv, |s| s.get(&key).unwrap().to_vec()), 2_000).unwrap();
+        assert_eq!((stored.policy, stored.job.map(|j| j.state)), (Some(Policy::Off), Some(JobState::Aborted)));
     }
 }

@@ -348,3 +348,71 @@ fn ota_device_states_follow_the_registry() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+/// While the records are foreign the devices' own policies are unknown (a
+/// stored `off` among them): the hub-wide `auto` starts nothing; adopted,
+/// the stored policy applies.
+#[cfg(feature = "ota")]
+#[test]
+fn while_foreign_the_hub_wide_auto_starts_no_download() {
+    use std::sync::{Arc, Mutex};
+
+    use base64::Engine as _;
+    use hub_ncp::sim::{SimAps, indication};
+    use hub_ota::sim::{SimClient, frame};
+    use zigbee_zrhp::msg::ids;
+
+    let mem = foreign();
+    let mut store = Store::open(Box::new(mem.clone())).unwrap();
+    let n = store.state().network.unwrap();
+    let (ieee, nwk) = (0x5a52_5300_0000_0001u64, 0x5A01u16);
+    let plug = format!("zb:{ieee:016x}");
+    let off = hub_ota::server::DevState { policy: Some(hub_ota::Policy::Off), ..Default::default() };
+    store.kv_put(&format!("ota/d/{plug}"), &off.to_bytes()).unwrap();
+    let r = rig_with(store, |sim| {
+        sim.with(|s| {
+            (s.network_state, s.pan_id, s.ext_pan_id, s.channel, s.key) = (2, n.pan_id, n.ext_pan_id, n.channel, n.network_key);
+            s.table_devices = vec![(ieee.to_le_bytes(), nwk, None)];
+        })
+    });
+    let client = Arc::new(Mutex::new(SimClient::new(0x6D6B, 1, 0x0001_0000)));
+    let c = client.clone();
+    r.sim.set_aps_hook(Box::new(move |a: &SimAps<'_>| {
+        if a.dst != nwk || a.cluster != 0x0019 {
+            return Vec::new();
+        }
+        let frames = c.lock().unwrap().on_zcl(a.asdu, 0);
+        frames.into_iter().map(|f| indication(nwk, ieee, a.dst_ep, a.src_ep, 0x0104, 0x0019, &f)).collect()
+    }));
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.imported == 1), "{:?}", app.status());
+    let (sid, rx) = session(&app);
+    ok(&call(&app, sid, &rx, 1, json!({"type": "ota/settings/set", "policy": "auto"})));
+    let file = hub_ota::file::build(0x6D6B, 1, 0x0001_0100, "", &[7; 3000], None);
+    let header = base64::engine::general_purpose::STANDARD.encode(&file[..256]);
+    ok(&call(&app, sid, &rx, 2, json!({"type": "ota/stream/offer", "size": file.len(), "header": header, "name": "p.ota"})));
+
+    // The plug asks: recorded, not offered.
+    let q = frame(client.lock().unwrap().query());
+    r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(nwk, ieee, 1, 1, 0x0104, 0x0019, &q));
+    let t = std::time::Instant::now();
+    let row = loop {
+        let l = ok(&call(&app, sid, &rx, 3, json!({"type": "ota/devices/list"}))).clone();
+        if l[0]["current_version"] == 0x0001_0000 {
+            break l[0].clone();
+        }
+        assert!(t.elapsed() < T, "{l}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(row["available"].is_object(), "{row}");
+    assert_eq!((&row["effective_policy"], &row["job"]), (&J::from("manual"), &J::Null), "{row}");
+    assert_eq!(client.lock().unwrap().upgrades, 0);
+
+    // Adopted: the stored policy.
+    ok(&call(&app, sid, &rx, 4, json!({"type": "network/registry/adopt", "confirm": true})));
+    let l = ok(&call(&app, sid, &rx, 5, json!({"type": "ota/devices/list"}))).clone();
+    assert_eq!((&l[0]["policy"], &l[0]["effective_policy"]), (&J::from("off"), &J::from("off")), "{l}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
