@@ -264,6 +264,7 @@ configuration without Wi-Fi Enterprise saves only ~7 KB.
    conformance tests. Design and PR sequence: `coordinator-boundary.md`.
 3. Implement and host-test ASH/EZSP: core stage, read-only backup export,
    then the updater against explicitly supported firmware versions.
+   Core stage: `crates/hub-ezsp`, host-tested; not wired, not hardware-tested.
 4. ZNP/MT core may follow in parallel; its updater waits for the wiring.
 5. Supply the external-board wiring and integrate actual ESP image targets,
    one backend per image.

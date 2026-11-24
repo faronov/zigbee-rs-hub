@@ -1,0 +1,17 @@
+[package]
+name = "hub-ezsp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Host-side ASH + EZSP protocol core for EmberZNet NCPs (std, sans-IO link, blocking host, simulated NCP)"
+publish = false
+
+[dependencies]
+
+[features]
+default = []
+# In-process simulated EmberZNet NCP speaking ASH + EZSP over an in-memory
+# byte pipe with fault injection (tests, later `hubctl --sim`).
+sim = []
