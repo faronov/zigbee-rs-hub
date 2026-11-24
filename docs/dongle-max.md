@@ -1,12 +1,32 @@
 # SONOFF Dongle Max (Dongle-M)
 
-**Status: build-tested, not hardware-tested.** `firmware/donglem` is the
-board bring-up stage of the Dongle-M port: network, LED, button, MG24
-lines, a read-only EZSP probe and the way back to SONOFF's firmware. It
-runs no coordinator backend and no hub application yet; those are wired
-after the backend selection lands. The data region, sdkconfig and memory
-budget below are planned for the product feature set. Nothing here is a
-Zigbee or interoperability claim.
+**Status: board bring-up hardware-tested on one unit (2026-11-24), no hub
+application yet.** `firmware/donglem` is the board bring-up stage of the
+Dongle-M port: network, LED, button, MG24 lines, a read-only EZSP probe and
+the way back to SONOFF's firmware. It runs no coordinator backend and no hub
+application yet; those are wired after the backend selection lands. The
+data region, sdkconfig and memory budget below are planned for the product
+feature set. Nothing here is a Zigbee or interoperability claim.
+
+**Hardware results** (lab unit, ESP32-D0WDR2-V3 rev v3.1, image in `ota_1`
+flashed over USB with hwlab esprom, SONOFF's bootloader and `ota_0` kept):
+
+- Boots from SONOFF's v5.2.1 bootloader; the bootloader itself prints
+  nothing on the CP2102N, and it leaves UART0 off GPIO1/3, so the
+  application re-routes the console first (`console::route`).
+- Console, `info`, `net` (Ethernet driver up, no cable; Wi-Fi not set),
+  `atomics` (0 lost on PSRAM and internal RAM), `stock`; LED blinks blue
+  without network, button press flashes white.
+- MG24 (stock "1.0.0"): ASH v2, EZSP 13 after two version exchanges,
+  EmberZNet 7.4.5.0, EUI-64 `B0E8E8FFFE5D4D03`, mfg "SONOFF", board
+  "Dongle-M", `networkInit` NOT_JOINED (no stored network), no ASH
+  retransmissions or errors at 115200 Bd without flow control.
+- Gecko Bootloader v2.04.02 at 115200 Bd (menu: upload gbl / run / ebl
+  info).
+- Heap at the console: internal 247 KiB free (largest block 92 KiB), PSRAM
+  2039 / 2048 KiB.
+- Not yet run: Ethernet link, Wi-Fi station, `stock confirm`, installation
+  through SONOFF's web console.
 
 ## Product target
 
