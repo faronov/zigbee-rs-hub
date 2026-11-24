@@ -37,6 +37,10 @@ pub use app::{App, AppConfig, AppStatus, CatalogSetup, Pieces, RequestHook, Sess
 pub use platform::{LogRing, Platform};
 
 #[cfg(test)]
+mod baseline;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_baseline;
 #[cfg(test)]
 mod tests_groups;

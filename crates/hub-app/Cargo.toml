@@ -30,3 +30,5 @@ zdefc = { path = "../zdefc" }
 base64 = "0.22"
 ed25519-compact = { version = "2.1", default-features = false }
 hub-ncp = { workspace = true, features = ["sim"] }
+# The device simulator answering the hub's traffic in the baseline scenario.
+hub-devices = { workspace = true, features = ["sim"] }

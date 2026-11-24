@@ -1,0 +1,13 @@
+{
+  "aps_fc_start": 12048,
+  "channel": 15,
+  "children": 0,
+  "coordinator_ieee": "020100000000515a",
+  "devices": 1,
+  "link_keys_host_backed": 0,
+  "link_keys_on_ncp": 1,
+  "notes": [],
+  "nwk_fc_start": 20240,
+  "pan_id": 6699,
+  "previous_network_backed_up": false
+}
