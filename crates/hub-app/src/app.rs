@@ -1085,6 +1085,12 @@ impl Runner {
             return Some(frame);
         }
         let (id, ty, v) = crate::ota::head(text)?;
+        // A job and a device's policy are network records (see `ota`).
+        if matches!(ty.as_str(), "ota/start" | "ota/devices/policy")
+            && let Some(e) = self.registry_read_only()
+        {
+            return Some(hub_devices::api::ServerMessage::err(id, e).to_text());
+        }
         Some(match self.ota.request(&mut self.engine, &self.ncp, sid, &ty, &v, now) {
             Ok(r) => r.frame(id),
             Err(e) => hub_devices::api::ServerMessage::err(id, e).to_text(),

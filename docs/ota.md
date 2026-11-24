@@ -137,7 +137,14 @@ deleted when the job is done.
   the engine's sleepy queue.
 - **Abort** (`ota/abort`): the next block request gets ABORT.
 - **Persistence**: per device `ota/d/<device>` in the host store journal
-  (identity, policy, job; progress every 10 %), settings `ota/cfg`.
+  (identity, policy, job; progress every 10 %), settings `ota/cfg`. The
+  device states are network records (`hub_store::kv::scope`, ownership
+  tag): like the registry they are loaded once readable (at the start, or
+  after `network/registry/adopt`), written only while the records are this
+  hub's (meanwhile they stay in memory), and dropped by
+  `network/registry/clear`; `ota/start` and `ota/devices/policy` answer
+  `registry_read_only` until then. `ota/cfg` is the hub's: always
+  written.
 
 ## Image store (8 MB layout)
 

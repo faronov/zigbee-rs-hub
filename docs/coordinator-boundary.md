@@ -346,7 +346,9 @@ firmware would **not** honour an EZSP tag (documented limit).
   the clients' entities stay; the interview it was in is dropped, so late
   answers and timeouts do not touch it). Rule changes
   (`automations/create`, `update`, `delete`, `enable`, `disable`, and the
-  rules' enable/disable actions) are refused with `registry_read_only`
+  rules' enable/disable actions) and, with #55, `ota/start` and
+  `ota/devices/policy` (the `ota/d/` records load, are written and are
+  cleared like the registry's) are refused with `registry_read_only`
   while the gate is not open.
 - `network/registry/adopt` / `clear` take `"confirm": true`. `clear` also
   drops the engine's devices, groups, bindings and rules without network

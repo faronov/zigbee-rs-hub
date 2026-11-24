@@ -37,6 +37,8 @@ impl Runner {
             self.forget_network(now).and_then(|forgotten| {
                 let deleted = self.ncp.registry_clear().map_err(failed)?;
                 self.registry.loaded = true;
+                #[cfg(feature = "ota")]
+                self.ota.forget_devices();
                 self.imported_in = None;
                 self.import_retry = None;
                 self.import_gen = self.import_gen.wrapping_add(1);
@@ -62,6 +64,11 @@ impl Runner {
         if !kind.strip_prefix("automations/").is_some_and(|k| changes.contains(&k)) {
             return None;
         }
+        self.registry_read_only()
+    }
+
+    /// Why the network records cannot be written now (`None`: they can).
+    pub(super) fn registry_read_only(&self) -> Option<ApiError> {
         let why = match self.ncp.registry() {
             RegistryState::Untagged | RegistryState::Owned => return None,
             RegistryState::Unverified => "the device registry is unverified",
@@ -86,6 +93,8 @@ impl Runner {
     fn load_network(&mut self, now: Millis) -> usize {
         let n = self.registry.load_network(&self.ncp, &mut self.engine, now);
         self.last.load(&self.ncp, &mut self.engine, now);
+        #[cfg(feature = "ota")]
+        self.ota.load_devices(&self.ncp, &self.engine, now);
         let rules = kv::with(&self.ncp, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
         self.automations.load(rules);
         self.with_automations(|a, w, _| a.prime(w));

@@ -297,3 +297,54 @@ fn rules_cannot_change_while_the_records_are_foreign() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+/// The OTA server's device states (`ota/d/`) are network records: not
+/// written while foreign (requests that would are refused), loaded on
+/// adopt, dropped by clear.
+#[cfg(feature = "ota")]
+#[test]
+fn ota_device_states_follow_the_registry() {
+    let mem = foreign();
+    let mut store = Store::open(Box::new(mem.clone())).unwrap();
+    let n = store.state().network.unwrap();
+    let plug = "zb:5a52530000000001";
+    let key = format!("ota/d/{plug}");
+    let st = hub_ota::server::DevState { policy: Some(hub_ota::Policy::Off), ..Default::default() };
+    store.kv_put(&key, &st.to_bytes()).unwrap();
+    mem.take_log();
+    let r = rig_with(store, |sim| {
+        sim.with(|s| {
+            (s.network_state, s.pan_id, s.ext_pan_id, s.channel, s.key) = (2, n.pan_id, n.ext_pan_id, n.channel, n.network_key);
+            s.table_devices = vec![(0x5a52530000000001u64.to_le_bytes(), 0x5A01, None)];
+        })
+    });
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.imported == 1), "{:?}", app.status());
+    let (sid, rx) = session(&app);
+    let ota_list = |id| ok(&call(&app, sid, &rx, id, json!({"type": "ota/devices/list"}))).clone();
+    assert_eq!(ota_list(1), json!([]), "not loaded while foreign");
+    for (i, ty) in ["ota/devices/policy", "ota/start"].into_iter().enumerate() {
+        let f = call(&app, sid, &rx, 2 + i as u64, json!({"type": ty, "device": plug, "policy": "auto"}));
+        assert_eq!(f["error"]["code"], "registry_read_only", "{f}");
+    }
+    call(&app, sid, &rx, 4, json!({"type": "hub/reboot"}));
+    assert_eq!(key_records(&mem.take_log()), Vec::<String>::new());
+
+    // Adopted: the stored state loads.
+    ok(&call(&app, sid, &rx, 5, json!({"type": "network/registry/adopt", "confirm": true})));
+    let l = ota_list(6);
+    assert_eq!((l[0]["device"].as_str(), l[0]["policy"].as_str()), (Some(plug), Some("off")), "{l}");
+
+    // Cleared: gone from the store and the server; a new policy is written.
+    ok(&call(&app, sid, &rx, 7, json!({"type": "network/registry/clear", "confirm": true})));
+    assert!(app.wait(T, |s| s.imported == 2), "{:?}", app.status());
+    assert_eq!(ota_list(8), json!([]));
+    assert!(!kv(&mem).contains_key(&key));
+    ok(&call(&app, sid, &rx, 9, json!({"type": "ota/devices/policy", "device": plug, "policy": "manual"})));
+    call(&app, sid, &rx, 10, json!({"type": "hub/reboot"}));
+    let stored = hub_ota::server::DevState::from_bytes(&kv(&mem)[&key], 0).unwrap();
+    assert_eq!(stored.policy, Some(hub_ota::Policy::Manual));
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}

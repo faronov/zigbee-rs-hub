@@ -20,6 +20,11 @@
 //! transport ([`Engine::send_app_zcl`]); its outcome only counts
 //! (`ota/status` `tx`, `tx_failed` per device): the device's own requests
 //! and the server's timers drive the transfer, as before.
+//!
+//! The device states are network records (`hub_store::kv::scope`): like
+//! the registry, they are loaded once the store's gate shows them and
+//! written and swept only once loaded with the gate open; meanwhile they
+//! stay in memory. Settings are the hub's and always written.
 
 use std::collections::BTreeSet;
 
@@ -33,7 +38,7 @@ use hub_ota::json::{Obj, array, try_array};
 use hub_ota::server::{Action, CLUSTER, Command, DEFAULT_ASDU, attr};
 use hub_ota::stream::{CHUNK as STREAM_CHUNK, Streams};
 use hub_ota::{Device, Policy, Server, Settings};
-use hub_store::{KvStore, kv};
+use hub_store::{Gate, KvStore, kv};
 use log::{debug, info, warn};
 use serde_json::{Value as J, json};
 
@@ -134,6 +139,8 @@ pub struct Ota {
     pub store: crate::ota_store::StoreState,
     /// Devices whose state needs writing.
     dirty: BTreeSet<String>,
+    /// The stored device states were loaded (the gate was not closed).
+    loaded: bool,
     snapshot_dirty: bool,
     last_sweep: Millis,
     /// Free heap probe (`None`: the desktop).
@@ -204,6 +211,7 @@ impl Ota {
             #[cfg(feature = "ota-store")]
             store: crate::ota_store::StoreState::open(&cfg.ota_flash),
             dirty: BTreeSet::new(),
+            loaded: false,
             snapshot_dirty: true,
             last_sweep: 0,
             platform: cfg.platform.clone(),
@@ -274,34 +282,61 @@ impl Ota {
         cfg!(feature = "ota-store")
     }
 
-    /// Settings and device states from the journal.
+    /// Settings and, unless the gate hides them, device states from the
+    /// journal.
     pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis) {
-        type Records = Vec<(String, Vec<u8>)>;
-        let (cfg, devs): (Option<Vec<u8>>, Records) = kv::with(kv, |s| {
-            (s.get(SETTINGS_KEY).map(<[u8]>::to_vec), s.prefix(DEV_PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect())
-        });
-        if let Some(b) = cfg {
+        if let Some(b) = kv::with(kv, |s| s.get(SETTINGS_KEY).map(<[u8]>::to_vec)) {
             let tz = self.server.settings.tz_offset_s;
             self.server.settings = Settings::from_bytes(&b);
             self.server.settings.tz_offset_s = tz;
         }
+        self.load_devices(kv, engine, now);
+    }
+
+    /// The stored device states, once the gate shows them: at the start,
+    /// or when the app loads the network's records later (adopted, or
+    /// readable after the start). A stored state replaces the one made
+    /// meanwhile unless that one runs a job. Records of devices the engine
+    /// does not know are deleted (gate open).
+    pub fn load_devices<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis) {
+        type Records = Vec<(String, Vec<u8>)>;
+        let (gate, devs): (Gate, Records) =
+            kv::with(kv, |s| (s.gate(), s.prefix(DEV_PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect()));
+        if gate == Gate::Closed {
+            return;
+        }
+        self.loaded = true;
         let mut stale = Vec::new();
         for (k, v) in devs {
             let id = &k[DEV_PREFIX.len()..];
             match hub_ota::server::DevState::from_bytes(&v, now) {
                 Some(st) if engine.device(id).is_some() => {
-                    self.server.devices.insert(id.to_string(), st);
+                    let running = self.server.devices.get(id).and_then(|d| d.job.as_ref()).is_some_and(|j| j.state.active());
+                    if !running {
+                        self.server.devices.insert(id.to_string(), st);
+                        self.dirty.remove(id);
+                    }
                 }
                 _ => stale.push(k),
             }
         }
-        if !stale.is_empty() {
+        if gate == Gate::Open && !stale.is_empty() {
             kv::with(kv, |s| {
                 for k in &stale {
                     let _ = s.delete(k);
                 }
             });
         }
+        self.snapshot_dirty = true;
+    }
+
+    /// The network's records were cleared (`network/registry/clear`): the
+    /// device states and their jobs go; the empty set is this hub's.
+    pub fn forget_devices(&mut self) {
+        self.server.devices.clear();
+        self.dirty.clear();
+        self.tx_failed.clear();
+        self.loaded = true;
         self.snapshot_dirty = true;
     }
 
@@ -409,17 +444,24 @@ impl Ota {
             self.tx_failed.retain(|(d, _)| engine.device(d).is_some());
             for id in gone {
                 self.server.devices.remove(&id);
+                let loaded = self.loaded;
                 kv::with(kv, |s| {
-                    let _ = s.delete(&format!("{DEV_PREFIX}{id}"));
+                    if loaded && s.gate() == Gate::Open {
+                        let _ = s.delete(&format!("{DEV_PREFIX}{id}"));
+                    }
                 });
                 self.snapshot_dirty = true;
             }
         }
+        // Written once this hub's (see the module); kept until then.
         if !self.dirty.is_empty() {
-            let dirty = std::mem::take(&mut self.dirty);
+            let (loaded, devices, dirty) = (self.loaded, &self.server.devices, &mut self.dirty);
             kv::with(kv, |s| {
-                for id in &dirty {
-                    if let Some(st) = self.server.devices.get(id)
+                if !loaded || s.gate() != Gate::Open {
+                    return;
+                }
+                for id in std::mem::take(dirty) {
+                    if let Some(st) = devices.get(&id)
                         && let Err(e) = s.put(&format!("{DEV_PREFIX}{id}"), &st.to_bytes())
                     {
                         warn!("ota: persist {id}: {e}");
