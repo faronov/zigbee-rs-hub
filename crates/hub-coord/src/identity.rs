@@ -32,10 +32,11 @@ impl NetworkIdentity {
     /// SHA-256(`"zigbee-rs-hub/key-id/1"` ‖ key). It identifies the key
     /// without revealing it.
     pub fn key_id_for(key: &[u8; 16]) -> [u8; 8] {
-        let digest = Sha256::new()
-            .chain_update(KEY_ID_DOMAIN)
-            .chain_update(key)
-            .finalize();
+        // One buffer: the hub's other SHA-256 users hash slices this way.
+        let mut input = [0; KEY_ID_DOMAIN.len() + 16];
+        input[..KEY_ID_DOMAIN.len()].copy_from_slice(KEY_ID_DOMAIN);
+        input[KEY_ID_DOMAIN.len()..].copy_from_slice(key);
+        let digest = Sha256::digest(&input[..]);
         let mut id = [0; 8];
         id.copy_from_slice(&digest[..8]);
         id
