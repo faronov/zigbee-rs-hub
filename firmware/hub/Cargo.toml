@@ -16,7 +16,7 @@ test = false
 [dependencies]
 esp-idf-svc = "0.53"
 hub-core = { workspace = true }
-hub-ncp = { workspace = true }
+hub-ncp = { workspace = true, optional = true }
 hub-app = { workspace = true, optional = true }
 hub-web = { workspace = true, optional = true }
 hub-mqtt = { workspace = true, optional = true }
@@ -26,7 +26,11 @@ log = "0.4"
 tbr-bridge = { path = "../bridge" }
 
 [features]
-default = ["app"]
+default = ["zrhp", "app"]
+# The coordinator backend; exactly one (`compile_error!` otherwise). The
+# Thread BR board's H2 NCP speaks ZRHP: the only one this firmware has.
+# Implied like `app`: build.rs does not mark it in the image.
+zrhp = ["dep:hub-ncp", "hub-app?/zrhp"]
 # The application (device engine, registry) with its WebSocket JSON API over
 # Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
 # phase-1 hub (ZRHP host core only).
