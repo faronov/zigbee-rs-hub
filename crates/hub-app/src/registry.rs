@@ -12,6 +12,9 @@
 //! holds no measured values, so reports alone never write flash.
 //! Groups and binding records (device-support 14.9): `grp/<4 hex>`,
 //! `bnd/<device id>` (JSON), written when the engine reports a change.
+//! The edited reporting defaults (device-support 5.2): `cfg/report`
+//! (JSON), read before the devices, written when they change and removed
+//! when nothing is edited.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +23,7 @@ use hub_devices::hub::zgroups::{BIND_KEY, GROUP_KEY};
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
 use hub_devices::model::LayerSource;
 use hub_devices::persist::DeviceSnapshot;
+use hub_devices::reporting::DEFAULTS_KEY;
 use hub_devices::transport::ZigbeeTransport;
 use hub_devices::zdef_adapter::{ZdefSchemaDecoder, load_cbor};
 use hub_store::{KvStore, kv};
@@ -61,6 +65,8 @@ pub struct Registry {
     dirty_since: Option<Millis>,
     /// Groups or bindings changed.
     zg_dirty: bool,
+    /// Generation of the reporting defaults in the store.
+    report_gen: u64,
     last_sweep: Millis,
     /// Devices restored at start.
     pub restored: usize,
@@ -73,6 +79,13 @@ pub struct Registry {
 impl Registry {
     /// Restores user definitions, then devices, from the store.
     pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) {
+        // Before the devices: their resolution uses the defaults.
+        if let Some(b) = kv::with(kv, |s| s.get(DEFAULTS_KEY).map(<[u8]>::to_vec))
+            && let Err(e) = engine.load_reporting_defaults(&b)
+        {
+            warn!("registry: {DEFAULTS_KEY}: {e}");
+        }
+        self.report_gen = engine.reporting_defaults().generation;
         let (udefs, devs, srcs): (Records, Records, Records) = kv::with(kv, |s| {
             (
                 s.prefix(UDEF).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
@@ -166,6 +179,20 @@ impl Registry {
     pub fn flush<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis, force: bool) {
         let sweep = force || now.saturating_sub(self.last_sweep) >= SWEEP_MS;
         let due = force || self.dirty_since.is_some_and(|t| now.saturating_sub(t) >= FLUSH_MS);
+        let defaults = engine.reporting_defaults();
+        if defaults.generation != self.report_gen {
+            self.report_gen = defaults.generation;
+            let r = kv::with(kv, |s| {
+                if defaults.is_empty() { s.delete(DEFAULTS_KEY) } else { s.put(DEFAULTS_KEY, &defaults.to_bytes()) }
+            });
+            match r {
+                Ok(()) => self.writes += 1,
+                Err(e) => {
+                    self.errors += 1;
+                    warn!("registry: {DEFAULTS_KEY}: {e}");
+                }
+            }
+        }
         if !sweep && !due {
             return;
         }
@@ -243,5 +270,50 @@ impl Registry {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use hub_devices::hub::HubConfig;
+    use hub_devices::resolve::MemoryCatalog;
+    use hub_devices::transport::MockTransport;
+    use hub_store::Store;
+    use serde_json::json;
+
+    use super::*;
+
+    fn engine() -> Engine<MockTransport> {
+        Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()))
+    }
+
+    fn stored(kv: &Mutex<Store>) -> Option<Vec<u8>> {
+        kv::with(kv, |s| s.get(DEFAULTS_KEY).map(<[u8]>::to_vec))
+    }
+
+    #[test]
+    fn reporting_defaults_round_trip_through_the_store() {
+        let kv = Mutex::new(Store::volatile());
+        let (mut e, mut reg) = (engine(), Registry::default());
+        reg.load(&kv, &mut e, 0);
+        reg.flush(&kv, &e, 1, true);
+        // Nothing edited: nothing written (stores of earlier builds stay as they were).
+        assert_eq!(stored(&kv), None);
+        e.set_reporting_defaults(&json!({"temperature": [60, 3600, 20]}), 2).unwrap();
+        // Written with the next flush, not only at the sweep.
+        reg.flush(&kv, &e, 3, false);
+        assert_eq!(stored(&kv).as_deref(), Some(&br#"{"temperature":[60,3600,20]}"#[..]));
+        // A restart reads them before the devices.
+        let (mut e2, mut reg2) = (engine(), Registry::default());
+        reg2.load(&kv, &mut e2, 10);
+        assert_eq!(e2.reporting_defaults().record(), e.reporting_defaults().record());
+        reg2.flush(&kv, &e2, 11, true);
+        assert_eq!(reg2.writes, 0);
+        // Back to the built-in table: the key goes.
+        e2.set_reporting_defaults(&json!({"temperature": "default"}), 12).unwrap();
+        reg2.flush(&kv, &e2, 13, false);
+        assert_eq!(stored(&kv), None);
     }
 }

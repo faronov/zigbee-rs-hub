@@ -10,6 +10,7 @@ mod groups;
 mod merge;
 mod plain;
 mod props;
+mod reporting;
 mod tuya_plug;
 mod tuya_trv;
 mod vendors;

@@ -38,6 +38,13 @@ pub(crate) struct AnswerTo {
     drains: u64,
 }
 
+impl AnswerTo {
+    /// Its ticket.
+    pub(crate) fn ticket(self) -> u64 {
+        self.ticket
+    }
+}
+
 /// What follows the outcome of a control request.
 pub(crate) enum Then {
     /// Nothing (device removal).

@@ -145,9 +145,29 @@ pub enum Request {
         enabled: Option<bool>,
         #[serde(default)]
         value: Option<J>,
+        /// Reporting override (5.2): `[min, max, change]`, `"off"`,
+        /// `"default"` or null (back to the default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<J>,
+        /// The part of a composite entity `report` applies to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
     },
     #[serde(rename = "entities/delete")]
     EntitiesDelete { uid: String },
+    #[serde(rename = "entities/reporting")]
+    EntitiesReporting {
+        #[serde(default)]
+        uid: Option<String>,
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        read: bool,
+    },
+    #[serde(rename = "reporting/defaults/get")]
+    ReportingDefaultsGet,
+    #[serde(rename = "reporting/defaults/set")]
+    ReportingDefaultsSet { defaults: J },
 
     #[serde(rename = "definitions/validate")]
     DefinitionsValidate { cbor: String },
@@ -379,9 +399,21 @@ impl Request {
                 },
                 enabled: opt(m, "enabled")?,
                 value: opt(m, "value")?,
+                // Present (null too: back to the default) or missing.
+                report: m.remove("report"),
+                part: opt(m, "part")?,
             },
             "entities/delete" => R::EntitiesDelete {
                 uid: take(m, "uid")?,
+            },
+            "entities/reporting" => R::EntitiesReporting {
+                uid: opt(m, "uid")?,
+                device: opt(m, "device")?,
+                read: or_default(m, "read")?,
+            },
+            "reporting/defaults/get" => R::ReportingDefaultsGet,
+            "reporting/defaults/set" => R::ReportingDefaultsSet {
+                defaults: take(m, "defaults")?,
             },
             "definitions/validate" => R::DefinitionsValidate {
                 cbor: take(m, "cbor")?,

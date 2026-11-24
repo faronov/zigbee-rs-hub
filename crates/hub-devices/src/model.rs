@@ -205,6 +205,9 @@ impl Access {
 pub enum ReportSpec {
     /// No Configure Reporting.
     Off,
+    /// `off` set by the user (5.2): Configure Reporting with the maximum
+    /// interval 0xFFFF, which tells the device to stop reporting.
+    Disable,
     /// `[min, max, change]`; change in raw attribute units.
     Config {
         /// Minimum interval, s.

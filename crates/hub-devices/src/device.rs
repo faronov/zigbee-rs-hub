@@ -267,6 +267,13 @@ pub struct ConfigureState {
     pub unreportable: Vec<(u8, u16, u16)>,
     /// Last poll (or failure) of an unreportable primary measurement.
     pub poll_at: BTreeMap<(u8, u16, u16), Millis>,
+    /// The user changed reporting settings: the next op rebuild forgets
+    /// superseded Configure Reporting results.
+    pub reports_changed: bool,
+    /// Superseded Configure Reporting ops still in flight (one entry per
+    /// key, dropped when the key is current again): their results are not
+    /// recorded.
+    pub stale: Vec<String>,
 }
 
 /// Self-description progress (12.3).
@@ -357,6 +364,11 @@ pub struct Device {
     pub fp_hash: Option<String>,
     /// Next periodic Tuya query.
     pub tuya_query_at: Option<Millis>,
+    /// Reporting configurations the device answered (`entities/reporting`
+    /// with `read`) by `(ep, cluster, attr)`; not persisted.
+    pub reporting: BTreeMap<(u8, u16, u16), crate::reporting::Applied>,
+    /// User reporting overrides by attribute (5.2, layer 5).
+    pub report_overrides: BTreeMap<crate::reporting::AttrKey, crate::reporting::ReportSetting>,
 }
 
 impl Device {
@@ -395,6 +407,8 @@ impl Device {
             schema: SchemaState::default(),
             fp_hash: None,
             tuya_query_at: None,
+            reporting: BTreeMap::new(),
+            report_overrides: BTreeMap::new(),
         }
     }
 

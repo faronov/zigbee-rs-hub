@@ -14,6 +14,11 @@ mod variant;
 /// The page, gzip-compressed at build time (`Content-Encoding: gzip`).
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
 
+/// Budget of the compressed page in every image variant (raised from
+/// 32 KiB for the 8 MB image's OTA and reporting UI); it counts in the
+/// firmware image.
+pub const PAGE_BUDGET: usize = 34 * 1024;
+
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
 pub const ETAG: &str = include_str!(concat!(env!("OUT_DIR"), "/etag"));
 
@@ -65,14 +70,20 @@ mod tests {
     fn embedded_page_is_the_minified_source_and_small() {
         let selected = select(cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store"));
         assert_eq!(page(), super::minify::minify(&selected).unwrap().into_bytes());
-        // Budget (approved for hub 0.2.0): 32 KiB; it counts in the firmware
-        // image. Every variant, not only this build's (gzip as build.rs:
-        // 10-byte header, deflate level 10, CRC and size).
-        assert!(INDEX_HTML_GZ.len() <= 32 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
+        assert!(INDEX_HTML_GZ.len() <= PAGE_BUDGET, "{} B compressed", INDEX_HTML_GZ.len());
+    }
+
+    /// Every variant (not only the one this build embeds) within the
+    /// budget, compressed as `build.rs` does.
+    #[test]
+    fn every_variant_fits_the_budget() {
         for (advanced, ota, store) in variants() {
             let html = super::minify::minify(&select(advanced, ota, store)).unwrap();
             let gz = 18 + miniz_oxide::deflate::compress_to_vec(html.as_bytes(), 10).len();
-            assert!(gz <= 32 * 1024, "advanced {advanced}, ota {ota}, ota-store {store}: {gz} B compressed");
+            assert!(gz <= PAGE_BUDGET, "advanced {advanced}, ota {ota}, ota-store {store}: {gz} B compressed");
+            if (advanced, ota, store) == (cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store")) {
+                assert_eq!(gz, INDEX_HTML_GZ.len());
+            }
         }
     }
 
@@ -111,7 +122,13 @@ mod tests {
             assert!(!plain.contains(item), "{item} remains in the basic page");
             assert!(advanced.contains(item), "{item} missing from the advanced page");
         }
-        for item in ["entities/command", "data-tab=\"groups\"", "data-tab=\"conv\""] {
+        for item in [
+            "entities/command",
+            "data-tab=\"groups\"",
+            "data-tab=\"conv\"",
+            "entities/reporting",
+            "reporting/defaults/set",
+        ] {
             assert!(plain.contains(item), "normal functionality lost: {item}");
         }
         let on = super::variant::enabled(false, false, false);

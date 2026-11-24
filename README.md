@@ -883,7 +883,9 @@ once (console `token`; a link ending in `#token=…` stores it too) and keeps
 it in the browser. `build.rs` minifies the page line by line (indentation,
 blank lines and `//` comment lines in the script and style; `src/minify.rs`,
 which refuses constructs it cannot keep intact) and gzips it at build time
-(deterministic, pure Rust, no node toolchain) and derives a strong ETag; the hub answers
+(deterministic, pure Rust, no node toolchain) and derives a strong ETag (every image
+variant's page must stay within 34 KiB gzipped, `hub_web::PAGE_BUDGET`, checked by
+the crate's tests); the hub answers
 `Content-Encoding: gzip`, `Cache-Control: no-cache` and `304` on a matching
 `If-None-Match`. `hubctl serve` serves the same page on `/` (the WebSocket on
 `/api`), so the UI can be tried on a desktop, also with `--sim`. API 1.1
