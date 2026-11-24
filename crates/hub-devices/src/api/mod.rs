@@ -14,6 +14,7 @@ use base64::Engine as _;
 use serde_json::{Value as J, json};
 
 use crate::device::{DeviceKind, Millis};
+use crate::hub::control::GpRemoved;
 use crate::hub::{ApiError, Hub, HubEvent};
 use crate::model::{Binding, Definition, LayerSource};
 use crate::resolve::{Catalog, MemoryCatalog, ResolveInput, resolve};
@@ -272,10 +273,13 @@ impl ApiServer {
                     || kind.starts_with("scenes/")
                     || kind.starts_with("bindings/"))
             {
-                return one(match hub.zg_request(kind, &raw, now) {
-                    Ok(v) => ServerMessage::ok(id, v),
-                    Err(e) => ServerMessage::err(id, e),
-                });
+                hub.deferred = None;
+                let r = hub.zg_request(kind, &raw, now);
+                return self
+                    .answer(hub, s, id, r)
+                    .map(|m| Frame::Text(m.into_text()))
+                    .into_iter()
+                    .collect();
             }
         }
         // An extension may take a request from its text (uploads: no copy
@@ -443,10 +447,51 @@ impl ApiServer {
                 Err(e) => vec![ServerMessage::err(id, e)],
             };
         }
-        vec![match self.dispatch(hub, env.request, now) {
+        hub.deferred = None;
+        let r = self.dispatch(hub, env.request, now);
+        self.answer(hub, s, id, r).into_iter().collect()
+    }
+
+    /// The result of request `id`, or `None` when a control request
+    /// decides it: its [`HubEvent::Answer`] follows as the deferred result.
+    fn answer<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        id: u64,
+        r: Result<J, ApiError>,
+    ) -> Option<ServerMessage> {
+        if let Some(ticket) = hub.take_deferred() {
+            if let Some(sess) = self.sessions.get_mut(&s) {
+                sess.tickets.insert(ticket, id);
+            }
+            return None;
+        }
+        Some(match r {
             Ok(r) => ServerMessage::ok(id, r),
             Err(e) => ServerMessage::err(id, e),
-        }]
+        })
+    }
+
+    /// The deferred result of request `id` of session `s` that a control
+    /// request already decided (its [`HubEvent::Answer`] is still among
+    /// the hub's events), taken now: for a caller that needs the result
+    /// in place (the application's automations).
+    pub fn take_result<T: ZigbeeTransport>(
+        &mut self,
+        hub: &mut Hub<T>,
+        s: SessionId,
+        id: u64,
+    ) -> Option<Result<J, ApiError>> {
+        let tickets = &mut self.sessions.get_mut(&s)?.tickets;
+        let i = hub.events.iter().position(
+            |e| matches!(e, HubEvent::Answer { ticket, .. } if tickets.get(ticket) == Some(&id)),
+        )?;
+        let HubEvent::Answer { ticket, result } = hub.events.remove(i) else {
+            return None;
+        };
+        tickets.remove(&ticket);
+        Some(result)
     }
 
     fn dispatch<T: ZigbeeTransport>(
@@ -500,13 +545,7 @@ impl ApiServer {
                             .ok_or_else(|| missing(t))?,
                     ),
                 };
-                hub.transport
-                    .permit_join(duration_s, nwk)
-                    .map_err(|e| ApiError::new("busy", e.to_string()))?;
-                if include_gp {
-                    hub.gp_commissioning_open(u16::from(duration_s), true, false, now)?;
-                }
-                J::Null
+                hub.permit_join(duration_s, nwk, include_gp, now)?
             }
             R::DevicesList => hub
                 .devices()
@@ -833,14 +872,13 @@ impl ApiServer {
                     Some(DeviceKind::Gp { gpd_id }) => gpd_id,
                     _ => return Err(missing(&id)),
                 };
-                hub.gp_remove(gpd, send_remove, now)?;
-                hub.remove_device_entry(&id);
-                J::Null
+                // The record goes once the Sink Table entry is gone.
+                hub.gp_remove(gpd, send_remove, GpRemoved::Entry(id), now)?
             }
             R::GpConfig {
                 security_level,
                 communication_mode,
-            } => hub.gp_set_config(security_level, communication_mode)?,
+            } => hub.gp_set_config(security_level, communication_mode, now)?,
             R::GpConfigGet => hub.gp_config(),
             R::GpBindingsList { gpd, target } => {
                 J::Array(hub.list_bindings(gpd.as_deref(), target.as_deref()))
@@ -1024,6 +1062,10 @@ impl ApiServer {
                     self.deliver(ticket, result.map(|_| json!({"status": "ok"})), &mut out);
                     continue;
                 }
+                HubEvent::Answer { ticket, result } => {
+                    self.deliver(ticket, result, &mut out);
+                    continue;
+                }
                 #[cfg(feature = "advanced")]
                 HubEvent::ConsoleResult { ticket, result } => {
                     self.deliver(ticket, result, &mut out);
@@ -1101,7 +1143,7 @@ impl ApiServer {
                     }
                     ("gp", body)
                 }
-                HubEvent::CommandResult { .. } => continue,
+                HubEvent::CommandResult { .. } | HubEvent::Answer { .. } => continue,
                 #[cfg(feature = "advanced")]
                 HubEvent::ConsoleResult { .. } => continue,
                 #[cfg(feature = "advanced")]

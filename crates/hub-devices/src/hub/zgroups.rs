@@ -20,8 +20,10 @@
 //! from (`queued` in the records). Records are JSON values throughout
 //! (API, store, backup): no serde derives, which keeps the flash small.
 
+use super::control::{GroupTail, Then};
 use super::*;
 use crate::commands::{Action, CommandAck};
+use crate::transport::{CoordError, Request};
 use crate::zcl::types::Reader;
 use crate::zdo::BindDst;
 
@@ -919,7 +921,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             options: TxOptions::default(),
         };
         self.transport
-            .aps_send(req)
+            .submit(Request::Aps(req))
+            .map(drop)
             .map_err(|e| ApiError::new("busy", e.to_string()))
     }
 
@@ -1297,22 +1300,62 @@ impl<T: ZigbeeTransport> Hub<T> {
             .ok_or_else(|| no_group(id))
     }
 
-    fn hub_membership(&mut self, id: u16, add: bool) {
-        let ep = self.cfg.hub_endpoint;
-        let r = if add {
-            self.transport.group_add(ep, id)
-        } else {
-            self.transport.group_remove(ep, id)
+    /// `NWK_GROUP_MEMBERSHIP` of the hub endpoint; `tail` and `answer`
+    /// follow its outcome ([`Self::membership_done`]).
+    fn hub_membership(
+        &mut self,
+        id: u16,
+        add: bool,
+        tail: GroupTail,
+        answer: Option<u64>,
+        now: Millis,
+    ) {
+        let req = Request::Group {
+            endpoint: self.cfg.hub_endpoint,
+            group: id,
+            add,
         };
+        let then = Then::Membership { group: id, tail };
+        self.control(req, then, answer, now);
+    }
+
+    /// The hub endpoint's membership changed (or not: `error`), then the
+    /// rest of the group request.
+    pub(crate) fn membership_done(
+        &mut self,
+        id: u16,
+        tail: GroupTail,
+        error: Option<CoordError>,
+        now: Millis,
+    ) -> Option<Result<J, ApiError>> {
         if let Some(g) = self.zg.get_mut(id) {
-            g.hub_error = r.err().map(|e| e.to_string());
+            g.hub_error = error.map(|e| e.to_string());
+        }
+        match tail {
+            GroupTail::None => None,
+            GroupTail::Create => {
+                self.group_event(id);
+                Some(self.group_result(id))
+            }
+            GroupTail::Update => {
+                self.group_event(id);
+                self.zg_sync(id);
+                Some(self.group_result(id))
+            }
+            GroupTail::Delete => {
+                self.zg_pump(now);
+                self.zg_finish_delete(id);
+                self.group_event(id);
+                self.zg_sync(id);
+                None
+            }
         }
     }
 
     /// `NWK_GROUP_MEMBERSHIP` add of the hub endpoint for every group that
     /// has it: at the start of an NCP session (the NCP keeps its APS group
     /// table across reboots, not across a reset or for another NCP).
-    pub fn groups_resync(&mut self) -> usize {
+    pub fn groups_resync(&mut self, now: Millis) -> usize {
         let ids: Vec<u16> = self
             .zg
             .groups
@@ -1321,7 +1364,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .map(|g| g.id)
             .collect();
         for id in &ids {
-            self.hub_membership(*id, true);
+            self.hub_membership(*id, true, GroupTail::None, None, now);
         }
         ids.len()
     }
@@ -1332,6 +1375,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         name: &str,
         id: Option<u16>,
         hub_member: bool,
+        now: Millis,
     ) -> Result<J, ApiError> {
         let free = |i: &u16| self.zg.get(*i).is_none() && *i != self.cfg.gp_group;
         let id = match id {
@@ -1357,7 +1401,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             ents: None,
         });
         if hub_member {
-            self.hub_membership(id, true);
+            let ticket = self.answer_ticket();
+            self.hub_membership(id, true, GroupTail::Create, Some(ticket), now);
+            return self.answer(ticket);
         }
         self.group_event(id);
         self.group_result(id)
@@ -1376,6 +1422,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         id: u16,
         name: Option<&str>,
         hub_member: Option<bool>,
+        now: Millis,
     ) -> Result<J, ApiError> {
         let g = self.group_mut(id)?;
         if let Some(n) = name {
@@ -1383,7 +1430,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         if let Some(h) = hub_member.filter(|h| *h != g.hub_member) {
             g.hub_member = h;
-            self.hub_membership(id, h);
+            let ticket = self.answer_ticket();
+            self.hub_membership(id, h, GroupTail::Update, Some(ticket), now);
+            return self.answer(ticket);
         }
         self.group_event(id);
         self.zg_sync(id);
@@ -1404,7 +1453,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             m.error = None;
         }
         if hub {
-            self.hub_membership(id, false);
+            self.hub_membership(id, false, GroupTail::Delete, None, now);
+            return Ok(());
         }
         self.zg_pump(now);
         self.zg_finish_delete(id);
@@ -1818,11 +1868,14 @@ impl<T: ZigbeeTransport> Hub<T> {
             "groups/create" => {
                 let id = opt_num(v, "group", 0xFFFF)?.map(|g| g as u16);
                 let hub = v["hub_member"] != false;
-                self.group_create(text(v, "name")?, id, hub)?
+                self.group_create(text(v, "name")?, id, hub, now)?
             }
-            "groups/update" => {
-                self.group_update(gid()?, v["name"].as_str(), v["hub_member"].as_bool())?
-            }
+            "groups/update" => self.group_update(
+                gid()?,
+                v["name"].as_str(),
+                v["hub_member"].as_bool(),
+                now,
+            )?,
             "groups/delete" => {
                 self.group_delete(gid()?, v["force"] == true, now)?;
                 J::Null
@@ -1966,7 +2019,7 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Replaces all groups (a restored backup's, in their stored form), and
     /// the hub endpoint's memberships with them.
     #[inline(never)]
-    pub fn zg_replace_groups(&mut self, groups: &[J]) -> usize {
+    pub fn zg_replace_groups(&mut self, groups: &[J], now: Millis) -> usize {
         let old: Vec<u16> = self.zg.groups.iter().map(|g| g.id).collect();
         for id in old {
             if let Some(g) = self.zg.get_mut(id) {
@@ -1982,6 +2035,6 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.zg_sync(id);
             self.group_event(id);
         }
-        self.groups_resync()
+        self.groups_resync(now)
     }
 }

@@ -313,6 +313,32 @@ fn network_info_and_permit_join_events() {
     r.sim.stop();
 }
 
+#[test]
+fn refused_control_requests_answer_as_before() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    r.sim.with(|s| s.unsupported.extend([ids::GP_SINK_CONFIG, ids::NWK_PERMIT_JOIN]));
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    // The result follows the NCP's answer, worded as it always was.
+    let c = call(&app, sid, &rx, 1, json!({"type": "gp/config", "security_level": 1}));
+    assert_eq!(c["error"], json!({"code": "busy", "message": "ZRHP status 0x04"}), "{c}");
+    let c = call(&app, sid, &rx, 2, json!({"type": "gp/config/get"}));
+    assert_eq!(c["result"]["security_level"], 0, "{c}");
+    // An automation's request action has its result in place.
+    let rule = json!({"id": "pj", "actions": [{"type": "request", "request": {"type": "network/permit_join", "duration_s": 30}}]});
+    let c = call(&app, sid, &rx, 3, json!({"type": "automations/create", "rule": rule}));
+    assert_eq!(c["success"], true, "{c}");
+    let c = call(&app, sid, &rx, 4, json!({"type": "automations/run", "automation": "pj"}));
+    let a = &c["result"]["trace"]["actions"][0];
+    assert_eq!(a["result"], "error", "{c}");
+    assert_eq!(a["error"], json!({"code": "busy", "message": "ZRHP status 0x04"}), "{c}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 fn permit_events(rx: &Receiver<String>, until: impl Fn(&[u64]) -> bool) -> Vec<u64> {
     let mut seen = Vec::new();
     let t = std::time::Instant::now();

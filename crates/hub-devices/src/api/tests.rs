@@ -965,3 +965,122 @@ fn token_rotation_keeps_authenticated_sessions() {
     assert_eq!(ok[0]["type"], "auth_ok");
     assert!(!api.is_authed(99));
 }
+
+#[test]
+fn control_request_results_follow_their_outcome() {
+    use crate::transport::{CoordError, Reply, Request, Terminal};
+    let mut hub = hub_with(&[]);
+    let mut api = ApiServer::new("hub", "t");
+    let (s, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type":"auth","token":"t"}"#, T0);
+    hub.transport.manual = true;
+    let ask = |api: &mut ApiServer, hub: &mut Hub<MockTransport>, text: &str, t| {
+        assert!(api.handle_text(hub, s, text, T0).is_empty(), "{text}");
+        let (id, req) = hub.transport.open.pop().unwrap();
+        hub.on_outcome(id, t, T0);
+        let out: Vec<J> = api
+            .pump(hub)
+            .into_iter()
+            .map(|(_, f)| serde_json::from_str(&f).unwrap())
+            .collect();
+        (req, out)
+    };
+    let done = || Terminal::Done(Reply::None).into();
+    // The result once the NCP has answered, as it was answered at once.
+    let (req, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":1,"type":"network/permit_join","duration_s":60}"#,
+        done(),
+    );
+    assert_eq!(
+        req,
+        Request::PermitJoin {
+            duration_s: 60,
+            target: None
+        }
+    );
+    assert_eq!(
+        out,
+        [json!({"id": 1, "type": "result", "success": true, "result": null})]
+    );
+    let refused = || Terminal::Refused(CoordError::Busy).into();
+    let (_, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":2,"type":"network/permit_join","duration_s":60}"#,
+        refused(),
+    );
+    assert_eq!(
+        out,
+        [
+            json!({"id": 2, "type": "result", "success": false, "error": {"code": "busy", "message": "busy"}})
+        ]
+    );
+    // A group's record carries the hub endpoint's membership error.
+    let (req, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":3,"type":"groups/create","name":"Kitchen"}"#,
+        refused(),
+    );
+    assert!(matches!(req, Request::Group { add: true, .. }), "{req:?}");
+    assert_eq!(out[0]["id"], 3);
+    assert_eq!(out[0]["result"]["name"], "Kitchen");
+    assert_eq!(out[0]["result"]["hub_error"], "busy");
+    // GP sink settings change only when the NCP took them.
+    let (_, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":4,"type":"gp/config","security_level":2}"#,
+        refused(),
+    );
+    assert_eq!(out[0]["error"]["code"], "busy");
+    assert_eq!(hub.gp_config()["security_level"], 0);
+    let (_, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":5,"type":"gp/config","security_level":2}"#,
+        done(),
+    );
+    assert_eq!(out[0]["result"]["security_level"], 2);
+    // A GPD's record goes once its Sink Table entry is gone.
+    let gpd = crate::gp::types::GpdId::SrcId(0x00F4_0003);
+    let record = crate::gp::types::GpSinkRecord {
+        gpd_id: gpd,
+        device_id: 2,
+        communication_mode: 2,
+        group: 0x0B84,
+        assigned_alias: 0xFFFF,
+        flags: 0,
+        security_level: 0,
+        key_type: 0,
+        key: None,
+        frame_counter: 1,
+        groupcast_radius: 0,
+    };
+    let ev = crate::gp::types::GpEvent::Commissioned {
+        gpd_id: gpd,
+        device_id: 0x02,
+        flags: 0,
+        record,
+    };
+    hub.on_gp_event(ev, T0);
+    let (_, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":6,"type":"devices/remove","device":"gp:00f40003"}"#,
+        refused(),
+    );
+    assert_eq!(out[0]["error"]["code"], "busy");
+    assert!(hub.device("gp:00f40003").is_some());
+    let (_, out) = ask(
+        &mut api,
+        &mut hub,
+        r#"{"id":7,"type":"gp/devices/remove","device":"gp:00f40003"}"#,
+        done(),
+    );
+    assert_eq!(out[0]["success"], true);
+    assert!(hub.device("gp:00f40003").is_none());
+    assert!(hub.transport.open.is_empty());
+}

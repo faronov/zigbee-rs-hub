@@ -28,29 +28,48 @@ GP bindings). `std`, sans-IO, host-tested without hardware.
 | `gp` | GP events, commissioning, generic GP tier, GP reports 0xA0–0xA3, GP definitions, GP bindings (on-device and hub-side) | 13 |
 | `hub::zgroups` | Zigbee groups (ZCL Groups, hub endpoint via `NWK_GROUP_MEMBERSHIP`), group devices/entities with aggregated state and groupcast commands, scenes (ZCL Scenes), bindings (Bind/Unbind/Mgmt_Bind), persistence records | 14.9 |
 | `api` | WebSocket JSON message model and a transport-free `ApiServer` (auth, subscriptions with snapshot + `seq`, handlers) | 14 |
-| `transport` | `ZigbeeTransport` trait (the boundary to the ZRHP host core) and `MockTransport`; `ApsRequest`, `ApsIndication`, `ApsDst`, `TxOptions` are re-exported from `hub-coord` | 2 |
+| `transport` | `ZigbeeTransport` trait (the boundary to the coordinator backend: ticketed requests, outcomes) and `MockTransport`; `ApsRequest`, `ApsIndication`, `ApsDst`, `TxOptions`, `Request`, `RequestId`, `Progress`, `Terminal`, `CoordError` are re-exported from `hub-coord` | 2 |
 | `persist` | `DeviceSnapshot`: what of a device survives a restart (no measured values), `Hub::snapshot_device` / `restore_device`; stored by `hub-app`'s registry | 3, 16.1 |
 
 ## Boundary to the ZRHP host core (`hub-ncp`; adapter: `crates/hub-app`)
 
-The engine never blocks. Outgoing traffic goes through `ZigbeeTransport`;
-everything incoming is a method call with the current time.
+The engine never blocks. Outgoing traffic goes through
+`ZigbeeTransport::submit(Request)`, which returns a `RequestId` at once (or
+refuses the request); the outcome follows through
+`Hub::on_outcome(id, Outcome, now)`: at most one `Progress::Accepted`, then
+one `Terminal` (`docs/coordinator-boundary.md` §2.2). Everything else
+incoming is a method call with the current time.
+
+- APS: a refusal at submit fails the waiting command with `busy`;
+  `NotDelivered` and `Refused` outcomes retry once, then fail it with
+  `not_delivered` (matched by `RequestId`); other outcomes leave it to the
+  response timeout.
+- Control requests (GP, group membership, removal, permit join) carry what
+  follows their outcome. An API request they decide (`network/permit_join`,
+  `groups/create` and `groups/update` of the hub endpoint, `gp/config`,
+  `gp/commissioning/*`, removing a GPD) is answered at once when the outcome
+  is already known, otherwise later as `HubEvent::Answer` through the API's
+  deferred results, with the same JSON.
+- A remote GP request waits by `RequestId` until `Accepted { zcl_tsn }`,
+  then by the TSN; an `EVT_GP_REMOTE_*` that comes first is kept until then.
+- `MockTransport` completes control requests at once (`completed()`), or
+  nothing with `manual`, for tests that pass outcomes themselves.
 
 | Engine | `hub-ncp` (phase1, 5af686b) |
 |---|---|
-| `aps_send(ApsRequest)` | `APS_DATA_REQUEST` through `Client::start` (non-blocking); `Hub::send_aps` blocks on the confirm, so an adapter must run it off the engine thread or use `start` |
-| `gp_request(GpRequest) -> Option<zcl_tsn>` | `Client::call(&GpPairingConfiguration / GpTranslationUpdate / GpTranslationRequest / GpRemoteSinkTableRequest / GpRemoteProxyTableRequest / GpSinkCommissioning / GpSinkRemove / GpSinkConfig)`, `zcl_tsn` from `GpRemoteRsp` (0x0A08–0x0A0D are in the pinned `zigbee-zrhp`) |
-| `group_add(ep, group)`, `group_remove(ep, group)` | `NWK_GROUP_MEMBERSHIP` op 1 / 2 (`Hub::group_membership`) |
-| `remove_device(ieee)` | `NWK_REMOVE_DEVICE` (no helper yet) |
-| `permit_join(duration, target)` | `Hub::permit_join(secs)` (whole network; per-router targets are not in phase1) |
+| `Request::Aps` | `APS_DATA_REQUEST` through `Client::start` (non-blocking); `Hub::send_aps` blocks on the confirm, so an adapter must run it off the engine thread or use `start` |
+| `Request::Gp`, `Accepted { zcl_tsn }` | `Client::call(&GpPairingConfiguration / GpTranslationUpdate / GpTranslationRequest / GpRemoteSinkTableRequest / GpRemoteProxyTableRequest / GpSinkCommissioning / GpSinkRemove / GpSinkConfig)`, `zcl_tsn` from `GpRemoteRsp` (0x0A08–0x0A0D are in the pinned `zigbee-zrhp`) |
+| `Request::Group { add }` | `NWK_GROUP_MEMBERSHIP` op 1 / 2 (`Hub::group_membership`) |
+| `Request::RemoveDevice` | `NWK_REMOVE_DEVICE` (`Hub::remove_device`) |
+| `Request::PermitJoin` | `Hub::permit_join_on(secs, target)` |
 | `Hub::on_aps_indication` | `EVT_APS_DATA_INDICATION` from `Hub::subscribe()` |
 | `Hub::on_device_joined` | `EVT_DEVICE_JOINED` with an admitted decision |
 | `Hub::on_gp_event` | `EVT_GP_FRAME`, `EVT_GP_COMMISSIONING`, `EVT_GP_COMMISSIONED`, `EVT_GP_COMMISSIONING_FAILED`, `EVT_GP_DECOMMISSIONED`, `EVT_GP_REMOTE_*` (owned mirrors in `gp::types`, re-exported from `hub_coord::gp`, field names 1:1 with `zigbee_zrhp::msg::gp`) |
 | `Hub::tick(now)` | a 1 s timer |
 
 The hub endpoint (1, HA profile) must be registered with `add_endpoint`.
-Wanted later: an `on_aps_confirm` input (faster failures; spec 13.8 times
-remote GP requests from the APS confirm, the engine uses 5 s from the send).
+Wanted later: remote GP request timing from the APS confirm (spec 13.8;
+the engine uses 5 s from the send).
 
 ## zdef: what is used, and the API requests
 

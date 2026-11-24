@@ -493,6 +493,12 @@ impl AppWorld<'_> {
         let id = *self.next_id;
         req["id"] = id.into();
         let frames = self.api.handle_text(self.engine, AUTOMATIONS_SESSION, &req.to_string(), self.now);
+        if frames.is_empty() {
+            // A result a control request decides: known once its outcome
+            // is in, as the transport answers those requests in place.
+            settle(self.engine, self.now);
+            return (id, self.api.take_result(self.engine, AUTOMATIONS_SESSION, id));
+        }
         (id, frames.first().and_then(|f| reply(f)).map(|(_, r)| r))
     }
 }
@@ -523,6 +529,14 @@ impl World for AppWorld<'_> {
     fn request(&mut self, req: &serde_json::Value) -> Result<serde_json::Value, hub_devices::hub::ApiError> {
         // A deferred result (a device command): sent.
         self.call(req.clone()).1.unwrap_or(Ok(serde_json::Value::Null))
+    }
+}
+
+/// Hands the outcomes of control requests to the engine: as soon as the
+/// engine has returned from the call that submitted them.
+fn settle(engine: &mut Engine<NcpTransport>, now: Millis) {
+    while let Some((id, o)) = engine.transport.take_control() {
+        engine.on_outcome(id, o, now);
     }
 }
 
@@ -713,7 +727,11 @@ impl Runner {
             }
             match rx.recv_timeout(wait) {
                 Ok(Input::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-                Ok(input) => self.handle(input),
+                Ok(input) => {
+                    self.handle(input);
+                    let now = self.now();
+                    settle(&mut self.engine, now);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
             }
             if Instant::now() >= next_tick {
@@ -826,7 +844,7 @@ impl Runner {
                 JobOut::Reply(sid, frame) => self.send_owned(sid, frame),
                 JobOut::Event(body) => self.engine.network_event(body),
                 JobOut::Groups(list) => {
-                    self.engine.zg_replace_groups(&list);
+                    self.engine.zg_replace_groups(&list, now);
                     info!("app: {} groups from the restored backup", self.engine.zg.groups.len());
                 }
                 JobOut::Reimport => {
@@ -1054,7 +1072,7 @@ impl Runner {
         // Group memberships of the hub endpoint, once per NCP session.
         if self.registered && self.ncp.client().state() == SessionState::Ready && self.groups_for != cookie {
             self.groups_for = cookie;
-            let n = self.engine.groups_resync();
+            let n = self.engine.groups_resync(now);
             if n > 0 {
                 info!("app: hub endpoint joined {n} groups");
             }
@@ -1077,7 +1095,11 @@ impl Runner {
         }
         // Confirms first: the tick fails undeliverable requests at once.
         self.engine.transport.poll();
+        for (id, t) in self.engine.transport.take_done() {
+            self.engine.on_outcome(id, t.into(), now);
+        }
         self.engine.tick(now);
+        settle(&mut self.engine, now);
         self.with_automations(|a, w, clk| a.tick(w, clk));
         if let Some(c) = self.catalog.as_mut()
             && self.registered
@@ -1179,8 +1201,9 @@ impl Runner {
     }
 
     fn after_input(&mut self) {
-        self.observe_permit();
         let now = self.now();
+        settle(&mut self.engine, now);
+        self.observe_permit();
         if !self.outboxes.is_empty() {
             self.pump_outboxes(now);
         }

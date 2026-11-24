@@ -112,6 +112,22 @@ pub trait Coordinator: Send {
 `deadline: None` means the backend default; for ZRHP these are exactly
 today's `CallOpts`.
 
+**Engine side (PR F).** hub-devices' `ZigbeeTransport::submit(Request)`
+returns the `RequestId` or refuses; `Hub::on_outcome(id, Outcome, now)`
+takes the `Progress` and the `Terminal`. Until PR G, hub-app's
+`NcpTransport` still makes today's blocking calls inside `submit` and
+queues the outcomes. The app passes APS terminals on in the 1 s tick,
+before `Hub::tick`, as `poll` did. It passes control outcomes on as soon
+as the engine returns from the call that submitted them, including the
+automations' internal requests. Details:
+- An API request that a control request decides answers through
+  `HubEvent::Answer` and the existing deferred results, with the same
+  JSON. It answers at once when the outcome is already known.
+- Error texts stay as before ("ZRHP status 0x..", "NCP link down"). The
+  text change of §2.3 is left for a later PR.
+- A remote GP answer that arrives before its `Accepted` is kept (up to
+  four) until its TSN is known.
+
 **Endpoints** are backend configuration given at construction
 (`BackendConfig { endpoints }`), not a request:
 - EZSP accepts `addEndpoint` only before `networkInit`.
