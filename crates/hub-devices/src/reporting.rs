@@ -223,8 +223,7 @@ const fn class(
     }
 }
 
-/// The editable classes: the rows of the 5.2 table (and the generic
-/// tier's soil moisture and PM2.5).
+/// The editable classes: the rows of the 5.2 table.
 pub const CLASSES: &[ReportClass] = &[
     class(
         "on_off",
@@ -286,6 +285,26 @@ pub const CLASSES: &[ReportClass] = &[
         "pm25",
         &[(cl::PM25, 0, ZclType::SINGLE)],
         cfg(30, 900, Some(1.0)),
+    ),
+    class(
+        "pm1",
+        &[(cl::PM1, 0, ZclType::SINGLE)],
+        cfg(30, 900, Some(1.0)),
+    ),
+    class(
+        "pm10",
+        &[(cl::PM10, 0, ZclType::SINGLE)],
+        cfg(30, 900, Some(1.0)),
+    ),
+    class(
+        "voc",
+        &[(cl::TVOC, 0, ZclType::SINGLE)],
+        cfg(30, 900, Some(0.000_000_1)),
+    ),
+    class(
+        "formaldehyde",
+        &[(cl::FORMALDEHYDE, 0, ZclType::SINGLE)],
+        cfg(30, 900, Some(0.000_000_01)),
     ),
     class(
         "battery_pct",
@@ -582,6 +601,9 @@ impl Applied {
 /// A readback in progress (`entities/reporting` with `read`).
 #[derive(Debug, Clone)]
 pub(crate) struct ReportingRead {
+    /// The API answer ticket; `None` for a sleeping device's read, which
+    /// was answered `queued` and ends in an `entity_reporting` event.
+    answer: Option<u64>,
     device: String,
     uid: Option<String>,
     remaining: u32,
@@ -775,8 +797,9 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// (`device`), and what the device applied when last read back. With
     /// `read` the device is asked (Read Reporting Configuration, ≤ 3
     /// attributes per frame): the answer follows when it replies; a
-    /// sleeping device is answered `queued` at once and asked when it is
-    /// next heard from.
+    /// sleeping device is answered `queued` at once, asked when it is next
+    /// heard from, and its answer is the event `entity_reporting` (topic
+    /// `entities`) with the same body plus `device` and `uid`.
     pub fn entity_reporting(
         &mut self,
         uid: Option<&str>,
@@ -798,18 +821,19 @@ impl<T: ZigbeeTransport> Hub<T> {
         let queued = d.sleepy() && now > d.awake_until;
         let frames: u32 = groups.values().map(|a| a.len().div_ceil(3) as u32).sum();
         let ticket = (!queued).then(|| self.answer_ticket().ticket());
-        if let Some(t) = ticket {
-            self.reporting_reads.insert(
-                t,
-                ReportingRead {
-                    device: did.clone(),
-                    uid: uid.map(str::to_string),
-                    remaining: frames,
-                    answered: false,
-                    error: None,
-                },
-            );
-        }
+        self.reporting_seq += 1;
+        let read_id = self.reporting_seq;
+        self.reporting_reads.insert(
+            read_id,
+            ReportingRead {
+                answer: ticket,
+                device: did.clone(),
+                uid: uid.map(str::to_string),
+                remaining: frames,
+                answered: false,
+                error: None,
+            },
+        );
         for ((ep, cluster, mfr), attrs) in groups {
             for chunk in attrs.chunks(3) {
                 let tsn = self.next_zcl_tsn();
@@ -821,7 +845,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     zf::read_reporting_config(chunk),
                 );
                 let purpose = Purpose::Reporting {
-                    ticket,
+                    read: read_id,
                     ep,
                     cluster,
                     attrs: chunk.to_vec(),
@@ -857,7 +881,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(p) = self.take_pending(id, tsn) else {
             return;
         };
-        let Purpose::Reporting { ticket, .. } = p.purpose else {
+        let Purpose::Reporting { read, .. } = p.purpose else {
             return;
         };
         match zf::parse_read_reporting_config_rsp(payload) {
@@ -874,10 +898,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                         );
                     }
                 }
-                self.reporting_part_done(ticket, None);
+                self.reporting_part_done(read, None);
             }
             Err(e) => self.reporting_part_done(
-                ticket,
+                read,
                 Some(ApiError::new("failed", format!("malformed answer: {e}"))),
             ),
         }
@@ -894,7 +918,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         now: Millis,
     ) {
         let Purpose::Reporting {
-            ticket,
+            read,
             ep,
             cluster,
             attrs,
@@ -916,14 +940,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                         );
                     }
                 }
-                self.reporting_part_done(*ticket, None);
+                self.reporting_part_done(*read, None);
             }
-            Err(e) => self.reporting_part_done(*ticket, Some(e)),
+            Err(e) => self.reporting_part_done(*read, Some(e)),
         }
     }
 
-    fn reporting_part_done(&mut self, ticket: Option<u64>, err: Option<ApiError>) {
-        let Some(r) = ticket.and_then(|t| self.reporting_reads.get_mut(&t)) else {
+    /// One frame of readback `read` done; the last one answers the
+    /// request, or (a sleeping device's read) emits `entity_reporting`.
+    fn reporting_part_done(&mut self, read: u64, err: Option<ApiError>) {
+        let Some(r) = self.reporting_reads.get_mut(&read) else {
             return;
         };
         r.remaining = r.remaining.saturating_sub(1);
@@ -936,8 +962,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         if r.remaining > 0 {
             return;
         }
-        let t = ticket.unwrap_or_default();
-        let Some(r) = self.reporting_reads.remove(&t) else {
+        let Some(r) = self.reporting_reads.remove(&read) else {
             return;
         };
         let result = match r.error.filter(|_| !r.answered) {
@@ -946,6 +971,17 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .reporting_rows(&r.device, r.uid.as_deref())
                 .map(|(rows, _)| json!({"status": "ok", "records": rows})),
         };
-        self.emit(HubEvent::Answer { ticket: t, result });
+        match r.answer {
+            Some(ticket) => self.emit(HubEvent::Answer { ticket, result }),
+            None => {
+                let mut body = match result {
+                    Ok(b) => b,
+                    Err(e) => json!({"status": "failed", "error": e}),
+                };
+                body["device"] = r.device.into();
+                body["uid"] = r.uid.into();
+                self.emit(HubEvent::EntityReporting(body));
+            }
+        }
     }
 }

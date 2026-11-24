@@ -552,7 +552,11 @@ can change any of them (`report: [min, max, change]`), or set `report: off`.
 | Pressure 0x0403/0x0000 | 30 | 900 | 1 |
 | Illuminance 0x0400/0x0000 | 30 | 900 | 500 |
 | Occupancy 0x0406/0x0000 | 0 | 900 | — |
-| CO2 0x040D/0x0000 | 30 | 900 | 0.000025 (25 ppm) |
+| Soil moisture 0x0408/0x0000 | 30 | 900 | 100 (1 %) |
+| CO2 0x040D/0x0000 (and the other gases measured as a fraction, 0x040C–0x0416) | 30 | 900 | 0.000025 (25 ppm) |
+| Formaldehyde 0x042B/0x0000 (fraction) | 30 | 900 | 0.00000001 (0.01 ppm) |
+| TVOC 0x042E/0x0000 (fraction) | 30 | 900 | 0.0000001 (0.1 ppm) |
+| PM2.5 0x042A, PM1 0x042C, PM10 0x042D (µg/m³) | 30 | 900 | 1 (1 µg/m³) |
 | Battery % 0x0001/0x0021 | 3600 | 21600 | 2 (1 %) |
 | Battery voltage 0x0001/0x0020 | 3600 | 21600 | 1 |
 | ActivePower 0x0B04/0x050B | 5 | 900 | 10 (raw) |
@@ -587,7 +591,9 @@ Reporting, 6.3). Classes and their attributes (`reporting/defaults/get`
 lists them with the built-in values): `on_off` (0x0006/0x0000), `level`
 (0x0008/0x0000), `color` (0x0300/0x0007, 0x0003, 0x0004, 0x0000, 0x0001),
 `temperature`, `humidity`, `pressure`, `illuminance`, `occupancy`,
-`soil_moisture` (0x0408), `co2`, `pm25` (0x042A), `battery_pct`
+`soil_moisture` (0x0408), `co2` (0x040D), `pm25` (0x042A), `pm1`
+(0x042C), `pm10` (0x042D), `voc` (0x042E), `formaldehyde` (0x042B),
+`battery_pct`
 (0x0001/0x0021), `battery_voltage` (0x0001/0x0020), `power`
 (0x0B04/0x050B), `voltage` (0x0505), `current` (0x0508), `energy`
 (0x0702/0x0000), `demand` (0x0702/0x0400), `local_temperature`
@@ -663,7 +669,8 @@ the device state (not persisted): its status (`SUCCESS`;
 configured), `[min, max, change]` or `off` (max 0xFFFF), and the time. A
 device without the command answers a Default Response, whose status
 (`UNSUP_GENERAL_COMMAND`) is kept the same way. A sleeping device is asked
-when it is next heard from.
+when it is next heard from; when its answers are in, the event
+`entity_reporting` (topic `entities`) carries the result.
 
 ### 5.4 Client clusters → events (remotes)
 
@@ -2261,7 +2268,8 @@ code feels familiar:
   `unsupported`). Added later within 1.3, in every image: reporting
   configuration (5.2, 14.3): `entities/reporting`,
   `reporting/defaults/get`, `reporting/defaults/set`, the `report` and
-  `part` parameters of `entities/update` and the entity record's `report`.
+  `part` parameters of `entities/update`, the entity record's `report` and
+  the event `entity_reporting`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2319,12 +2327,15 @@ deadline, as an NCP image need not report `EVT_PERMIT_JOIN_STATE`) and `network_
 | `entities/refresh` | `uid` | reads the bound attribute(s) now (mains devices) |
 | `entities/update` | `uid`, `name`, `enabled`, `value` for `hub` bindings, `report` (5.2: `[min, max, change]`, `"off"`, `"default"` or null) with `part` (the part of a composite entity; `""` or absent for the entity's own value) | entity record (`report`: its overrides). `report` is checked first: an invalid one changes nothing |
 | `entities/delete` | `uid` | only orphaned entities (3.4) |
-| `entities/reporting` | `uid` (one entity) or `device` (all its entities), `read` (bool, default false) | `{status, records}`; one record per ZCL-bound value: `uid`, `part` (null: the own value), `endpoint`, `cluster`, `attribute`, `type` (ZCL type code), `manufacturer` (when set), `report` (what the hub configures, battery cap applied: `[min, max, change]`, `"off"`, or null for no Configure Reporting), `source` (`override`, `definition`, `default`), `default` (with an override: the setting without it), `class` (5.2), `applied` (the last readback: `{status, report, time}`, absent before one). `status`: `cached` without `read`; with `read`, `ok` once the device answered (the result waits for it; `timeout` / `not_delivered` errors as for commands) or, for a sleeping device, `queued` at once (the read goes out at its next contact; the next request shows the answer). `unsupported` for GP devices |
+| `entities/reporting` | `uid` (one entity) or `device` (all its entities), `read` (bool, default false) | `{status, records}`; one record per ZCL-bound value: `uid`, `part` (null: the own value), `endpoint`, `cluster`, `attribute`, `type` (ZCL type code), `manufacturer` (when set), `report` (what the hub configures, battery cap applied: `[min, max, change]`, `"off"`, or null for no Configure Reporting), `source` (`override`, `definition`, `default`), `default` (with an override: the setting without it), `class` (5.2), `applied` (the last readback: `{status, report, time}`, absent before one). `status`: `cached` without `read`; with `read`, `ok` once the device answered (the result waits for it; `timeout` / `not_delivered` errors as for commands) or, for a sleeping device, `queued` at once (the read goes out at its next contact, and its answer comes as the event `entity_reporting`). `unsupported` for GP devices |
 | `reporting/defaults/get` | — | `classes`: [{`key`, `attributes` ([[cluster, attribute]]), `builtin`, `report` (effective), `edited`}] |
 | `reporting/defaults/set` | `defaults`: `{class: setting}` (a setting, `"default"` or null) | as `reporting/defaults/get`. All entries are checked first (`invalid_value` for an unknown class or setting; nothing applied); a setting equal to the built-in one removes the edit. Devices re-resolve and reconfigure what changed (5.3) |
 
 Events (topic `entities`): `entity_added`, `entity_updated`,
-`entity_removed`, `entity_state` (4.5). Topic `events`: `entity_event`
+`entity_removed`, `entity_state` (4.5), `entity_reporting` (5.3: a sleeping
+device answered a queued `entities/reporting` read; the result's body —
+`status` `ok` and `records`, or `failed` and `error` — plus `device` and
+`uid`, null for a whole-device read; nothing is written to flash). Topic `events`: `entity_event`
 `{uid, event_type, attributes, time}` for event entities.
 
 ### 14.4 Definitions and catalog
@@ -2533,10 +2544,12 @@ or `"0x21"`; the web UI also takes definition type names such as `u16`);
 
 Every result also has `tsn`, `frame` (`global`/`cluster`), `command`,
 `manufacturer` and `payload` (hex) of the answer. `zcl/configure_reporting`
-is a one-off the hub does not remember: `devices/reconfigure`, or a change
-of the hub's own setting for the attribute, sends the hub's setting again.
-Persistent settings are `entities/update` `report` and the global defaults
-(5.2), whose readback (`entities/reporting`) works in every image. Argument errors
+stays a one-off: the hub neither remembers it nor notices it, so the device
+keeps it only until the next reconfigure of that attribute
+(`devices/reconfigure`, or any change of the hub's own setting for it,
+5.2), which restores the hub's setting. Persistent settings are
+`entities/update` `report` and the global defaults (5.2), whose readback
+(`entities/reporting`) works in every image. Argument errors
 (`invalid_value`) answer at once, e.g. a write of an attribute whose type
 is not known.
 
@@ -3352,7 +3365,9 @@ The bank builder fails if a bank exceeds its partition size, a definition
 exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
 size table (definitions, strings, index) per run. The hub CI checks the app
 against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
-D24; README).
+D24; README). The web page (`hub-web`, gzip as embedded) must stay within
+34 KiB (34 816 B, `hub_web::PAGE_BUDGET`) in every image variant; its
+tests build each variant and fail above it.
 
 ### 18.6 Hardware
 

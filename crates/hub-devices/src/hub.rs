@@ -142,6 +142,9 @@ pub enum HubEvent {
     EntityRemoved(String),
     /// `entity_state` (the state message, 4.5).
     EntityState(J),
+    /// `entity_reporting`: a sleeping device answered a queued readback
+    /// (the `entities/reporting` body with `device` and `uid`).
+    EntityReporting(J),
     /// `entity_event`.
     EntityEvent {
         /// Entity.
@@ -226,11 +229,10 @@ pub enum Purpose {
     },
     /// A groups, scenes or bindings request (14.9).
     Group(zgroups::ZgOp),
-    /// Read Reporting Configuration of `entities/reporting` (`ticket`:
-    /// its answer; `None` for a sleeping device, answered `queued`).
+    /// Read Reporting Configuration of `entities/reporting`.
     Reporting {
-        /// Answer ticket.
-        ticket: Option<u64>,
+        /// The readback it belongs to.
+        read: u64,
         /// Device endpoint.
         ep: u8,
         /// Cluster.
@@ -419,8 +421,10 @@ pub struct Hub<T: ZigbeeTransport> {
     pub zg: zgroups::ZgState,
     /// Global reporting defaults (5.2).
     pub(crate) report_defaults: crate::reporting::ReportDefaults,
-    /// Reporting readbacks in progress by answer ticket.
+    /// Reporting readbacks in progress.
     pub(crate) reporting_reads: BTreeMap<u64, crate::reporting::ReportingRead>,
+    /// Last readback number.
+    pub(crate) reporting_seq: u64,
 }
 
 /// The ExprEnv of one device.
@@ -508,6 +512,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             zg: Default::default(),
             report_defaults: Default::default(),
             reporting_reads: BTreeMap::new(),
+            reporting_seq: 0,
         }
     }
 

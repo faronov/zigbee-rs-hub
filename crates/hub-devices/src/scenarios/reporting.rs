@@ -404,6 +404,15 @@ fn sleepy_device_is_reconfigured_at_its_next_contact_with_the_battery_cap() {
     sim.devices.push(sleepy());
     sim.join(&mut hub, SLEEPY, T0);
     let d = id(SLEEPY);
+    let mut api = ApiServer::new("hub", "secret");
+    let (s, _): (SessionId, _) = api.connect();
+    api.handle_text(&mut hub, s, r#"{"type":"auth","token":"secret"}"#, T0);
+    api.handle_text(
+        &mut hub,
+        s,
+        r#"{"id":1,"type":"subscribe","topics":["entities"]}"#,
+        T0,
+    );
     // Asleep: nothing goes out yet.
     let t = T0 + 120_000;
     sim.log.clear();
@@ -414,11 +423,12 @@ fn sleepy_device_is_reconfigured_at_its_next_contact_with_the_battery_cap() {
         .unwrap();
     sim.run(&mut hub, t);
     assert!(sim.aps().is_empty());
-    let r = hub
-        .entity_reporting(Some(&format!("{d}:1:battery")), None, true, t)
-        .unwrap();
+    // The whole device: three clusters, three frames, one answer.
+    let r = hub.entity_reporting(None, Some(&d), true, t).unwrap();
     assert_eq!(r["status"], "queued");
+    assert_eq!(r["records"][0]["uid"], format!("{d}:1:battery"));
     assert_eq!(r["records"][0]["report"], json!([3600, 21600, 4]));
+    api.pump(&mut hub);
     // The device reports: the queued work goes out.
     let s = sim.dev(SLEEPY).clone();
     hub.on_aps_indication(
@@ -448,17 +458,34 @@ fn sleepy_device_is_reconfigured_at_its_next_contact_with_the_battery_cap() {
         "{frames:?}"
     );
     // The queued readback was answered too, before the new configuration
-    // went out (frames leave in order).
-    let r = hub
-        .entity_reporting(Some(&format!("{d}:1:battery")), None, false, t + 60_000)
-        .unwrap();
+    // went out (frames leave in order): one `entity_reporting` event with
+    // the body `entities/reporting` returns.
+    let ev: Vec<J> = api
+        .pump(&mut hub)
+        .iter()
+        .map(|(_, t)| serde_json::from_str::<J>(t).unwrap()["event"].clone())
+        .filter(|e| e["topic"] == "entity_reporting")
+        .collect();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    let e = &ev[0];
+    assert_eq!(
+        (e["device"].clone(), e["uid"].clone(), e["status"].clone()),
+        (json!(d), J::Null, json!("ok"))
+    );
+    let bat = row(e["records"].as_array().unwrap(), &format!("{d}:1:battery"));
     assert_eq!(
         (
-            r["records"][0]["applied"]["status"].clone(),
-            r["records"][0]["applied"]["report"].clone()
+            bat["applied"]["status"].clone(),
+            bat["applied"]["report"].clone()
         ),
         (json!("SUCCESS"), json!([3600, 21600, 2]))
     );
+    let r = hub
+        .entity_reporting(None, Some(&d), false, t + 60_000)
+        .unwrap();
+    assert_eq!(r["records"], e["records"]);
+    let hum = row(e["records"].as_array().unwrap(), &format!("{d}:1:humidity"));
+    assert_eq!(hum["applied"]["report"], json!([60, 3600, 50]));
 }
 
 #[test]

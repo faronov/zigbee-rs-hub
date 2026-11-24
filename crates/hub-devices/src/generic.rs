@@ -209,12 +209,21 @@ pub fn measurement(cluster: u16, attr: u16) -> Option<EntityDef> {
         (c, 0x0000) if (0x040C..=0x042F).contains(&c) => {
             let (key, dc, unit, ppm) = concentration(c)?;
             e = sensor(key, dc, Some(unit));
+            // Reportable change in raw units (5.2): particles 1 µg/m³;
+            // fractions (ppm = × 10⁶) 0.01 ppm formaldehyde, 0.1 ppm TVOC,
+            // 25 ppm for CO2 and the other gases.
+            let change = match c {
+                cl::FORMALDEHYDE => 0.000_000_01,
+                cl::TVOC => 0.000_000_1,
+                _ if ppm => 0.000_025,
+                _ => 1.0,
+            };
             e.value = zcl(
                 c,
                 0,
                 ZclType::SINGLE,
                 ZclWrite::ReadOnly,
-                rep(30, 900, Some(if ppm { 0.000_025 } else { 1.0 })),
+                rep(30, 900, Some(change)),
             );
             if ppm {
                 e.value.transforms.mul = Some(1_000_000.0);

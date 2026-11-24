@@ -1125,6 +1125,10 @@ impl ApiServer {
                     s["topic"] = "entity_state".into();
                     ("entities", s)
                 }
+                HubEvent::EntityReporting(mut b) => {
+                    b["topic"] = "entity_reporting".into();
+                    ("entities", b)
+                }
                 HubEvent::EntityEvent {
                     uid,
                     event_type,

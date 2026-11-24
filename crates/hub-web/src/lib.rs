@@ -14,6 +14,11 @@ mod variant;
 /// The page, gzip-compressed at build time (`Content-Encoding: gzip`).
 pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index.html.gz"));
 
+/// Budget of the compressed page in every image variant (raised from
+/// 32 KiB for the 8 MB image's OTA and reporting UI); it counts in the
+/// firmware image.
+pub const PAGE_BUDGET: usize = 34 * 1024;
+
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
 pub const ETAG: &str = include_str!(concat!(env!("OUT_DIR"), "/etag"));
 
@@ -50,8 +55,22 @@ mod tests {
         let src = include_str!("../web/index.html");
         let selected = super::variant::select(src, cfg!(feature = "advanced")).unwrap();
         assert_eq!(page(), super::minify::minify(&selected).unwrap().into_bytes());
-        // Budget (approved for hub 0.2.0): 32 KiB; it counts in the firmware image.
-        assert!(INDEX_HTML_GZ.len() <= 32 * 1024, "{} B compressed", INDEX_HTML_GZ.len());
+        assert!(INDEX_HTML_GZ.len() <= PAGE_BUDGET, "{} B compressed", INDEX_HTML_GZ.len());
+    }
+
+    /// Every variant (not only the one this build embeds) within the
+    /// budget, compressed as `build.rs` does.
+    #[test]
+    fn every_variant_fits_the_budget() {
+        let src = include_str!("../web/index.html");
+        for advanced in [false, true] {
+            let html = super::minify::minify(&super::variant::select(src, advanced).unwrap()).unwrap();
+            let gz = 18 + miniz_oxide::deflate::compress_to_vec(html.as_bytes(), 10).len();
+            assert!(gz <= PAGE_BUDGET, "advanced {advanced}: {gz} B compressed");
+            if advanced == cfg!(feature = "advanced") {
+                assert_eq!(gz, INDEX_HTML_GZ.len());
+            }
+        }
     }
 
     /// The page's scripts, minified and not, parse (when Node is installed).
