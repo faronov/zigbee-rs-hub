@@ -146,17 +146,17 @@ impl ReportSetting {
     /// API and store form (an integral change as an integer).
     pub fn to_json(self) -> J {
         match self {
-            Self::Config {
-                min,
-                max,
-                change: Some(c),
-            } if c.fract() == 0.0 && c.abs() < 9e15 => json!([min, max, c as i64]),
-            Self::Config {
-                min,
-                max,
-                change: Some(c),
-            } => json!([min, max, c]),
-            Self::Config { min, max, .. } => json!([min, max]),
+            Self::Config { min, max, change } => {
+                let mut a = vec![J::from(min), J::from(max)];
+                if let Some(c) = change {
+                    a.push(if c.fract() == 0.0 && c.abs() < 9e15 {
+                        J::from(c as i64)
+                    } else {
+                        J::from(c)
+                    });
+                }
+                J::Array(a)
+            }
             Self::Off => "off".into(),
             Self::Revert => "revert".into(),
         }
@@ -499,7 +499,11 @@ impl ReportDefaults {
         let classes: Vec<J> = CLASSES
             .iter()
             .map(|c| {
-                let attrs: Vec<J> = c.attrs.iter().map(|a| json!([a.0, a.1])).collect();
+                let attrs: Vec<J> = c
+                    .attrs
+                    .iter()
+                    .map(|a| J::Array(vec![a.0.into(), a.1.into()]))
+                    .collect();
                 let mut o = Map::new();
                 o.insert("key".into(), c.key.into());
                 o.insert("attributes".into(), J::Array(attrs));
@@ -516,7 +520,9 @@ impl ReportDefaults {
                 J::Object(o)
             })
             .collect();
-        json!({ "classes": classes })
+        let mut o = Map::new();
+        o.insert("classes".into(), J::Array(classes));
+        J::Object(o)
     }
 
     /// `reporting/defaults/set`: `{class: setting | "default" | null}`,
@@ -531,15 +537,16 @@ impl ReportDefaults {
                 .iter()
                 .find(|c| c.key == k)
                 .ok_or_else(|| format!("unknown class {k}"))?;
-            match ReportSetting::parse(v).map_err(|e| format!("{k}: {e}"))? {
-                Some(s) if s != c.builtin => {
-                    check_class(c, s).map_err(|e| format!("{k}: {e}"))?;
-                    next.insert(c.key, s);
-                }
-                _ => {
-                    next.remove(c.key);
-                }
-            }
+            let edit = ReportSetting::parse(v)
+                .and_then(|s| match s {
+                    Some(s) if s != c.builtin => check_class(c, s).map(|()| Some(s)),
+                    _ => Ok(None),
+                })
+                .map_err(|e| format!("{k}: {e}"))?;
+            match edit {
+                Some(s) => next.insert(c.key, s),
+                None => next.remove(c.key),
+            };
         }
         let changed = next != self.edits;
         self.edits = next;
@@ -722,6 +729,14 @@ pub(crate) struct ReportingRead {
 }
 
 type Groups = BTreeMap<(u8, u16, Option<u16>), Vec<u16>>;
+
+/// An `entities/reporting` answer: `{status, records}`.
+fn answer(status: &str, rows: Vec<J>) -> J {
+    let mut o = Map::new();
+    o.insert("status".into(), status.into());
+    o.insert("records".into(), J::Array(rows));
+    J::Object(o)
+}
 
 impl<T: ZigbeeTransport> Hub<T> {
     /// The global defaults.
@@ -984,7 +999,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let (rows, groups) = self.reporting_rows(&did, uid, now)?;
         if !read || groups.is_empty() {
             let status = if read { "ok" } else { "cached" };
-            return Ok(json!({"status": status, "records": rows}));
+            return Ok(answer(status, rows));
         }
         let d = &self.devices[&did];
         let queued = d.sleepy() && now > d.awake_until;
@@ -1023,7 +1038,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
         }
         let Some(t) = ticket else {
-            return Ok(json!({"status": "queued", "records": rows}));
+            return Ok(answer("queued", rows));
         };
         // Every frame may have failed already (transport refused).
         let done = self
@@ -1139,7 +1154,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             Some(e) => Err(e),
             None => self
                 .reporting_rows(&r.device, r.uid.as_deref(), now)
-                .map(|(rows, _)| json!({"status": "ok", "records": rows})),
+                .map(|(rows, _)| answer("ok", rows)),
         };
         match r.answer {
             Some(ticket) => self.emit(HubEvent::Answer { ticket, result }),
