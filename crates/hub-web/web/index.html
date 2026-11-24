@@ -164,7 +164,6 @@ progress{width:12em}
 <!-- stream:start -->
 <div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div></section>
 <!-- stream:end -->
-<section class="card"><h2>Settings</h2><div class="row"><label>Policy <select id="otpo"><option>manual</option><option>auto</option><option>off</option></select></label><label>Window <input id="otw1" size="5" placeholder="02:00">–<input id="otw2" size="5" placeholder="05:00"></label><label>At once <input id="otmc" type="number" class="num" min="1" max="8"></label><button id="otsv">Apply</button></div><p class="mut" id="ota"></p></section>
 </div>
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
@@ -885,7 +884,7 @@ $("#aud").onclick=()=>{if(auId&&confirm("Delete "+auId+"?"))act("automations/del
 let otD={},otI=[],otA={},otStr={};
 const ver=v=>v==null?"?":hex(v,8),kb=n=>Math.round((n||0)/1024)+" KiB";
 const otL=()=>call("ota/images/list").then(l=>{otI=l;otImg()},()=>{});
-onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()},()=>{});otL();call("ota/status").then(s=>{otA=s.area;otSet(s.settings);$("#ota").textContent="Blocks of up to "+s.block_max+" B (NCP max_asdu "+s.asdu_max+")";otImg()},e=>$("#ota").textContent=e.message)};
+onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()},()=>{});otL();call("ota/status").then(s=>{otA=s.area;otImg()},()=>{})};
 function otEv(e){const r=e.device;if(!r){otA=e.area||otA;return otL()}otD[r.device]=r;otDev();
 // stream:start
  const j=r.job;if(j&&otStr[j.image]&&/done|failed|aborted/.test(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}
@@ -928,9 +927,6 @@ function otRe(){const old=otStr;otStr={};for(const k in old)otOffer(old[k],"imag
 addEventListener("beforeunload",e=>{if(Object.keys(otStr).length){e.preventDefault();e.returnValue=""}});
 $("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otOffer(otCut(b),f.name)).then(o=>call("ota/start",{device:d,image:o.session})).then(()=>toast("Started")).catch(x=>toast(x.message)))};
 // stream:end
-// Pacing (`blocks_per_s`, `min_block_period_ms`) is set through the API.
-function otSet(s){if(!s)return;V("otpo",s.policy);V("otmc",s.max_concurrent);const w=s.window||{};V("otw1",w.start||"");V("otw2",w.end||"")}
-$("#otsv").onclick=e=>{const a=V("otw1"),b=V("otw2");busy(e.target,act("ota/settings/set",{policy:V("otpo"),max_concurrent:+V("otmc"),window:a&&b?{start:a,end:b}:null}).then(otSet,()=>{}))};
 // ---- end of Updates tab ----
 connect();
 </script>

@@ -186,10 +186,12 @@ built for the image (hub-web feature `ota-store`, set with the
 firmware's): with a store (8 MB) it offers **Upload to the hub**; without
 (4 MB) **Install from this tab**, where the tab serves the image and asks
 to stay open until the update is done (it also warns before closing).
-Both list the devices (Update, Abort, Check, policy), the images and the
-policy, window and concurrency settings; the pacing settings are API
-only. The page has no index search of its own (the 32 KiB page budget):
-a file from the index is downloaded by hand, or Home Assistant does it.
+Both list the devices (Update, Abort, Check, their policy) and the
+images. The server settings (default policy, window, concurrency,
+pacing, index URL) are API only (`ota/settings/set`, e.g. `hubctl
+ws-call`), and the page has no index search of its own: a file from the
+index is downloaded by hand, or Home Assistant does it (the page budget
+of 32 KiB gzip leaves no room for more).
 
 The index URL is a hub setting (`index_url`, default Koenkk's) that
 clients share. Home Assistant fetches it a minute
