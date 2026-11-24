@@ -29,7 +29,7 @@ use crate::expr::Value;
 use crate::fingerprint::Fingerprint;
 use crate::generic::Support;
 use crate::gp::types::GpSinkRecord;
-use crate::hub::{Hub, HubEvent, SchemaDecoder};
+use crate::hub::{Hub, HubEvent, Purpose, SchemaDecoder};
 use crate::model::LayerSource;
 use crate::reporting::ReportSetting;
 use crate::transport::ZigbeeTransport;
@@ -294,7 +294,8 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// `device_added`/`entity_added` events. A device the engine has (made
     /// before the hub's records were adopted) is replaced in place: its
     /// address and entities are kept, `device_updated` and the entities'
-    /// changes are emitted, no removal.
+    /// changes are emitted, no removal; the interview it was in is
+    /// dropped (late answers and timeouts find no request).
     pub fn restore_device(
         &mut self,
         s: DeviceSnapshot,
@@ -307,6 +308,15 @@ impl<T: ZigbeeTransport> Hub<T> {
         if let Some(old) = old {
             d.kind = old.kind.clone();
             d.entities = std::mem::take(&mut old.entities);
+            let stale: Vec<(bool, u8)> = self
+                .pending
+                .iter()
+                .filter(|(_, p)| p.device == s.id && matches!(p.purpose, Purpose::Interview(_)))
+                .map(|(k, _)| *k)
+                .collect();
+            for k in stale {
+                self.pending.remove(&k);
+            }
         }
         // Not heard from yet: a sleepy device's requests wait for it.
         d.awake_until = 0;
