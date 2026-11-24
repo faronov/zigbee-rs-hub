@@ -1,0 +1,39 @@
+{
+  "advanced": "<feature>",
+  "api_version": "1.3",
+  "automations": {
+    "format": 1,
+    "max_rules": 64
+  },
+  "coordinator_ieee": "020100000000515a",
+  "devices": 1,
+  "entities": 6,
+  "features": [
+    "expr-v1",
+    "tuya",
+    "gp",
+    "struct.zcl_tagged",
+    "codec.tuya_schedule_day",
+    "codec.bcd_time",
+    "codec.hhmm",
+    "codec.ascii",
+    "codec.utf16be_hex",
+    "codec.bitmap_flags",
+    "match.date_code"
+  ],
+  "maintenance": [
+    "diagnostics",
+    "topology",
+    "change_channel",
+    "reset",
+    "energy_scan",
+    "tx_power",
+    "backup",
+    "restore",
+    "logs"
+  ],
+  "name": "zigbee-rs-hub",
+  "ncp_board": "sim",
+  "ncp_product": "sim-ncp",
+  "seq": "<volatile>"
+}

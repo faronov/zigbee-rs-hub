@@ -1,0 +1,25 @@
+{
+  "channel": 15,
+  "ext_pan_id": "00124b0001020304",
+  "ncp": {
+    "baud": 921600,
+    "board": "sim",
+    "chip": 1,
+    "flash_kib": 4096,
+    "flow_control": true,
+    "fw": "sim-ncp 0.1.0",
+    "ieee": "020100000000515a",
+    "product": "sim-ncp",
+    "protocol": "1.0"
+  },
+  "nwk_update_id": 0,
+  "ownership": "owned",
+  "pan_id": 6699,
+  "permit_join_s": 0,
+  "session": "ready",
+  "state": "up",
+  "time": "<volatile>",
+  "time_synced": true,
+  "time_utc": "<volatile>",
+  "tx_power": 8
+}

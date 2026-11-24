@@ -1,0 +1,55 @@
+{
+  "duration_ms": "<volatile>",
+  "links": [
+    {
+      "depth": null,
+      "lqi": 200,
+      "relationship": "sibling",
+      "source": 0,
+      "target": 17476
+    },
+    {
+      "depth": 1,
+      "lqi": 220,
+      "relationship": "sibling",
+      "source": 17476,
+      "target": 0
+    }
+  ],
+  "nodes": [
+    {
+      "device": null,
+      "error": null,
+      "ieee": "020100000000515a",
+      "name": null,
+      "nwk": 0,
+      "scanned": true,
+      "type": "coordinator"
+    },
+    {
+      "device": "zb:6d6b00000000c0b0",
+      "error": null,
+      "ieee": "6d6b00000000c0b0",
+      "name": "combo-light",
+      "nwk": 17476,
+      "scanned": true,
+      "type": "router"
+    }
+  ],
+  "notes": [],
+  "routes": [
+    {
+      "dst": 17476,
+      "next_hop": 17476,
+      "source": 0,
+      "status": "active"
+    },
+    {
+      "dst": 0,
+      "next_hop": 0,
+      "source": 17476,
+      "status": "active"
+    }
+  ],
+  "time": "<volatile>"
+}
