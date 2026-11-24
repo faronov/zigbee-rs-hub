@@ -19,7 +19,7 @@
 //! NCP events update the store (checkpoints, device registry, table epoch)
 //! and are forwarded to subscribers.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -241,6 +241,11 @@ pub fn ncp_slot_size(flash_size: u32) -> Option<u32> {
 /// Random bytes from the platform (`esp_fill_random`, `/dev/urandom`).
 pub type Rng = Arc<dyn Fn(&mut [u8]) + Send + Sync>;
 
+/// A subscriber of the NCP's events ([`Hub::subscribe_into`]): called on
+/// the lifecycle thread with every event, in order, after the store has
+/// taken it; `false` unsubscribes it. Must not block.
+pub type Subscriber = Box<dyn FnMut(&Message) -> bool + Send>;
+
 struct Inner {
     client: Client,
     store: Mutex<Store>,
@@ -251,7 +256,7 @@ struct Inner {
     control: Mutex<Option<Box<dyn NcpControl>>>,
     started: Instant,
     permit_until: Mutex<Option<Instant>>,
-    subscribers: Mutex<Vec<Sender<Message>>>,
+    subscribers: Mutex<Vec<Subscriber>>,
     resumed_cookie: Mutex<Option<u32>>,
     pending_fc: Mutex<[u32; 2]>,
     coex: Mutex<Option<bool>>,
@@ -367,8 +372,13 @@ impl Hub {
     /// Every NCP event from now on.
     pub fn subscribe(&self) -> Receiver<Message> {
         let (tx, rx) = mpsc::channel();
-        self.inner.subscribers.lock().unwrap().push(tx);
+        self.subscribe_into(Box::new(move |m| tx.send(m.clone()).is_ok()));
         rx
+    }
+
+    /// Every NCP event from now on, handed to `f` (no thread of its own).
+    pub fn subscribe_into(&self, f: Subscriber) {
+        self.inner.subscribers.lock().unwrap().push(f);
     }
 
     /// Stop the driver. Waits for a store commit in progress and refuses
@@ -436,7 +446,7 @@ impl Hub {
                 }
                 DriverEvent::Event(m) => {
                     self.on_event(&m);
-                    self.inner.subscribers.lock().unwrap().retain(|s| s.send(m.clone()).is_ok());
+                    self.inner.subscribers.lock().unwrap().retain_mut(|s| s(&m));
                 }
                 DriverEvent::Request(m) => self.on_ncp_request(&m),
                 DriverEvent::Incompatible(why) => self.note_error(format!("NCP incompatible: {why}")),

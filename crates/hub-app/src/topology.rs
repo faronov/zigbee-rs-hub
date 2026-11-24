@@ -157,9 +157,9 @@ impl Zdo<'_> {
         self.net.zdo_request(nwk, cluster, &zdp, self.timeout).map_err(|e| match e.meaning() {
             CoordError::NoAck(c) => {
                 let legacy =
-                    self.ncp.client().session().is_some_and(|s| hub_devices::transport::legacy_zb_status(&s.negotiated.fw));
+                    self.ncp.client().session().is_some_and(|s| hub_ncp::coord::legacy_zb_status(&s.negotiated.fw));
                 let st = c.value as u8;
-                match hub_devices::transport::zb_status_text(st, legacy) {
+                match hub_ncp::coord::zb_status_text(st, legacy) {
                     Some(t) => format!("not delivered: {t} (zb status 0x{st:02X})"),
                     None => format!("not delivered (zb status 0x{st:02X})"),
                 }
@@ -205,7 +205,7 @@ impl Zdo<'_> {
 }
 
 /// A ZDP status (Mgmt_Lqi_rsp, Mgmt_Rtg_rsp) with its name and meaning;
-/// delivery failures are named by `hub_devices::transport::zb_status_text`.
+/// delivery failures are named by `hub_ncp::coord::zb_status_text`.
 pub fn status_text(code: u8) -> String {
     let name = match code {
         0x80 => "INV_REQUESTTYPE",

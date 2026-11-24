@@ -148,9 +148,23 @@ fn plug_command_without_answer_times_out_with_an_error() {
     assert!(t - T0 - 1000 <= 30_000, "{}", t - T0);
 }
 
+/// A failed `EVT_APS_DATA_CONFIRM` as the ZRHP backend reports it.
+fn not_delivered(zb_status: u8) -> crate::transport::Terminal {
+    use hub_coord::{BackendKind, Code, CoordError};
+    let text = match zb_status {
+        0xA7 => "no APS ACK",
+        0xD0 => "no route to the device",
+        _ => unreachable!(),
+    };
+    crate::transport::Terminal::NotDelivered(CoordError::NoAck(Code {
+        backend: BackendKind::Zrhp,
+        value: zb_status.into(),
+        text: Some(text),
+    }))
+}
+
 #[test]
 fn plug_command_fails_fast_when_not_delivered() {
-    use crate::transport::zrhp_not_delivered;
     let (mut hub, mut sim) = joined();
     let sw = format!("{ID}:1:switch");
     sim.dev(IEEE).responsive = false;
@@ -164,7 +178,7 @@ fn plug_command_fails_fast_when_not_delivered() {
         assert_eq!(hub.transport.aps().len(), 1);
         hub.transport.take();
         let id = hub.transport.last_id().unwrap();
-        hub.on_outcome(id, zrhp_not_delivered(0xD0, false).into(), now);
+        hub.on_outcome(id, not_delivered(0xD0).into(), now);
     };
     // The first failure retries at once, the second fails the command.
     fail(&mut hub, T0 + 1500);
@@ -178,14 +192,13 @@ fn plug_command_fails_fast_when_not_delivered() {
     assert_eq!(e.code, "not_delivered");
     assert!(e.message.contains("no route"), "{}", e.message);
     // A failure of a request nobody waits for any more is ignored.
-    hub.on_outcome(first, zrhp_not_delivered(0xA7, false).into(), T0 + 2500);
+    hub.on_outcome(first, not_delivered(0xA7).into(), T0 + 2500);
     hub.tick(T0 + 2500);
     assert!(hub.transport.aps().is_empty());
 }
 
 #[test]
 fn stale_failure_of_an_identical_request_spares_its_retry() {
-    use crate::transport::zrhp_not_delivered;
     let (mut hub, mut sim) = joined();
     let sw = format!("{ID}:1:switch");
     sim.dev(IEEE).responsive = false;
@@ -202,12 +215,12 @@ fn stale_failure_of_an_identical_request_spares_its_retry() {
     let retry = hub.transport.last_id().unwrap();
     assert_ne!(first, retry);
     // The first send's failure arrives late: it is not the retry's.
-    hub.on_outcome(first, zrhp_not_delivered(0xD0, false).into(), T0 + 9600);
+    hub.on_outcome(first, not_delivered(0xD0).into(), T0 + 9600);
     hub.tick(T0 + 9600);
     assert_eq!(result_of(&hub.drain_events(), ack.ticket), None);
     assert!(hub.transport.aps().is_empty(), "no extra retry");
     // The retry's own failure fails the command (it was retried once).
-    hub.on_outcome(retry, zrhp_not_delivered(0xD0, false).into(), T0 + 9700);
+    hub.on_outcome(retry, not_delivered(0xD0).into(), T0 + 9700);
     let e = result_of(&hub.drain_events(), ack.ticket)
         .expect("failed fast")
         .unwrap_err();

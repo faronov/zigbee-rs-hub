@@ -80,8 +80,11 @@ pub trait World {
     /// or `pending`/`queued` with [`Automations::command_result`] for `key`
     /// to follow).
     fn command(&mut self, uid: &str, command: &str, params: &J) -> Result<(u64, &'static str), ApiError>;
-    /// Any other allowed API request (`rule::REQUEST_PREFIXES`).
-    fn request(&mut self, req: &J) -> Result<J, ApiError>;
+    /// Any other allowed API request (`rule::REQUEST_PREFIXES`): `(key,
+    /// result)`; no result yet when it follows from what the coordinator
+    /// still has to do: the run waits for [`Automations::request_result`]
+    /// for `key`.
+    fn request(&mut self, req: &J) -> Result<(u64, Option<J>), ApiError>;
 }
 
 #[derive(Debug, Default)]
@@ -99,6 +102,8 @@ struct Run {
     actions: Vec<Action>,
     pc: usize,
     wake: Option<u64>,
+    /// Waits for the result of its request action: `(key, action index)`.
+    waits: Option<(u64, usize)>,
     chain: Vec<String>,
     errors: u32,
 }
@@ -611,7 +616,7 @@ impl Automations {
             result: "running",
             count: 1,
         });
-        self.runs.push(Run { id: run, rule: id.into(), actions, pc: 0, wake: None, chain, errors: 0 });
+        self.runs.push(Run { id: run, rule: id.into(), actions, pc: 0, wake: None, waits: None, chain, errors: 0 });
         self.step(run, w, clk);
         run
     }
@@ -648,6 +653,7 @@ impl Automations {
             let mut out = json!({"i": pc});
             let mut wait = None;
             let mut failed = None;
+            let mut waits = None;
             match &a {
                 Action::Command { uid, command, params } => {
                     out["type"] = "command".into();
@@ -668,7 +674,8 @@ impl Automations {
                 Action::Request(req) => {
                     out["type"] = "request".into();
                     match w.request(&parse(req)) {
-                        Ok(_) => out["result"] = "ok".into(),
+                        Ok((_, Some(_))) => out["result"] = "ok".into(),
+                        Ok((key, None)) => waits = Some(key),
                         Err(e) => failed = Some(e),
                     }
                 }
@@ -694,16 +701,13 @@ impl Automations {
                     }
                 }
             }
-            if let Some(e) = failed {
-                out["result"] = "error".into();
-                out["error"] = json!({"code": e.code, "message": e.message});
+            if let Some(key) = waits {
                 if let Some(r) = self.runs.iter_mut().find(|r| r.id == run) {
-                    r.errors += 1;
+                    r.waits = Some((key, pc));
                 }
+                return;
             }
-            if let Some(t) = self.traces.iter_mut().find(|t| t.run == run) {
-                t.actions.push((pc, out.to_string()));
-            }
+            self.action_done(run, pc, out, failed);
             if let Some(at) = wait {
                 if let Some(r) = self.runs.iter_mut().find(|r| r.id == run) {
                     r.wake = Some(at);
@@ -711,6 +715,54 @@ impl Automations {
                 return;
             }
         }
+    }
+
+    /// The action's trace entry `out`, with its error.
+    fn action_done(&mut self, run: u32, pc: usize, mut out: J, failed: Option<ApiError>) {
+        if let Some(e) = failed {
+            out["result"] = "error".into();
+            out["error"] = json!({"code": e.code, "message": e.message});
+            if let Some(r) = self.runs.iter_mut().find(|r| r.id == run) {
+                r.errors += 1;
+            }
+        }
+        if let Some(t) = self.traces.iter_mut().find(|t| t.run == run) {
+            t.actions.push((pc, out.to_string()));
+        }
+    }
+
+    /// The result of a request action a run waits for ([`World::request`]):
+    /// recorded, and the run goes on.
+    pub fn request_result(&mut self, key: u64, result: Result<J, ApiError>, w: &mut dyn World, clk: &Clock) {
+        let Some(r) = self.runs.iter_mut().find(|r| r.waits.is_some_and(|(k, _)| k == key)) else { return };
+        let Some((_, pc)) = r.waits.take() else { return };
+        let run = r.id;
+        let mut out = json!({"i": pc, "type": "request"});
+        let failed = match result {
+            Ok(_) => {
+                out["result"] = "ok".into();
+                None
+            }
+            Err(e) => Some(e),
+        };
+        self.action_done(run, pc, out, failed);
+        self.step(run, w, clk);
+    }
+
+    /// Keys of the request actions runs wait for.
+    pub fn waiting_requests(&self) -> Vec<u64> {
+        self.runs.iter().filter_map(|r| r.waits.map(|(k, _)| k)).collect()
+    }
+
+    /// Whether run `run` waits for a request action.
+    pub fn waits(&self, run: u32) -> bool {
+        self.runs.iter().any(|r| r.id == run && r.waits.is_some())
+    }
+
+    /// The `automations/run` result of run `run`, as it is now.
+    pub fn run_result(&self, run: u32) -> J {
+        let t = self.traces.iter().rev().find(|t| t.run == run).map_or(J::Null, Trace::json);
+        json!({"run": run, "trace": t})
     }
 
     /// Changes of `uid` in the next [`CAUSE_MS`] count as caused by rule

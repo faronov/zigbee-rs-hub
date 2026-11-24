@@ -1,9 +1,9 @@
-//! ZRHP wire messages ⇄ the engine's owned types (`hub_devices::transport`,
-//! `hub_devices::gp::types`; field names are 1:1 with `zigbee_zrhp::msg`).
+//! ZRHP wire messages ⇄ the backend-neutral types of `hub-coord`
+//! ([`CoordEvent`], [`ApsRequest`], [`hub_coord::gp`]; field names are 1:1
+//! with `zigbee_zrhp::msg`). Moved from `hub-app` (`convert.rs`).
 
-use hub_devices::gp::types as eg;
-use hub_devices::transport::{ApsDst as EApsDst, ApsIndication, ApsRequest};
-use hub_ncp::Message;
+use hub_coord::gp as eg;
+use hub_coord::{ApsDst as EApsDst, ApsIndication, ApsRequest, CoordEvent, NetChange};
 use zigbee_zrhp::codec::List;
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication, indication_flags, tx_options};
 use zigbee_zrhp::msg::gp as wg;
@@ -12,23 +12,7 @@ use zigbee_zrhp::msg::network::{EvtDeviceJoined, EvtNetworkState, EvtPermitJoinS
 use zigbee_zrhp::records::Record;
 use zigbee_zrhp::types::Ieee;
 
-/// Something the engine must be told.
-#[derive(Debug, Clone, PartialEq)]
-pub enum EngineInput {
-    /// `Hub::on_aps_indication`.
-    Indication(ApsIndication),
-    /// `Hub::on_device_joined`.
-    Joined {
-        /// IEEE.
-        ieee: u64,
-        /// NWK.
-        nwk: u16,
-    },
-    /// `Hub::on_gp_event`.
-    Gp(eg::GpEvent),
-    /// `Hub::network_event` (API topic `network`).
-    Network(serde_json::Value),
-}
+use crate::driver::Message;
 
 fn gpd(id: &wg::GpdId) -> eg::GpdId {
     match *id {
@@ -75,12 +59,12 @@ fn translation(t: &wg::GpTranslation<'_>) -> eg::GpTranslation {
     }
 }
 
-/// Converts an NCP event; `None` for events the engine does not take.
-pub fn engine_input(m: &Message) -> Option<EngineInput> {
+/// Converts an NCP event; `None` for events the hub does not take.
+pub fn coord_event(m: &Message) -> Option<CoordEvent> {
     Some(match m.msg_id {
         ids::EVT_APS_DATA_INDICATION => {
             let e: EvtApsDataIndication = m.decode().ok()?;
-            EngineInput::Indication(ApsIndication {
+            CoordEvent::Indication(ApsIndication {
                 src_nwk: e.src_nwk,
                 src_ieee: (e.flags & indication_flags::SRC_IEEE_VALID != 0).then(|| e.src_ieee.to_u64()),
                 src_ep: e.src_ep,
@@ -95,28 +79,27 @@ pub fn engine_input(m: &Message) -> Option<EngineInput> {
         }
         ids::EVT_PERMIT_JOIN_STATE => {
             let e: EvtPermitJoinState = m.decode().ok()?;
-            EngineInput::Network(serde_json::json!({"topic": "permit_join", "remaining_s": e.remaining_s}))
+            CoordEvent::PermitJoin { remaining_s: e.remaining_s.into() }
         }
         ids::EVT_NETWORK_STATE => {
             let e: EvtNetworkState = m.decode().ok()?;
-            let state = match e.state {
-                0 => "down",
-                1 => "forming",
-                2 => "up",
-                _ => "leaving",
-            };
-            EngineInput::Network(serde_json::json!({"topic": "network_state", "state": state}))
+            CoordEvent::NetworkState(match e.state {
+                0 => NetChange::Down,
+                1 => NetChange::Forming,
+                2 => NetChange::Up,
+                _ => NetChange::Leaving,
+            })
         }
         ids::EVT_DEVICE_JOINED => {
             let e: EvtDeviceJoined = m.decode().ok()?;
             if e.decision != 0 {
                 return None;
             }
-            EngineInput::Joined { ieee: e.ieee.to_u64(), nwk: e.nwk }
+            CoordEvent::DeviceJoined { ieee: e.ieee.to_u64(), nwk: e.nwk }
         }
         ids::EVT_GP_FRAME => {
             let e: wg::EvtGpFrame = m.decode().ok()?;
-            EngineInput::Gp(eg::GpEvent::Frame(eg::GpFrame {
+            CoordEvent::Gp(Box::new(eg::GpEvent::Frame(eg::GpFrame {
                 origin: e.origin,
                 result: e.result,
                 gpd_id: gpd(&e.gpd_id),
@@ -131,38 +114,38 @@ pub fn engine_input(m: &Message) -> Option<EngineInput> {
                 rssi: e.rssi,
                 lqi: e.lqi,
                 payload: e.payload.0.to_vec(),
-            }))
+            })))
         }
         ids::EVT_GP_COMMISSIONING => {
             let e: wg::EvtGpCommissioning = m.decode().ok()?;
-            EngineInput::Gp(eg::GpEvent::Commissioning { state: e.state, window_s: e.window_s, exit_reason: e.exit_reason })
+            CoordEvent::Gp(Box::new(eg::GpEvent::Commissioning { state: e.state, window_s: e.window_s, exit_reason: e.exit_reason }))
         }
         ids::EVT_GP_COMMISSIONED => {
             let e: wg::EvtGpCommissioned = m.decode().ok()?;
             let Record::GpSink(r) = &e.record else { return None };
-            EngineInput::Gp(eg::GpEvent::Commissioned {
+            CoordEvent::Gp(Box::new(eg::GpEvent::Commissioned {
                 gpd_id: gpd(&e.gpd_id),
                 device_id: e.device_id,
                 flags: e.flags,
                 record: sink(r),
-            })
+            }))
         }
         ids::EVT_GP_COMMISSIONING_FAILED => {
             let e: wg::EvtGpCommissioningFailed = m.decode().ok()?;
-            EngineInput::Gp(eg::GpEvent::CommissioningFailed { gpd_id: gpd(&e.gpd_id), reason: e.reason })
+            CoordEvent::Gp(Box::new(eg::GpEvent::CommissioningFailed { gpd_id: gpd(&e.gpd_id), reason: e.reason }))
         }
         ids::EVT_GP_DECOMMISSIONED => {
             let e: wg::EvtGpDecommissioned = m.decode().ok()?;
-            EngineInput::Gp(eg::GpEvent::Decommissioned { gpd_id: gpd(&e.gpd_id) })
+            CoordEvent::Gp(Box::new(eg::GpEvent::Decommissioned { gpd_id: gpd(&e.gpd_id) }))
         }
         ids::EVT_GP_REMOTE_STATUS => {
             let e: wg::EvtGpRemoteStatus = m.decode().ok()?;
-            EngineInput::Gp(eg::GpEvent::RemoteStatus {
+            CoordEvent::Gp(Box::new(eg::GpEvent::RemoteStatus {
                 src_nwk: e.src_nwk,
                 zcl_tsn: e.zcl_tsn,
                 command_id: e.command_id,
                 zcl_status: e.zcl_status,
-            })
+            }))
         }
         ids::EVT_GP_REMOTE_SINK_TABLE => {
             let e: wg::EvtGpRemoteSinkTable = m.decode().ok()?;
@@ -174,8 +157,9 @@ pub fn engine_input(m: &Message) -> Option<EngineInput> {
                     _ => None,
                 })
                 .collect();
-            EngineInput::Gp(eg::GpEvent::RemoteSinkTable { src_nwk: e.src_nwk, zcl_tsn: e.zcl_tsn, status: e.status, records })
+            CoordEvent::Gp(Box::new(eg::GpEvent::RemoteSinkTable { src_nwk: e.src_nwk, zcl_tsn: e.zcl_tsn, status: e.status, records }))
         }
+        super::EVT_SCAN_PROGRESS => return super::scan_progress(m),
         ids::EVT_GP_REMOTE_TRANSLATION_TABLE => {
             let e: wg::EvtGpRemoteTranslationTable = m.decode().ok()?;
             let records = e
@@ -186,14 +170,14 @@ pub fn engine_input(m: &Message) -> Option<EngineInput> {
                     _ => None,
                 })
                 .collect();
-            EngineInput::Gp(eg::GpEvent::RemoteTranslationTable { src_nwk: e.src_nwk, zcl_tsn: e.zcl_tsn, status: e.status, records })
+            CoordEvent::Gp(Box::new(eg::GpEvent::RemoteTranslationTable { src_nwk: e.src_nwk, zcl_tsn: e.zcl_tsn, status: e.status, records }))
         }
         _ => return None,
     })
 }
 
 /// `APS_DATA_REQUEST` payload of an engine request.
-pub fn aps_request(req: &ApsRequest) -> Result<Vec<u8>, hub_ncp::Error> {
+pub fn aps_request(req: &ApsRequest) -> Result<Vec<u8>, crate::Error> {
     let mut opts = 0;
     if req.options.ack {
         opts |= tx_options::APS_ACK;
@@ -219,12 +203,12 @@ pub fn aps_request(req: &ApsRequest) -> Result<Vec<u8>, hub_ncp::Error> {
         alias: None,
         asdu: &req.payload,
     };
-    hub_ncp::driver::encode_body(&body)
+    crate::driver::encode_body(&body)
 }
 
 /// ZRHP message ID and payload of an engine GP request.
-pub fn gp_request(req: &eg::GpRequest) -> Result<(u16, Vec<u8>), hub_ncp::Error> {
-    use hub_ncp::driver::encode_body as enc;
+pub fn gp_request(req: &eg::GpRequest) -> Result<(u16, Vec<u8>), crate::Error> {
+    use crate::driver::encode_body as enc;
     let payload = match req {
         eg::GpRequest::SinkConfig { mode, communication_mode, group, exit_mode, window_s, security_level, groupcast_radius } => {
             enc(&wg::GpSinkConfig {
@@ -328,8 +312,8 @@ mod tests {
             rx_time_ms: 5,
             asdu: Bytes16(&[0x18, 0x01, 0x0A]),
         };
-        let m = Message { kind: Kind::Event, msg_id: ids::EVT_APS_DATA_INDICATION, tid: 1, payload: hub_ncp::driver::encode_body(&ind).unwrap() };
-        let Some(EngineInput::Indication(i)) = engine_input(&m) else { panic!() };
+        let m = Message { kind: Kind::Event, msg_id: ids::EVT_APS_DATA_INDICATION, tid: 1, payload: crate::driver::encode_body(&ind).unwrap() };
+        let Some(CoordEvent::Indication(i)) = coord_event(&m) else { panic!() };
         assert_eq!(i.src_ieee, Some(0x00158d0001a2b3c4));
         assert_eq!(i.group, Some(0x0B84));
         assert_eq!(i.payload, [0x18, 0x01, 0x0A]);

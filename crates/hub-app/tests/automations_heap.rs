@@ -38,8 +38,8 @@ impl World for W {
     fn command(&mut self, _: &str, _: &str, _: &J) -> Result<(u64, &'static str), ApiError> {
         Ok((1, "pending"))
     }
-    fn request(&mut self, _: &J) -> Result<J, ApiError> {
-        Ok(J::Null)
+    fn request(&mut self, _: &J) -> Result<(u64, Option<J>), ApiError> {
+        Ok((1, Some(J::Null)))
     }
 }
 

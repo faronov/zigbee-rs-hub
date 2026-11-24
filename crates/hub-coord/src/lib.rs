@@ -4,8 +4,8 @@
 //! backend protocol crate is a dependency.
 //!
 //! - [`Coordinator`]: non-blocking request submission ([`Request`]) with
-//!   one [`Terminal`] outcome per [`RequestId`], [`CoordEvent`]s and a
-//!   [`CoordStatus`] snapshot;
+//!   one [`Terminal`] outcome per [`RequestId`], [`CoordEvent`]s (through
+//!   the bounded [`EventQueue`]) and a [`CoordStatus`] snapshot;
 //! - [`NetworkAdmin`]: blocking administration for job threads;
 //! - [`RadioControl`]: Wi-Fi coexistence, called by the firmware;
 //! - [`CoordError`], [`Capabilities`], [`NetworkIdentity`] and
@@ -23,6 +23,7 @@ mod coord;
 mod error;
 pub mod gp;
 mod identity;
+mod queue;
 mod request;
 
 pub use admin::{
@@ -36,12 +37,13 @@ pub use caps::{
     BackupSupport, Capabilities, FwUpdateMethod, GpSupport, OwnershipModel, RadioOps, Tables,
 };
 pub use coord::{
-    BackendConfig, CoordEvent, CoordStatus, Coordinator, EndpointConfig, NcpInfo, NetState,
-    NetworkParams, RadioControl, SessionEvent, SessionState,
+    BackendConfig, CoordEvent, CoordStatus, Coordinator, EndpointConfig, NcpInfo, NetChange,
+    NetState, NetworkParams, RadioControl, SessionEvent, SessionState,
 };
 pub use error::{BackendKind, Code, CoordError, Described, Kind};
 pub use gp::{GpEvent, GpRequest};
 pub use identity::{NetworkIdentity, NetworkOwnership};
+pub use queue::{Doorbell, EVENT_SLOTS, EventQueue};
 pub use request::{Inventory, InventoryDevice, Progress, Reply, Request, RequestId, Terminal};
 
 // The backend's event queue preallocates 64 slots: keep them within 4 KiB.

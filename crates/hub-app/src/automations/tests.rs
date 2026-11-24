@@ -55,9 +55,9 @@ impl World for Fake {
         self.ticket += 1;
         Ok((self.ticket, if self.deferred { "pending" } else { "ok" }))
     }
-    fn request(&mut self, req: &J) -> Result<J, ApiError> {
+    fn request(&mut self, req: &J) -> Result<(u64, Option<J>), ApiError> {
         self.requests.push(req.clone());
-        Ok(J::Null)
+        Ok((self.requests.len() as u64, Some(J::Null)))
     }
 }
 

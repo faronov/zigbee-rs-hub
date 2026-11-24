@@ -1,21 +1,37 @@
 //! The ZRHP coordinator backend: the host core behind the backend-neutral
 //! interfaces of `hub-coord` (`docs/coordinator-boundary.md` §4).
 //!
+//! - [`ZrhpCoordinator`]: [`Coordinator`](hub_coord::Coordinator) with the
+//!   non-blocking `zrhp-pump` thread ([`pump`]), the hub endpoints as
+//!   backend configuration, and the [`CoordStatus`](hub_coord::CoordStatus)
+//!   snapshot;
+//! - [`ZrhpRadio`]: [`RadioControl`](hub_coord::RadioControl) (Wi-Fi
+//!   coexistence);
 //! - [`ZrhpAdmin`]: [`NetworkAdmin`](hub_coord::NetworkAdmin) with the same
 //!   [`Hub`](crate::Hub) calls and call options as before;
 //! - [`coord_error`]: host core errors as [`CoordError`](hub_coord::CoordError)s,
-//!   worded as before;
+//!   worded as before ([`engine_error`]: as the engine shows them), and the
+//!   NCP's APS delivery statuses ([`zb_status_text`]);
+//! - ZRHP messages ⇄ neutral events and requests ([`convert`]);
 //! - backups as ZRHP record streams ⇄ [`BackupItem`](hub_coord::BackupItem)s
 //!   ([`RecordEncoder`], [`export_items`]);
 //! - [`scan_progress`]: the NCP's optional scan progress event.
 
 mod admin;
 mod backup;
+pub mod convert;
 mod error;
+pub mod pump;
+mod status;
 
 pub use admin::ZrhpAdmin;
 pub use backup::{RecordEncoder, export_items};
-pub use error::coord_error;
+pub use error::{
+    control_outcome, coord_error, engine_error, legacy_zb_status, zb_status_text,
+    zrhp_not_delivered,
+};
+pub use pump::{ZrhpCoordinator, ZrhpRadio, aps_terminal};
+pub use status::{DEFAULT_ASDU, capabilities, ncp_info};
 
 use hub_coord::CoordEvent;
 
