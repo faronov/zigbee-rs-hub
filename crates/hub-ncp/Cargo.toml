@@ -5,10 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Portable ZRHP host core of zigbee-rs-hub (std): session/resume, ARQ, client API, NCP lifecycle, NCP firmware update and the host store journal"
+description = "Portable ZRHP host core of zigbee-rs-hub (std): session/resume, ARQ, client API, NCP lifecycle, NCP firmware update; re-exports the host store (hub-store)"
 publish = false
 
 [dependencies]
+hub-store = { workspace = true }
 zigbee-zrhp = { workspace = true, features = ["std"] }
 log = "0.4"
 sha2 = { version = "0.10", default-features = false }

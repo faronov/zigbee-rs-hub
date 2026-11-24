@@ -23,10 +23,9 @@
 
 use std::io;
 
-use zigbee_zrhp::crc::crc32c;
-
-use super::flash::Flash;
-use super::state::{Change, HostState, rec};
+use crate::crc::{Crc32c, crc32c};
+use crate::flash::Flash;
+use crate::state::{Change, HostState, rec};
 
 const MAGIC: u32 = u32::from_le_bytes(*b"ZHJ1");
 const SECTOR_HEADER: u32 = 16;
@@ -95,7 +94,7 @@ fn header_bytes(seq: u32) -> [u8; 16] {
 }
 
 fn record_crc(len: u16, t: u8, payload: &[u8]) -> u32 {
-    let mut c = zigbee_zrhp::crc::Crc32c::new();
+    let mut c = Crc32c::new();
     c.update(&len.to_le_bytes());
     c.update_byte(t);
     c.update(payload);
@@ -350,8 +349,8 @@ impl<F: Flash> Journal<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::flash::MemFlash;
-    use crate::store::state::{DeviceRecord, FcRecord, Meta};
+    use crate::flash::MemFlash;
+    use crate::state::{DeviceRecord, FcRecord, Meta};
 
     fn dev(i: u8) -> DeviceRecord {
         DeviceRecord { ieee: [i; 8], nwk: u16::from(i) << 8, capability: 0x8E, flags: 0, last_seen: u32::from(i) }

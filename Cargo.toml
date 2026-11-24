@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/hub"]
+members = ["crates/hub-core", "crates/hub-store", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/hub"]
 # Host-side `cargo test` at the root only builds the portable crates and the
 # desktop tool; the firmware is built from `firmware/bridge` and
 # `firmware/hub` (Xtensa toolchain, see README).
-default-members = ["crates/hub-core", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/zdef", "crates/zdefc", "tools/hubctl"]
+default-members = ["crates/hub-core", "crates/hub-store", "crates/hub-ncp", "crates/hub-devices", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/zdef", "crates/zdefc", "tools/hubctl"]
 
 [workspace.package]
 edition = "2024"
@@ -14,6 +14,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 hub-core = { path = "crates/hub-core" }
+hub-store = { path = "crates/hub-store" }
 hub-ncp = { path = "crates/hub-ncp" }
 hub-devices = { path = "crates/hub-devices" }
 hub-app = { path = "crates/hub-app" }

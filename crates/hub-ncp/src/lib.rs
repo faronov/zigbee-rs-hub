@@ -12,7 +12,7 @@
 //! | [`lifecycle`] | [`Hub`]: seamless resume, network ownership, `NWK_INIT` floors, replay, events → store, form, permit join, APS data, NCP update/confirm, reset, ROM-loader hand-off; maintenance (`netops`): energy scan, channel change, TX power, diagnostics, coordinator tables, backup export/restore, leave/reset | 7, 8.4, 8.7, 9, 12.1, 12.4 |
 //! | [`fw`] | `FW_*` streaming into the NCP's inactive slot | 7.9 |
 //! | [`inventory`] | devices the NCP knows (`TBL_READ`, `DIAG_GET_CHILDREN`/`NEIGHBORS`) for import | 8.5, 10 |
-//! | [`store`] | host store: log-structured journal on raw flash (`hubdata`), file or RAM | 3.4, 8.8 |
+//! | [`store`] | re-export of `hub-store`: log-structured journal on raw flash (`hubdata`), file or RAM | 3.4, 8.8 |
 //! | `sim` (feature `sim`) | simulated NCP for tests and `hubctl --sim` | — |
 
 pub mod driver;
@@ -21,7 +21,6 @@ pub mod inventory;
 pub mod lifecycle;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
-pub mod store;
 pub mod transport;
 
 pub use driver::{CallOpts, Client, DriverConfig, DriverEvent, Error, Message, NcpSession, SessionState};
@@ -29,6 +28,7 @@ pub use lifecycle::{
     ChannelChange, EnergyChannel, FormRequest, FwState, Hub, HubConfig, HubStatus, Ownership, ResumePolicy, RestoreOptions,
     RestoreReport, Rng,
 };
+pub use hub_store as store;
 pub use zigbee_zrhp as zrhp;
 
 #[cfg(test)]

@@ -24,7 +24,7 @@
 use std::io;
 
 use hub_devices::bankcat::{Fetched, FetchedCatalog};
-use zigbee_zrhp::crc::crc32c;
+use hub_store::crc::crc32c;
 
 use super::data::{DataFlash, SECTOR};
 
