@@ -1,8 +1,11 @@
 # Coordinator backend boundary (plan phase 4)
 
-**Status: design, not implemented.** Implements step 2 of
-`docs/coordinator-profiles.md` §5 against §3–§4. Baseline `main` 1feaac8;
-open PRs #54, #55, #56 considered. Nothing here was built or measured.
+**Status:** PRs A–G, I and H1 (backend selection, §6 "As implemented")
+are implemented; H2 (the Dongle-M firmware on the EZSP backend) and J are
+open. Implements step 2 of `docs/coordinator-profiles.md` §5 against
+§3–§4. The design text is the plan made on `main` 1feaac8 (open PRs #54,
+#55, #56 considered); the "As implemented" notes record what the code
+does where it differs.
 
 Invariants for every step: ZRHP message IDs, payloads, `CallOpts`/timeouts,
 request ordering and `hubdata` bytes are unchanged; resume, `NWK_INIT`
@@ -358,8 +361,8 @@ firmware would **not** honour an EZSP tag (documented limit).
   "why"}` (the last two for foreign records).
 - `NcpNv`: `RegistryState::check` returns `Unverified` until the NCP's
   identity is known, `Gate::ReadOnly` keeps the records loaded and
-  unwritable. `CoordTransport` refusing device traffic until then comes
-  with the first `NcpNv` backend.
+  unwritable. The decision and `CoordTransport` refusing device traffic
+  until then came with the first `NcpNv` backend (PR H1, §6).
 - Size (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths,
   against `main` 35fb5ac): app image +4,656 B (`.flash.text` +2,896 B,
   `.flash.rodata` +1,760 B, IRAM and DRAM unchanged). LTO moves the
@@ -605,6 +608,108 @@ zrhp = ["dep:hub-ncp"]
     `coordinator-profiles.md:233-236`) minus the hub-store journal they
     keep (a few KB).
 
+**As implemented (PR H1).**
+- **hub-app features.** `zrhp` (default, `dep:hub-ncp`) and `ezsp`
+  (`dep:hub-ezsp`); both may be on (hubctl). `--no-default-features`
+  builds an app without a backend (CI builds it); zigbee-zrhp is a
+  dev-dependency only. The ZRHP test modules need `zrhp`; the suite on
+  both backends (`tests_backends`) needs `zrhp` and `ezsp`.
+- **`Backend { coordinator, kv, radio }`.** `coordinator` is a closure
+  `FnOnce(BackendConfig, Arc<EventQueue>) -> (Box<dyn Coordinator>,
+  Arc<dyn NetworkAdmin>)` the app calls with its event queue and the hub
+  endpoint. Deviation from the planned `admin` field: the event queue is
+  the app's, and EZSP makes the coordinator and its administration from
+  one worker. `kv` is `Arc<dyn Records>`: `KvStore` plus whose the
+  network-scoped records are (`registry`, `adopt`, `clear`), the backend's
+  ownership reports (`observe`), whether device traffic may go out
+  (`verified`), the hub's reading of `network/info.ownership`
+  (`ownership`), the operator replacing the network (`replacing`,
+  `replaced`), the TX power for backends that do not keep it
+  (`tx_power_set`) and `hub/system`'s `store`/`ncp` objects (`system`).
+  `Backend::zrhp(hub)` (`Records for hub_ncp::Hub`: the host core decides,
+  as in PR I) and `Backend::ezsp(transport, clock, opts, store)`
+  (`NcpNvRecords`).
+- **App API.** `App::start_backend(backend, cfg, catalog)`; `App::start` and
+  `App::start_with` stay under `zrhp` as wrappers; `App::radio()` hands the
+  firmware the backend's `RadioControl`.
+- **hub-coord.** `NetworkAdmin::status()` (default `None`): the job threads
+  have no `Coordinator`, and read the network state, the current channel,
+  the own network and the NCP a backup names from it.
+  `Coordinator::permit_join_s()` (default: from `status()`): the app
+  looks after every input (ZRHP keeps `Hub::permit_join_remaining`).
+  ZRHP's `zdo_request` names a delivery failure in `CoordError::NoAck`
+  (`Code.text`), so the network map no longer asks hub-ncp.
+  `EzspOptions::tx_power`: the operator's TX power of an earlier run.
+- **Neutral app thread.** Every KV access, `adopt`/`clear` and
+  `network/info.registry` go through the records; `hub/info.maintenance`
+  comes from the session's `Capabilities` (`radio.energy_scan`,
+  `radio.tx_power`, `backup.export`, `backup.restore`: the same list for
+  ZRHP); `hub/system` from `Records::system` (ZRHP: the same JSON).
+- **Workspace.** hub-mqtt's normal dependency selects no backend, its tests
+  `zrhp`; hubctl selects both; hub-core's `zrhp` re-export has no user.
+  hub-ota already depended on hub-store only and took `max_asdu` from the
+  capabilities (#55).
+- **Firmware.** `tbr-hub` has `zrhp` (default) and stops at a
+  `compile_error!` without it (the board's H2 NCP speaks ZRHP; one backend
+  is all this firmware has). build.rs does not mark it, so the images'
+  feature markers and the release manifest stay as they were. The app
+  starts with `App::start_backend(Backend::zrhp(hub))`; coexistence goes
+  through `App::radio()`. The Dongle-M firmware stays on its probe (H2).
+- **`NcpNv` in hub-app** (§2.5, §2.7). `NcpNvRecords` keeps the records in
+  the hub's own store and decides from the backend's `Ownership` reports:
+
+  | Start | Records | Gate |
+  |---|---|---|
+  | no tag, no network-scoped records | `untagged` | open |
+  | no tag, network-scoped records (migration) | tag `{backend, epid: null}`, `unverified` | read-only |
+  | this backend's tag | `unverified` | read-only |
+  | another backend's tag, unreadable tag | `foreign` | closed |
+
+  | The NCP reports | Records | Device traffic |
+  |---|---|---|
+  | `Observed` matching the tag (EPID, and the key ID when both are known), or no tag yet | `owned`; the tag written, or its informative fields rewritten (a key ID kept while the key is not exportable) | allowed |
+  | `Observed` of another network | `foreign` (nothing written) | refused |
+  | `NoNetwork`, `Unknown`, session down | unchanged | refused until the next match |
+
+  `CoordTransport` refuses the engine's and the app's requests until the
+  NCP's network of the session matches (`LinkDown`, "not verified"); the
+  hub endpoint's group replay, the NCP device import and the state refresh
+  wait for it too. `network/info.ownership` shows the hub's decision for
+  `NcpNv` backends (`owned`, `mismatch`) instead of the backend's
+  `observed`. `network/reset`, `network/restore` and the new
+  `network/form` (forms only where the backend reports `no_network`, no
+  `confirm`; EZSP forms only then anyway) tell the records that the
+  operator replaces the network: reports meanwhile decide nothing, and
+  the new network becomes the records' (the tag is rewritten, as ZRHP's
+  adapter does). A `DeviceLeft` is logged; the device stays until
+  `devices/remove`, as with ZRHP, which reports no leaves.
+- **Tests.** `hub-app` `tests_backends` runs one suite on both simulated
+  NCPs: join → interview → command → report, groups, permit join,
+  `network/form` then `network/reset`, and on EZSP the `NcpNv` decision
+  across restarts on one store (owned, unverified → owned, foreign until
+  clear or adopt, another backend's records). `hubctl --backend ezsp
+  --sim` runs the app on the EZSP simulator; the hubctl automations end
+  to end and the Home Assistant end to end (`HUBCTL_BACKEND=ezsp`) run on
+  it too. The ZRHP goldens of PR A are unchanged.
+- **CI.** `cargo test -p hub-app --no-default-features --features zrhp`,
+  `cargo build -p hub-app --no-default-features`, `cargo tree -e normal`
+  of hub-app (no backend, with the OTA store), hub-mqtt and hub-ota
+  without hub-ncp or zigbee-zrhp; the `hub-app-ezsp` job (both backends,
+  the EZSP-only app and its tree, the hubctl end to end).
+- **Size** (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths,
+  against `main` 9efb313): app image +2,848 B (2,787,552 → 2,790,400 B;
+  `.flash.text` +2,668 B, `.flash.rodata` +176 B, `.dram0.data` +16 B;
+  IRAM and bss unchanged). 857 B of it is a second copy of a BTreeMap
+  rebalancing instance (`bulk_steal_left`/`_right`) that hub-store's
+  `HostState::apply` now calls instead of the copy it shared with
+  hub-devices (LTO's choice; no hub-store code changed). The rest is the
+  boundary itself: the records behind `dyn Records`, the coordinator
+  started through a boxed closure, the status of admin jobs, the `NcpNv`
+  hooks (the decision itself is not linked into ZRHP images) and
+  `network/form`. LTO moves code between functions here by ±0.7 KB
+  (dropping `network/form` made the image larger), so the parts have no
+  exact cost.
+
 ## 7. Migration plan (small PRs, in order)
 
 Merge order: **#54 → #56 → #55**, then this plan.
@@ -622,7 +727,7 @@ Merge order: **#54 → #56 → #55**, then this plan.
 | **D** KvStore | registry, laststate, automations, catalog config, admin clock/backup-last, #55 `ota.rs` | golden journal identical; recorded KV call sequence identical |
 | **E** `ZrhpAdmin` | admin, topology and ocb use `NetworkAdmin`; record codec moved | OCB and restore bytes identical; diagnostics/topology JSON identical; `Status`→API table test |
 | **G** ZRHP Coordinator | pump, `CoordTransport`, `RadioControl`, endpoint config | wire golden identical; **sim `stall` of GP_SINK_CONFIG: the app still answers API requests** (today it blocks for 10 s); counter-table test |
-| **H** Features | hub-app `zrhp`, `start_backend`; hub-core gate; hub-ota → hub-store; OTA `max_asdu` from caps; firmware, hubctl, hub-mqtt wiring | `--no-default-features` builds; cargo-tree check; 4 MB size gate |
+| **H** Features | hub-app `zrhp`, `start_backend`; hub-core gate; hub-ota → hub-store; OTA `max_asdu` from caps; firmware, hubctl, hub-mqtt wiring | `--no-default-features` builds; cargo-tree check; 4 MB size gate (H1 done, §6; H2: the Dongle-M firmware on EZSP) |
 | **I** Tagging | `hub/owner`, migration, KV guard, adopt/clear | untagged golden journal → only `hub/owner` added; foreign start + shutdown leaves KV bytes identical; identity matrix (PAN change, key rotation, key unknown) |
 | **J** Surfacing | caps in `hub/info` and `network/info.capabilities` (additive); additive delivery outcome in command results; testkit conformance (Mock + ZRHP sim); docs | goldens updated only additively |
 

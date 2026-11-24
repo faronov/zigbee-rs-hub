@@ -122,6 +122,27 @@ The 4 MB app still has a 2,944 KiB slot and no hub A/B update; this change
 adds neither SoftAP nor Zigbee OTA. Release **0.2.0** predates these
 variants: its 4 MB images omit MQTT and include the console.
 
+### Coordinator backends (cargo features)
+
+The application runs on a coordinator backend chosen at build time
+(`docs/coordinator-boundary.md` §6, `docs/ezsp-backend.md`):
+
+| Build | Backend features | Notes |
+|---|---|---|
+| `tbr-hub` (Thread BR board) | `zrhp` (default; exactly one, else `compile_error!`) | the H2 NCP speaks ZRHP; not marked in the image (`app`, `mqtt`, `advanced`, `ota`, `ota-store` are) |
+| `hub-app` | `zrhp` (default), `ezsp`, both, or none | `App::start_backend(Backend::zrhp(hub) / Backend::ezsp(…))`; `App::start`/`start_with` need `zrhp` |
+| `hub-mqtt`, `hub-ota` | none | link no hub-ncp or zigbee-zrhp (CI checks the tree) |
+| `hubctl` | `zrhp` + `ezsp` | `--sim` / `--serial` (ZRHP); `--backend ezsp --sim` (the EZSP simulated NCP, `serve`) |
+| `zrh-donglem` (Dongle Max) | — | board bring-up and EZSP probe; the hub app on EZSP is PR H2 |
+
+```sh
+cargo test -p hub-app                                         # ZRHP, OTA store (defaults)
+cargo test -p hub-app --no-default-features --features zrhp   # the 4 MB images' app
+cargo test -p hub-app --features ezsp                         # + EZSP: one suite on both backends
+cargo build -p hub-app --no-default-features                  # an app without a backend
+hubctl --backend ezsp --sim --sim-devices serve               # the app on the EZSP simulated NCP
+```
+
 ## Device support
 
 Specification (draft, design only): [`docs/device-support.md`](docs/device-support.md),
@@ -187,13 +208,14 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 |---|---|
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
 | `crates/hub-coord` | Coordinator backend boundary (`std`, no backend protocol crate): requests and outcomes, events, errors, capabilities, network identity, the administration traits, and the APS/Green Power types the engine exchanges (re-exported by `hub-devices`); see `docs/coordinator-boundary.md` |
-| `crates/hub-core` | Portable `no_std` core: board wiring (`board`) and board profiles (`profile`: Thread BR, SONOFF Dongle-M), flash layouts (`layout`), buffer limits (`resources`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
+| `crates/hub-core` | Portable `no_std` core: board wiring (`board`) and board profiles (`profile`: Thread BR, SONOFF Dongle-M), flash layouts (`layout`), buffer limits (`resources`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` behind feature `zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
 | `crates/hub-web` | The embedded web UI: one static page (`web/index.html`), gzip-compressed by `build.rs` |
 | `crates/hub-ota` | Zigbee OTA Upgrade server (cluster 0x0019): OTA file format, streamed images, image store (inactive app slot, 8 MB), server state machine, simulated OTA client ([`docs/ota.md`](docs/ota.md)) |
-| `crates/hub-app` | Stage 2: the engine on the host core: event/request conversion, transport, device registry in the host store, app thread with the API sessions, catalog verifier (trusted keys) |
+| `crates/hub-app` | Stage 2: the engine on a coordinator backend (`Backend`: ZRHP with feature `zrhp`, EZSP with `ezsp`), transport, device registry in the host store and its ownership (`NcpNv` decision for EZSP), app thread with the API sessions, catalog verifier (trusted keys) |
+| `crates/hub-ezsp` | ASH + EZSP host for EmberZNet NCPs (EZSP 13–18), simulated NCP, the EZSP coordinator backend ([`docs/ezsp-backend.md`](docs/ezsp-backend.md)) |
 | `crates/hub-mqtt` | Zigbee2MQTT-compatible MQTT bridge: topics, payloads and exposes from the hub's entities, HA MQTT discovery, the bridge thread with reconnects; a desktop MQTT client and a test broker |
 | `crates/hub-ncp` | Phase 1: portable ZRHP host core (`std`): link driver, sessions/resume, client API, NCP lifecycle, `FW_*` streaming, host store journal, simulated NCP (`sim`) |
-| `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim` |
+| `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim`; the hub app on the EZSP simulated NCP (`--backend ezsp --sim`) |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
 | `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
 | `firmware/gateway`, `firmware/donglem` | SONOFF Dongle Max (classic ESP32 + EFR32MG24) firmware, board bring-up stage: Ethernet/Wi-Fi, LED, button, MG24 lines, read-only EZSP probe, return to SONOFF's firmware; runs on SONOFF's unchanged partition table (`docs/dongle-max.md`) |
