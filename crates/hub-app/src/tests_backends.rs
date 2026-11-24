@@ -672,12 +672,73 @@ fn form_needs_records_that_are_the_hubs() {
     refused(&rig, "untagged records, blank EZSP NCP");
     rig.finish();
 
+    // EZSP: the NCP loses the hub's network mid-run (erased, swapped).
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    rig.ezsp.as_ref().unwrap().ncp(|n| {
+        n.config_mut().network_formed = false;
+        n.spontaneous_reset(hub_ezsp::ResetCode::WATCHDOG);
+    });
+    wait("no network", || info(&rig.app, sid, &rx)["ownership"] == "no_network");
+    let (sid, rx) = refused(&rig, "the hub's network, lost by the NCP");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    ok(&call(&rig.app, sid, &rx, 2, json!({"type": "network/reset", "confirm": "RESET", "skip_backup": true})));
+    rig.finish();
+
     // ZRHP over an EZSP image's records.
     let mut s = Store::volatile();
     s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Ezsp, None).encode().as_bytes()).unwrap();
     s.kv_put("dev/zb:1", b"{}").unwrap();
     let rig = Rig::zrhp_with(s, false);
     refused(&rig, "EZSP records, blank ZRHP NCP");
+    rig.finish();
+}
+
+/// EZSP first setup, interrupted: records the hub made before its first
+/// network (a rule) and the tag of a form that failed are the hub's own
+/// after a restart, so `network/form` still takes them.
+#[test]
+fn first_setup_survives_restarts() {
+    use hub_ezsp::coord::EzspOptions;
+    use hub_ezsp::ezsp::command::id;
+    let flash = SharedFlash::new();
+    let rules = |app: &App, sid, rx: &Receiver<String>| -> usize {
+        let l = call(app, sid, rx, 70, json!({"type": "automations/list"}));
+        ok(&l)["rules"].as_array().unwrap().len()
+    };
+    // A blank NCP: a rule before the first network.
+    let rig = Rig::ezsp(ezsp_sim(false, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    let rule = json!({"type": "automations/create", "rule": {"id": "r1", "triggers": [], "actions": [{"type": "notify", "message": "x"}]}});
+    ok(&call(&rig.app, sid, &rx, 1, rule));
+    assert_eq!(rig.tag(), None, "no network yet");
+    rig.finish();
+
+    // Restarted: the rule is the hub's; a form the NCP never answers fails.
+    let host = hub_ezsp::HostConfig { command_timeout: Duration::from_millis(500), ..Default::default() };
+    let rig = Rig::ezsp_with(ezsp_sim(false, 0xDD), flash.store(), EzspOptions { host, ..Default::default() });
+    let (sid, rx) = session(&rig.app);
+    let i = info(&rig.app, sid, &rx);
+    assert_eq!(i["registry"]["state"], "owned", "{i}");
+    assert_eq!(rules(&rig.app, sid, &rx), 1);
+    rig.ezsp.as_ref().unwrap().ncp(|n| n.stall(Some(id::FORM_NETWORK)));
+    let f = call(&rig.app, sid, &rx, 2, json!({"type": "network/form"}));
+    assert_eq!(f["success"], false, "{f}");
+    assert_eq!(rig.tag().map(|t| (t.channel, t.key_id)), Some((0, None)), "the network being formed");
+    rig.finish();
+
+    // Restarted again, the NCP still blank: the hub forms its network.
+    let rig = Rig::ezsp(ezsp_sim(false, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    assert_eq!(info(&rig.app, sid, &rx)["registry"]["state"], "owned");
+    let f = call(&rig.app, sid, &rx, 3, json!({"type": "network/form"}));
+    let formed = ok(&f)["network"].clone();
+    wait("the formed network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ext_pan_id"] == formed["ext_pan_id"] && i["ownership"] == "owned" && i["registry"]["state"] == "owned"
+    });
+    assert_eq!(rules(&rig.app, sid, &rx), 1);
     rig.finish();
 }
 

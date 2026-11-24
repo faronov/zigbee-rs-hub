@@ -67,6 +67,14 @@ pub trait Records: KvStore {
         true
     }
 
+    /// Whether `network/form` may take the records (it asks no
+    /// confirmation): only the hub's own. `NcpNv`: no tag (and not records
+    /// of unknown origin), or this backend's tag that names no formed
+    /// network; a network the NCP lost needs `network/reset`.
+    fn may_form(&self) -> bool {
+        matches!(self.registry(), RegistryState::Untagged | RegistryState::Owned)
+    }
+
     /// `network/info.ownership` when the hub decides it (`NcpNv`: owned or
     /// mismatch instead of the backend's `observed`); `None`: as reported.
     fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {

@@ -1107,21 +1107,25 @@ impl Admin {
             Ok(q) => q,
             Err(e) => return fail(e),
         };
-        // Forming takes the records: only the hub's own (or none yet).
-        // Foreign or unverified ones need adopt/clear (with confirm), or a
-        // network/reset ("RESET").
-        if form_only && !matches!(ctx.records.registry(), RegistryState::Untagged | RegistryState::Owned) {
-            let state = ctx.records.registry().as_str();
-            return fail(ApiError::new(
-                "registry_read_only",
-                format!("the device registry is {state}: network/registry/adopt or clear it, or replace the network with network/reset"),
-            ));
-        }
         if form_only && ctx.status.ownership != NetworkOwnership::NoNetwork {
             return fail(bad(format!(
                 "the NCP reports {} network ownership, not no_network: network/reset replaces a network",
                 ctx.status.ownership.as_str()
             )));
+        }
+        // Forming takes the records: only the hub's own of no formed
+        // network (or none yet). Foreign or unverified ones, or those of a
+        // network the NCP lost, need adopt/clear (with confirm), or a
+        // network/reset ("RESET").
+        if form_only && !ctx.records.may_form() {
+            let why = match ctx.records.registry() {
+                RegistryState::Owned => "the device registry holds a network the NCP no longer runs".to_string(),
+                s => format!("the device registry is {}", s.as_str()),
+            };
+            return fail(ApiError::new(
+                "registry_read_only",
+                format!("{why}: network/registry/adopt or clear it, or replace the network with network/reset"),
+            ));
         }
         if !form_only && q.confirm != "RESET" {
             return fail(bad("confirm must be \"RESET\""));

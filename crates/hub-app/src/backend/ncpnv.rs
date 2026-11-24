@@ -6,10 +6,11 @@
 //!
 //! | Start | Records | Gate |
 //! |---|---|---|
-//! | no tag, no stored ZRHP network, no network-scoped records | `untagged` | open |
+//! | no tag, no stored ZRHP network, no network-scoped records | `untagged`; the first network-scoped write tags them `{backend, epid: null}` | open |
 //! | no tag, a ZRHP image's stored network (`NetworkRecord`) | tagged as that image's migration does (`{zrhp, epid of the record}`), `foreign` | closed |
 //! | no tag, network-scoped records of unknown origin | `unverified` until `network/registry/adopt` or `clear` | closed |
-//! | this backend's tag | `unverified` | read-only |
+//! | this backend's tag naming no formed network (`epid: null`, or a network being formed: channel 0) | `owned` (`network/form` may take them) | open |
+//! | this backend's tag of a formed network | `unverified` | read-only |
 //! | another backend's tag, unreadable tag | `foreign` | closed |
 //!
 //! | The NCP reports | Records | Device traffic |
@@ -77,6 +78,42 @@ fn closed(epoch: u32) -> u32 {
     epoch.wrapping_shl(1)
 }
 
+/// This backend's tag that names no formed network: written before any
+/// network (`epid: null`) or for one being formed (channel 0 until it is
+/// up). `network/form` may take such records.
+fn names_no_network(tag: &[u8], backend: BackendKind) -> bool {
+    OwnerTag::decode(tag)
+        .is_some_and(|t| t.backend == backend.as_str() && t.identity.is_none_or(|n| n.channel == 0))
+}
+
+/// The store while the records are untagged: the first network-scoped
+/// write tags them as this backend's, with no network yet, so a restart
+/// knows where they come from.
+struct Tagging<'a> {
+    store: &'a mut Store,
+    backend: BackendKind,
+    tagged: bool,
+}
+
+impl Kv for Tagging<'_> {
+    fn get(&self, key: &str) -> Option<&[u8]> {
+        self.store.kv_get(key)
+    }
+    fn prefix<'a>(&'a self, prefix: &'a str) -> Box<dyn Iterator<Item = (&'a str, &'a [u8])> + 'a> {
+        Box::new(self.store.kv_prefix(prefix))
+    }
+    fn put(&mut self, key: &str, value: &[u8]) -> io::Result<()> {
+        if !self.tagged && scope(key) == Scope::Network && self.store.kv_get(OWNER_KEY).is_none() {
+            self.store.kv_put(OWNER_KEY, OwnerTag::new(self.backend, None).encode().as_bytes())?;
+            self.tagged = true;
+        }
+        self.store.kv_put(key, value)
+    }
+    fn delete(&mut self, key: &str) -> io::Result<()> {
+        self.store.kv_delete(key)
+    }
+}
+
 /// Access to the network-scoped records in `st`.
 fn gate(st: &State) -> Gate {
     match st.registry {
@@ -123,7 +160,11 @@ impl NcpNvRecords {
     pub fn open(backend: BackendKind, mut store: Store) -> Self {
         let mut hold = false;
         let registry = if let Some(tag) = store.kv_get(OWNER_KEY) {
-            RegistryState::check(Some(tag), backend, OwnershipModel::NcpNv, None)
+            if names_no_network(tag, backend) {
+                RegistryState::Owned
+            } else {
+                RegistryState::check(Some(tag), backend, OwnershipModel::NcpNv, None)
+            }
         } else if let Some(network) = zrhp_network(store.state()) {
             let tag = OwnerTag::new(BackendKind::Zrhp, Some(network)).encode();
             if let Err(e) = store.kv_put(OWNER_KEY, tag.as_bytes()) {
@@ -255,7 +296,19 @@ impl KvStore for NcpNvRecords {
     fn with_kv(&self, f: &mut dyn FnMut(&mut dyn Kv)) {
         let mut store = self.store();
         // The state is not held while `f` runs.
-        let g = gate(&self.state());
+        let (g, untagged) = {
+            let st = self.state();
+            (gate(&st), st.registry == RegistryState::Untagged)
+        };
+        if untagged {
+            let mut t = Tagging { store: &mut store, backend: self.backend, tagged: false };
+            f(&mut t);
+            if t.tagged {
+                info!("hub: network records tagged as {}'s (no network yet)", self.backend.as_str());
+                self.state().registry = RegistryState::Owned;
+            }
+            return;
+        }
         match g {
             Gate::Open => f(&mut *store),
             g => f(&mut Guarded::new(&mut *store, g)),
@@ -338,6 +391,12 @@ impl Records for NcpNvRecords {
 
     fn verified(&self) -> bool {
         self.traffic.load(Ordering::SeqCst) & 1 == 1
+    }
+
+    fn may_form(&self) -> bool {
+        let store = self.store();
+        let st = self.state();
+        !st.hold && store.kv_get(OWNER_KEY).is_none_or(|t| names_no_network(t, self.backend))
     }
 
     fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {
@@ -469,6 +528,14 @@ mod tests {
         Some((o, 1))
     }
 
+    /// A copy of the records' store, as a restart finds it.
+    fn reopen(r: &NcpNvRecords) -> NcpNvRecords {
+        let mut s = Store::volatile();
+        for (k, v) in &r.store().state().kv {
+            s.kv_put(k, v).unwrap();
+        }
+        open(s)
+    }
 
     #[test]
     fn a_fresh_store_is_tagged_at_the_first_network() {
@@ -477,8 +544,12 @@ mod tests {
         assert!(!r.verified());
         see(&r, NetworkOwnership::NoNetwork);
         assert_eq!((r.registry(), r.verified(), tag(&r)), (RegistryState::Untagged, false, None));
-        // Rules made while the NCP has no network are kept.
+        assert!(r.may_form());
+        // Rules made while the NCP has no network are kept, tagged as this
+        // backend's (no network yet).
         put(&r, "auto/r1").unwrap();
+        assert_eq!((r.registry(), tag(&r)), (RegistryState::Owned, Some(OwnerTag::new(BackendKind::Ezsp, None))));
+        assert!(r.may_form());
         see(&r, observed(id(4, Some(1))));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         assert_eq!(tag(&r), Some(OwnerTag::new(BackendKind::Ezsp, Some(id(4, Some(1))))));
@@ -594,6 +665,7 @@ mod tests {
             see(&r, observed(n));
             assert!(!r.verified() && r.registry().as_str() == "foreign");
             assert_eq!(r.ownership(&observed(n)).map(|o| o.as_str()), Some("mismatch"));
+            assert!(!r.may_form());
             assert_eq!(r.adopt(now(&observed(n))).unwrap(), RegistryState::Owned);
             assert!(r.verified());
             assert_eq!(tag(&r), Some(OwnerTag::new(BackendKind::Ezsp, Some(n))));
@@ -609,6 +681,7 @@ mod tests {
         let r = fresh();
         assert_eq!(r.registry(), RegistryState::Unverified);
         assert_eq!(tag(&r), None);
+        assert!(!r.may_form());
         let denied = |e: io::Error| e.kind() == io::ErrorKind::PermissionDenied;
         assert_eq!(kv::with(&r, |s| (s.gate(), s.get("auto/r1").is_some(), s.get("udef/a").is_some())), (Gate::Closed, false, true));
         assert!(put(&r, "auto/r2").is_err_and(denied));
@@ -636,8 +709,9 @@ mod tests {
     }
 
     /// The network being formed is tagged before `form` (its EPID, the key
-    /// ID unknown): a form that times out with the network coming up later,
-    /// or a reboot in between, leaves the records the new network's.
+    /// ID unknown, channel 0): a form that times out with the network
+    /// coming up later, or a reboot in between, leaves the records the new
+    /// network's; one that failed leaves them to the next `network/form`.
     #[test]
     fn the_network_being_formed_is_tagged_before_it_comes_up() {
         let r = open(Store::volatile());
@@ -665,9 +739,14 @@ mod tests {
         let mut s = Store::volatile();
         s.kv_put(OWNER_KEY, r2.store().kv_get(OWNER_KEY).unwrap()).unwrap();
         let r3 = open(s);
-        assert_eq!(r3.registry(), RegistryState::Unverified);
+        assert_eq!(r3.registry(), RegistryState::Owned, "the hub's own, of no formed network");
+        assert_eq!(kv::with(&r3, |s| s.gate()), Gate::Open);
+        // The form failed (the NCP has no network): formed again.
+        see(&r3, NetworkOwnership::NoNetwork);
+        assert!(r3.may_form());
         see(&r3, observed(new));
         assert_eq!((r3.registry(), r3.verified()), (RegistryState::Owned, true));
+        assert!(!r3.may_form(), "the network is up");
     }
 
     /// The backend shares the traffic flag and clears it itself.
@@ -721,6 +800,48 @@ mod tests {
         r.reported(&a, &status(&a, 3));
         assert!(r.verified());
         assert_eq!(r.traffic().load(Ordering::SeqCst), closed(3) | 1);
+    }
+
+    /// Records the hub makes before its first network (rules, groups) are
+    /// tagged as this backend's: after a restart they are still the hub's
+    /// own, and `network/form` may take them.
+    #[test]
+    fn records_made_before_the_first_network_stay_the_hubs() {
+        let r = open(Store::volatile());
+        see(&r, NetworkOwnership::NoNetwork);
+        put(&r, "auto/r1").unwrap();
+        put(&r, "grp/1").unwrap();
+        let r = reopen(&r);
+        assert_eq!(r.registry(), RegistryState::Owned);
+        assert_eq!(kv::with(&r, |s| (s.gate(), s.get("auto/r1").is_some())), (Gate::Open, true));
+        see(&r, NetworkOwnership::NoNetwork);
+        assert!(r.may_form());
+        put(&r, "auto/r2").unwrap();
+        // The first network becomes theirs.
+        see(&r, observed(id(4, Some(1))));
+        assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
+        assert_eq!(tag(&r).unwrap().identity, Some(id(4, Some(1))));
+    }
+
+    /// `network/form` (no confirmation) takes only the hub's records of no
+    /// formed network: a network the NCP lost needs `network/reset`.
+    #[test]
+    fn form_takes_only_records_of_no_formed_network() {
+        let r = open(Store::volatile());
+        see(&r, observed(id(4, Some(1))));
+        see(&r, NetworkOwnership::NoNetwork);
+        assert_eq!(r.registry(), RegistryState::Owned);
+        assert!(!r.may_form(), "the NCP lost the network mid-run");
+        let r = reopen(&r);
+        see(&r, NetworkOwnership::NoNetwork);
+        assert_eq!(r.registry(), RegistryState::Unverified);
+        assert!(!r.may_form(), "after a restart");
+        let mut s = Store::volatile();
+        s.kv_put(OWNER_KEY, b"garbage").unwrap();
+        assert!(!open(s).may_form(), "an unreadable tag");
+        let mut s = Store::volatile();
+        s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+        assert!(!open(s).may_form(), "another backend's");
     }
 
     #[test]
