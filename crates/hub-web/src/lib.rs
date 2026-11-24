@@ -157,52 +157,107 @@ eq(Number.isNaN(chR("x",1,false)),true);
     /// Shard fetches against an older installed manifest (the mirror moved
     /// on): the page reads the signed manifest's version, installs a newer
     /// one first or after a refused shard and retries once; an older or the
-    /// same one is never sent and nothing loops. The page's catalog code
-    /// runs in Node against a mock hub and mirror (when Node is installed).
+    /// same one is never sent and nothing loops. Interrupted bank uploads of
+    /// the installed release continue where they stopped, a newer release
+    /// replaces them, a busy hub gets one retry 30 s later, and Find
+    /// definition reports what the device resolves to. The page's catalog
+    /// code (uploads included) runs in Node against a mock of the hub's
+    /// upload rules and a mirror (when Node is installed).
     #[test]
     fn shards_follow_a_newer_catalog_manifest_once() {
         let src = include_str!("../web/index.html");
-        let (a, b) = (src.find("async function ctShards(").unwrap(), src.find("const ctFetch=").unwrap());
+        let (a, b) = (src.find("async function ctPut(").unwrap(), src.find("const ctFetch=").unwrap());
+        let b64 = src.lines().find(|l| l.starts_with("const b64=")).expect("b64 line");
         let signed = include_bytes!("../../hub-app/tests/golden/baseline/catalog/manifest.cose");
         let mock = r#"
 const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
 // A COSE_Sign1 around a canonical manifest map (0: 1, 1: date, 2: serial, ...).
 const man=(date,serial)=>{const s=serial<24?[serial]:serial<256?[24,serial]:[25,serial>>8,serial&255];
  return Uint8Array.from([0xD2,0x84,0x43,0xA1,0x01,0x27,0xA1,0x04,0x48,0,1,1,26,0,1,1,26,0x59,0,40,0xA6,0,1,1,26,date>>>24,date>>16&255,date>>8&255,date&255,2,...s,3,0x80,4,0x80,5,0x80,0x58,0x40,...Array(64).fill(0)])};
-const V=(d,s)=>d*65536+s,old=V(20261121,1),cur=V(20261124,1);
+const V=(d,s)=>d*65536+s,old=V(20261121,1),cur=V(20261124,1),next=V(20261125,1);
 eq(ctVer(SIGNED),V(20261121,3));
 for(const s of [0,23,24,255,256,65535])eq(ctVer(man(20261124,s)),V(20261124,s));
 eq(ctVer(Uint8Array.from([1,2,3])),undefined);
-// The hub: anti-rollback, shards checked against its manifest. The mirror:
-// manifests in turn (the last one stays), shards of one version.
-let hub,mirror,log,toasts;
+// Bank and shard files of a release: its version in the first 8 bytes.
+const file=(v,n)=>{const u=new Uint8Array(n);new DataView(u.buffer).setFloat64(0,v);return u};
+const fv=a=>new DataView(Uint8Array.from(a).buffer).getFloat64(0);
+// The hub (crates/hub-app/src/catalog/service.rs): one upload at a time;
+// offset 0 starts one, refused as busy while another target's advanced in
+// the last 30 s, else dropping it; other offsets continue it; a commit
+// checks it (manifest anti-rollback, bank and shards against the
+// manifest). `has`: the bank of that release holds the device's definition.
+let H,M,log,toasts,now=0;
+globalThis.setTimeout=(f,ms)=>{now+=ms;f()};
+const devs={d:{name:"Remote"}},dL=d=>(d.definition||[]).filter(l=>l.source!="generic"),$=()=>({classList:{add(){},remove(){}}});
 const ct0={config:{base_url:"m"}};let ct=ct0;
-const ctMsg=()=>{},toast=m=>toasts.push(m),ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
-const call=async t=>({manifest:{version:hub},missing:[{device:"d",shards:[0x44]}],config:ct0.config});
-const ctGet=async n=>{log.push("get "+n);if(n=="manifest.cose"){const v=mirror.man.length>1?mirror.man.shift():mirror.man[0];return man(Math.floor(v/65536),v%65536)}return{shard:mirror.shard}};
-const ctPut=async(t,u)=>{log.push("put "+t);if(t=="manifest"){const v=ctVer(u);if(v<hub)throw new Error("manifest version "+v+" is older than the installed "+hub);hub=v;return{version:v,catalog_date:Math.floor(v/65536),catalog_serial:v%65536,wants:{}}}
- if(u.shard!=hub)throw new Error("shard 44: SHA-256 differs from the installed manifest");return{definitions:["x/y"]}};
-const run=async(h,m,s,upd)=>{hub=h;mirror={man:m,shard:s};log=[];toasts=[];try{const r=await ctGo(()=>ctMiss("d"),upd);return[r.n,r.m&&r.m.version]}catch(e){return e.message}};
+const ctMsg=()=>{},toast=m=>toasts.push(m),ctSay=toast,ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
+const mj=v=>({version:v,catalog_date:Math.floor(v/65536),catalog_serial:v%65536});
+const call=async(t,p={})=>{now+=100;if(H.other){H.up={target:"web",bytes:[]};H.at=now}
+ if(t=="catalog/status")return{manifest:H.v&&mj(H.v),wants:{bank:H.bank<H.v?{name:"bank.zdb"}:null},upload:H.up&&{target:H.up.target,written:H.up.bytes.length},missing:H.def?[]:[{device:"d",shards:H.noshard?[]:[0x44]}],config:ct0.config};
+ if(t=="devices/get")return{definition:[{source:"generic",id:"generic"}].concat(H.def?[{source:H.def,id:"ikea/x"}]:[])};
+ if(t=="catalog/upload_chunk"){log.push(p.target+"@"+p.offset);
+  if(p.offset==0){if(H.up&&H.up.target!=p.target&&now-H.at<30000)throw Error("a "+H.up.target+" upload is in progress");H.up={target:p.target,bytes:[]}}
+  if(!H.up||H.up.target!=p.target)throw Error("no "+p.target+" upload in progress (start at offset 0)");
+  if(p.offset!=H.up.bytes.length)throw Error("expected offset "+H.up.bytes.length);
+  H.at=now;H.up.bytes.push(...Buffer.from(p.data,"base64"));return{written:H.up.bytes.length}}
+ if(t=="catalog/commit"){log.push("commit "+p.target);const u=H.up;H.up=null;if(!u||u.target!=p.target)throw Error("no "+p.target+" upload in progress");
+  if(p.target=="manifest"){const v=ctVer(Uint8Array.from(u.bytes));if(v<H.v)throw Error("manifest version "+v+" is older than the installed "+H.v);H.v=v;return Object.assign(mj(v),{wants:{bank:H.bank<v?{name:"bank.zdb"}:null}})}
+  if(fv(u.bytes)!=H.v)throw Error(p.target=="shard"?"shard 44: SHA-256 differs from the installed manifest":"bank: SHA-256 differs");
+  if(p.target=="bank"){H.bank=H.v;if(H.has==H.v)H.def="catalog";return{}}
+  if(!H.none)H.def="fetched";return{definitions:H.none?[]:["ikea/x"]}}};
+// The mirror: manifests in turn (the last one stays), files of one release.
+const ctGet=async n=>{log.push("get "+n);if(n=="bank.zdb"&&M.nobank)throw Error("bank.zdb: HTTP 404");if(n=="manifest.cose"){const v=M.man.length>1?M.man.shift():M.man[0];return man(Math.floor(v/65536),v%65536)}
+ return file(M.files,n=="bank.zdb"?5000:100)};
+const setup=(h,m,f)=>{H=Object.assign({v:old,bank:old},h);M={man:m,files:f};log=[];toasts=[]};
+const run=async(h,m,f,upd)=>{setup(h,m,f);try{const r=await ctGo(()=>ctMiss("d"),upd);return[r.n,r.m&&r.m.version]}catch(e){return e.message}};
+const DIFF="shard 44: SHA-256 differs from the installed manifest",BANK=["get bank.zdb","bank@0","bank@4096","commit bank"],SHARD=["get shard-44.cbor","shard@0","commit shard"];
 (async()=>{
- // Newer online: installed first, then the shard.
- eq(await run(old,[cur],cur,1),[1,cur]);eq(log,["get manifest.cose","put manifest","get shard-44.cbor","put shard"]);eq(hub,cur);
+ // Newer online: its manifest and bank first, then the shard.
+ eq(await run({},[cur],cur,1),[1,cur]);eq(log,["get manifest.cose","manifest@0","commit manifest",...BANK,...SHARD]);eq([H.v,H.bank],[cur,cur]);
  // The mirror's manifest still old at first, its shard new: refused, update, one retry.
- eq(await run(old,[old,cur],cur,1),[1,cur]);
- eq(log,["get manifest.cose","get shard-44.cbor","put shard","get manifest.cose","put manifest","get shard-44.cbor","put shard"]);
+ eq(await run({},[old,cur],cur,1),[1,cur]);eq(log,["get manifest.cose",...SHARD,"get manifest.cose","manifest@0","commit manifest",...BANK,...SHARD]);
  eq(toasts,["catalog updated to 20261124.1, retrying…"]);
  // Older online: never sent, the shard error once, no loop.
- eq(await run(cur,[old],old,1),"shard 44: SHA-256 differs from the installed manifest");
- eq(log,["get manifest.cose","get shard-44.cbor","put shard","get manifest.cose"]);eq(hub,cur);
+ eq(await run({v:cur,bank:cur},[old],old,1),DIFF);eq(log,["get manifest.cose",...SHARD,"get manifest.cose"]);eq(H.v,cur);
  // A mirror that keeps moving on: one update and one retry only.
- eq(await run(old,[old,cur,V(20261125,1)],V(20261126,1),1),"shard 44: SHA-256 differs from the installed manifest");
- eq(log,["get manifest.cose","get shard-44.cbor","put shard","get manifest.cose","put manifest","get shard-44.cbor","put shard"]);eq(hub,cur);
+ eq(await run({bank:1e15},[old,cur,next],V(20261126,1),1),DIFF);eq(log,["get manifest.cose",...SHARD,"get manifest.cose","manifest@0","commit manifest",...SHARD]);eq(H.v,cur);
  // The same online: nothing sent but the shard.
- eq(await run(cur,[cur],cur,1),[1,0]);eq(log,["get manifest.cose","get shard-44.cbor","put shard"]);
+ eq(await run({v:cur,bank:cur},[cur],cur,1),[1,0]);eq(log,["get manifest.cose",...SHARD]);
  // Without updates (fetching for new devices, daily updates off): the error.
- eq(await run(old,[cur],cur,0),"shard 44: SHA-256 differs from the installed manifest");eq(log,["get shard-44.cbor","put shard"]);
+ eq(await run({},[cur],cur,0),DIFF);eq(log,SHARD);
+ // The installed release's bank never arrived (same manifest online): installed.
+ eq(await run({v:cur},[cur],cur,1),[1,cur]);eq(log,["get manifest.cose",...BANK,...SHARD]);eq(H.bank,cur);
+ // ... interrupted 5 s ago: it continues where it stopped (no busy, no restart).
+ setup({v:cur,up:{target:"bank",bytes:Array.from(file(cur,5000).subarray(0,4096))},at:now-5000,has:cur},[cur],cur);
+ eq(await ctFind("d"),"catalog updated to 20261124.1; Remote now uses ikea/x");eq(log,["get manifest.cose","get bank.zdb","bank@4096","commit bank"]);
+ // The mirror moved on during an interrupted install of the old release:
+ // the new manifest replaces it (once idle), its bank from the start.
+ setup({v:old,bank:0,up:{target:"bank",bytes:Array(4096).fill(0)},at:now-60000},[cur],cur);
+ eq(await ctGo(()=>ctMiss("d"),1).then(r=>[r.n,r.m.version]),[1,cur]);eq(log,["get manifest.cose","manifest@0","commit manifest",...BANK,...SHARD]);
+ // ... interrupted 5 s ago: busy, one retry 30 s later.
+ setup({v:old,bank:0,up:{target:"bank",bytes:Array(4096).fill(0)},at:now-5000},[cur],cur);
+ eq(await ctGo(()=>ctMiss("d"),1).then(r=>[r.n,r.m.version]),[1,cur]);eq(log,["get manifest.cose","manifest@0","manifest@0","commit manifest",...BANK,...SHARD]);
+ eq(toasts,["the hub is busy with another catalog upload, trying again in 30 s…"]);
+ // A failed update (the mirror lacks the bank) does not stop the shards,
+ // which match the manifest it installed.
+ setup({},[cur],cur);M.nobank=1;
+ eq(await ctGo(()=>ctMiss("d"),1).then(r=>[r.n,r.m]),[1,undefined]);eq(log,["get manifest.cose","manifest@0","commit manifest","get bank.zdb",...SHARD]);
+ // ... and with no shard to fetch, the update's error is the answer.
+ setup({noshard:1},[cur],cur);M.nobank=1;
+ eq(await ctFind("d").catch(e=>e.message),"catalog update: bank.zdb: HTTP 404");
+ // Another client keeps uploading: one retry 30 s later each, then its error.
+ setup({other:1},[cur],cur);
+ eq(await ctGo(()=>ctMiss("d"),1).catch(e=>e.message),"a web upload is in progress");
+ eq(log,["get manifest.cose","manifest@0","manifest@0","get shard-44.cbor","shard@0","shard@0"]);
+ // A newer bank holding the device's definition: no shard, and Find definition says so.
+ setup({has:cur},[cur],cur);
+ eq(await ctFind("d"),"catalog updated to 20261124.1; Remote now uses ikea/x");eq(log,["get manifest.cose","manifest@0","commit manifest",...BANK]);
+ // Nothing for it anywhere.
+ setup({v:cur,bank:cur,none:1},[cur],cur);
+ eq(await ctFind("d"),"the catalog has no definition for Remote");eq(log,["get manifest.cose",...SHARD]);
 })().catch(e=>{console.error(e);process.exit(1)});
 "#;
-        let js = std::format!("{}\nconst SIGNED=Uint8Array.from({signed:?});\n{mock}", &src[a..b]);
+        let js = std::format!("{b64}\n{}\nconst SIGNED=Uint8Array.from({signed:?});\n{mock}", &src[a..b]);
         use std::io::Write;
         let Ok(node) = std::process::Command::new("node")
             .args(["-e", &js])

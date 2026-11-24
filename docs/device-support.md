@@ -1564,7 +1564,12 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   `catalog/status` `manifest.version` before fetching shards and, after a
   shard refused with `verification_failed` (SHA-256 differs), installs a
   newer one and retries once; an older or the same manifest is not
-  uploaded and nothing loops.
+  uploaded and nothing loops. With the same release online it completes
+  what `wants` still lists (an interrupted bank or web tools upload
+  continues from `upload.written`); a newer release's manifest replaces
+  such an upload (the hub drops it), and its files start at offset 0. A
+  `busy` hub (another target's upload advanced in the last 30 s) gets one
+  retry 30 s later; a failed update does not stop the shard fetch.
 - Without Internet anywhere: the UI offers "upload a definition" and
   "update the catalog from files" (the same upload API).
 

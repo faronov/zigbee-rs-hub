@@ -827,7 +827,9 @@ manifest, so the web UI installs the mirror's newer manifest (and the bank
 and web tools it then wants) before fetching shards — for Find definition,
 Fetch, and for `definition_needed` and on opening the Catalog tab when
 `auto_update` is on — and once more after a shard refused as not matching,
-retrying the shards once; an older or the same manifest is not uploaded.
+retrying the shards once; an older or the same manifest is not uploaded,
+an interrupted bank or web tools install of the installed release
+continues where it stopped, and a busy hub gets one retry 30 s later.
 Lookups read the memory-mapped bank:
 format 2 banks (zdefc default since 2026-11-21) keep even their string
 table in flash, so a lookup only allocates the inflater, a 4 KiB block
