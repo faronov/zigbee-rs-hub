@@ -186,6 +186,8 @@ pub struct SimNcp {
     busy_sends: u32,
     stall: Option<u16>,
     random: u16,
+    /// Callbacks sent just before the next response.
+    early: Vec<Callback>,
 }
 
 fn default_config() -> BTreeMap<u8, u16> {
@@ -211,6 +213,7 @@ fn default_config() -> BTreeMap<u8, u16> {
         (ConfigId::APPLICATION_ZDO_FLAGS, 0),
         (ConfigId::BROADCAST_TABLE_SIZE, 15),
         (ConfigId::SUPPORTED_NETWORKS, 2),
+        (ConfigId::TRANSIENT_KEY_TIMEOUT_S, 300),
     ]
     .into_iter()
     .map(|(k, v)| (k.0, v))
@@ -248,6 +251,7 @@ impl SimNcp {
             busy_sends: 0,
             stall: None,
             random: 0x1234,
+            early: Vec::new(),
         }
     }
 
@@ -345,6 +349,12 @@ impl SimNcp {
         self.busy_sends = n;
     }
 
+    /// Sends `cb` right before the response to the next command (the NCP
+    /// queues a callback while it executes it).
+    pub fn callback_before_next_response(&mut self, cb: Callback) {
+        self.early.push(cb);
+    }
+
     /// Commands with this frame ID get no response (and have no effect)
     /// until cleared.
     pub fn stall(&mut self, frame_id: Option<u16>) {
@@ -357,9 +367,7 @@ impl SimNcp {
         self.values.clear();
         self.endpoints.clear();
         self.network_up = false;
-        self.multicast
-            .iter_mut()
-            .for_each(|e| *e = MulticastTableEntry::default());
+        self.multicast = vec![MulticastTableEntry::default(); self.cfg.multicast_table_size];
         self.overflow_pending = false;
         self.policies.clear();
         self.transient_keys.clear();
@@ -495,6 +503,9 @@ impl SimNcp {
                 vec![],
             ),
         };
+        for cb in std::mem::take(&mut self.early) {
+            self.callback(cb);
+        }
         self.respond(h.sequence, resp);
         if let Some(fault) = self.fault_after_response.take() {
             self.pending_fault = Some(fault);
@@ -579,6 +590,10 @@ impl SimNcp {
                     Self::st(v, Ezsp, K::InvalidCall)
                 } else if let Some(slot) = self.config.get_mut(&id.0) {
                     *slot = value;
+                    if id == ConfigId::MULTICAST_TABLE_SIZE {
+                        self.multicast
+                            .resize(usize::from(value), MulticastTableEntry::default());
+                    }
                     Self::st(v, Ezsp, K::Success)
                 } else {
                     Self::st(v, Ezsp, K::InvalidId)
@@ -1088,9 +1103,13 @@ impl SimNcp {
         let waiting = self
             .held
             .iter()
-            .filter(|c| matches!(c, Callback::MessageSent { kind, .. } if *kind == OutgoingMessageType::DIRECT))
+            .filter(|c| {
+                matches!(c, Callback::MessageSent { kind, aps, .. }
+                    if *kind == OutgoingMessageType::DIRECT && aps.options.contains(ApsOptions::RETRY))
+            })
             .count();
-        if self.busy_sends > 0 || (unicast && waiting >= usize::from(slots)) {
+        let retried = matches!(&cmd, Command::SendUnicast { aps, .. } if aps.options.contains(ApsOptions::RETRY));
+        if self.busy_sends > 0 || (retried && waiting >= usize::from(slots)) {
             self.busy_sends = self.busy_sends.saturating_sub(1);
             let busy = Self::st(v, Ember, K::MaxMessageLimitReached);
             return (refuse(resp, busy), vec![]);

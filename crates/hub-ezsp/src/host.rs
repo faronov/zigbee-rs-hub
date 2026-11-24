@@ -396,6 +396,11 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
         &self.stats
     }
 
+    /// The host's clock, in milliseconds.
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
     pub fn ash(&self) -> &Ash {
         &self.ash
     }

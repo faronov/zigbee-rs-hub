@@ -1,5 +1,6 @@
 //! Host-side ASH + EZSP protocol core for Silicon Labs EmberZNet NCPs
-//! (EFR32MG24 running stock EmberZNet NCP-UART firmware).
+//! (EFR32MG24 running stock EmberZNet NCP-UART firmware), and the EZSP
+//! coordinator backend of the hub (`coord`, feature `coord`, default).
 //!
 //! **Status: host-tested only.** The crate is not wired into the hub and
 //! has not run against a real NCP. Every behaviour below is implemented
@@ -17,8 +18,11 @@
 //! | EZSP session | [`ezsp::session`] ([`Session`]) | sans-IO: sequence numbers, correlation, callback routing, NCP status flags |
 //! | Host | [`host`] ([`EzspHost`]) | blocking, one thread, [`Transport`] + [`Clock`], bounded event queue |
 //! | Simulator | `sim` (feature `sim`) | NCP model over a faulty in-memory UART on a virtual clock |
+//! | Coordinator backend | `coord` (feature `coord`) | `hub-coord`'s `Coordinator` and `NetworkAdmin` on a worker thread that owns the host |
 //!
-//! The crate depends on nothing but `std`, and on no other hub crate.
+//! Without the `coord` feature the crate depends on nothing but `std`;
+//! `coord` adds `hub-coord` and `log`. It never depends on `hub-ncp` or
+//! the ZRHP crates.
 //!
 //! # Sources
 //!
@@ -196,6 +200,8 @@
 //! [`HostEvent::Dropped`]: host::HostEvent::Dropped
 
 pub mod ash;
+#[cfg(feature = "coord")]
+pub mod coord;
 pub mod ezsp;
 pub mod host;
 #[cfg(any(test, feature = "sim"))]
