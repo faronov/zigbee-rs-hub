@@ -1267,3 +1267,44 @@ fn a_setting_superseded_twice_while_asleep_counts_when_set_again() {
     assert!(dev.configure.done.values().all(|v| *v));
     assert!(dev.configure.stale.is_empty());
 }
+
+#[test]
+fn rows_give_the_change_scale_and_unit_of_linear_analog_values() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(sleepy());
+    sim.devices.push(light());
+    sim.join(&mut hub, SLEEPY, T0);
+    sim.join(&mut hub, LIGHT, T0);
+    // Entity units per raw unit (× mul / div of the value) and the unit,
+    // for the change of analog values; additive fields (14.3).
+    let r = rows(&mut hub, &id(SLEEPY));
+    let su = |uid: &str| {
+        let x = row(&r, &format!("{}:1:{uid}", id(SLEEPY)));
+        (x["scale"].clone(), x["unit"].clone(), x["report"].clone())
+    };
+    assert_eq!(
+        su("temperature"),
+        (json!(0.01), json!("°C"), json!([30, 900, 50]))
+    );
+    assert_eq!(
+        su("humidity"),
+        (json!(0.01), json!("%"), json!([30, 900, 100]))
+    );
+    assert_eq!(
+        su("battery"),
+        (json!(0.5), json!("%"), json!([3600, 21600, 2]))
+    );
+    assert_eq!(
+        su("battery_voltage"),
+        (json!(0.1), json!("V"), json!([3600, 21600, 1]))
+    );
+    // Discrete: no change, so neither; a part: the scale only (1: absent).
+    let r = rows(&mut hub, &id(LIGHT));
+    let part = |p: &str| r.iter().find(|x| x["part"] == p).unwrap().clone();
+    let on = part("on_off");
+    assert!(on.get("scale").is_none() && on.get("unit").is_none());
+    let level = part("brightness");
+    assert!(level.get("scale").is_none() && level.get("unit").is_none());
+    assert_eq!(level["report"], json!([1, 900, 1]));
+}

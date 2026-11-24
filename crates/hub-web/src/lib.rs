@@ -99,6 +99,45 @@ mod tests {
         }
     }
 
+    /// The reporting panel's change conversion, raw ⇄ entity units (the
+    /// record's `scale`), run in Node when it is installed.
+    #[test]
+    fn reporting_change_converts_between_raw_and_entity_units() {
+        let src = include_str!("../web/index.html");
+        let helpers = src
+            .lines()
+            .find(|l| l.starts_with("const chU="))
+            .expect("chU/chR line");
+        let checks = r#"
+const eq=(a,b)=>{if(!Object.is(a,b))throw new Error(a+" != "+b)};
+// raw → entity: divisor, multiplier, fractional factors, float noise cleaned
+eq(chU(50,0.01),0.5);eq(chU(100,0.01),1);eq(chU(3,0.1),0.3);eq(chU(2,0.5),1);
+eq(chU(7,2.5),17.5);eq(chU(3,10),30);eq(chU(1,0.125),0.125);eq(chU(4294967295,1),4294967295);
+// entity → raw, integer types: rounded to a whole raw unit
+eq(chR("0.5",0.01,false),50);eq(chR("0,5",0.01,false),50);eq(chR("0.333",0.01,false),33);
+eq(chR("0.337",0.01,false),34);eq(chR("0.004",0.01,false),0);eq(chR("1",0.5,false),2);
+eq(chR("0.7",0.5,false),1);eq(chR("25",10,false),3);eq(chR("24",10,false),2);eq(chR("2",2.5,false),1);
+// float types keep the fraction (to 9 decimals)
+eq(chR("0.05",0.1,true),0.5);eq(chR("0.3",0.1,true),3);eq(chR("1",3,true),0.333333333);
+// round trip through the display
+for(const k of [0.01,0.1,0.5,2.5,10])for(const c of [0,1,7,50,999])eq(chR(String(chU(c,k)),k,false),c);
+// not a number: NaN (the page then sends the text, which the hub refuses)
+eq(Number.isNaN(chR("x",1,false)),true);
+"#;
+        use std::io::Write;
+        let Ok(mut node) = std::process::Command::new("node")
+            .args(["-e", &std::format!("{helpers}\n{checks}")])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let out = node.wait_with_output().unwrap();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        assert!(out.status.success(), "conversion checks failed");
+    }
+
     #[test]
     fn basic_page_omits_manual_console_but_keeps_normal_device_controls() {
         let src = include_str!("../web/index.html");

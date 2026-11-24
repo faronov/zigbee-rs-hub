@@ -24,9 +24,8 @@ main{max-width:1100px;margin:0 auto;padding:1em;display:grid;gap:1em}
 .dev .top{display:flex;gap:.5em;align-items:baseline;overflow-wrap:anywhere}
 .dev .top b{flex:1;font-size:1.05em}.top a{flex:1;color:inherit;text-decoration:none}
 .devs .dev[id]{cursor:pointer}
-.sig{display:inline-flex;align-items:flex-end;gap:1px;height:.9em}.sig i{width:3px;background:currentColor}
-.rp{overflow-x:auto}.rp .num{width:4.5em}
-@media(max-width:800px){.rp table{display:block}.rp tr{display:flex;flex-wrap:wrap;gap:.2em .6em;padding:.4em 0;border-top:1px solid var(--line)}.rp tr:first-child{display:none}.rp td{padding:0}.rp td:nth-child(n+3){flex-basis:100%}.rp [data-l]::before{content:attr(data-l)": ";color:var(--mut)}.rp .num{flex:1;min-width:0}}
+.rp{overflow-x:auto}.rp [data-l]::before{content:attr(data-l)": ";color:var(--mut)}
+@media(max-width:800px){.rp table{display:block}.rp tr{display:flex;flex-wrap:wrap;gap:.2em .6em;padding:.4em 0;border-top:1px solid var(--line)}.rp td:nth-child(n+3){flex-basis:100%}.rp .num{flex:1;min-width:0}}
 .mono{font-family:monospace;word-break:break-all}#zo{max-height:20em;overflow:auto}
 .pic{width:2.6em;height:2.6em;object-fit:contain;flex:none;align-self:center}.pic.s{width:1.6em;height:1.6em;vertical-align:middle;margin-right:.4em}
 .mut{color:var(--mut);font-size:.88em}
@@ -289,14 +288,16 @@ $("#pj").onclick=()=>{const d=+$("#pjd").value;act("network/permit_join",{durati
 $("#pjc").onclick=()=>act("network/permit_join",{duration_s:0}).then(()=>{pjEnd=0;pjTick()}).catch(()=>{});
 function ago(t){if(!t)return"never";const s=Math.max(0,Date.now()/1000+skew-t);return s<60?Math.round(s)+" s ago":s<3600?Math.round(s/60)+" min ago":s<86400?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"}
 // The dashboard, or one device's page (#device/<id>): its card in full.
-function renderAll(){const box=$("#devs"),p=pgId(),ids=p?devs[p]?[p]:[]:Object.keys(devs).filter(i=>devs[i].group==null).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));box.textContent="";box.className=p?"tab":"devs";$("#dash").classList.toggle("hide",!!p);for(const id of ids)box.append(devCard(id,p));$("#nd").textContent="("+ids.length+")";if(!ids.length&&snap)box.append(el("p",{class:"mut"},p?"No device "+p+". ":"No devices yet. Permit join and pair a device.",p?el("a",{href:"#/devices"},"All devices"):""));
+// Built before the old list goes: a device page keeps its reporting panel.
+function renderAll(){const p=pgId(),ids=p?devs[p]?[p]:[]:Object.keys(devs).filter(i=>devs[i].group==null).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));$("#dash").classList.toggle("hide",!!p);$("#nd").textContent="("+ids.length+")";
+ keep($("#devs"),()=>el("section",{id:"devs",class:p?"tab":"devs"},...ids.map(id=>devCard(id,p)),!ids.length&&snap?el("p",{class:"mut"},p?"No device "+p+". ":"No devices yet. Permit join and pair a device.",p?el("a",{href:"#/devices"},"All devices"):""):""));
 // advanced:start
 if($("#zd").offsetParent)onTab.zcl()
 // advanced:end
 }
 function renderDev(id){if(/^grp:/.test(id))return renderGroups();const old=document.getElementById("d-"+id),p=pgId();if(!devs[id]){if(old)old.remove();return}if(old)keep(old,()=>devCard(id,p));else if(!p)renderAll()}
-// Replace a live-updated node by f(), keeping keyboard focus on the same control.
-function keep(o,f){const q=x=>[...x.querySelectorAll("a,button,input,select")],i=q(o).indexOf(document.activeElement),n=f();o.replaceWith(n);(q(n)[i]||n).focus()}
+// Replace a live-updated node by f(); a field being edited keeps the focus.
+function keep(o,f){const q=x=>[...x.querySelectorAll("input,select")],i=q(o).indexOf(document.activeElement),n=f();o.replaceWith(n);if(q(n)[i])q(n)[i].focus({preventScroll:true})}
 // Device pictures: the Zigbee2MQTT site's image of the resolved definition's
 // herdsman model (white label first, then its base model; their file name
 // rule replaces / : ' and space by -). Loaded by the browser, never by the
@@ -325,17 +326,18 @@ const eg=e=>e.category=="diagnostic"?3:e.category?2:/sensor/.test(e.platform)?0:
  bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
   gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
   el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
- pgId=()=>{const m=/^#device\/(.+)/.exec(location.hash);return m&&decodeURIComponent(m[1])};
+ pgId=()=>(/^#device\/(.+)/.exec(location.hash)||[])[1];
 let sy,pgOn,snap;
 // Live values: battery (s: %, b: low), linkquality, rssi and last seen (t),
 // from the device's entities (updated with every frame), else its record.
 function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen};
  for(const e of dEnts(id)){const s=states[e.uid]||{};v.t=Math.max(v.t||0,s.last_reported||0);if(s.state!=null)v[e.device_class=="battery"?e.platform[0]:e.key]=s.state}
  return v}
-// Battery, signal (and on the page last seen and power source).
+// Battery, signal (a dot coloured by LQI as on the map: ≥ 150, ≥ 80, below)
+// and on the page last seen and power source.
 function netLine(id,f){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.s<20;
  return el("div",{class:"row mut acts",id:"n-"+id},v.s!=null||v.b!=null?el("span",{class:lo?"warn":null},"🔋"+(v.s!=null?" "+Math.round(v.s)+" %":"")+(lo?" low":"")):"",
-  el("span",{class:"sig"},...[1,2,3,4].map(i=>el("i",{style:"height:"+i*25+"%"+(q==null||i>1+(q>>6)?";opacity:.3":"")}))),"LQI "+(q??"–")+(v.rssi!=null?" · RSSI "+v.rssi+" dBm":"")+(f?" · seen "+ago(v.t)+" · "+d.power:""))}
+  el("span",{class:"dot "+(q>=150?"on":q>=80?"wait":"")}),"LQI "+(q??"–")+(v.rssi!=null?" · RSSI "+v.rssi+" dBm":"")+(f?" · seen "+ago(v.t)+" · "+d.power:""))}
 // f: the device page (everything, entities grouped), else the card.
 function devCard(id,f){
  const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),c=[];let ul,k;
@@ -349,8 +351,8 @@ function devCard(id,f){
    bt("Rename",()=>{const n=prompt("Device name",d.name||"");return n!=null?act("devices/update",{device:id,name:n.trim()}):Promise.resolve()}),
    bt("Re-interview",()=>act("devices/reinterview",{device:id})),
    gn(d)?bt("Find definition",async()=>findDef(id)):"",
-   d.ieee?bt("Bindings",()=>{bOpen.has(id)?bOpen.delete(id):bOpen.add(id);return gEps().then(()=>renderDev(id))}):"",
-   d.ieee?bt("Reporting",async()=>{rOpen.has(id)?rOpen.delete(id):rOpen.add(id);renderDev(id)}):"",
+   d.ieee?bt("Bindings",()=>{bOpen.delete(id)||bOpen.add(id);return gEps().then(()=>renderDev(id))}):"",
+   d.ieee?bt("Reporting",async()=>{rOpen.delete(id)||rOpen.add(id);renderDev(id)}):"",
    bt("Remove",()=>confirm("Remove "+(d.name||id)+" from the network?")?act("devices/remove",{device:id}):Promise.resolve(),"d"))]:[],
   ...c,f?"":netLine(id),f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
 }
@@ -393,28 +395,33 @@ function entRow(e){
  return li;
 }
 // Reporting (device-support 5.2): hub setting (* = override) and what the
-// device applied; inputs min, max, change (all three), off, or none = default. ⇄: the
+// device applied; inputs min and max (both; change only for analog types,
+// optional), off, or none = default; saved when the row is left. ⇄: the
 // attribute (and its setting) is shared with other entities.
-const rOpen=new Set,rTxt=(r,s=" ")=>r==null?"–":r=="off"?r:r.join(s),rVal=v=>(v=v.trim())?v=="off"?v:v.split(/[\s,]+/).map(Number):"default";
+const rOpen=new Set,rTxt=r=>r==null?"–":r=="off"?r:r.join(" "),rVal=v=>(v=v.trim())?v=="off"?v:v.split(/[\s,]+/).map(Number):"default";
+// The change raw ⇄ in the entity's units (`scale`: entity units per raw
+// unit, 14.3); entered ones round to a whole raw unit, f: float types keep it.
+const chU=(c,k)=>+(c*k).toFixed(9),chR=(v,k,f)=>(v=+v.replace(",",".")/k,f?+v.toFixed(9):Math.round(v));
 // `data`: an entity_reporting event (a sleeping device answered the read).
 // A panel already shown is replaced once the new one is loaded.
 function repPanel(id,read,data){const box=el("div",{id:"rp-"+id,class:"rp"},el("h3",{},"Reporting"));
- (data?Promise.resolve(data):call("entities/reporting",{device:id,read:!!read})).then(r=>{const t=el("table",{},el("tr",{},...["entity","attribute","hub","device","min s, max s, change"].map(h=>el("th",{},h))));
-  for(const x of r.records||[]){const e=ents[x.uid]||{},o=x.source=="override",a=x.applied,v=o&&x.report!="off"?x.report:[],f=el("input",{type:"checkbox",checked:o&&x.report=="off"?"":null}),
-   i=["min s","max s","change"].map((p,k)=>el("input",{class:"num",inputmode:"decimal",placeholder:p,"aria-label":p,value:v[k]})),
-   // All three, none (default) or off.
-   go=()=>{const w=i.map(c=>c.value.trim()),n=w.filter(Boolean).length;if(f.checked||n%3==0)act("entities/update",{uid:x.uid,part:x.part||"",report:f.checked?"off":n?w.map(Number):"default"}).then(()=>repPanel(id),()=>{})};
-   for(const n of[...i,f])n.onchange=go;
-   t.append(el("tr",{},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{class:"mut"},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{"data-l":"hub",title:x.source},rTxt(x.report," / ")+(o?" *":"")),el("td",{"data-l":"device",title:a?a.status:""},a?a.report?rTxt(a.report," / "):a.status:"?"),el("td",{},el("div",{class:"row"},...i,el("label",{},f,"off")))))}
-  box.append(t,r.status=="queued"?el("p",{class:"mut"},"Read queued until the device wakes."):r.error?el("p",{class:"mut"},r.error.message):"",el("button",{onclick:e=>{e.target.disabled=true;repPanel(id,1)}},"Read from device"))}).catch(e=>box.append(e.message)).then(()=>{const o=document.getElementById("rp-"+id);if(o&&o!=box)keep(o,()=>box)});
+ (data?Promise.resolve(data):call("entities/reporting",{device:id,read:!!read})).then(r=>{const t=el("table");
+  for(const x of r.records||[]){let dt;const e=ents[x.uid]||{},o=x.source=="override",a=x.applied,y=x.type,off=o&&x.report=="off",v=o&&!off?x.report:[],sc=x.scale||1,u=x.unit?" "+x.unit:"",fl=y>55&&y<59,
+   // Analog (ZCL r8 2.5.7.1.7: integers, floats, time) take a reportable change.
+   an=y>31&&y<48||fl||y>223&&y<227,f=el("input",{type:"checkbox",checked:off?"":null,onchange:()=>go()}),
+   rs=r=>r&&r.map?r.map((c,j)=>j>1?chU(c,sc)+u:c).join(" / "):rTxt(r),
+   i=["min s","max s","change"+u].map((p,k)=>el("input",{class:"num",inputmode:"decimal",placeholder:p,"aria-label":p,value:k>1&&v[2]!=null?chU(v[2],sc):v[k],disabled:off?"":null,style:k>1&&!an?"visibility:hidden":null,oninput:()=>dt=1})),
+   go=()=>{const[m,M,c]=i.map(n=>n.value.trim()),w=c&&chR(c,sc,fl);dt=0;if(!f.checked&&(!m!=!M||!m&&c))return toast("Reporting: set both min and max");
+    act("entities/update",{uid:x.uid,part:x.part||"",report:f.checked?"off":m?[+m,+M,...c?[w==w?w:c]:[]]:"default"}).finally(()=>repPanel(id)).catch(()=>{})};
+   t.append(el("tr",{onfocusout:n=>{if(dt&&!n.currentTarget.contains(n.relatedTarget))go()},onkeydown:n=>{if(dt&&n.key=="Enter")go()}},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{class:"mut"},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{"data-l":"hub",title:x.source},rs(x.report)+(o?" *":"")),el("td",{"data-l":"device",title:a?a.status:""},a?a.report?rs(a.report):a.status:"?"),el("td",{},el("div",{class:"row"},...i,el("label",{},f,"off")))))}
+  box.append(t,r.status=="queued"?el("p",{class:"mut"},"Read queued until the device wakes."):r.error?el("p",{class:"mut"},r.error.message):"",bt("Read from device",async()=>repPanel(id,1)))}).catch(e=>box.append(e.message)).then(()=>{const o=document.getElementById("rp-"+id);if(o&&o!=box)keep(o,()=>box)});
  return box}
 // Rows of other entities shown nowhere; the battery and signal line (card)
 // or the facts (page) follow every state.
 function renderEnt(e){const o=document.getElementById("e-"+e.uid),n=document.getElementById("n-"+e.device),p=pgId();
  if(o)keep(o,()=>entRow(e));else if(p||onCard(e))renderDev(e.device);
  if(n){const x=netLine(e.device,p);if(x.textContent!=n.textContent)n.replaceWith(x)}}
-// Relative times; not under a field being edited (keep() saves other focus).
-setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById("d-"+id);if(c&&!c.contains(document.activeElement.closest("input,select")))renderDev(id)}},30000);
+setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById("d-"+id);if(c&&!c.contains(document.activeElement))renderDev(id)}},30000);
 // ── Views: map and settings (API 1.2, device-support 14.6) ──
 const has=f=>(hub.maintenance||[]).includes(f);
 onTab.map=()=>{if(authed&&!mapData)call("network/topology",{refresh:false}).then(drawMap).catch(()=>{})};

@@ -839,8 +839,8 @@ battery and a signal indicator from LQI/RSSI; subscription to `devices`,
 `#device/<id>` (model, IEEE, NWK, LQI/RSSI, last seen, power source,
 definition, every entity grouped as sensors, controls, configuration and
 diagnostic; rename, re-interview, find definition, bindings, reporting per
-attribute and remove with confirmation; back returns to the list where it
-was), controls for switches and lights (on/off, brightness), numbers,
+attribute — min and max in seconds, the change in the entity's units — and
+remove with confirmation; back returns to the list where it was), controls for switches and lights (on/off, brightness), numbers,
 selects and buttons, connection status with automatic reconnect; mobile
 layout, light/dark from `prefers-color-scheme`. The page is split into
 tabs (`#/devices`, …): each `<div class="tab" data-tab="id" data-title="…">`

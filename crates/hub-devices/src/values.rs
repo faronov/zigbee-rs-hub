@@ -139,23 +139,7 @@ pub fn decode(
         x = r;
     }
     // 6. mul / div / offset, or the generic attribute scaling.
-    let (mut mul, mut div) = (t.mul, t.div);
-    if mul.is_none() && div.is_none() {
-        if let Some(s) = &t.attr_scale {
-            let m = s
-                .mul_attr
-                .and_then(|a| scale(s.cluster, a))
-                .filter(|v| *v != 0.0)
-                .unwrap_or(1.0);
-            let d = s
-                .div_attr
-                .and_then(|a| scale(s.cluster, a))
-                .filter(|v| *v != 0.0)
-                .unwrap_or(1.0);
-            mul = Some(m * s.factor);
-            div = Some(d);
-        }
-    }
+    let (mul, div) = factors(t, scale);
     if mul.is_some() || div.is_some() || t.offset.is_some() {
         if let Some(v) = x.as_f64().filter(|_| !matches!(x, Value::Bool(_))) {
             let r = v * mul.unwrap_or(1.0) / div.unwrap_or(1.0) + t.offset.unwrap_or(0.0);
@@ -175,6 +159,41 @@ pub fn decode(
         x = x.truthy().map_or(Value::Null, Value::Bool);
     }
     (x, flags)
+}
+
+/// The factors of decode step 6: the layer's `mul` / `div`, else the
+/// generic attribute scaling from the device's cached attributes.
+fn factors(t: &Transforms, scale: &dyn Fn(u16, u16) -> Option<f64>) -> (Option<f64>, Option<f64>) {
+    match &t.attr_scale {
+        Some(s) if t.mul.is_none() && t.div.is_none() => {
+            let f = |a: Option<u16>| {
+                a.and_then(|a| scale(s.cluster, a))
+                    .filter(|v| *v != 0.0)
+                    .unwrap_or(1.0)
+            };
+            (Some(f(s.mul_attr) * s.factor), Some(f(s.div_attr)))
+        }
+        _ => (t.mul, t.div),
+    }
+}
+
+/// Entity units per raw unit of a change in the value: the magnitude of
+/// decode step 6's `mul / div` (an offset moves no difference), for a
+/// reportable change shown and entered in the entity's units (14.3).
+/// `None` when the decode is not linear in the raw value (codec, map,
+/// on/off values, `from` expression).
+pub fn change_scale(t: &Transforms, scale: &dyn Fn(u16, u16) -> Option<f64>) -> Option<f64> {
+    if t.codec.is_some()
+        || !t.map.is_empty()
+        || t.value_on.is_some()
+        || t.value_off.is_some()
+        || t.from.is_some()
+    {
+        return None;
+    }
+    let (m, d) = factors(t, scale);
+    let k = (m.unwrap_or(1.0) / d.unwrap_or(1.0)).abs();
+    (k.is_finite() && k > 0.0).then_some(k)
 }
 
 /// Encode failure: `INVALID_VALUE` before anything is sent.
@@ -276,6 +295,67 @@ mod tests {
                 mode: None,
             },
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn change_scale_is_the_linear_factor() {
+        let t = |mul, div| Transforms {
+            mul,
+            div,
+            offset: Some(-40.0),
+            ..Default::default()
+        };
+        let none = |_: u16, _: u16| None;
+        // Divisor, multiplier, both, a negative and a fractional factor.
+        assert_eq!(change_scale(&t(None, Some(100.0)), &none), Some(0.01));
+        assert_eq!(change_scale(&t(Some(10.0), None), &none), Some(10.0));
+        assert_eq!(change_scale(&t(Some(5.0), Some(2.0)), &none), Some(2.5));
+        assert_eq!(change_scale(&t(Some(-10.0), None), &none), Some(10.0));
+        assert_eq!(change_scale(&t(Some(0.5), Some(-4.0)), &none), Some(0.125));
+        assert_eq!(change_scale(&t(None, None), &none), Some(1.0));
+        assert_eq!(change_scale(&t(Some(0.0), None), &none), None);
+        assert_eq!(change_scale(&t(None, Some(0.0)), &none), None);
+        // Generic scaling: the device's multiplier / divisor × factor, as
+        // decode uses them (an unknown or zero attribute counts as 1).
+        let metering = Transforms {
+            attr_scale: Some(crate::model::AttrScale {
+                cluster: 0x0702,
+                mul_attr: Some(0x0301),
+                div_attr: Some(0x0302),
+                factor: 1000.0,
+            }),
+            ..Default::default()
+        };
+        let cache = |c: u16, a: u16| match (c, a) {
+            (0x0702, 0x0301) => Some(3.0),
+            (0x0702, 0x0302) => Some(1000.0),
+            _ => None,
+        };
+        assert_eq!(change_scale(&metering, &cache), Some(3.0));
+        assert_eq!(change_scale(&metering, &none), Some(1000.0));
+        let v = vd(metering);
+        assert_eq!(
+            decode(&v, false, Value::Int(7), &EmptyEnv, &cache).0,
+            Value::Float(21.0)
+        );
+        // Not linear: no scale.
+        for t in [
+            Transforms {
+                map: vec![(0, "a".into())],
+                ..Default::default()
+            },
+            Transforms {
+                value_on: Some(Value::Int(1)),
+                ..Default::default()
+            },
+            Transforms {
+                codec: Some(Codec::ZclTagged),
+                div: Some(10.0),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(change_scale(&t, &none), None);
         }
     }
 
