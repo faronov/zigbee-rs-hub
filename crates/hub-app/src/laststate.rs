@@ -24,7 +24,7 @@ pub const KEY: &str = "st/";
 /// A device whose states changed is written at most this often.
 pub const SAVE_MS: Millis = 15 * 60_000;
 /// A device with only diagnostic news (`last_seen`, LQI, RSSI).
-pub const SLOW_MS: Millis = 6 * 3600_000;
+pub const SLOW_MS: Millis = 6 * 3_600_000;
 
 /// Bookkeeping of the kept values.
 #[derive(Debug, Default)]
@@ -85,6 +85,10 @@ impl LastValues {
                     self.slow.remove(id);
                     self.removed.insert(id.clone());
                 }
+                // Removed and added again before the flush: its values stay.
+                HubEvent::DeviceAdded(id) => {
+                    self.removed.remove(id);
+                }
                 _ => {}
             }
         }
@@ -141,5 +145,32 @@ impl LastValues {
             self.errors += e;
             warn!("last values: {e} store writes failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use hub_devices::hub::HubConfig;
+    use hub_devices::resolve::MemoryCatalog;
+    use hub_devices::transport::MockTransport;
+    use hub_store::Store;
+
+    use super::*;
+
+    #[test]
+    fn a_device_removed_and_added_again_keeps_its_values() {
+        let kv = Mutex::new(Store::volatile());
+        kv::with(&kv, |s| s.put("st/zb:1", b"{}")).unwrap();
+        let e = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
+        let (removed, added) = (HubEvent::DeviceRemoved("zb:1".into()), HubEvent::DeviceAdded("zb:1".into()));
+        let mut lv = LastValues::default();
+        lv.note(&[removed.clone(), added], &e);
+        lv.flush(&kv, &e, 1, true);
+        assert!(kv::with(&kv, |s| s.get("st/zb:1").is_some()));
+        lv.note(&[removed], &e);
+        lv.flush(&kv, &e, 2, true);
+        assert!(kv::with(&kv, |s| s.get("st/zb:1").is_none()), "removed for good");
     }
 }

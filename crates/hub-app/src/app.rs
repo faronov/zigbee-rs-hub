@@ -44,6 +44,9 @@ use crate::platform::Platform;
 use crate::registry::Registry;
 use crate::transport::{ApsCounters, CoordTransport};
 
+#[path = "ownership.rs"]
+mod ownership;
+
 /// Where the API frames of one connection go. `false` = the connection is
 /// gone (the session is dropped).
 pub trait SessionSink: Send {
@@ -690,6 +693,8 @@ impl Runner {
         let mut registry = std::mem::take(&mut r.registry);
         registry.load(&r.ncp, &mut r.engine, now);
         r.registry = registry;
+        let ncp = r.ncp.clone();
+        r.engine.transport.registry = Some(Box::new(move || ncp.registry()));
         // The clock first: kept times convert only once the time is known.
         r.admin.clock_tick(&mut r.engine.cfg, now);
         let mut last = std::mem::take(&mut r.last);
@@ -966,7 +971,10 @@ impl Runner {
                     && let (Some(id), Some(kind)) = (v["id"].as_u64(), v["type"].as_str())
                     && let Some(r) = {
                         self.automations.free_heap = self.cfg.platform.as_ref().and_then(|p| p.data_heap_free());
-                        self.with_automations(|a, w, clk| a.request(kind, &v, w, clk))
+                        match self.automations_refused(kind) {
+                            Some(e) => Some(Err(e)),
+                            None => self.with_automations(|a, w, clk| a.request(kind, &v, w, clk)),
+                        }
                     }
                 {
                     // A run waiting for its request action (or deferred behind
@@ -1041,6 +1049,9 @@ impl Runner {
 
     /// A maintenance request (`admin`), with what it may need from here.
     fn admin_request(&mut self, sid: SessionId, head: &admin::Head, now: Millis) -> Vec<String> {
+        if head.ty.starts_with("network/registry/") {
+            return vec![self.registry_request(head, now)];
+        }
         let engine = &self.engine;
         let known = || {
             engine
@@ -1207,6 +1218,7 @@ impl Runner {
 
     fn tick(&mut self) {
         let now = self.now();
+        self.check_registry(now);
         let probe = self.t0.elapsed().as_secs().is_multiple_of(KEEPALIVE_S);
         let dead: Vec<SessionId> = self
             .sinks

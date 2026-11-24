@@ -4,6 +4,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::device::InterviewStep;
 use crate::testutil::sim::{Sim, SimDevice};
 use crate::transport::Sent;
 use crate::zcl::{TypedValue, ZclType, ZclValue};
@@ -26,6 +27,103 @@ fn sensor() -> SimDevice {
         .attr(1, 0x0405, 0x0000, TypedValue::uint(ZclType::U16, 4510))
         .attr(1, 0x0001, 0x0021, TypedValue::uint(ZclType::U8, 180))
         .attr(1, 0x0001, 0x0020, TypedValue::uint(ZclType::U8, 30))
+}
+
+/// The hub's records adopted after the engine made the device again (an
+/// NCP import): the stored device replaces it in place, without a removal.
+#[test]
+fn restoring_a_device_the_engine_has_replaces_it_in_place() {
+    let id = "zb:00158d0001a2b3c4";
+    let mut sim = Sim::default();
+    sim.devices.push(sensor());
+    let mut hub = hub_with(&[]);
+    sim.join(&mut hub, SENSOR, T0);
+    hub.device_mut(id).unwrap().user_name = Some("Kitchen".into());
+    let snap = hub.snapshot_device(id).unwrap();
+
+    let mut other = hub_with(&[]);
+    other.on_device_joined(SENSOR, 0x4321, T0);
+    let entities = other.device(id).unwrap().entities.len();
+    let _ = other.drain_events();
+    other.restore_device(snap, None, T0 + 1000).unwrap();
+    let events = other.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceRemoved(_) | HubEvent::DeviceAdded(_))),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == id))
+    );
+    let d = other.device(id).unwrap();
+    assert_eq!(d.user_name.as_deref(), Some("Kitchen"));
+    assert_eq!(d.nwk(), Some(0x4321), "the current address");
+    assert!(
+        d.entities.len() > entities,
+        "the interviewed device's entities"
+    );
+}
+
+/// A hub that met `dev` again and restores its snapshot (interviewed
+/// elsewhere) in the middle of the new interview (`answered`: the
+/// interview's first request is still to be delivered); the stored
+/// fingerprint.
+fn replaced_mid_interview(
+    dev: SimDevice,
+    answered: bool,
+) -> (Hub<MockTransport>, crate::fingerprint::Fingerprint) {
+    let (ieee, nwk, id) = (dev.ieee, dev.nwk, format!("zb:{:016x}", dev.ieee));
+    let mut sim = Sim::default();
+    sim.devices.push(dev);
+    let mut hub = hub_with(&[]);
+    sim.join(&mut hub, ieee, T0);
+    let snap = hub.snapshot_device(&id).unwrap();
+    let mut other = hub_with(&[]);
+    other.on_device_joined(ieee, nwk, T0);
+    if !answered {
+        other.transport.take();
+    }
+    other.restore_device(snap, None, T0 + 100).unwrap();
+    (other, hub.device(&id).unwrap().fp.clone())
+}
+
+fn untouched(h: &Hub<MockTransport>, id: &str, fp: &crate::fingerprint::Fingerprint) {
+    let d = h.device(id).unwrap();
+    assert_eq!(d.interview, InterviewStep::Done);
+    assert!(!d.interview_partial);
+    assert_eq!(&d.fp, fp);
+}
+
+/// The interview a replaced device was in is over: a late answer does not
+/// touch the restored device.
+#[test]
+fn a_late_interview_answer_does_not_touch_a_replaced_device() {
+    let (mut other, fp) = replaced_mid_interview(sensor(), true);
+    let mut late = Sim::default();
+    late.devices.push(sensor());
+    late.run(&mut other, T0 + 200);
+    assert_eq!(
+        late.aps().len(),
+        1,
+        "only the request sent before: {:?}",
+        late.aps()
+    );
+    untouched(&other, "zb:00158d0001a2b3c4", &fp);
+}
+
+/// ... nor does its timeout (a mains device: retried, then the step
+/// fails): no retry, no failed step.
+#[test]
+fn a_lost_interview_request_does_not_touch_a_replaced_device() {
+    let (mut other, fp) = replaced_mid_interview(light(), false);
+    for s in 1..=60 {
+        other.tick(T0 + s * 1000);
+    }
+    assert!(other.transport.take().is_empty());
+    untouched(&other, "zb:0017880100aabbcc", &fp);
 }
 
 #[test]
