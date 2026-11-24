@@ -4,7 +4,12 @@
 
 pub mod bindings;
 pub mod generic;
-pub mod types;
+
+/// Owned mirrors of the ZRHP 7.11 GP records, events and requests; they
+/// live in the coordinator boundary crate ([`hub_coord::gp`]).
+pub mod types {
+    pub use hub_coord::gp::*;
+}
 
 use std::collections::{BTreeMap, VecDeque};
 
