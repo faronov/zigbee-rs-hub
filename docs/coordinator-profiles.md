@@ -108,8 +108,10 @@ firmware's configuration (e.g. `EZSP_CONFIG_*`, Z-Stack NV items), not
 from the protocol.
 
 **Compatible existing network**: the NCP reports a formed network whose
-identity (extended PAN ID, PAN ID, channel, network-key hash) is known to
-the hub's store, or the operator explicitly adopts it. Adopting a network
+identity (extended PAN ID, plus the network-key hash when both sides know
+it) is known to the hub's store, or the operator explicitly adopts it. PAN
+ID, channel and key sequence are informative: PAN ID conflict resolution,
+channel changes and key rotation rewrite them. Adopting a network
 without its previous controller's device database is supported only with
 rediscovery: NCP child/address tables, Device Announce and traffic. Sleepy
 devices may take hours to reappear; the UI says so.
@@ -259,7 +261,7 @@ configuration without Wi-Fi Enterprise saves only ~7 KB.
    without PSRAM: the wrong-image mode). MQTT under load remains.
 2. Extract the coordinator/storage boundary while keeping the existing
    ZRHP wire behavior, persistence and recovery unchanged; ZRHP adapter
-   conformance tests.
+   conformance tests. Design and PR sequence: `coordinator-boundary.md`.
 3. Implement and host-test ASH/EZSP: core stage, read-only backup export,
    then the updater against explicitly supported firmware versions.
 4. ZNP/MT core may follow in parallel; its updater waits for the wiring.
