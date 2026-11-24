@@ -2290,7 +2290,9 @@ code feels familiar:
   `unsupported`). Added later within 1.3, in every image: reporting
   configuration (5.2, 14.3): `entities/reporting`,
   `reporting/defaults/get`, `reporting/defaults/set`, the `report` and
-  `part` parameters of `entities/update` and the event `entity_reporting`.
+  `part` parameters of `entities/update` and the event `entity_reporting`;
+  the hub records' ownership: `registry` in `network/info`,
+  `network/registry/adopt` and `network/registry/clear`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2317,7 +2319,7 @@ code feels familiar:
 | Type | Parameters | Result |
 |---|---|---|
 | `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`; once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
-| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced` (fields the host core does not know are absent; `unsupported` without a host core) |
+| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced`, `registry` (whose the hub's network records are, below: {`state`: `owned`, `untagged` (nothing stored yet), `unverified` (an NCP-held network not compared yet), `foreign` with `backend` and `why`}) (fields the host core does not know are absent; `unsupported` without a host core) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
 | `devices/list` | — | device records (4.1) |
 | `devices/get` | `id` | device record + endpoints + resolution summary |
@@ -2488,7 +2490,9 @@ written as text with fallible allocation, never as a JSON tree).
 | `network/backup` | `keys` (default true) | the backup file, Open ZigBee Coordinator Backup v1 (`zigpy/open-coordinator-backup`; ZRHP 9.1/9.2): the NCP's export (`BKP_EXPORT_*`) plus the hub's devices without keys, `metadata.internal.zigbee_rs`, `stack_specific.zigbee_rs` with the durable counter limits. With keys it is kept as the last backup in the host store; without keys (or when the NCP's key export is locked) it is marked `metadata.internal.incomplete` and cannot be restored. Keys need a non-empty API token |
 | `network/backup/last` | — | `backup`: the last complete backup (taken by `network/backup`, `network/reset` or `network/restore`), or null |
 | `network/restore` | `backup` (the OCB object; its `devices` may be left out or partial), then any number of requests with `devices` (a batch of `devices[]` entries), each with `more` (bool) while more follow; the first request also takes `allow_ieee_change` (default true), `force`, `skip_backup`. A request with `more` is answered `staged_devices`; the last one starts the restore. Every request is a small JSON value, so a large backup never has to be in the hub's RAM at once (the web UI sends 8 devices per request) | `pan_id`, `channel`, `coordinator_ieee`, `devices`, `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` [{`index`, `note`}], `previous_network_backed_up`. ZRHP `BKP_RESTORE_*` with margins 10 000 / 10 000 (APS 2²⁰ when the file has no TCLK counter, Z2M); the restored network is adopted (store, counters as floors) and its devices imported. An NCP that runs a network needs `force`; it is backed up first unless `skip_backup` |
-| `network/reset` | `confirm` = `"RESET"`, `channel` or `channels` (default 11–26), `pan_id`, `ext_pan_id` (big-endian hex), `tx_power`, `skip_backup` | `network` {`pan_id`, `ext_pan_id`, `channel`}, `backup` (the automatic backup of the previous network, or null). Backup first (a failed backup changes nothing unless `skip_backup`), `NWK_LEAVE_RESET` (IEEE override and host endpoints kept), then forming with hub-chosen key and the given parameters. Also forms a network on an empty NCP. Devices stay in the registry and must join again |
+| `network/reset` | `confirm` = `"RESET"`, `channel` or `channels` (default 11–26), `pan_id`, `ext_pan_id` (big-endian hex), `tx_power`, `skip_backup` | `network` {`pan_id`, `ext_pan_id`, `channel`}, `backup` (the automatic backup of the previous network, or null). Backup first (a failed backup changes nothing unless `skip_backup`), `NWK_LEAVE_RESET` (IEEE override and host endpoints kept), then forming with hub-chosen key and the given parameters. Also forms a network on an empty NCP. Devices stay in the registry and must join again (also `foreign` ones: the new network takes them) |
+| `network/registry/adopt` | `confirm` = `true` | `restored` (devices loaded), `registry`. The hub's network records (below) become this hub's, of the network it runs, and are loaded. Nothing is deleted |
+| `network/registry/clear` | `confirm` = `true` | `deleted` (records), `forgotten` (devices), `registry`. Deletes the network records and drops the devices, groups, bindings and automations from the hub without network traffic (no leave, no removal on the NCP); the NCP's devices are imported again. User definitions and the hub's settings stay |
 | `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason`), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time`, `time_synced` |
 | `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged), stamped `MM-DD HH:MM:SS` local time once the clock is set, else seconds since boot |
 | `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
@@ -2500,8 +2504,23 @@ written as text with fallible allocation, never as a JSON tree).
 
 Events (topic `network`, API 1.2): `network_updated` {`reason`:
 `channel_changed` (with `channel`, `nwk_update_id`), `tx_power`, `restored`,
-`formed`} — clients read `network/info` again; `job_progress`, `job_done`,
-`job_failed` (below).
+`formed`, `registry_adopted`, `registry_cleared`} — clients read
+`network/info` again; `job_progress`, `job_done`, `job_failed` (below).
+
+**Network records and their owner.** The device registry, last values,
+groups, bindings, automations, per-device OTA state and the last backup
+(`dev/`, `st/`, `grp/`, `bnd/`, `auto/`, `ota/d/`, `bkp/last`) belong to one
+network; user definitions and the hub's settings do not. The host store
+tags them with the coordinator backend and network they belong to
+(`hub/owner`: extended PAN ID and a key ID, a hash of the network key;
+PAN ID, channel, key sequence and coordinator are informative and follow
+the network). An image that finds another backend's records (an EZSP image
+ran on this flash), or a network whose extended PAN ID, or known key, is
+not the tag's, does not load them and cannot change or delete them:
+`network/info.registry.state` is `foreign`. The operator then adopts or
+clears them; `network/reset` and `network/restore` take them for the new
+network too. Records written before the tag existed are tagged for the
+stored network at the first start.
 
 **Background jobs.** `network/energy_scan`, `network/active_scan` and
 `network/topology` (with `refresh`) answer at once with `{job, kind,

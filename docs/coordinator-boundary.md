@@ -314,6 +314,45 @@ Only one KV record is written. Older ZRHP firmware ignores `hub/owner` and
 compaction preserves it, so a ZRHP→older-ZRHP downgrade is safe. Older
 firmware would **not** honour an EZSP tag (documented limit).
 
+**As implemented (PR I).**
+- hub-store: `kv::scope` (the table above), `Gate` (`Open`, `ReadOnly`,
+  `Closed`), `Guarded` (a `Kv` behind a gate; writes fail with
+  `PermissionDenied`), `Kv::gate`. hub-coord: `OwnerTag` (encode/decode)
+  and `RegistryState::check` (`Untagged`, `Owned`, `Unverified`,
+  `Foreign{backend, why}`). hub-ncp `coord::owner`: migration (`open`),
+  upkeep (`mirror`), `adopt`, `clear`; `impl KvStore for Hub` applies the
+  gate.
+- Tag: EPID and coordinator IEEE big-endian hex (as the API shows EUI-64s),
+  `key_id` hex in digest order; `{"v":1,"backend":"zrhp","epid":null}`
+  while the identity is null. Only the hub writes it (no whitespace); a
+  small field scanner reads it, an unreadable tag or another `v` is
+  foreign. The coordinator is the store's `meta.ncp_ieee`.
+- Migration runs in `Hub::start`, before the lifecycle thread and before
+  the app's `registry.load`, so neither a resume nor a sweep sees an
+  undecided state. A read-only (observing) hub tags nothing.
+- Upkeep: after the resume's `Meta` commit when `Owned`, after `form` and
+  `backup_restore` (forced: they rewrite a foreign tag), and after a
+  channel change. A non-forced `Owned` whose stored network does not match
+  the tag (an auto-adopt into a store emptied by `leave_reset`) makes the
+  records foreign and writes nothing.
+- The registry writes and sweeps network-scoped keys only once it loaded
+  them with the gate open (`Registry::loaded`); this also covers a gate
+  opened by a job thread (`network/reset`, `network/restore`) between the
+  app's check and its flush. Once readable, the app loads them on its next
+  tick (stored devices replace the ones made meanwhile).
+- `network/registry/adopt` / `clear` take `"confirm": true`. `clear` also
+  drops the engine's devices, groups, bindings and rules without network
+  traffic and imports the NCP's devices again. `network/info.registry`:
+  `{"state": "owned" | "untagged" | "unverified" | "foreign", "backend",
+  "why"}` (the last two for foreign records).
+- `NcpNv`: `RegistryState::check` returns `Unverified` until the NCP's
+  identity is known, `Gate::ReadOnly` keeps the records loaded and
+  unwritable. `CoordTransport` refusing device traffic until then comes
+  with the first `NcpNv` backend.
+- Size (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths): app
+  image +3,568 B (`.flash.text` +1,972 B, `.flash.rodata` +1,600 B, IRAM
+  and DRAM unchanged).
+
 ## 3. Threading model
 
 **Today.** The app thread blocks for up to 10 s (default `CallOpts`) at
