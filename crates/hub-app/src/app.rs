@@ -905,7 +905,7 @@ impl Runner {
             return;
         }
         let (ready, waiting): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.run_answers).into_iter().partition(|(_, _, run)| !self.automations.waits(*run));
+            std::mem::take(&mut self.run_answers).into_iter().partition(|(_, _, run)| !self.automations.pending(*run));
         self.run_answers = waiting;
         for (sid, id, run) in ready {
             let v = self.automations.run_result(run);
@@ -969,11 +969,12 @@ impl Runner {
                         self.with_automations(|a, w, clk| a.request(kind, &v, w, clk))
                     }
                 {
-                    // A run waiting for its request action answers once that
-                    // is done, as it did when the result was known in place.
+                    // A run waiting for its request action (or deferred behind
+                    // one) answers once it goes on, as it did when the result
+                    // was known in place.
                     if kind == "automations/run"
                         && let Ok(v) = &r
-                        && let Some(run) = v["run"].as_u64().map(|r| r as u32).filter(|r| self.automations.waits(*r))
+                        && let Some(run) = v["run"].as_u64().map(|r| r as u32).filter(|r| self.automations.pending(*r))
                     {
                         self.run_answers.push((sid, id, run));
                         self.pump_automations();

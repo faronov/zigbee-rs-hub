@@ -348,16 +348,22 @@ struct Pump {
 
 impl Pump {
     fn run(mut self) {
-        while self.step() {}
+        // A session already up is announced at once.
+        if self.session() {
+            while self.step() {}
+        }
         debug!("zrhp: pump stopped");
     }
 
     /// One message (or a poll); `false` stops the pump.
     fn step(&mut self) -> bool {
+        let msg = self.rx.recv_timeout(POLL);
+        // The session as it is now: `Up` goes before whatever the NCP sent
+        // in the new session.
         if !self.session() {
             return false;
         }
-        let msg = match self.rx.recv_timeout(POLL) {
+        let msg = match msg {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => return self.replies(true),
             Err(RecvTimeoutError::Disconnected) => return false,
@@ -754,6 +760,120 @@ mod tests {
         drop(coord);
         hub.shutdown();
         sim.stop();
+    }
+
+    /// Events until `stop` holds for all of them.
+    fn collect(q: &EventQueue, got: &mut Vec<CoordEvent>, stop: impl Fn(&[CoordEvent]) -> bool) {
+        let t = Instant::now();
+        while !stop(got) {
+            assert!(t.elapsed() < T, "{got:?}");
+            q.drain(usize::MAX, |e| got.push(e));
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn up(ev: &CoordEvent) -> Option<u32> {
+        match ev {
+            CoordEvent::Session(s) => match **s {
+                SessionEvent::Up { epoch, .. } => Some(epoch),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn down(ev: &CoordEvent) -> bool {
+        matches!(ev, CoordEvent::Session(s) if **s == SessionEvent::Down)
+    }
+
+    fn outcome(evs: &[CoordEvent], want: RequestId) -> (usize, &Terminal) {
+        evs.iter()
+            .enumerate()
+            .find_map(|(i, e)| match e {
+                CoordEvent::Done { id, t } if *id == want => Some((i, t)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// A request on the wire (`a`, unanswered) and one submitted while the
+    /// session is down (`b`, held by the driver) across a session loss;
+    /// `lose` ends the session and keeps the next one from negotiating
+    /// until the pump has reported it down.
+    fn across_a_session_loss(
+        lose: impl FnOnce(&Hub, &crate::sim::SimNcp),
+    ) -> (
+        Vec<CoordEvent>,
+        RequestId,
+        RequestId,
+        u32,
+        crate::sim::SimNcp,
+    ) {
+        let (hub, sim, mut coord, q) = rig();
+        let mut evs = Vec::new();
+        collect(&q, &mut evs, |e| e.iter().any(|e| up(e).is_some()));
+        let epoch = evs.iter().find_map(up).unwrap();
+        sim.with(|s| s.stall = Some(ids::APS_DATA_REQUEST));
+        let a = coord.submit(aps(), None).unwrap();
+        while sent(&sim, ids::APS_DATA_REQUEST) == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+        sim.with(|s| s.stall = Some(ids::SYS_NEGOTIATE));
+        lose(&hub, &sim);
+        let mut evs = Vec::new();
+        collect(&q, &mut evs, |e| e.iter().any(down));
+        let b = coord.submit(aps(), None).unwrap();
+        sim.with(|s| s.stall = None);
+        collect(&q, &mut evs, |e| {
+            e.iter().filter(|e| done(e, a) || done(e, b)).count() == 2
+        });
+        drop(coord);
+        hub.shutdown();
+        sim.stop();
+        (evs, a, b, epoch, sim)
+    }
+
+    /// ZRHP holds requests across a resync (same NCP cookie): `Down` ends
+    /// none of them; after `Up` the one on the wire is sent again (`RETRY`)
+    /// and both report their real outcome.
+    #[test]
+    fn a_resync_holds_requests_and_their_outcomes_follow_up() {
+        let (evs, a, b, epoch, sim) = across_a_session_loss(|hub, _| hub.client().reopen());
+        let at_up = evs
+            .iter()
+            .position(|e| up(e) == Some(epoch))
+            .expect("up again, same epoch");
+        assert!(evs.iter().position(down).unwrap() < at_up, "{evs:?}");
+        for id in [a, b] {
+            let (i, t) = outcome(&evs, id);
+            assert_eq!(t, &Terminal::Delivered, "{evs:?}");
+            assert!(i > at_up, "{evs:?}");
+        }
+        assert!(
+            sim.state()
+                .requests
+                .contains(&(ids::APS_DATA_REQUEST, true)),
+            "sent again with RETRY"
+        );
+    }
+
+    /// After an NCP restart the request on the wire ends unknown (its
+    /// outcome is lost with the NCP); the held one is sent after `Up`.
+    #[test]
+    fn an_ncp_restart_ends_requests_on_the_wire_and_sends_the_others_after_up() {
+        let (evs, a, b, epoch, _) = across_a_session_loss(|_, sim| sim.reboot());
+        let at_up = evs
+            .iter()
+            .position(|e| up(e).is_some_and(|e| e != epoch))
+            .expect("a new epoch");
+        assert!(evs.iter().position(down).unwrap() < at_up, "{evs:?}");
+        let (_, t) = outcome(&evs, a);
+        assert!(
+            matches!(t, Terminal::Unknown(e) if *e.meaning() == CoordError::DeliveryUnknown),
+            "{t:?}"
+        );
+        let (i, t) = outcome(&evs, b);
+        assert_eq!((t, i > at_up), (&Terminal::Delivered, true), "{evs:?}");
     }
 
     #[test]

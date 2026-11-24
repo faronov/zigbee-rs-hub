@@ -104,7 +104,20 @@ pub trait Coordinator: Send {
 **Contract** (tested by `hub-coord::testkit`):
 - A terminal never precedes an indication that the NCP sent before it.
 - `Progress` precedes `Terminal`.
-- `Session::Down` ends every in-flight request with `Unknown(DeliveryUnknown)`.
+- Every request gets exactly one terminal, also across a session loss.
+  Requests submitted before `Session::Down` may be executed, and report
+  their terminal, after the next `Session::Up`.
+  - Backends that lose requests across an NCP reset (EZSP, ZNP) end the
+    in-flight ones with `Unknown(DeliveryUnknown)` at `Down`.
+  - ZRHP holds them (seamless resume, the host protocol's resync and
+    resume) and reports their real terminal after `Up`:
+    - after a resync (same NCP cookie), requests are sent again (`RETRY`)
+      or released;
+    - after an NCP restart, the ones already on the wire end
+      `Unknown(DeliveryUnknown)` (`LinkReset`), and those not sent yet are
+      executed after `Up`;
+    - a control request is executed after `Up` too, and so are the
+      requests behind it.
 - Control requests are **barriers**: nothing submitted later reaches the NCP
   before they complete. This is today's order, which the blocking app thread
   produces.
@@ -366,6 +379,11 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 - **Readiness checks unchanged.** Control requests return `LinkDown` at
   once unless `Ready` (`transport.rs:73-78`); APS is refused only when
   `Stopped` or `Incompatible` (140-142).
+- **Session loss.** The pump emits `Session::Down` when the session leaves
+  `Ready`, and `Up` once it is back (and the endpoints are registered). It
+  ends no request at `Down`: the driver holds them across a resume, as
+  before (§2.2 contract). The app routes outcomes by `RequestId` alone, so
+  terminals that come after `Down`/`Up` reach the engine as any other.
 - **Terminal mapping and counters.** `CoordTransport` (hub-app, neutral)
   counts per a pinned table that covers every branch of `transport.rs:89-133`:
 

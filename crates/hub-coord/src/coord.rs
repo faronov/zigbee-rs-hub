@@ -79,8 +79,10 @@ pub enum SessionEvent {
         /// What it can do.
         caps: Arc<Capabilities>,
     },
-    /// The session ended; every request in flight ended with
-    /// `Terminal::Unknown(CoordError::DeliveryUnknown)`.
+    /// The session ended. Requests in flight still get one terminal each:
+    /// backends that lose them across an NCP reset end them with
+    /// `Terminal::Unknown(CoordError::DeliveryUnknown)`; ZRHP holds them
+    /// and reports their real terminal after the next `Up`.
     Down,
     /// The NCP speaks no supported protocol version.
     Incompatible,

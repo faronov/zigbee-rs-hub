@@ -166,6 +166,39 @@ fn aps_confirms_are_counted_and_failures_reach_the_engine() {
     r.sim.stop();
 }
 
+/// Outcomes that come after the NCP session was lost and is back (ZRHP
+/// holds requests across a resume): a request the restarted NCP lost is
+/// counted, and the engine goes on.
+#[test]
+fn outcomes_after_an_ncp_restart_reach_the_engine() {
+    let r = rig(Store::volatile());
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    // The interview's first request is on the wire, unanswered, when the
+    // NCP restarts: its outcome is unknown.
+    r.sim.with(|s| s.stall = Some(ids::APS_DATA_REQUEST));
+    join(&r.sim);
+    let t = std::time::Instant::now();
+    while !r.sim.state().requests.iter().any(|(id, _)| *id == ids::APS_DATA_REQUEST) {
+        assert!(t.elapsed() < T);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    r.sim.with(|s| s.stall = None);
+    let resumes = r.ncp.status().resumes;
+    r.sim.reboot();
+    assert!(r.ncp.wait_status(T, |s| s.resumes > resumes));
+    assert!(app.wait(T, |s| s.aps.failed == 1), "{:?}", app.status().aps);
+    // The engine takes new requests and their outcomes after the resume.
+    let (sid, rx) = session(&app);
+    let re = call(&app, sid, &rx, 1, json!({"type": "devices/reinterview", "device": "zb:00158d0001a2b3c4"}));
+    assert_eq!(re["success"], true, "{re}");
+    assert!(app.wait(T, |s| s.aps.delivered > 0), "{:?}", app.status().aps);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 #[test]
 fn registry_survives_an_app_restart() {
     let flash: Box<dyn hub_ncp::store::Flash> = Box::new(MemFlash::new(32, 4096));

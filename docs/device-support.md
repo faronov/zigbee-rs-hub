@@ -2495,7 +2495,7 @@ top-level fields are dropped, `v` is the format version, 1):
 |---|---|
 | `id` | `[a-z0-9_-]`, 1–32; `r<N>` when `create` has none |
 | `name` | ≤ 64 bytes (default: the ID) |
-| `mode` | `single` (a trigger while a run waits in a delay is dropped: trace `already_running`), `restart` (the waiting run is cancelled, a new one starts) |
+| `mode` | `single` (a trigger while a run waits in a delay is dropped: trace `already_running`), `restart` (the waiting run is cancelled, a new one starts). A trigger (manual runs too) that comes while a run of the rule waits for the result of a `request` action (a few milliseconds, until the coordinator has done it) starts after that run goes on; beyond 16 such triggers per rule (64 for all rules) it is dropped (trace `deferred_overflow`) |
 | `max_per_min` | 1–60 runs per rule per minute (default 20); more are dropped (trace `rate_limited`) |
 
 Triggers (any of them starts a run):
@@ -2563,8 +2563,8 @@ pending delay) and traces are not persisted.
 | `automations/update` | `automation`, `rule` (the whole rule) | the rule; its waiting runs are cancelled |
 | `automations/delete` | `automation` | — |
 | `automations/enable`, `automations/disable` | `automation` | the rule |
-| `automations/run` | `automation`, `conditions` (bool, default false: skip them) | `{run, trace}`: a test run of the actions now (also of a disabled rule; no rate limit), `run` null when a guard stopped it |
-| `automations/traces` | `automation` (optional), `limit` | traces, newest first: `run`, `automation`, `time`, `trigger` (`type` and what fired: `uid`, `from`, `to`; `event_type`; `device`, `available`; `local`), `chain`, `conditions` [{`i`, `result`, `value` or `local`, `note`}], `actions` [{`i`, `type`, `result` (`ok`, `pending`, `queued`, `error` with `error`), `note`}], `result` (`running`, `done`, `error`, `cancelled`, `conditions_failed`, `already_running`, `rate_limited`, `loop`, `too_deep`, `busy`), `count` (repeats of the same outcome counted on one trace) |
+| `automations/run` | `automation`, `conditions` (bool, default false: skip them) | `{run, trace}`: a test run of the actions now (also of a disabled rule; no rate limit), `run` null when a guard stopped it; answered once the run no longer waits for the result of a `request` action |
+| `automations/traces` | `automation` (optional), `limit` | traces, newest first: `run`, `automation`, `time`, `trigger` (`type` and what fired: `uid`, `from`, `to`; `event_type`; `device`, `available`; `local`), `chain`, `conditions` [{`i`, `result`, `value` or `local`, `note`}], `actions` [{`i`, `type`, `result` (`ok`, `pending`, `queued`, `error` with `error`), `note`}], `result` (`running`, `done`, `error`, `cancelled`, `conditions_failed`, `already_running`, `rate_limited`, `loop`, `too_deep`, `busy`, `deferred_overflow`), `count` (repeats of the same outcome counted on one trace) |
 
 Events (topic `automations`): `automation_added`, `automation_updated`
 (`automation`: the rule), `automation_removed` (`automation`: the ID),
