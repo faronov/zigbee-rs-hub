@@ -25,12 +25,17 @@ jobs:
         run: |
           deps=$(cargo tree -p hub-coord -e normal --prefix none)
           if grep -E '^(zigbee-zrhp|hub-ncp|hub-store) ' <<<"$deps"; then exit 1; fi
-      - name: hub-ezsp fmt, clippy, and no ZRHP or hub-ncp dependency (ASH + EZSP core, simulated NCP)
+      - name: hub-ezsp fmt, clippy, and no ZRHP or hub-ncp dependency (ASH + EZSP core, simulated NCP, EZSP backend)
         run: |
           cargo fmt -p hub-ezsp -- --check
           cargo clippy -p hub-ezsp --all-targets --all-features -- -D warnings
           deps=$(cargo tree -p hub-ezsp -e normal --prefix none)
           if grep -E '^(zigbee-zrhp|hub-ncp) ' <<<"$deps"; then exit 1; fi
+      - name: hub-ezsp core without the backend (std only)
+        run: |
+          cargo test -p hub-ezsp --no-default-features
+          deps=$(cargo tree -p hub-ezsp --no-default-features -e normal --prefix none)
+          if [ "$(wc -l <<<"$deps")" -ne 1 ]; then echo "$deps"; exit 1; fi
       # hubctl enables `advanced`; the images without it build hub-mqtt alone.
       - name: hub-mqtt without the advanced console
         run: cargo test -p hub-mqtt

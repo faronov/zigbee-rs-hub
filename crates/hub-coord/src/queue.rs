@@ -66,6 +66,23 @@ impl EventQueue {
         true
     }
 
+    /// Worker side, never waits: appends `ev` and rings the doorbell as
+    /// [`Self::push`] does, unless the queue is full or closed (`Err(ev)`).
+    /// For workers that must keep servicing their link while the
+    /// application is behind (EZSP: ASH needs ACKs, and the host's own
+    /// not-ready flow control then holds the NCP's callbacks).
+    pub fn try_push(&self, ev: CoordEvent) -> Result<(), CoordEvent> {
+        let mut s = self.state.lock().unwrap();
+        if s.closed || s.events.len() >= self.capacity {
+            return Err(ev);
+        }
+        s.events.push_back(ev);
+        s.high_water = s.high_water.max(s.events.len());
+        drop(s);
+        self.ring();
+        Ok(())
+    }
+
     fn ring(&self) {
         if !self.rung.swap(true, Ordering::SeqCst) {
             (self.doorbell)();
@@ -182,6 +199,22 @@ mod tests {
         }
         assert!(worker.join().unwrap());
         assert_eq!(got, (0..5).map(ev).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn try_push_never_waits_and_refuses_when_full_or_closed() {
+        let (q, rings) = queue(2);
+        assert_eq!(q.try_push(ev(0)), Ok(()));
+        assert_eq!(q.try_push(ev(1)), Ok(()));
+        assert_eq!(q.try_push(ev(2)), Err(ev(2)));
+        assert_eq!(rings.load(Ordering::SeqCst), 1);
+        let mut got = Vec::new();
+        q.drain(1, |e| got.push(e));
+        assert_eq!(q.try_push(ev(2)), Ok(()));
+        q.drain(EVENT_SLOTS, |e| got.push(e));
+        assert_eq!(got, [ev(0), ev(1), ev(2)]);
+        q.close();
+        assert_eq!(q.try_push(ev(3)), Err(ev(3)));
     }
 
     #[test]

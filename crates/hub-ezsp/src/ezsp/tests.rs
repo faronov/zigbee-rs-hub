@@ -399,6 +399,344 @@ fn callbacks_round_trip_for_every_verified_version() {
     );
 }
 
+fn coordinator_commands() -> Vec<Command> {
+    vec![
+        Command::SetPolicy {
+            policy: PolicyId::TRUST_CENTER_POLICY,
+            decision: tc_policy::ALLOW_JOINS | tc_policy::ALLOW_UNSECURED_REJOINS,
+        },
+        Command::SetInitialSecurityState(InitialSecurityState {
+            bitmask: security_bitmask::HAVE_NETWORK_KEY,
+            preconfigured_key: [1; 16],
+            network_key: [2; 16],
+            network_key_sequence_number: 3,
+            preconfigured_trust_center_eui64: Eui64::from_u64(4),
+        }),
+        Command::FormNetwork(NetworkParameters {
+            extended_pan_id: [9; 8],
+            pan_id: 0x1A62,
+            radio_tx_power: 8,
+            radio_channel: 15,
+            ..NetworkParameters::default()
+        }),
+        Command::LeaveNetwork { options: 0 },
+        Command::StartScan {
+            scan_type: ScanType::ACTIVE_SCAN,
+            channel_mask: 0x07FF_F800,
+            duration: 3,
+        },
+        Command::StopScan,
+        Command::SetRadioPower { power: -4 },
+        Command::GetNeighbor { index: 1 },
+        Command::NeighborCount,
+        Command::GetRouteTableEntry { index: 2 },
+        Command::GetChildData { index: 3 },
+        Command::ReadCounters,
+        Command::ReadAndClearCounters,
+        Command::ExportKey(SecManContext::network_key()),
+        Command::GetNetworkKeyInfo,
+        Command::ImportTransientKey {
+            eui64: Eui64([0xFF; 8]),
+            key: *b"ZigBeeAlliance09",
+            flags: 0,
+        },
+        Command::ClearTransientLinkKeys,
+        Command::SetConcentrator {
+            on: true,
+            concentrator_type: concentrator::HIGH_RAM,
+            min_time: 10,
+            max_time: 60,
+            route_error_threshold: 3,
+            delivery_failure_threshold: 1,
+            max_hops: 0,
+        },
+        Command::EnergyScanRequest {
+            target: 0xFFFF,
+            channels: 1 << 20,
+            duration: 0xFE,
+            count: 0,
+        },
+        Command::GetRandomNumber,
+        Command::GetMfgToken {
+            token: MfgTokenId::BOARD_NAME,
+        },
+        Command::LookupNodeIdByEui64 {
+            eui64: Eui64::from_u64(5),
+        },
+    ]
+}
+
+#[test]
+fn coordinator_frames_round_trip_for_every_verified_version() {
+    use StatusFamily::{Ember, Ezsp};
+    for n in VERIFIED {
+        let ver = v(n);
+        for cmd in coordinator_commands() {
+            let params = cmd.encode_params(ver).unwrap();
+            assert_eq!(
+                Command::decode(cmd.frame_id(), ver, &params),
+                Ok(Some(cmd.clone())),
+                "EZSP {n} {cmd:?}"
+            );
+        }
+        let sl_ok = Status::Sl(SlStatus::OK);
+        let wide = ver.simplicity_layout();
+        let responses = vec![
+            Response::SetPolicy {
+                status: ok(ver, Ezsp),
+            },
+            Response::SetInitialSecurityState {
+                status: ok(ver, Ember),
+            },
+            Response::FormNetwork {
+                status: ok(ver, Ember),
+            },
+            Response::LeaveNetwork {
+                status: ok(ver, Ember),
+            },
+            Response::StartScan { status: sl_ok },
+            Response::StopScan {
+                status: ok(ver, Ember),
+            },
+            Response::SetRadioPower {
+                status: ok(ver, Ember),
+            },
+            Response::GetNeighbor {
+                status: ok(ver, Ember),
+                entry: NeighborTableEntry {
+                    short_id: 0x1234,
+                    average_lqi: 200,
+                    in_cost: 1,
+                    out_cost: 3,
+                    age: 2,
+                    long_id: Eui64::from_u64(7),
+                },
+            },
+            Response::NeighborCount { count: 4 },
+            Response::GetRouteTableEntry {
+                status: ok(ver, Ember),
+                entry: RouteTableEntry {
+                    destination: 0x1234,
+                    next_hop: 0x5678,
+                    status: 0,
+                    age: 1,
+                    concentrator_type: 0,
+                    route_record_state: 0,
+                },
+            },
+            Response::GetChildData {
+                status: ok(ver, Ember),
+                data: ChildData {
+                    eui64: Eui64::from_u64(8),
+                    node_type: NodeType::SLEEPY_END_DEVICE,
+                    id: 0x4321,
+                    phy: 0,
+                    power: 0,
+                    timeout: 8,
+                    remaining_timeout: 1000,
+                },
+            },
+            Response::ReadCounters {
+                values: (0..41).collect(),
+            },
+            Response::ReadAndClearCounters {
+                values: vec![7; 42],
+            },
+            Response::ExportKey {
+                status: sl_ok,
+                key: [0x5A; 16],
+                context: wide.then_some(SecManContext::network_key()),
+            },
+            Response::GetNetworkKeyInfo {
+                status: sl_ok,
+                info: NetworkKeyInfo {
+                    network_key_set: true,
+                    alternate_network_key_set: false,
+                    network_key_sequence_number: 1,
+                    alt_network_key_sequence_number: 0,
+                    network_key_frame_counter: 0x0102_0304,
+                },
+            },
+            Response::ImportTransientKey { status: sl_ok },
+            Response::ClearTransientLinkKeys,
+            Response::SetConcentrator {
+                status: ok(ver, Ember),
+            },
+            Response::EnergyScanRequest {
+                status: ok(ver, Ember),
+            },
+            Response::GetRandomNumber {
+                status: ok(ver, Ember),
+                value: 0xBEEF,
+            },
+            Response::GetMfgToken {
+                data: b"SONOFF Dongle-M\0".to_vec(),
+            },
+            Response::LookupNodeIdByEui64 {
+                status: wide.then_some(sl_ok),
+                node_id: 0xFFFE,
+            },
+        ];
+        for r in responses {
+            let bytes = r.encode_params(ver).unwrap();
+            assert_eq!(
+                Response::decode(r.frame_id(), ver, &bytes),
+                Ok(r.clone()),
+                "EZSP {n} {r:?}"
+            );
+        }
+        let callbacks = vec![
+            Callback::EnergyScanResult {
+                channel: 15,
+                max_rssi: -71,
+            },
+            Callback::NetworkFound {
+                network: ZigbeeNetwork {
+                    channel: 20,
+                    pan_id: 0x1234,
+                    extended_pan_id: [1, 2, 3, 4, 5, 6, 7, 8],
+                    allowing_join: true,
+                    stack_profile: 2,
+                    nwk_update_id: 0,
+                },
+                last_hop_lqi: 180,
+                last_hop_rssi: -60,
+            },
+            Callback::ScanComplete {
+                channel: 0,
+                status: ok(ver, Ember),
+            },
+            Callback::IncomingRouteRecord {
+                source: 0x1234,
+                source_eui64: Eui64::from_u64(9),
+                last_hop_lqi: 200,
+                last_hop_rssi: -50,
+                relays: vec![0x1111, 0x2222],
+            },
+        ];
+        for cb in callbacks {
+            let bytes = cb.encode_params(ver).unwrap();
+            assert_eq!(
+                Callback::decode(cb.frame_id(), ver, &bytes),
+                Ok(cb.clone()),
+                "EZSP {n} {cb:?}"
+            );
+        }
+    }
+}
+
+/// Byte order of the coordinator frames whose layout changes between EZSP
+/// 13 (Gecko SDK 4.4.6) and 14+ (Simplicity SDK 2024.6.0 / 2025.6.3).
+#[test]
+fn coordinator_frames_match_the_sdk_byte_order() {
+    let leave = Command::LeaveNetwork { options: 0 };
+    assert_eq!(leave.encode_params(v(13)).unwrap(), Vec::<u8>::new());
+    assert_eq!(leave.encode_params(v(14)).unwrap(), vec![0x00]);
+    assert!(matches!(
+        Command::LeaveNetwork { options: 0x20 }.encode_params(v(13)),
+        Err(EncodeError::WrongLayout(_))
+    ));
+
+    let transient = Command::ImportTransientKey {
+        eui64: Eui64([0xFF; 8]),
+        key: *b"ZigBeeAlliance09",
+        flags: 0,
+    };
+    let zb09 = "5A 69 67 42 65 65 41 6C 6C 69 61 6E 63 65 30 39";
+    assert_eq!(
+        transient.encode_params(v(13)).unwrap(),
+        hex(&format!("FF FF FF FF FF FF FF FF {zb09} 00"))
+    );
+    assert_eq!(
+        transient.encode_params(v(18)).unwrap(),
+        hex(&format!("FF FF FF FF FF FF FF FF {zb09}"))
+    );
+
+    // exportKey: the context of the network key (type 1), 18 bytes.
+    let ctx = "01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+    assert_eq!(
+        Command::ExportKey(SecManContext::network_key())
+            .encode_params(v(13))
+            .unwrap(),
+        hex(ctx)
+    );
+    let key = "5A 5A 5A 5A 5A 5A 5A 5A 5A 5A 5A 5A 5A 5A 5A 5A";
+    let export = |ver: u8| {
+        Response::decode(
+            id::EXPORT_KEY,
+            v(ver),
+            &hex(&if ver == 13 {
+                format!("{key} 00 00 00 00")
+            } else {
+                format!("00 00 00 00 {key} {ctx}")
+            }),
+        )
+        .unwrap()
+    };
+    for ver in [13, 14] {
+        assert!(
+            matches!(export(ver), Response::ExportKey { status, key, .. } if status.is_success() && key == [0x5A; 16]),
+            "EZSP {ver}"
+        );
+    }
+
+    // startScan answers sl_status_t already in EZSP 13; scanComplete's
+    // status is an EmberStatus there.
+    assert_eq!(
+        Response::decode(id::START_SCAN, v(13), &hex("00 00 00 00")),
+        Ok(Response::StartScan {
+            status: Status::Sl(SlStatus::OK)
+        })
+    );
+    assert_eq!(
+        Callback::decode(id::SCAN_COMPLETE_HANDLER, v(13), &hex("0F 00")),
+        Ok(Callback::ScanComplete {
+            channel: 15,
+            status: Status::Ember(EmberStatus::SUCCESS)
+        })
+    );
+    assert_eq!(
+        Callback::decode(id::SCAN_COMPLETE_HANDLER, v(14), &hex("0F 00 00 00 00")),
+        Ok(Callback::ScanComplete {
+            channel: 15,
+            status: Status::Sl(SlStatus::OK)
+        })
+    );
+    // lookupNodeIdByEui64: node ID only in 13, status first from 14.
+    assert_eq!(
+        Response::decode(id::LOOKUP_NODE_ID_BY_EUI64, v(13), &hex("34 12")),
+        Ok(Response::LookupNodeIdByEui64 {
+            status: None,
+            node_id: 0x1234
+        })
+    );
+    assert_eq!(
+        Response::decode(
+            id::LOOKUP_NODE_ID_BY_EUI64,
+            v(16),
+            &hex("00 00 00 00 34 12")
+        ),
+        Ok(Response::LookupNodeIdByEui64 {
+            status: Some(Status::Sl(SlStatus::OK)),
+            node_id: 0x1234
+        })
+    );
+    // Initial security state: 43 bytes, bitmask first.
+    let state = InitialSecurityState {
+        bitmask: 0x1B84,
+        ..InitialSecurityState::default()
+    };
+    let bytes = Command::SetInitialSecurityState(state)
+        .encode_params(v(13))
+        .unwrap();
+    assert_eq!((bytes.len(), &bytes[..2]), (43, &[0x84, 0x1B][..]));
+    // Counters: as many as the NCP sends (41 in 13, 42 in 18).
+    match Response::decode(id::READ_COUNTERS, v(18), &[1; 84]).unwrap() {
+        Response::ReadCounters { values } => assert_eq!(values.len(), 42),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn encode_and_decode_errors() {
     let unicast = Command::SendUnicast {

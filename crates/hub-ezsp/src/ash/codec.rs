@@ -317,6 +317,10 @@ pub enum Deframed {
     Substituted,
     /// The frame exceeded [`MAX_FRAME`] bytes and was dropped.
     TooLong,
+    /// XOFF: the peer asks us to stop transmitting (software flow control).
+    Xoff,
+    /// XON: the peer lets us transmit again.
+    Xon,
 }
 
 /// Byte-level receiver: reverses stuffing and splits frames on Flag Bytes
@@ -361,14 +365,19 @@ impl Deframer {
     ///   also clears a pending Substitute, because RST/RSTACK are sent
     ///   after a Cancel Byte to get past link noise (our reading of §4).
     /// - Substitute: the frame is dropped up to the next flag (UG101 §4).
-    /// - XON/XOFF: flow control, never frame data; ignored here.
+    /// - XON/XOFF: software flow control, never frame data (UG101 §4:
+    ///   "Resume transmission" / "Stop transmission"); reported as
+    ///   [`Deframed::Xon`] / [`Deframed::Xoff`] and otherwise transparent.
+    ///   A sender escapes 0x11 and 0x13 in frame data, so a raw one is
+    ///   always flow control, which a UART with software flow control may
+    ///   insert between any two bytes, even between an Escape Byte and the
+    ///   byte it escapes: the escape stays pending across it.
     /// - Escape: complements bit 5 of the next byte unless that byte is
     ///   reserved, in which case the escape has no effect (UG101 §4).
     /// - 0xFF between frames: wake / callback-pending signal (UG101 §4);
     ///   ignored. Inside a frame it is ordinary data.
-    // UNVERIFIED: Cancel clearing a pending Substitute, and the host
-    // dropping XON/XOFF (UG101 only says the NCP ignores them), are our
-    // reading of UG101 §4.
+    // UNVERIFIED: Cancel clearing a pending Substitute, and XON/XOFF not
+    // consuming a pending escape, are our reading of UG101 §4.
     pub fn push(&mut self, b: u8) -> Option<Deframed> {
         if self.complete {
             self.buf.clear();
@@ -403,10 +412,8 @@ impl Deframer {
                 self.substituted = true;
                 None
             }
-            XON | XOFF => {
-                self.escaped = false;
-                None
-            }
+            XON => Some(Deframed::Xon),
+            XOFF => Some(Deframed::Xoff),
             _ if self.substituted => None,
             ESCAPE => {
                 self.escaped = true;

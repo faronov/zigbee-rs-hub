@@ -9,6 +9,20 @@
 //! `getNetworkParameters`, `permitJoining`, `sendUnicast`/`Broadcast`/
 //! `Multicast` with a configurable `messageSentHandler` outcome, the
 //! multicast table, injected callbacks, ERROR and spontaneous resets.
+//!
+//! For the coordinator backend it also plays an EmberZNet trust center:
+//! policies, the initial security state, `formNetwork`/`leaveNetwork`,
+//! energy and active scans, radio power, neighbor/route/child tables,
+//! counters, security manager key export and transient keys, the
+//! concentrator, channel change (`energyScanRequest` 0xFE), random
+//! numbers, manufacturing tokens and node ID lookup. Faults beyond the
+//! UART: `messageSentHandler`s held back ([`SimNcp::hold_message_sent`]),
+//! an APS unicast limit (`APS_UNICAST_MESSAGE_COUNT` held messages, then
+//! `MAX_MESSAGE_LIMIT_REACHED`), forced buffer exhaustion
+//! ([`SimNcp::busy_sends`]), a command left unanswered
+//! ([`SimNcp::stall`]) and raw XON/XOFF bytes ([`Sim::to_host_raw`]).
+//! [`Sim::set_pace`] ties the virtual clock to real time for hosts that
+//! run on their own thread.
 
 pub mod pipe;
 
@@ -17,6 +31,8 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+use crate::ash::codec::{XOFF, XON};
 
 use crate::ash::{Ash, AshConfig, AshEvent, ResetCode};
 use crate::ezsp::command::{Callback, Command, Endpoint, Response, id};
@@ -54,6 +70,9 @@ pub struct SimConfig {
     pub boot_ms: u64,
     /// A network is stored: `networkInit` succeeds.
     pub network_formed: bool,
+    /// `networkInit` fails with ERR_FATAL (`SL_STATUS_FAIL` from EZSP 14)
+    /// whether or not a network is stored.
+    pub network_init_fails: bool,
     pub eui64: Eui64,
     pub node_id: NodeId,
     pub node_type: NodeType,
@@ -63,6 +82,29 @@ pub struct SimConfig {
     pub multicast_table_size: usize,
     /// NCP-side ASH (UG101 §7 TX_K = 5).
     pub ash: AshConfig,
+    /// The network key of the stored network.
+    pub network_key: KeyData,
+    pub network_key_sequence: u8,
+    /// `exportKey` of the network key succeeds (no Secure Vault lock).
+    pub key_exportable: bool,
+    /// `VERSION_INFO` value: build, major, minor, patch, special, type.
+    pub version_info: [u8; 7],
+    /// Manufacturing token `BOARD_NAME` (16 bytes).
+    pub board_name: [u8; 16],
+    /// Manufacturing token `STRING` (16 bytes).
+    pub mfg_string: [u8; 16],
+    /// Neighbor table (routers).
+    pub neighbors: Vec<NeighborTableEntry>,
+    /// Route table.
+    pub routes: Vec<RouteTableEntry>,
+    /// Child table.
+    pub children: Vec<ChildData>,
+    /// Maximum RSSI per channel reported by an energy scan (others: -90).
+    pub energy: Vec<(u8, i8)>,
+    /// Beacons an active scan finds.
+    pub beacons: Vec<(ZigbeeNetwork, u8, i8)>,
+    /// `readCounters` values.
+    pub counters: Vec<u16>,
 }
 
 impl Default for SimConfig {
@@ -72,6 +114,7 @@ impl Default for SimConfig {
             stack_version: StackVersion(0x8230),
             boot_ms: 0,
             network_formed: true,
+            network_init_fails: false,
             eui64: Eui64::from_u64(0x00_0B_57_FF_FE_12_34_56),
             node_id: 0x0000,
             node_type: NodeType::COORDINATOR,
@@ -94,6 +137,18 @@ impl Default for SimConfig {
                 rx_queue_frames: 4,
                 ..AshConfig::default()
             },
+            network_key: [0x4B; 16],
+            network_key_sequence: 0,
+            key_exportable: true,
+            version_info: [0x8D, 0x01, 8, 2, 3, 0, 0xAA],
+            board_name: *b"SIM-MG24\0\0\0\0\0\0\0\0",
+            mfg_string: *b"hub-ezsp sim\xFF\xFF\xFF\xFF",
+            neighbors: Vec::new(),
+            routes: Vec::new(),
+            children: Vec::new(),
+            energy: Vec::new(),
+            beacons: Vec::new(),
+            counters: (0..41).collect(),
         }
     }
 }
@@ -125,6 +180,20 @@ pub struct SimNcp {
     booting: Option<(u64, ResetCode)>,
     fault_after_response: Option<LinkFault>,
     pending_fault: Option<LinkFault>,
+    policies: BTreeMap<u8, u8>,
+    security: Option<InitialSecurityState>,
+    transient_keys: Vec<(Eui64, KeyData)>,
+    concentrator: Option<Command>,
+    /// `messageSentHandler`s held back, and whether new ones are.
+    held: Vec<Callback>,
+    holding: bool,
+    busy_sends: u32,
+    stall: Option<u16>,
+    random: u16,
+    /// Callbacks sent just before the next response.
+    early: Vec<Callback>,
+    /// The last `permitJoining` duration.
+    permit: u8,
 }
 
 fn default_config() -> BTreeMap<u8, u16> {
@@ -150,6 +219,7 @@ fn default_config() -> BTreeMap<u8, u16> {
         (ConfigId::APPLICATION_ZDO_FLAGS, 0),
         (ConfigId::BROADCAST_TABLE_SIZE, 15),
         (ConfigId::SUPPORTED_NETWORKS, 2),
+        (ConfigId::TRANSIENT_KEY_TIMEOUT_S, 300),
     ]
     .into_iter()
     .map(|(k, v)| (k.0, v))
@@ -178,6 +248,17 @@ impl SimNcp {
             booting: None,
             fault_after_response: None,
             pending_fault: None,
+            policies: BTreeMap::new(),
+            security: None,
+            transient_keys: Vec::new(),
+            concentrator: None,
+            held: Vec::new(),
+            holding: false,
+            busy_sends: 0,
+            stall: None,
+            random: 0x1234,
+            early: Vec::new(),
+            permit: 0,
         }
     }
 
@@ -225,16 +306,86 @@ impl SimNcp {
         self.dropped_callbacks
     }
 
+    /// Decision set for `policy` since the last reset.
+    pub fn policy(&self, policy: PolicyId) -> Option<u8> {
+        self.policies.get(&policy.0).copied()
+    }
+
+    /// The last `setInitialSecurityState`.
+    pub fn security_state(&self) -> Option<InitialSecurityState> {
+        self.security
+    }
+
+    /// Transient link keys imported and not cleared.
+    pub fn transient_keys(&self) -> &[(Eui64, KeyData)] {
+        &self.transient_keys
+    }
+
+    /// The duration of the last `permitJoining` (0: closed).
+    pub fn permit_joining(&self) -> u8 {
+        self.permit
+    }
+
+    /// The last `setConcentrator`.
+    pub fn concentrator(&self) -> Option<&Command> {
+        self.concentrator.as_ref()
+    }
+
+    /// The multicast table.
+    pub fn multicast_table(&self) -> &[MulticastTableEntry] {
+        &self.multicast
+    }
+
+    /// While `on`, `messageSentHandler`s are held back until
+    /// [`release_message_sent`](Self::release_message_sent).
+    pub fn hold_message_sent(&mut self, on: bool) {
+        self.holding = on;
+    }
+
+    /// `messageSentHandler`s held back now.
+    pub fn held_message_sent(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Sends up to `n` held `messageSentHandler`s, oldest first.
+    pub fn release_message_sent(&mut self, n: usize) {
+        let n = n.min(self.held.len());
+        for cb in self.held.drain(..n).collect::<Vec<_>>() {
+            self.callback(cb);
+        }
+    }
+
+    /// The next `n` send commands fail with `MAX_MESSAGE_LIMIT_REACHED`
+    /// (packet buffers exhausted).
+    pub fn busy_sends(&mut self, n: u32) {
+        self.busy_sends = n;
+    }
+
+    /// Sends `cb` right before the response to the next command (the NCP
+    /// queues a callback while it executes it).
+    pub fn callback_before_next_response(&mut self, cb: Callback) {
+        self.early.push(cb);
+    }
+
+    /// Commands with this frame ID get no response (and have no effect)
+    /// until cleared.
+    pub fn stall(&mut self, frame_id: Option<u16>) {
+        self.stall = frame_id;
+    }
+
     fn reset_ezsp(&mut self) {
         self.version = None;
         self.config = default_config();
         self.values.clear();
         self.endpoints.clear();
         self.network_up = false;
-        self.multicast
-            .iter_mut()
-            .for_each(|e| *e = MulticastTableEntry::default());
+        self.multicast = vec![MulticastTableEntry::default(); self.cfg.multicast_table_size];
         self.overflow_pending = false;
+        self.policies.clear();
+        self.transient_keys.clear();
+        self.concentrator = None;
+        self.held.clear();
+        self.permit = 0;
     }
 
     fn handle_rx(&mut self, bytes: &[u8], now: u64) {
@@ -312,6 +463,9 @@ impl SimNcp {
         }
         self.last_sequence = h.sequence;
         self.commands.push(h.frame_id);
+        if self.stall == Some(h.frame_id) {
+            return;
+        }
         if h.frame_id == id::VERSION {
             let Some(&desired) = params.first() else {
                 return;
@@ -362,6 +516,9 @@ impl SimNcp {
                 vec![],
             ),
         };
+        for cb in std::mem::take(&mut self.early) {
+            self.callback(cb);
+        }
         self.respond(h.sequence, resp);
         if let Some(fault) = self.fault_after_response.take() {
             self.pending_fault = Some(fault);
@@ -446,6 +603,10 @@ impl SimNcp {
                     Self::st(v, Ezsp, K::InvalidCall)
                 } else if let Some(slot) = self.config.get_mut(&id.0) {
                     *slot = value;
+                    if id == ConfigId::MULTICAST_TABLE_SIZE {
+                        self.multicast
+                            .resize(usize::from(value), MulticastTableEntry::default());
+                    }
                     Self::st(v, Ezsp, K::Success)
                 } else {
                     Self::st(v, Ezsp, K::InvalidId)
@@ -460,6 +621,14 @@ impl SimNcp {
                 None if id == ValueId::UART_SYNCH_CALLBACKS => Response::GetValue {
                     status: Self::st(v, Ezsp, K::Success),
                     value: vec![0],
+                },
+                None if id == ValueId::VERSION_INFO => Response::GetValue {
+                    status: Self::st(v, Ezsp, K::Success),
+                    value: self.cfg.version_info.to_vec(),
+                },
+                None if id == ValueId::EXTENDED_SECURITY_BITMASK => Response::GetValue {
+                    status: Self::st(v, Ezsp, K::Success),
+                    value: vec![0, 0],
                 },
                 None => Response::GetValue {
                     status: Self::st(v, Ezsp, K::InvalidId),
@@ -484,7 +653,11 @@ impl SimNcp {
                 Response::AddEndpoint { status }
             }
             Command::NetworkInit { .. } => {
-                if self.cfg.network_formed {
+                if self.cfg.network_init_fails {
+                    Response::NetworkInit {
+                        status: Self::ember(v, EmberStatus::ERR_FATAL),
+                    }
+                } else if self.cfg.network_formed {
                     self.network_up = true;
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, Ember, K::NetworkUp),
@@ -527,6 +700,7 @@ impl SimNcp {
             },
             Command::PermitJoining { duration } => {
                 if self.network_up {
+                    self.permit = duration;
                     let kind = if duration == 0 {
                         K::NetworkClosed
                     } else {
@@ -576,8 +750,285 @@ impl SimNcp {
             },
             Command::Nop => Response::Nop,
             Command::Raw { .. } => unreachable!("decode never yields Raw"),
+            cmd => return self.execute_coordinator(v, cmd),
         };
         (resp, callbacks)
+    }
+
+    fn ember(v: EzspVersion, s: EmberStatus) -> Status {
+        if v.uses_sl_status() {
+            Status::Sl(match s {
+                EmberStatus::SUCCESS => SlStatus::OK,
+                EmberStatus::INVALID_CALL => SlStatus::INVALID_STATE,
+                EmberStatus::NOT_JOINED => SlStatus::NOT_JOINED,
+                EmberStatus::INDEX_OUT_OF_RANGE => SlStatus::INVALID_INDEX,
+                EmberStatus::NETWORK_DOWN => SlStatus::NETWORK_DOWN,
+                _ => SlStatus::FAIL,
+            })
+        } else {
+            Status::Ember(s)
+        }
+    }
+
+    fn sl(s: SlStatus) -> Status {
+        Status::Sl(s)
+    }
+
+    /// The coordinator frames (see the module docs).
+    // UNVERIFIED: the error statuses a real NCP returns for an unused
+    // table index, a missing network or a key it will not export.
+    fn execute_coordinator(&mut self, v: EzspVersion, cmd: Command) -> (Response, Vec<Callback>) {
+        use EmberStatus as E;
+        let ok = Self::ember(v, E::SUCCESS);
+        let mut callbacks = Vec::new();
+        let resp = match cmd {
+            Command::SetPolicy { policy, decision } => {
+                self.policies.insert(policy.0, decision);
+                Response::SetPolicy {
+                    status: Self::st(v, StatusFamily::Ezsp, StatusKind::Success),
+                }
+            }
+            Command::SetInitialSecurityState(state) => {
+                self.security = Some(state);
+                Response::SetInitialSecurityState { status: ok }
+            }
+            Command::FormNetwork(p) => {
+                if self.network_up {
+                    Response::FormNetwork {
+                        status: Self::ember(v, E::INVALID_CALL),
+                    }
+                } else {
+                    self.cfg.network = p;
+                    self.cfg.network.nwk_manager_id = 0;
+                    self.cfg.network_formed = true;
+                    self.network_up = true;
+                    if let Some(sec) = self.security
+                        && sec.bitmask & security_bitmask::HAVE_NETWORK_KEY != 0
+                    {
+                        self.cfg.network_key = sec.network_key;
+                        self.cfg.network_key_sequence = sec.network_key_sequence_number;
+                    }
+                    callbacks.push(Callback::StackStatus {
+                        status: Self::st(v, StatusFamily::Ember, StatusKind::NetworkUp),
+                    });
+                    Response::FormNetwork { status: ok }
+                }
+            }
+            Command::LeaveNetwork { .. } => {
+                if self.network_up {
+                    self.network_up = false;
+                    self.cfg.network_formed = false;
+                    callbacks.push(Callback::StackStatus {
+                        status: Self::st(v, StatusFamily::Ember, StatusKind::NetworkDown),
+                    });
+                    Response::LeaveNetwork { status: ok }
+                } else {
+                    Response::LeaveNetwork {
+                        status: Self::ember(v, E::INVALID_CALL),
+                    }
+                }
+            }
+            Command::StartScan {
+                scan_type,
+                channel_mask,
+                ..
+            } => {
+                let channels = (11..=26u8).filter(|c| channel_mask & (1 << c) != 0);
+                if scan_type == ScanType::ENERGY_SCAN {
+                    for channel in channels {
+                        let max_rssi = self
+                            .cfg
+                            .energy
+                            .iter()
+                            .find(|(c, _)| *c == channel)
+                            .map_or(-90, |(_, r)| *r);
+                        callbacks.push(Callback::EnergyScanResult { channel, max_rssi });
+                    }
+                } else {
+                    for (network, lqi, rssi) in &self.cfg.beacons {
+                        if channel_mask & (1 << network.channel) != 0 {
+                            callbacks.push(Callback::NetworkFound {
+                                network: *network,
+                                last_hop_lqi: *lqi,
+                                last_hop_rssi: *rssi,
+                            });
+                        }
+                    }
+                }
+                callbacks.push(Callback::ScanComplete {
+                    channel: 0,
+                    status: ok,
+                });
+                Response::StartScan {
+                    status: Self::sl(SlStatus::OK),
+                }
+            }
+            Command::StopScan => Response::StopScan { status: ok },
+            Command::SetRadioPower { power } => {
+                self.cfg.network.radio_tx_power = power;
+                Response::SetRadioPower { status: ok }
+            }
+            Command::GetNeighbor { index } => match self.cfg.neighbors.get(usize::from(index)) {
+                Some(entry) => Response::GetNeighbor {
+                    status: ok,
+                    entry: *entry,
+                },
+                None => Response::GetNeighbor {
+                    status: Self::ember(v, E::INDEX_OUT_OF_RANGE),
+                    entry: NeighborTableEntry::default(),
+                },
+            },
+            Command::NeighborCount => Response::NeighborCount {
+                count: self.cfg.neighbors.len() as u8,
+            },
+            Command::GetRouteTableEntry { index } => {
+                match self.cfg.routes.get(usize::from(index)) {
+                    Some(entry) => Response::GetRouteTableEntry {
+                        status: ok,
+                        entry: *entry,
+                    },
+                    None => Response::GetRouteTableEntry {
+                        status: Self::ember(v, E::INDEX_OUT_OF_RANGE),
+                        entry: RouteTableEntry::default(),
+                    },
+                }
+            }
+            Command::GetChildData { index } => match self.cfg.children.get(usize::from(index)) {
+                Some(data) => Response::GetChildData {
+                    status: ok,
+                    data: *data,
+                },
+                None => Response::GetChildData {
+                    status: Self::ember(v, E::NOT_JOINED),
+                    data: ChildData::default(),
+                },
+            },
+            Command::ReadCounters => Response::ReadCounters {
+                values: self.counters(v),
+            },
+            Command::ReadAndClearCounters => {
+                let values = self.counters(v);
+                self.cfg.counters.iter_mut().for_each(|c| *c = 0);
+                Response::ReadAndClearCounters { values }
+            }
+            Command::ExportKey(context) => {
+                let found = context.core_key_type == key_type::NETWORK
+                    && self.cfg.network_formed
+                    && self.cfg.key_exportable;
+                let (status, key) = if found {
+                    (SlStatus::OK, self.cfg.network_key)
+                } else if self.cfg.network_formed && !self.cfg.key_exportable {
+                    (SlStatus::NOT_SUPPORTED, [0; 16])
+                } else {
+                    (SlStatus::NOT_FOUND, [0; 16])
+                };
+                Response::ExportKey {
+                    status: Self::sl(status),
+                    key,
+                    context: v.simplicity_layout().then_some(context),
+                }
+            }
+            Command::GetNetworkKeyInfo => Response::GetNetworkKeyInfo {
+                status: Self::sl(if self.cfg.network_formed {
+                    SlStatus::OK
+                } else {
+                    SlStatus::NOT_FOUND
+                }),
+                info: NetworkKeyInfo {
+                    network_key_set: self.cfg.network_formed,
+                    alternate_network_key_set: false,
+                    network_key_sequence_number: self.cfg.network_key_sequence,
+                    alt_network_key_sequence_number: 0,
+                    network_key_frame_counter: 0x1000,
+                },
+            },
+            Command::ImportTransientKey { eui64, key, .. } => {
+                self.transient_keys.retain(|(e, _)| *e != eui64);
+                self.transient_keys.push((eui64, key));
+                Response::ImportTransientKey {
+                    status: Self::sl(SlStatus::OK),
+                }
+            }
+            Command::ClearTransientLinkKeys => {
+                self.transient_keys.clear();
+                Response::ClearTransientLinkKeys
+            }
+            cmd @ Command::SetConcentrator { .. } => {
+                self.concentrator = Some(cmd);
+                Response::SetConcentrator { status: ok }
+            }
+            Command::EnergyScanRequest {
+                channels, duration, ..
+            } => {
+                if !self.network_up {
+                    Response::EnergyScanRequest {
+                        status: Self::ember(v, E::NETWORK_DOWN),
+                    }
+                } else {
+                    if duration == 0xFE
+                        && let Some(ch) = (11..=26u8).find(|c| channels & (1 << c) != 0)
+                    {
+                        self.cfg.network.radio_channel = ch;
+                        self.cfg.network.channels = 1 << ch;
+                        self.cfg.network.nwk_update_id =
+                            self.cfg.network.nwk_update_id.wrapping_add(1);
+                        callbacks.push(Callback::StackStatus {
+                            status: Self::st(v, StatusFamily::Ember, StatusKind::ChannelChanged),
+                        });
+                    }
+                    Response::EnergyScanRequest { status: ok }
+                }
+            }
+            Command::GetRandomNumber => {
+                self.random = self.random.wrapping_mul(25173).wrapping_add(13849);
+                Response::GetRandomNumber {
+                    status: ok,
+                    value: self.random,
+                }
+            }
+            Command::GetMfgToken { token } => Response::GetMfgToken {
+                data: match token {
+                    MfgTokenId::BOARD_NAME => self.cfg.board_name.to_vec(),
+                    MfgTokenId::STRING => self.cfg.mfg_string.to_vec(),
+                    _ => vec![0xFF, 0xFF],
+                },
+            },
+            Command::LookupNodeIdByEui64 { eui64 } => {
+                let id = self
+                    .cfg
+                    .children
+                    .iter()
+                    .find(|c| c.eui64 == eui64)
+                    .map(|c| c.id)
+                    .or_else(|| {
+                        self.cfg
+                            .neighbors
+                            .iter()
+                            .find(|n| n.long_id == eui64)
+                            .map(|n| n.short_id)
+                    });
+                Response::LookupNodeIdByEui64 {
+                    status: v.simplicity_layout().then(|| {
+                        Self::sl(if id.is_some() {
+                            SlStatus::OK
+                        } else {
+                            SlStatus::NOT_FOUND
+                        })
+                    }),
+                    node_id: id.unwrap_or(0xFFFE),
+                }
+            }
+            _ => unreachable!("core frames are executed by `execute`"),
+        };
+        (resp, callbacks)
+    }
+
+    /// 41 counters (`EMBER_COUNTER_TYPE_COUNT`) up to EZSP 16, 42 from 17.
+    fn counters(&self, v: EzspVersion) -> Vec<u16> {
+        let n = if v.get() >= 17 { 42 } else { 41 };
+        let mut c = self.cfg.counters.clone();
+        c.resize(n, 0);
+        c
     }
 
     fn send(&mut self, v: EzspVersion, cmd: Command) -> (Response, Vec<Callback>) {
@@ -639,40 +1090,47 @@ impl SimNcp {
             ),
             _ => unreachable!("only send commands"),
         };
-        if !self.network_up {
-            let resp = match resp {
+        let refuse = |resp: Response, status: Status| -> Response {
+            match resp {
                 Response::SendUnicast { .. } => Response::SendUnicast {
-                    status: down,
+                    status,
                     sequence: 0,
                 },
                 Response::SendBroadcast { .. } => Response::SendBroadcast {
-                    status: down,
+                    status,
                     sequence: 0,
                 },
                 _ => Response::SendMulticast {
-                    status: down,
+                    status,
                     sequence: 0,
                 },
-            };
-            return (resp, vec![]);
+            }
+        };
+        if !self.network_up {
+            return (refuse(resp, down), vec![]);
         }
         if len > usize::from(self.cfg.max_payload) {
             let too_long = Self::st(v, Ember, K::MessageTooLong);
-            let resp = match resp {
-                Response::SendUnicast { .. } => Response::SendUnicast {
-                    status: too_long,
-                    sequence: 0,
-                },
-                Response::SendBroadcast { .. } => Response::SendBroadcast {
-                    status: too_long,
-                    sequence: 0,
-                },
-                _ => Response::SendMulticast {
-                    status: too_long,
-                    sequence: 0,
-                },
-            };
-            return (resp, vec![]);
+            return (refuse(resp, too_long), vec![]);
+        }
+        // Packet buffers exhausted, or every APS unicast slot waits for
+        // its messageSentHandler (`APS_UNICAST_MESSAGE_COUNT`).
+        let slots = self
+            .configuration(ConfigId::APS_UNICAST_MESSAGE_COUNT)
+            .unwrap_or(10);
+        let waiting = self
+            .held
+            .iter()
+            .filter(|c| {
+                matches!(c, Callback::MessageSent { kind, aps, .. }
+                    if *kind == OutgoingMessageType::DIRECT && aps.options.contains(ApsOptions::RETRY))
+            })
+            .count();
+        let retried = matches!(&cmd, Command::SendUnicast { aps, .. } if aps.options.contains(ApsOptions::RETRY));
+        if self.busy_sends > 0 || (retried && waiting >= usize::from(slots)) {
+            self.busy_sends = self.busy_sends.saturating_sub(1);
+            let busy = Self::st(v, Ember, K::MaxMessageLimitReached);
+            return (refuse(resp, busy), vec![]);
         }
         self.aps_sequence = self.aps_sequence.wrapping_add(1);
         aps.sequence = sequence;
@@ -698,6 +1156,10 @@ impl SimNcp {
             tag,
             message: vec![],
         };
+        if self.holding {
+            self.held.push(cb);
+            return (resp, vec![]);
+        }
         (resp, vec![cb])
     }
 
@@ -742,6 +1204,8 @@ impl SimNcp {
 #[derive(Debug)]
 struct World {
     now: Arc<AtomicU64>,
+    /// Virtual milliseconds per real millisecond while the host waits.
+    pace: Option<u64>,
     ncp: SimNcp,
     to_ncp: Pipe,
     to_host: Pipe,
@@ -832,6 +1296,7 @@ impl Sim {
         let now = Arc::new(AtomicU64::new(0));
         let world = World {
             now: now.clone(),
+            pace: None,
             ncp: SimNcp::new(cfg),
             to_ncp: Pipe::new(faults),
             to_host: Pipe::new(Faults {
@@ -864,6 +1329,33 @@ impl Sim {
             seed: faults.seed ^ 0x5EED_5EED_5EED_5EED,
             ..faults
         });
+    }
+
+    /// Ties the virtual clock to real time while the host waits for input:
+    /// at most `virtual_ms_per_real_ms` virtual milliseconds pass per real
+    /// millisecond (`None`: the clock jumps to the next event, the
+    /// default). For hosts that run on a thread of their own, so that
+    /// tests can act between their reads.
+    pub fn set_pace(&self, virtual_ms_per_real_ms: Option<u64>) {
+        lock(&self.world).pace = virtual_ms_per_real_ms.map(|p| p.max(1));
+    }
+
+    /// Sends raw bytes to the host now, in order with the NCP's frames
+    /// and without faults.
+    pub fn to_host_raw(&self, bytes: &[u8]) {
+        let mut w = lock(&self.world);
+        let now = w.now();
+        w.to_host.push_raw(bytes, now);
+    }
+
+    /// The NCP's UART sends XOFF (software flow control, UG101 §4).
+    pub fn xoff(&self) {
+        self.to_host_raw(&[XOFF]);
+    }
+
+    /// The NCP's UART sends XON.
+    pub fn xon(&self) {
+        self.to_host_raw(&[XON]);
     }
 
     /// One-shot fault on the next host → NCP frame.
@@ -940,7 +1432,17 @@ impl Transport for SimTransport {
                 return Ok(0);
             }
             let next = w.next_event().unwrap_or(deadline).clamp(now + 1, deadline);
-            w.now.store(next, Ordering::SeqCst);
+            match w.pace {
+                None => w.now.store(next, Ordering::SeqCst),
+                Some(pace) => {
+                    let next = next.min(now + pace);
+                    drop(w);
+                    std::thread::sleep(Duration::from_millis(1));
+                    w = lock(&self.world);
+                    // Never backwards: a test may have advanced it meanwhile.
+                    w.now.fetch_max(next, Ordering::SeqCst);
+                }
+            }
         }
     }
 }

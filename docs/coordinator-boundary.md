@@ -89,7 +89,8 @@ pub enum Terminal {                       // exactly one per RequestId
 pub enum CoordEvent {                     // large variants boxed: bounded slots are preallocated
     Session(Box<SessionEvent>),           // Up{epoch, info, caps: Arc<Capabilities>} | Down | Incompatible
     Ownership(Box<NetworkOwnership>), NetworkState(NetState), PermitJoin { remaining_s: u32 },
-    Indication(ApsIndication), DeviceJoined { ieee: u64, nwk: u16 }, Gp(Box<GpEvent>),
+    Indication(ApsIndication), DeviceJoined { ieee: u64, nwk: u16 },
+    DeviceLeft { ieee: u64, nwk: u16, rejoin: Option<bool> }, Gp(Box<GpEvent>),
     Progress { id: RequestId, p: Progress }, Done { id: RequestId, t: Terminal },
     ScanProgress { scan: u8, done: u8, total: u8 }, Dropped { events: u32 },
 }
@@ -529,22 +530,33 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 
 ## 5. EZSP and ZNP mapping (validates the abstraction)
 
-The names are assumed: they come from UG100 (EZSP) and UG101 (ASH), and
-TI's ZNP/MT interface specification. Pin them per firmware version.
+The ZNP names are assumed: they come from TI's ZNP/MT interface
+specification; pin them per firmware version. The EZSP column is
+**pinned for EZSP 13 (EmberZNet 7.4.x, Gecko SDK 4.4.5/4.4.6, the
+SONOFF Dongle Max NCP)** and checked for 14–18: frame IDs and layouts from
+the SDK headers (Gecko SDK 4.4.6, Simplicity SDK 2024.6.0/2025.6.3
+`ezsp-enum.h`, `command-functions.h`, `ezsp-frame-utilities.{c,h}`), the
+semantics from UG100/UG101. On a Dongle Max (stock 7.4.5 NCP) the ASH
+reset, the EZSP 13 negotiation, `VERSION_INFO`, the EUI64, the
+manufacturing tokens and `networkInit` NOT_JOINED are confirmed (see
+`docs/ezsp-backend.md`); other behaviour against a real NCP is not verified
+yet (host tests against the simulated NCP; HIL on the Dongle Max is a
+follow-up). Implemented in `hub_ezsp::coord` (EZSP backend PR); details and
+choices: `docs/ezsp-backend.md`.
 
 | Boundary | EZSP/ASH (EmberZNet) | ZNP/MT (Z-Stack) |
 |---|---|---|
-| APS submit / `Accepted` | `sendUnicast`/`sendMulticast`/`sendBroadcast`, `EmberApsFrame`, `messageTag` ↔ RequestId | `AF_DATA_REQUEST(_EXT)`, `TransID` ↔ RequestId; SRSP |
-| Terminal | `messageSentHandler(tag, status)`: success = delivered only for ACKed unicast, else `Sent` | `AF_DATA_CONFIRM(endpoint, TransID, status)`; none if the SRSP failed |
-| Busy / in-flight | `EMBER_MAX_MESSAGE_LIMIT_REACHED`; `EZSP_CONFIG_APS_UNICAST_MESSAGE_COUNT`, broadcast table separately | no capacity report: fixed per pinned firmware |
-| Max ASDU | `maximumPayloadLength` | AF limit; `_EXT` for larger |
-| Indications, joins | `incomingMessageHandler`, `trustCenterJoinHandler`, `childJoinHandler` | `AF_INCOMING_MSG`, `ZDO_TC_DEV_IND`, `ZDO_END_DEVICE_ANNCE_IND` |
-| Session epoch | ASH RSTACK / `stackStatusHandler` | `SYS_RESET_IND`, `ZDO_STATE_CHANGE_IND` |
-| Endpoints | `addEndpoint` before `networkInit` | `AF_REGISTER` after reset (duplicate = success) |
-| Groups | `setMulticastTableEntry` (RAM: replay after reset) | `ZDO_EXT_ADD_GROUP` (NV: duplicates on resync) |
-| Ownership | `NcpNv` (NVM3 tokens; `networkInit`) | `NcpNv` (`ZCD_NV_*`) |
-| Backup | `getNetworkParameters`, version-dependent key export, key/child tables | NV reads of NIB, keys, TCLK table |
-| Firmware update | `launchStandaloneBootloader` + XMODEM GBL | TI ROM BSL (reset + backdoor lines) |
+| APS submit / `Accepted` | **pinned:** `sendUnicast` 0x0034 / `sendMulticast` 0x0038 / `sendBroadcast` 0x0036, `EmberApsFrame` (11 bytes), `messageTag` (u8 in 13, u16 from 14) ↔ RequestId; the send response is `Accepted` | `AF_DATA_REQUEST(_EXT)`, `TransID` ↔ RequestId; SRSP |
+| Terminal | **pinned:** `messageSentHandler` 0x003F (status last in 13, first from 14): success = `Delivered` only for a unicast with APS `RETRY`, else `Sent`; `DELIVERY_FAILED` → `NotDelivered(NoAck)` | `AF_DATA_CONFIRM(endpoint, TransID, status)`; none if the SRSP failed |
+| Busy / in-flight | **pinned:** `MAX_MESSAGE_LIMIT_REACHED` (0x72; `sl_status` 0x0C03 from 14), `NO_BUFFERS`, `NETWORK_BUSY` → `Refused(Busy)`; `EZSP_CONFIG_APS_UNICAST_MESSAGE_COUNT` (0x03, set to 32) = `max_in_flight`, excess waits in the worker FIFO | no capacity report: fixed per pinned firmware |
+| Max ASDU | **pinned:** `maximumPayloadLength` 0x0033 after NETWORK_UP | AF limit; `_EXT` for larger |
+| Indications, joins | **pinned:** `incomingMessageHandler` 0x0045 (separate fields in 13, `rx_packet_info` from 14; loopbacks dropped), `trustCenterJoinHandler` 0x0024 (`trustCenterPostJoinHandler` from 14, same layout) → `DeviceJoined`, DEVICE_LEFT → `DeviceLeft { rejoin: None }` (hub-app logs it until PR H), `childJoinHandler` 0x0023 | `AF_INCOMING_MSG`, `ZDO_TC_DEV_IND`, `ZDO_END_DEVICE_ANNCE_IND` |
+| Session epoch | **pinned:** every session starts with an ASH reset; an unprompted RSTACK or ERROR ends it (UG101 §5, §6); epoch = a counter per session; `stackStatusHandler` 0x0019 reports the network | `SYS_RESET_IND`, `ZDO_STATE_CHANGE_IND` |
+| Endpoints | **pinned:** `addEndpoint` 0x0002 before `networkInit` 0x0017, in every session | `AF_REGISTER` after reset (duplicate = success) |
+| Groups | **pinned:** `setMulticastTableEntry` 0x0064; the table is written again in every session (RAM on the NCP; assumed, the replay is harmless either way) | `ZDO_EXT_ADD_GROUP` (NV: duplicates on resync) |
+| Ownership | **pinned:** `NcpNv` (`networkInit`: the NCP resumes its network or answers `NOT_JOINED`); identity = `getNetworkParameters` + `getNetworkKeyInfo` 0x0116 + security manager `exportKey` 0x0114 (key ID; `None` when the key is not exportable: EPID-only match) | `NcpNv` (`ZCD_NV_*`) |
+| Backup | follow-up: `exportKey` 0x0114 (13: `key, status`; 14+: `status, key, context`) for the network key and the hashed TC link key root, `exportLinkKeyByIndex` 0x010F, `getNetworkKeyInfo`, child table; restore through `setInitialSecurityState` + `NO_FRAME_COUNTER_RESET`, `importLinkKey` 0x010E, frame counter values | NV reads of NIB, keys, TCLK table |
+| Firmware update | follow-up: `launchStandaloneBootloader` 0x008F + XMODEM GBL | TI ROM BSL (reset + backdoor lines) |
 
 **Conclusions:**
 - Both protocols are serialized command/response with asynchronous
@@ -641,5 +653,7 @@ C and B can land in parallel with #55. F conflicts with #55's `hub.rs` and
    or gate it behind a feature?
 9. **RAM:** approve the internal-RAM budget for the pump stack and the
    preallocated event slots; measure the high-water mark on hardware.
-10. **EZSP/ZNP facts:** all capacities and commands in §5 stay *assumed*
-    until the supported firmware versions are pinned.
+10. **EZSP/ZNP facts:** the EZSP commands and layouts of §5 are pinned
+    for EZSP 13–18 from the SDK headers; their behaviour on a real NCP
+    (callback timing, capacities, key export under Secure Vault) waits for
+    HIL on the Dongle Max. The ZNP column stays *assumed*.

@@ -33,6 +33,17 @@ pub enum CoordEvent {
         /// Short address.
         nwk: u16,
     },
+    /// A device left the network (the trust center or the NCP reported
+    /// it).
+    DeviceLeft {
+        /// IEEE.
+        ieee: u64,
+        /// Short address it had (0xFFFF when unknown).
+        nwk: u16,
+        /// Whether it announced a rejoin; `None` when the backend does not
+        /// know (EZSP's trust center reports a leave without it).
+        rejoin: Option<bool>,
+    },
     /// Green Power event.
     Gp(Box<GpEvent>),
     /// [`Progress`] of a request.

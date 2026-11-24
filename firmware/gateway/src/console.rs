@@ -46,6 +46,18 @@ zigbee-rs-hub gateway console (board bring-up: no coordinator backend yet):\r
 
 static PORT: OnceLock<Console> = OnceLock::new();
 
+/// Route UART0 back to its default pins (TX GPIO1, RX GPIO3, the CP2102N).
+/// SONOFF's stock bootloader, which stays in place, leaves the console off
+/// those pins, so without this the application's console is silent and
+/// deaf. Call before anything logs.
+pub fn route(console: Console) {
+    if console == Console::Uart0 {
+        unsafe {
+            sys::uart_set_pin(0, 1, 3, -1, -1);
+        }
+    }
+}
+
 /// Install the console driver and route stdout through it.
 pub fn init(console: Console) {
     let _ = PORT.set(console);

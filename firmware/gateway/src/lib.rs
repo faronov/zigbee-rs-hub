@@ -78,6 +78,7 @@ pub fn run(profile: &'static BoardProfile) -> ! {
     esp_idf_svc::sys::link_patches();
     // First: NCP lines released (GPIO12 low on the Dongle-M).
     let early = lines::init(profile);
+    console::route(profile.console);
     alloc::init();
     cpanic::count_boot();
     esp_idf_svc::log::EspLogger::initialize_default();

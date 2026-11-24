@@ -1185,6 +1185,10 @@ dependencies = [
 [[package]]
 name = "hub-ezsp"
 version = "0.1.0"
+dependencies = [
+ "hub-coord",
+ "log",
+]
 
 [[package]]
 name = "hub-mqtt"

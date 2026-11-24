@@ -111,9 +111,11 @@ code_type! {
         NETWORK_OPENED = 0x9C,
         NETWORK_CLOSED = 0x9D,
         NETWORK_BUSY = 0xA1,
+        SECURITY_STATE_NOT_SET = 0xA8,
         NO_BEACONS = 0xAB,
         STACK_AND_HARDWARE_MISMATCH = 0xB0,
         INDEX_OUT_OF_RANGE = 0xB1,
+        KEY_INVALID = 0xB2,
         TABLE_FULL = 0xB4,
     }
 }
@@ -129,6 +131,8 @@ code_type! {
         NOT_READY = 0x0003,
         BUSY = 0x0004,
         TIMEOUT = 0x0007,
+        NOT_AVAILABLE = 0x000E,
+        NOT_SUPPORTED = 0x000F,
         NETWORK_UP = 0x0015,
         NETWORK_DOWN = 0x0016,
         NOT_JOINED = 0x0017,
@@ -137,6 +141,7 @@ code_type! {
         INVALID_PARAMETER = 0x0021,
         INVALID_CONFIGURATION = 0x0023,
         INVALID_INDEX = 0x0027,
+        INVALID_KEY = 0x0029,
         NOT_FOUND = 0x002D,
         ALREADY_EXISTS = 0x002E,
         MESSAGE_TOO_LONG = 0x0038,
@@ -160,6 +165,10 @@ pub enum StatusFamily {
     Ezsp,
     /// `EmberStatus`: stack calls.
     Ember,
+    /// `sl_status_t` already in EZSP 13: `startScan` and the security
+    /// manager frames (`exportKey`, `importTransientKey`,
+    /// `getNetworkKeyInfo`; Gecko SDK 4.4.6 `command-functions.h`).
+    Sl,
 }
 
 /// A status as received, typed by the negotiated version.
@@ -182,6 +191,7 @@ pub enum StatusKind {
     NotJoined,
     NetworkOpened,
     NetworkClosed,
+    ChannelChanged,
     DeliveryFailed,
     MaxMessageLimitReached,
     MessageTooLong,
@@ -203,12 +213,13 @@ impl Status {
         v: EzspVersion,
         family: StatusFamily,
     ) -> Result<Status, DecodeError> {
-        Ok(if v.uses_sl_status() {
+        Ok(if v.uses_sl_status() || family == StatusFamily::Sl {
             Status::Sl(SlStatus(r.u32()?))
         } else {
             match family {
                 StatusFamily::Ezsp => Status::Ezsp(EzspStatus(r.u8()?)),
                 StatusFamily::Ember => Status::Ember(EmberStatus(r.u8()?)),
+                StatusFamily::Sl => unreachable!("read as sl_status_t above"),
             }
         })
     }
@@ -228,6 +239,7 @@ impl Status {
         matches!(
             (self, v.uses_sl_status(), family),
             (Status::Sl(_), true, _)
+                | (Status::Sl(_), _, StatusFamily::Sl)
                 | (Status::Ezsp(_), false, StatusFamily::Ezsp)
                 | (Status::Ember(_), false, StatusFamily::Ember)
         )
@@ -241,7 +253,7 @@ impl Status {
     // EZSP ≥ 14 (the SDK host keeps it in a host-side "last status").
     pub fn for_version(v: EzspVersion, family: StatusFamily, kind: StatusKind) -> Option<Status> {
         use StatusKind as K;
-        if v.uses_sl_status() {
+        if v.uses_sl_status() || family == StatusFamily::Sl {
             let s = match kind {
                 K::Success => SlStatus::OK,
                 K::NetworkUp => SlStatus::NETWORK_UP,
@@ -249,6 +261,7 @@ impl Status {
                 K::NotJoined => SlStatus::NOT_JOINED,
                 K::NetworkOpened => SlStatus::ZIGBEE_NETWORK_OPENED,
                 K::NetworkClosed => SlStatus::ZIGBEE_NETWORK_CLOSED,
+                K::ChannelChanged => SlStatus::ZIGBEE_CHANNEL_CHANGED,
                 K::DeliveryFailed => SlStatus::ZIGBEE_DELIVERY_FAILED,
                 K::MaxMessageLimitReached => SlStatus::ZIGBEE_MAX_MESSAGE_LIMIT_REACHED,
                 K::MessageTooLong => SlStatus::MESSAGE_TOO_LONG,
@@ -279,6 +292,7 @@ impl Status {
                     K::NotJoined => EmberStatus::NOT_JOINED,
                     K::NetworkOpened => EmberStatus::NETWORK_OPENED,
                     K::NetworkClosed => EmberStatus::NETWORK_CLOSED,
+                    K::ChannelChanged => EmberStatus::CHANNEL_CHANGED,
                     K::DeliveryFailed => EmberStatus::DELIVERY_FAILED,
                     K::MaxMessageLimitReached => EmberStatus::MAX_MESSAGE_LIMIT_REACHED,
                     K::MessageTooLong => EmberStatus::MESSAGE_TOO_LONG,
@@ -287,6 +301,7 @@ impl Status {
                 };
                 Some(Status::Ember(s))
             }
+            StatusFamily::Sl => unreachable!("handled above"),
         }
     }
 
@@ -309,6 +324,7 @@ impl Status {
                 EmberStatus::NOT_JOINED => K::NotJoined,
                 EmberStatus::NETWORK_OPENED => K::NetworkOpened,
                 EmberStatus::NETWORK_CLOSED => K::NetworkClosed,
+                EmberStatus::CHANNEL_CHANGED => K::ChannelChanged,
                 EmberStatus::DELIVERY_FAILED => K::DeliveryFailed,
                 EmberStatus::MAX_MESSAGE_LIMIT_REACHED => K::MaxMessageLimitReached,
                 EmberStatus::MESSAGE_TOO_LONG => K::MessageTooLong,
@@ -322,6 +338,7 @@ impl Status {
                 SlStatus::NOT_JOINED => K::NotJoined,
                 SlStatus::ZIGBEE_NETWORK_OPENED => K::NetworkOpened,
                 SlStatus::ZIGBEE_NETWORK_CLOSED => K::NetworkClosed,
+                SlStatus::ZIGBEE_CHANNEL_CHANGED => K::ChannelChanged,
                 SlStatus::ZIGBEE_DELIVERY_FAILED => K::DeliveryFailed,
                 SlStatus::ZIGBEE_MAX_MESSAGE_LIMIT_REACHED => K::MaxMessageLimitReached,
                 SlStatus::MESSAGE_TOO_LONG => K::MessageTooLong,
@@ -376,6 +393,9 @@ code_type! {
         APPLICATION_ZDO_FLAGS = 0x2A,
         BROADCAST_TABLE_SIZE = 0x2B,
         SUPPORTED_NETWORKS = 0x2D,
+        TRANSIENT_KEY_TIMEOUT_S = 0x36,
+        GP_PROXY_TABLE_SIZE = 0x41,
+        GP_SINK_TABLE_SIZE = 0x42,
     }
 }
 
@@ -383,11 +403,14 @@ code_type! {
     /// `EzspValueId` / `sl_zigbee_ezsp_value_id_t` (u8); the IDs used by
     /// the core stage (same values in EZSP 13–18).
     ValueId(u8) {
+        FREE_BUFFERS = 0x03,
         UART_SYNCH_CALLBACKS = 0x04,
         MAXIMUM_INCOMING_TRANSFER_SIZE = 0x05,
         MAXIMUM_OUTGOING_TRANSFER_SIZE = 0x06,
         STACK_TOKEN_WRITING = 0x07,
+        EXTENDED_SECURITY_BITMASK = 0x0A,
         VERSION_INFO = 0x11,
+        TRANSIENT_KEY_TIMEOUT_S = 0x3B,
     }
 }
 
@@ -677,4 +700,384 @@ pub struct RxPacketInfo {
     pub last_hop_rssi: i8,
     /// EZSP ≥ 14 only: SFD timestamp.
     pub last_hop_timestamp: Option<u32>,
+}
+
+code_type! {
+    /// `EzspPolicyId` (u8), same values in EZSP 13–18 (`ezsp-enum.h`).
+    PolicyId(u8) {
+        TRUST_CENTER_POLICY = 0x00,
+        BINDING_MODIFICATION_POLICY = 0x01,
+        UNICAST_REPLIES_POLICY = 0x02,
+        POLL_HANDLER_POLICY = 0x03,
+        MESSAGE_CONTENTS_IN_CALLBACK_POLICY = 0x04,
+        TC_KEY_REQUEST_POLICY = 0x05,
+        APP_KEY_REQUEST_POLICY = 0x06,
+        PACKET_VALIDATE_LIBRARY_POLICY = 0x07,
+        ZLL_POLICY = 0x08,
+        TC_REJOINS_USING_WELL_KNOWN_KEY_POLICY = 0x09,
+    }
+}
+
+code_type! {
+    /// `EzspDecisionId` (u8) of the policies other than the trust center
+    /// policy, which takes a [`tc_policy`] bitmask (`EzspDecisionBitmask`,
+    /// sent as one byte by `setPolicy`). Same values in EZSP 13–18.
+    DecisionId(u8) {
+        DISALLOW_BINDING_MODIFICATION = 0x10,
+        ALLOW_BINDING_MODIFICATION = 0x11,
+        CHECK_BINDING_MODIFICATIONS_ARE_VALID_ENDPOINT_CLUSTERS = 0x12,
+        HOST_WILL_NOT_SUPPLY_REPLY = 0x20,
+        HOST_WILL_SUPPLY_REPLY = 0x21,
+        POLL_HANDLER_IGNORE = 0x30,
+        POLL_HANDLER_CALLBACK = 0x31,
+        MESSAGE_TAG_ONLY_IN_CALLBACK = 0x40,
+        MESSAGE_TAG_AND_CONTENTS_IN_CALLBACK = 0x41,
+        DENY_TC_KEY_REQUESTS = 0x50,
+        ALLOW_TC_KEY_REQUESTS_AND_SEND_CURRENT_KEY = 0x51,
+        ALLOW_TC_KEY_REQUEST_AND_GENERATE_NEW_KEY = 0x52,
+        DENY_APP_KEY_REQUESTS = 0x60,
+        ALLOW_APP_KEY_REQUESTS = 0x61,
+        PACKET_VALIDATE_LIBRARY_CHECKS_ENABLED = 0x62,
+        PACKET_VALIDATE_LIBRARY_CHECKS_DISABLED = 0x63,
+    }
+}
+
+/// `EzspDecisionBitmask` of the trust center policy (Gecko SDK 4.4.6
+/// `ezsp-enum.h`; the same in Simplicity SDK 2024.6–2025.6).
+pub mod tc_policy {
+    /// No joins, no unsecured rejoins.
+    pub const DEFAULT_CONFIGURATION: u8 = 0x00;
+    /// Send the network key to joining devices.
+    pub const ALLOW_JOINS: u8 = 0x01;
+    /// Send the network key to devices rejoining unsecured (trust center
+    /// rejoin).
+    pub const ALLOW_UNSECURED_REJOINS: u8 = 0x02;
+    /// Send the network key in the clear.
+    pub const SEND_KEY_IN_CLEAR: u8 = 0x04;
+    /// Ignore unsecured rejoins.
+    pub const IGNORE_UNSECURED_REJOINS: u8 = 0x08;
+    /// Joins must use an install-code key.
+    pub const JOINS_USE_INSTALL_CODE_KEY: u8 = 0x10;
+    /// Defer joins.
+    pub const DEFER_JOINS: u8 = 0x20;
+}
+
+/// `EmberInitialSecurityBitmask` (u16, Gecko SDK 4.4.6 `ember-types.h`;
+/// `sl_zigbee_initial_security_bitmask_t` keeps the values).
+pub mod security_bitmask {
+    pub const DISTRIBUTED_TRUST_CENTER_MODE: u16 = 0x0002;
+    pub const TRUST_CENTER_GLOBAL_LINK_KEY: u16 = 0x0004;
+    pub const PRECONFIGURED_NETWORK_KEY_MODE: u16 = 0x0008;
+    pub const HAVE_TRUST_CENTER_EUI64: u16 = 0x0040;
+    /// `preconfiguredKey` is a root key hashed with each device's EUI64.
+    pub const TRUST_CENTER_USES_HASHED_LINK_KEY: u16 = 0x0084;
+    pub const HAVE_PRECONFIGURED_KEY: u16 = 0x0100;
+    pub const HAVE_NETWORK_KEY: u16 = 0x0200;
+    pub const GET_LINK_KEY_WHEN_JOINING: u16 = 0x0400;
+    pub const REQUIRE_ENCRYPTED_KEY: u16 = 0x0800;
+    pub const NO_FRAME_COUNTER_RESET: u16 = 0x1000;
+}
+
+/// `EmberExtendedSecurityBitmask` (u16, Gecko SDK 4.4.6 `ember-types.h`),
+/// the value [`ValueId::EXTENDED_SECURITY_BITMASK`].
+pub mod extended_security_bitmask {
+    pub const SECURE_NETWORK_KEY_ROTATION: u16 = 0x0002;
+    pub const JOINER_GLOBAL_LINK_KEY: u16 = 0x0010;
+    pub const EXT_NO_FRAME_COUNTER_RESET: u16 = 0x0020;
+    /// The trust center ignores NWK leave requests.
+    pub const NWK_LEAVE_REQUEST_NOT_ALLOWED: u16 = 0x0100;
+}
+
+/// `EmberZdoConfigurationFlags` (u8), the configuration value
+/// [`ConfigId::APPLICATION_ZDO_FLAGS`].
+pub mod zdo_flags {
+    pub const APP_RECEIVES_SUPPORTED_ZDO_REQUESTS: u16 = 0x01;
+    pub const APP_HANDLES_UNSUPPORTED_ZDO_REQUESTS: u16 = 0x02;
+    pub const APP_HANDLES_ZDO_ENDPOINT_REQUESTS: u16 = 0x04;
+    pub const APP_HANDLES_ZDO_BINDING_REQUESTS: u16 = 0x08;
+}
+
+/// Concentrator types of `setConcentrator` (`ember-types.h`).
+pub mod concentrator {
+    pub const LOW_RAM: u16 = 0xFFF8;
+    pub const HIGH_RAM: u16 = 0xFFF9;
+}
+
+code_type! {
+    /// `EzspNetworkScanType` (u8).
+    ScanType(u8) {
+        ENERGY_SCAN = 0x00,
+        ACTIVE_SCAN = 0x01,
+    }
+}
+
+code_type! {
+    /// `EzspMfgTokenId` (u8); the string tokens.
+    MfgTokenId(u8) {
+        CUSTOM_VERSION = 0x00,
+        STRING = 0x01,
+        BOARD_NAME = 0x02,
+        MANUF_ID = 0x03,
+    }
+}
+
+/// `EmberKeyData`: 16 bytes.
+pub type KeyData = [u8; 16];
+
+/// `EmberInitialSecurityState` / `sl_zigbee_initial_security_state_t`:
+/// 43 bytes, same layout in EZSP 13–18 (`ezsp-frame-utilities.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InitialSecurityState {
+    /// [`security_bitmask`] bits.
+    pub bitmask: u16,
+    /// The trust center's global link key, or with
+    /// [`security_bitmask::TRUST_CENTER_USES_HASHED_LINK_KEY`] the root key
+    /// it hashes per device.
+    pub preconfigured_key: KeyData,
+    pub network_key: KeyData,
+    pub network_key_sequence_number: u8,
+    pub preconfigured_trust_center_eui64: Eui64,
+}
+
+impl InitialSecurityState {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u16(self.bitmask);
+        w.bytes(&self.preconfigured_key);
+        w.bytes(&self.network_key);
+        w.u8(self.network_key_sequence_number);
+        w.bytes(&self.preconfigured_trust_center_eui64.0);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<InitialSecurityState, DecodeError> {
+        Ok(InitialSecurityState {
+            bitmask: r.u16()?,
+            preconfigured_key: r.array()?,
+            network_key: r.array()?,
+            network_key_sequence_number: r.u8()?,
+            preconfigured_trust_center_eui64: Eui64(r.array()?),
+        })
+    }
+}
+
+/// `EmberZigbeeNetwork` of networkFoundHandler: 14 bytes, same layout in
+/// EZSP 13–18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ZigbeeNetwork {
+    pub channel: u8,
+    pub pan_id: u16,
+    pub extended_pan_id: [u8; 8],
+    pub allowing_join: bool,
+    pub stack_profile: u8,
+    pub nwk_update_id: u8,
+}
+
+impl ZigbeeNetwork {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u8(self.channel);
+        w.u16(self.pan_id);
+        w.bytes(&self.extended_pan_id);
+        w.bool(self.allowing_join);
+        w.u8(self.stack_profile);
+        w.u8(self.nwk_update_id);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<ZigbeeNetwork, DecodeError> {
+        Ok(ZigbeeNetwork {
+            channel: r.u8()?,
+            pan_id: r.u16()?,
+            extended_pan_id: r.array()?,
+            allowing_join: r.bool()?,
+            stack_profile: r.u8()?,
+            nwk_update_id: r.u8()?,
+        })
+    }
+}
+
+/// `EmberNeighborTableEntry`: 14 bytes, same layout in EZSP 13–18. The
+/// table holds routers only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NeighborTableEntry {
+    pub short_id: NodeId,
+    pub average_lqi: u8,
+    pub in_cost: u8,
+    pub out_cost: u8,
+    pub age: u8,
+    pub long_id: Eui64,
+}
+
+impl NeighborTableEntry {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u16(self.short_id);
+        w.u8(self.average_lqi);
+        w.u8(self.in_cost);
+        w.u8(self.out_cost);
+        w.u8(self.age);
+        w.bytes(&self.long_id.0);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<NeighborTableEntry, DecodeError> {
+        Ok(NeighborTableEntry {
+            short_id: r.u16()?,
+            average_lqi: r.u8()?,
+            in_cost: r.u8()?,
+            out_cost: r.u8()?,
+            age: r.u8()?,
+            long_id: Eui64(r.array()?),
+        })
+    }
+}
+
+/// `EmberRouteTableEntry`: 8 bytes, same layout in EZSP 13–18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RouteTableEntry {
+    pub destination: NodeId,
+    pub next_hop: NodeId,
+    /// 0 active, 1 being discovered, 3 unused.
+    pub status: u8,
+    pub age: u8,
+    pub concentrator_type: u8,
+    pub route_record_state: u8,
+}
+
+impl RouteTableEntry {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u16(self.destination);
+        w.u16(self.next_hop);
+        w.u8(self.status);
+        w.u8(self.age);
+        w.u8(self.concentrator_type);
+        w.u8(self.route_record_state);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<RouteTableEntry, DecodeError> {
+        Ok(RouteTableEntry {
+            destination: r.u16()?,
+            next_hop: r.u16()?,
+            status: r.u8()?,
+            age: r.u8()?,
+            concentrator_type: r.u8()?,
+            route_record_state: r.u8()?,
+        })
+    }
+}
+
+/// `EmberChildData`: 18 bytes, same layout in EZSP 13–18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChildData {
+    pub eui64: Eui64,
+    pub node_type: NodeType,
+    pub id: NodeId,
+    pub phy: u8,
+    pub power: u8,
+    /// End device timeout index.
+    pub timeout: u8,
+    pub remaining_timeout: u32,
+}
+
+impl ChildData {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.bytes(&self.eui64.0);
+        w.u8(self.node_type.0);
+        w.u16(self.id);
+        w.u8(self.phy);
+        w.u8(self.power);
+        w.u8(self.timeout);
+        w.u32(self.remaining_timeout);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<ChildData, DecodeError> {
+        Ok(ChildData {
+            eui64: Eui64(r.array()?),
+            node_type: NodeType(r.u8()?),
+            id: r.u16()?,
+            phy: r.u8()?,
+            power: r.u8()?,
+            timeout: r.u8()?,
+            remaining_timeout: r.u32()?,
+        })
+    }
+}
+
+/// Security manager key types (`sl_zb_sec_man_key_type_t`, Gecko SDK 4.4.6
+/// `zigbee-security-manager-types.h`: an enum counted from NONE = 0).
+pub mod key_type {
+    pub const NONE: u8 = 0;
+    pub const NETWORK: u8 = 1;
+    pub const TC_LINK: u8 = 2;
+}
+
+/// `sl_zb_sec_man_context_t`: 18 bytes, same layout in EZSP 13–18 (Gecko
+/// SDK 4.4.6 `ezsp-frame-utilities.h` macros; Simplicity SDK functions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SecManContext {
+    /// [`key_type`].
+    pub core_key_type: u8,
+    pub key_index: u8,
+    pub derived_type: u16,
+    pub eui64: Eui64,
+    pub multi_network_index: u8,
+    pub flags: u8,
+    pub psa_key_alg_permission: u32,
+}
+
+impl SecManContext {
+    /// The context of the network key.
+    pub fn network_key() -> SecManContext {
+        SecManContext {
+            core_key_type: key_type::NETWORK,
+            ..SecManContext::default()
+        }
+    }
+
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u8(self.core_key_type);
+        w.u8(self.key_index);
+        w.u16(self.derived_type);
+        w.bytes(&self.eui64.0);
+        w.u8(self.multi_network_index);
+        w.u8(self.flags);
+        w.u32(self.psa_key_alg_permission);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<SecManContext, DecodeError> {
+        Ok(SecManContext {
+            core_key_type: r.u8()?,
+            key_index: r.u8()?,
+            derived_type: r.u16()?,
+            eui64: Eui64(r.array()?),
+            multi_network_index: r.u8()?,
+            flags: r.u8()?,
+            psa_key_alg_permission: r.u32()?,
+        })
+    }
+}
+
+/// `sl_zb_sec_man_network_key_info_t`: 8 bytes, same layout in EZSP 13–18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NetworkKeyInfo {
+    pub network_key_set: bool,
+    pub alternate_network_key_set: bool,
+    pub network_key_sequence_number: u8,
+    pub alt_network_key_sequence_number: u8,
+    pub network_key_frame_counter: u32,
+}
+
+impl NetworkKeyInfo {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.bool(self.network_key_set);
+        w.bool(self.alternate_network_key_set);
+        w.u8(self.network_key_sequence_number);
+        w.u8(self.alt_network_key_sequence_number);
+        w.u32(self.network_key_frame_counter);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<NetworkKeyInfo, DecodeError> {
+        Ok(NetworkKeyInfo {
+            network_key_set: r.bool()?,
+            alternate_network_key_set: r.bool()?,
+            network_key_sequence_number: r.u8()?,
+            alt_network_key_sequence_number: r.u8()?,
+            network_key_frame_counter: r.u32()?,
+        })
+    }
 }
