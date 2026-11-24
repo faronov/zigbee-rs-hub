@@ -209,6 +209,8 @@ pub struct Diagnostics {
     pub frame_counters: Option<FrameCounters>,
     /// Host-side link counters.
     pub host_link: Vec<DiagCounter>,
+    /// The NCP supports Wi-Fi coexistence (PTA).
+    pub coex: bool,
     /// TX power the operator set (dBm).
     pub tx_power_set: Option<i8>,
     /// Requests the NCP does not implement.
@@ -523,16 +525,21 @@ pub trait NetworkAdmin: Send + Sync {
         }
     }
 
-    /// Sends a ZDO request to `nwk` and waits up to `t` for its response
-    /// payload.
+    /// Sends a ZDO request to `nwk` and waits up to `t` for its delivery
+    /// and up to `t` for its response. `zdp` is the request's ZDP payload,
+    /// starting with the transaction sequence number the caller chose; the
+    /// result is the response's payload after its sequence number.
+    ///
+    /// Errors: [`CoordError::NoAck`] not delivered (the Zigbee status),
+    /// [`CoordError::Timeout`] no response; anything else failed to send.
     fn zdo_request(
         &self,
         nwk: u16,
         cluster: u16,
-        args: &[u8],
+        zdp: &[u8],
         t: Duration,
     ) -> Result<Vec<u8>, CoordError> {
-        let _ = (nwk, cluster, args, t);
+        let _ = (nwk, cluster, zdp, t);
         Err(CoordError::Unsupported)
     }
 

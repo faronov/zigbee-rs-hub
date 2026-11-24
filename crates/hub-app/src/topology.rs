@@ -1,22 +1,19 @@
-//! Network map: the coordinator's own tables (`DIAG_GET_NEIGHBORS`,
+//! Network map: the coordinator's own tables (ZRHP `DIAG_GET_NEIGHBORS`,
 //! `DIAG_GET_ROUTES`, `DIAG_GET_CHILDREN`, spec 7.4/7.8: the NCP does not
 //! loop ZDO back to itself) and, breadth first over the routers found,
 //! ZDO Mgmt_Lqi_req / Mgmt_Rtg_req over the air (R22 2.4.3.3.2/3).
 //!
 //! Runs on a job thread: every request blocks until its response or a
-//! timeout; responses arrive as `EVT_APS_DATA_INDICATION`s on a private
-//! subscription to the host core.
+//! timeout ([`NetworkAdmin::zdo_request`]).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use hub_coord::{CoordError, NetworkAdmin};
 use hub_devices::hub::ApiError;
-use hub_ncp::{Hub as Ncp, Message};
+use hub_ncp::Hub as Ncp;
 
 use crate::jw::Jw;
-use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication};
-use zigbee_zrhp::msg::ids;
 
 /// ZDO Mgmt_Lqi_req.
 pub const MGMT_LQI_REQ: u16 = 0x0031;
@@ -145,8 +142,8 @@ const RELATIONS: [&str; 8] = ["parent", "child", "sibling", "none", "previous_ch
 const ROUTE_STATUS: [&str; 8] = ["active", "discovery_underway", "discovery_failed", "inactive", "validation_underway", "reserved", "reserved", "reserved"];
 
 struct Zdo<'a> {
+    net: &'a dyn NetworkAdmin,
     ncp: &'a Ncp,
-    events: Receiver<Message>,
     tsn: u8,
     timeout: Duration,
 }
@@ -155,50 +152,21 @@ impl Zdo<'_> {
     /// One ZDO request to `nwk` and its response's ZDP payload after the TSN.
     fn request(&mut self, nwk: u16, cluster: u16, args: &[u8]) -> Result<Vec<u8>, String> {
         self.tsn = self.tsn.wrapping_add(1);
-        let tsn = self.tsn;
-        let mut asdu = vec![tsn];
-        asdu.extend_from_slice(args);
-        let req = ApsDataRequest {
-            dst: ApsDst::Nwk(nwk),
-            dst_ep: 0,
-            src_ep: 0,
-            profile: 0,
-            cluster,
-            tx_options: 0,
-            radius: 0,
-            non_member_radius: 0,
-            priority: 1,
-            relays: None,
-            alias: None,
-            asdu: &asdu,
-        };
-        while self.events.try_recv().is_ok() {}
-        let confirm = self.ncp.send_aps(&req, self.timeout).map_err(|e| format!("send: {e}"))?;
-        if confirm.status != 0 {
-            let legacy =
-                self.ncp.client().session().is_some_and(|s| hub_devices::transport::legacy_zb_status(&s.negotiated.fw));
-            let st = confirm.zb_status;
-            return Err(match hub_devices::transport::zb_status_text(st, legacy) {
-                Some(t) => format!("not delivered: {t} (zb status 0x{st:02X})"),
-                None => format!("not delivered (zb status 0x{st:02X})"),
-            });
-        }
-        let until = Instant::now() + self.timeout;
-        while let Some(left) = until.checked_duration_since(Instant::now()) {
-            let Ok(m) = self.events.recv_timeout(left) else {
-                break;
-            };
-            if m.msg_id != ids::EVT_APS_DATA_INDICATION {
-                continue;
+        let mut zdp = vec![self.tsn];
+        zdp.extend_from_slice(args);
+        self.net.zdo_request(nwk, cluster, &zdp, self.timeout).map_err(|e| match e.meaning() {
+            CoordError::NoAck(c) => {
+                let legacy =
+                    self.ncp.client().session().is_some_and(|s| hub_devices::transport::legacy_zb_status(&s.negotiated.fw));
+                let st = c.value as u8;
+                match hub_devices::transport::zb_status_text(st, legacy) {
+                    Some(t) => format!("not delivered: {t} (zb status 0x{st:02X})"),
+                    None => format!("not delivered (zb status 0x{st:02X})"),
+                }
             }
-            let Ok(ind) = m.decode::<EvtApsDataIndication>() else {
-                continue;
-            };
-            if ind.src_nwk == nwk && ind.profile == 0 && ind.cluster == cluster | 0x8000 && ind.asdu.0.first() == Some(&tsn) {
-                return Ok(ind.asdu.0[1..].to_vec());
-            }
-        }
-        Err("no response".into())
+            CoordError::Timeout => "no response".into(),
+            _ => format!("send: {e}"),
+        })
     }
 
     fn neighbors(&mut self, nwk: u16) -> Result<Vec<NeighborEntry>, String> {
@@ -296,9 +264,11 @@ struct Node {
     error: Option<String>,
 }
 
-/// Scan the network. `progress(scanned, queued)` after every router.
-/// The map's JSON text (structs while scanning, no JSON tree: RAM).
-pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> Result<String, ApiError> {
+/// Scan the network through `net`; `ncp` for the session (the
+/// coordinator's IEEE, the NCP's Zigbee status numbering).
+/// `progress(scanned, queued)` after every router. The map's JSON text
+/// (structs while scanning, no JSON tree: RAM).
+pub fn scan(net: &dyn NetworkAdmin, ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> Result<String, ApiError> {
     let started = Instant::now();
     let mut nodes: BTreeMap<u16, Node> = BTreeMap::new();
     let mut links: Vec<Link> = Vec::new();
@@ -308,21 +278,22 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
     nodes.insert(0, Node { ieee: coord_ieee, device_type: Some(0), scanned: true, error: None });
     let mut queue: VecDeque<u16> = VecDeque::new();
     // The coordinator, from the NCP's tables.
-    match ncp.coordinator_neighbors() {
+    let tables = net.coordinator_tables(opts.routes);
+    match tables.neighbors {
         Ok(list) => {
             for nb in list.iter().filter(|n| n.relationship != 4) {
-                let e = NeighborEntry { ieee: nb.ieee.0, nwk: nb.nwk, device_type: nb.device_type, relationship: nb.relationship, lqi: nb.lqi, depth: None };
+                let e = NeighborEntry { ieee: nb.ieee, nwk: nb.nwk, device_type: nb.device_type, relationship: nb.relationship, lqi: nb.lqi, depth: None };
                 learn(&mut nodes, &mut queue, &e);
                 add_link(&mut links, 0, &e);
             }
         }
         Err(e) => notes.push(format!("coordinator neighbours: {e}")),
     }
-    match ncp.coordinator_children() {
+    match tables.children {
         Ok(list) => {
             for c in list {
                 let n = nodes.entry(c.nwk).or_default();
-                n.ieee.get_or_insert(c.ieee.0);
+                n.ieee.get_or_insert(c.ieee);
                 n.device_type.get_or_insert(if c.capability & 0x02 != 0 { 1 } else { 2 });
                 if !links.iter().any(|l| l.source == 0 && l.target == c.nwk) {
                     links.push(Link { source: 0, target: c.nwk, lqi: None, relationship: 1, depth: None });
@@ -331,8 +302,8 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
         }
         Err(e) => notes.push(format!("coordinator children: {e}")),
     }
-    if opts.routes {
-        match ncp.coordinator_routes() {
+    if let Some(r) = tables.routes {
+        match r {
             Ok(list) => routes.extend(list.iter().map(|r| RouteRow { source: 0, dst: r.dst, next_hop: r.next_hop, status: r.status })),
             Err(e) => notes.push(format!("coordinator routes: {e}")),
         }
@@ -349,7 +320,7 @@ pub fn scan(ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &m
         }
     }
 
-    let mut zdo = Zdo { ncp, events: ncp.subscribe(), tsn: 0xA0, timeout: opts.timeout };
+    let mut zdo = Zdo { net, ncp, tsn: 0xA0, timeout: opts.timeout };
     let mut asked = 0;
     while let Some(nwk) = queue.pop_front() {
         let cancelled = opts.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));

@@ -13,15 +13,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hub_coord::{Beacon, CoordError, Diagnostics, EnergyChannel, FormParams, Kind, NetworkAdmin, RestoreOptions};
 use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
-use hub_ncp::lifecycle::{EnergyChannel, FormRequest, RestoreOptions};
 use hub_store::kv;
-use hub_ncp::{Error, Hub as Ncp};
+use hub_ncp::Hub as Ncp;
 use log::{info, warn};
 use serde_json::{Value as J, json};
 use zigbee_zrhp::msg::system::caps;
-use zigbee_zrhp::types::Status;
 
 use crate::clock;
 use crate::jobs::{self, Lane};
@@ -107,6 +106,8 @@ pub type Out = Arc<dyn Fn(JobOut) + Send + Sync>;
 pub struct Ctx<'a> {
     /// Host core.
     pub ncp: &'a Ncp,
+    /// Network administration (its blocking calls on job threads only).
+    pub net: &'a Arc<dyn NetworkAdmin>,
     /// API sessions (token rotation).
     pub api: &'a mut ApiServer,
     /// Devices the engine knows.
@@ -164,16 +165,16 @@ pub struct Admin {
     staged: Option<Staged>,
 }
 
-fn ncp_error(what: &str, e: Error) -> ApiError {
-    let (code, why) = match &e {
-        Error::Status(Status::UnsupportedCommand) => ("unsupported", "the NCP firmware does not implement it"),
-        Error::Status(Status::InvalidParameter) => ("invalid_value", "the NCP refused a parameter"),
-        Error::Status(Status::InvalidState) => ("invalid_value", "the network is not in a state for this (not up?)"),
-        Error::Status(Status::Busy | Status::InProgress) => ("busy", "the NCP is busy"),
-        Error::Status(Status::AccessDenied) => ("unauthorized", "the NCP refused (key export locked?)"),
-        Error::Status(Status::NotFound) => ("not_found", "not found on the NCP"),
-        Error::Timeout => ("timeout", "no answer from the NCP"),
-        Error::LinkReset | Error::Closed => ("device_unavailable", "NCP link lost"),
+fn ncp_error(what: &str, e: CoordError) -> ApiError {
+    let (code, why) = match e.meaning() {
+        CoordError::Unsupported => ("unsupported", "the NCP firmware does not implement it"),
+        CoordError::Backend { kind: Kind::InvalidParameter, .. } => ("invalid_value", "the NCP refused a parameter"),
+        CoordError::Backend { kind: Kind::InvalidState, .. } => ("invalid_value", "the network is not in a state for this (not up?)"),
+        CoordError::Busy => ("busy", "the NCP is busy"),
+        CoordError::Backend { kind: Kind::Denied, .. } => ("unauthorized", "the NCP refused (key export locked?)"),
+        CoordError::Backend { kind: Kind::NotFound, .. } => ("not_found", "not found on the NCP"),
+        CoordError::Timeout => ("timeout", "no answer from the NCP"),
+        CoordError::LinkDown | CoordError::DeliveryUnknown => ("device_unavailable", "NCP link lost"),
         _ => ("failed", ""),
     };
     if why.is_empty() { ApiError::new(code, format!("{what}: {e}")) } else { ApiError::new(code, format!("{what}: {why}")) }
@@ -251,72 +252,6 @@ pub fn recommend(scan: &[EnergyChannel], wifi: Option<u8>) -> (Option<u8>, Vec<(
         .collect();
     let best = scored.iter().min_by_key(|(ch, _, s)| (*s, *ch)).map(|(ch, _, _)| *ch);
     (best, scored)
-}
-
-/// Counter names (ZRHP 5.12 link counters, 7.8 registry).
-const COUNTER_NAMES: &[(u16, &str)] = &[
-    (0x0101, "tx_frames"),
-    (0x0102, "tx_bytes"),
-    (0x0103, "tx_retransmissions"),
-    (0x0104, "tx_rto_expiries"),
-    (0x0105, "tx_rejected"),
-    (0x0106, "tx_blocked_credit_ms"),
-    (0x0107, "tx_blocked_window_ms"),
-    (0x0108, "tx_discarded_no_host"),
-    (0x0109, "naks_sent"),
-    (0x010A, "naks_received"),
-    (0x010B, "sessions_established"),
-    (0x010C, "link_down_events"),
-    (0x0111, "rx_frames"),
-    (0x0112, "rx_bytes"),
-    (0x0113, "rx_bad_frame"),
-    (0x0114, "rx_duplicate"),
-    (0x0115, "rx_out_of_order"),
-    (0x0116, "rx_epoch_mismatch"),
-    (0x0117, "rx_not_in_session"),
-    (0x0118, "rx_rejected_sent"),
-    (0x0119, "rx_overflow"),
-    (0x011A, "rx_stale_reset"),
-    (0x011B, "peer_restarted"),
-    (0x011C, "peer_resync"),
-    (0x0201, "mac_tx"),
-    (0x0202, "mac_tx_ack_requested"),
-    (0x0203, "mac_tx_no_ack"),
-    (0x0204, "mac_tx_errors"),
-    (0x0205, "mac_tx_deferred"),
-    (0x0206, "mac_data_requests"),
-    (0x0207, "frame_pending_acks"),
-    (0x0208, "mac_ack_stall_recoveries"),
-    (0x0220, "coex_denied"),
-    (0x0221, "coex_ack_rx_denied"),
-    (0x0222, "coex_ack_tx_denied"),
-    (0x0301, "nwk_secured_rx"),
-    (0x0302, "nwk_decrypt_failures"),
-    (0x0303, "nwk_missing_key"),
-    (0x0304, "nwk_replay_rejects"),
-    (0x0305, "replay_table_full"),
-    (0x0306, "nwk_security_header_errors"),
-    (0x0401, "aps_tx"),
-    (0x0402, "aps_tx_failed"),
-    (0x0403, "aps_rx"),
-    (0x0501, "joins_admitted"),
-    (0x0502, "joins_denied"),
-    (0x0503, "devices_authorized"),
-    (0x0504, "authorization_failures"),
-    (0x0505, "devices_left"),
-    (0x0701, "aps_queue_high_water"),
-    (0x0702, "busy_responses"),
-    (0x0703, "indications_dropped"),
-    (0x0704, "log_dropped"),
-    (0x0705, "bad_batches"),
-];
-
-fn counter_name(id: u16) -> Option<&'static str> {
-    COUNTER_NAMES.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
-}
-
-fn group_name(id: u16) -> &'static str {
-    ["", "link", "mac", "nwk", "aps", "security", "tables", "queues", "gp"].get(usize::from(id >> 8)).copied().unwrap_or("other")
 }
 
 fn be_hex(b: &[u8]) -> String {
@@ -511,8 +446,9 @@ impl Backup {
 /// Export (keys optional) and write the OCB file straight into a result
 /// frame (one buffer, reserved fallibly); complete backups are also kept in
 /// the host store.
-fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
-    let stream = ncp.backup_export(keys).map_err(|e| ncp_error("backup export", e))?;
+fn take_backup(net: &dyn NetworkAdmin, ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
+    let mut export = ocb::Export::default();
+    net.backup_export(keys, &mut export).map_err(|e| ncp_error("backup export", e))?;
     let session = ncp.client().session();
     let info = ocb::ExportInfo {
         source: source.to_string(),
@@ -533,11 +469,10 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
     let mut frame = Jw::result(id, 0)?.finish()?;
     frame.pop();
     let start = frame.len();
-    let summary = ocb::from_records(&stream, &info, &mut frame).map_err(|e| match e {
+    let summary = ocb::from_export(export, &info, &mut frame).map_err(|e| match e {
         ocb::ExportError::NoMemory => oom(),
         ocb::ExportError::Invalid(e) => ApiError::new("failed", e),
     })?;
-    drop(stream);
     let end = frame.len();
     frame.try_reserve(1).map_err(|_| oom())?;
     frame.push('}');
@@ -899,15 +834,16 @@ impl Admin {
         self.board.lock().unwrap().progress_events()
     }
 
-    /// The NCP's optional `EVT_SCAN_PROGRESS`.
+    /// Scan progress from the coordinator: `done` of `total` channels.
     #[inline(never)]
-    pub fn ncp_progress(&self, payload: &[u8]) {
-        self.board.lock().unwrap().ncp_progress(payload);
+    pub fn scan_progress(&self, done: u8, total: u8) {
+        self.board.lock().unwrap().scan_progress(done, total);
     }
 
     fn ncp_job(&mut self, ctx: Ctx<'_>, sid: SessionId, head: &Head, v: &J) -> Vec<String> {
         let id = head.id;
         let ncp = ctx.ncp.clone();
+        let net = ctx.net.clone();
         let out = ctx.out.clone();
         let fail = |e: ApiError| vec![frame(id, Err(e))];
         match head.ty.as_str() {
@@ -933,7 +869,7 @@ impl Admin {
                         let mut text = String::new();
                         while done < passes && !bg.cancelled() {
                             let p = std::time::Instant::now();
-                            let scan = ncp.energy_scan(mask, duration, 1).map_err(|e| ncp_error("energy scan", e))?;
+                            let scan = net.energy_scan(mask, duration).map_err(|e| ncp_error("energy scan", e))?;
                             for c in scan.iter().filter(|c| (11..=26).contains(&c.channel)) {
                                 let a = &mut agg[usize::from(c.channel - 11)];
                                 *a = (a.0 + u32::from(c.energy), a.1.max(c.energy), a.2.max(c.max_rssi_dbm));
@@ -963,13 +899,13 @@ impl Admin {
                     id,
                     Box::new(move |_| {
                         let t = std::time::Instant::now();
-                        let found = ncp.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
+                        let found = net.active_scan(mask, duration).map_err(|e| ncp_error("active scan", e))?;
                         let own = ncp.status().network.map(|n| (n.pan_id, n.ext_pan_id));
                         // Every router of a network beacons: one entry per
                         // network and channel, its best beacon, and the count.
-                        let mut nets: Vec<(&zigbee_zrhp::msg::network::ScanResult, u32)> = Vec::new();
+                        let mut nets: Vec<(&Beacon, u32)> = Vec::new();
                         for b in &found {
-                            match nets.iter_mut().find(|(n, _)| (n.channel, n.pan, n.epid) == (b.channel, b.pan, b.epid)) {
+                            match nets.iter_mut().find(|(n, _)| (n.channel, n.pan_id, n.ext_pan_id) == (b.channel, b.pan_id, b.ext_pan_id)) {
                                 Some((n, c)) => {
                                     *c += 1;
                                     if b.lqi > n.lqi {
@@ -982,10 +918,10 @@ impl Admin {
                         let mut w = Jw::value(100 + 200 * nets.len())?;
                         w.obj().key("networks").arr();
                         for (b, n) in nets {
-                            w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan).key("ext_pan_id").str(&be_hex(&b.epid));
-                            w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit != 0);
+                            w.obj().key("channel").num(b.channel).key("pan_id").num(b.pan_id).key("ext_pan_id").str(&be_hex(&b.ext_pan_id));
+                            w.key("src").num(b.src).key("lqi").num(b.lqi).key("rssi").num(b.rssi).key("permit_join").num(b.permit_join);
                             w.key("stack_profile").num(b.stack_profile).key("update_id").num(b.update_id);
-                            w.key("beacons").num(n).key("own").num(own == Some((b.pan, b.epid))).end_obj();
+                            w.key("beacons").num(n).key("own").num(own == Some((b.pan_id, b.ext_pan_id))).end_obj();
                         }
                         w.end_arr().key("duration_ms").num(t.elapsed().as_millis() as u64).end_obj();
                         w.finish_value()
@@ -1001,7 +937,7 @@ impl Admin {
                     return fail(bad("channel: 11–26"));
                 }
                 self.spawn("channel change", out, sid, id, move |out| {
-                    let r = ncp.change_channel(q.channel).map_err(|e| ncp_error("channel change", e))?;
+                    let r = net.change_channel(q.channel).map_err(|e| ncp_error("channel change", e))?;
                     out(JobOut::Event(
                         json!({"topic": "network_updated", "reason": "channel_changed", "channel": r.channel, "nwk_update_id": r.nwk_update_id}),
                     ));
@@ -1014,7 +950,7 @@ impl Admin {
                     Err(e) => return fail(e),
                 };
                 self.spawn("TX power", out, sid, id, move |out| {
-                    let applied = ncp.set_tx_power(q.dbm).map_err(|e| ncp_error("TX power", e))?;
+                    let applied = net.set_tx_power(q.dbm).map_err(|e| ncp_error("TX power", e))?;
                     out(JobOut::Event(json!({"topic": "network_updated", "reason": "tx_power", "tx_power": applied})));
                     Ok(Reply::Json(json!({"requested_dbm": q.dbm, "applied_dbm": applied})))
                 })
@@ -1025,7 +961,7 @@ impl Admin {
                     Err(e) => return fail(e),
                 };
                 let groups = q.groups.unwrap_or(0xFF);
-                self.spawn("diagnostics", out, sid, id, move |_| diagnostics(&ncp, groups, q.reset, id).map(Reply::Frame))
+                self.spawn("diagnostics", out, sid, id, move |_| diagnostics(&net.diagnostics(groups, q.reset), id).map(Reply::Frame))
             }
             "network/backup" => {
                 let q = match BackupReq::from(v) {
@@ -1041,7 +977,7 @@ impl Admin {
                 let known = (ctx.known)();
                 let source = self.source.clone();
                 let now_s = ctx.now_s;
-                self.spawn("backup", out, sid, id, move |_| take_backup(&ncp, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame)))
+                self.spawn("backup", out, sid, id, move |_| take_backup(&*net, &ncp, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame)))
             }
             "network/reset" => self.reset(ctx, sid, id, v),
             other => fail(ApiError::new("unsupported", other.to_string())),
@@ -1050,6 +986,7 @@ impl Admin {
 
     fn job_topology(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, q: TopologyReq) -> Vec<String> {
         let ncp = ctx.ncp.clone();
+        let net = ctx.net.clone();
         let known = (ctx.known)();
         let now_s = ctx.now_s;
         self.start_bg(
@@ -1062,7 +999,7 @@ impl Admin {
             Box::new(move |bg| {
                 let opts = ScanOpts { routes: q.routes, cancel: Some(bg.cancel_flag()), ..ScanOpts::default() };
                 let mut progress = |scanned: usize, queued: usize| bg.fraction((scanned * 1000 / (scanned + queued).max(1)) as u32);
-                topology::scan(&ncp, &known, opts, now_s, &mut progress)
+                topology::scan(&*net, &ncp, &known, opts, now_s, &mut progress)
             }),
         )
     }
@@ -1084,7 +1021,11 @@ impl Admin {
             };
             self.staged = None;
             let groups = b.pointer("/metadata/internal/zigbee_rs/groups").and_then(J::as_array).cloned();
-            match ocb::to_records(b) {
+            let encoder = match ctx.net.restore_encoder() {
+                Ok(e) => e,
+                Err(e) => return fail(ncp_error("restore", e)),
+            };
+            match ocb::to_restore(b, encoder) {
                 Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }),
                 Err(e) => return fail(bad(e)),
             }
@@ -1111,6 +1052,7 @@ impl Admin {
             return fail(bad("no restore staged"));
         };
         let ncp = ctx.ncp.clone();
+        let net = ctx.net.clone();
         if !ncp.ncp_has(caps::BACKUP_RESTORE) {
             return fail(ApiError::new("unsupported", "the NCP has no BACKUP_RESTORE"));
         }
@@ -1129,12 +1071,12 @@ impl Admin {
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
             let mut previous = false;
             if ncp.status().network_state == 2 && !skip_backup {
-                drop(take_backup(&ncp, true, &known, &source, now_s, id).map_err(|e| {
+                drop(take_backup(&*net, &ncp, true, &known, &source, now_s, id).map_err(|e| {
                     ApiError::new(&e.code, format!("automatic backup before the restore failed ({}); set skip_backup to restore anyway", e.message))
                 })?);
                 previous = true;
             }
-            let report = ncp.backup_restore(&restore.stream, opts).map_err(|e| ncp_error("restore", e))?;
+            let report = net.backup_restore(restore.encoder.finish(), opts).map_err(|e| ncp_error("restore", e))?;
             out(JobOut::Reimport);
             if let Some(g) = groups {
                 out(JobOut::Groups(g));
@@ -1170,7 +1112,7 @@ impl Admin {
             (None, None) => Vec::new(),
         };
         let mask = match mask_of(&channels) {
-            Ok(0) => FormRequest::default().channel_mask,
+            Ok(0) => FormParams::default().channel_mask,
             Ok(m) => m,
             Err(e) => return fail(e),
         };
@@ -1193,6 +1135,7 @@ impl Admin {
             None => None,
         };
         let ncp = ctx.ncp.clone();
+        let net = ctx.net.clone();
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
@@ -1203,23 +1146,23 @@ impl Admin {
             let st = ncp.status();
             if st.network_state != 0 {
                 if st.network_state == 2 && !skip_backup {
-                    let b = take_backup(&ncp, true, &known, &source, now_s, id).map_err(|e| {
+                    let b = take_backup(&*net, &ncp, true, &known, &source, now_s, id).map_err(|e| {
                         ApiError::new(&e.code, format!("automatic backup failed ({}); nothing was changed; set skip_backup to reset anyway", e.message))
                     })?;
                     backup = Some(b);
                 }
-                ncp.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
+                net.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
             }
-            let req = FormRequest {
+            let req = FormParams {
                 channel_mask: mask,
                 pan_id: q.pan_id,
                 ext_pan_id: epid,
                 network_key: None,
-                tx_power: tx_power.or(ncp.stored_tx_power()).unwrap_or(0),
+                tx_power: tx_power.or(net.tx_power_setting()).unwrap_or(0),
             };
-            let net = ncp.form(req).map_err(|e| ncp_error("form", e))?;
+            let formed = net.form(req).map_err(|e| ncp_error("form", e))?;
             if let Some(dbm) = tx_power
-                && let Err(e) = ncp.set_tx_power(dbm)
+                && let Err(e) = net.set_tx_power(dbm)
             {
                 warn!("admin: TX power after forming: {e}");
             }
@@ -1227,8 +1170,8 @@ impl Admin {
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "formed"})));
             let file = backup.as_ref().map_or("null", |b| b.file());
             let mut w = Jw::result(id, file.len() + 160)?;
-            w.obj().key("network").obj().key("pan_id").num(net.pan_id).key("ext_pan_id").str(&be_hex(&net.ext_pan_id));
-            w.key("channel").num(net.channel).end_obj().key("backup").raw(file).end_obj();
+            w.obj().key("network").obj().key("pan_id").num(formed.pan_id).key("ext_pan_id").str(&be_hex(&formed.ext_pan_id));
+            w.key("channel").num(formed.channel).end_obj().key("backup").raw(file).end_obj();
             drop(backup);
             Ok(Reply::Frame(w.finish()?))
         })
@@ -1295,32 +1238,23 @@ fn energy_result(
     w.finish_value()
 }
 
-fn diagnostics(ncp: &Ncp, groups: u8, reset: bool, id: u64) -> Result<String, ApiError> {
-    let mut unsupported: Vec<&str> = Vec::new();
-    let mut errors = Vec::new();
-    let mut note = |what: &'static str, e: Error| match e {
-        Error::Status(Status::UnsupportedCommand) => unsupported.push(what),
-        e => errors.push(format!("{what}: {e}")),
-    };
-    if reset && let Err(e) = ncp.diag_reset_counters(groups) {
-        note("DIAG_RESET_COUNTERS", e);
-    }
-    let counters = ncp.diag_counters(groups).unwrap_or_else(|e| {
-        note("DIAG_GET_COUNTERS", e);
-        Vec::new()
-    });
-    let status = ncp.ncp_status().map_err(|e| note("SYS_GET_STATUS", e)).ok();
-    let fc = ncp.frame_counters().map_err(|e| note("SEC_GET_FRAME_COUNTERS", e)).ok();
-    let host = ncp.client().counters().entries();
-    let mut w = Jw::result(id, 700 + 75 * counters.len() + 50 * host.len())?;
+/// The `network/diagnostics` result frame.
+fn diagnostics(d: &Diagnostics, id: u64) -> Result<String, ApiError> {
+    let mut w = Jw::result(id, 700 + 75 * d.counters.len() + 50 * d.host_link.len())?;
     w.obj().key("ncp");
-    match &status {
+    match &d.status {
         Some(s) => {
             w.obj().key("network_state").num(s.network_state).key("uptime_s").num(s.uptime_s);
             w.key("free_aps_slots").num(s.free_aps_slots).key("host_absent_queue").num(s.host_absent_queue);
-            w.key("dirty_writebacks").num(s.dirty_writebacks).key("restore_in_progress").num(s.restore_in_progress != 0);
-            for (bit, k) in [(0x01, "key_export_locked"), (0x02, "paging_active"), (0x04, "pta_coex"), (0x08, "gp_commissioning"), (0x10, "permit_join")] {
-                w.key(k).num(s.flags & bit != 0);
+            w.key("dirty_writebacks").num(s.dirty_writebacks).key("restore_in_progress").num(s.restore_in_progress);
+            for (on, k) in [
+                (s.key_export_locked, "key_export_locked"),
+                (s.paging_active, "paging_active"),
+                (s.pta_coex, "pta_coex"),
+                (s.gp_commissioning, "gp_commissioning"),
+                (s.permit_join, "permit_join"),
+            ] {
+                w.key(k).num(on);
             }
             w.end_obj()
         }
@@ -1328,40 +1262,40 @@ fn diagnostics(ncp: &Ncp, groups: u8, reset: bool, id: u64) -> Result<String, Ap
     };
     let mut hexid = String::new();
     w.key("counters").arr();
-    for (cid, v) in &counters {
+    for c in &d.counters {
         hexid.clear();
-        let _ = std::fmt::Write::write_fmt(&mut hexid, format_args!("0x{cid:04X}"));
-        w.obj().key("id").str(&hexid).key("group").str(group_name(*cid));
-        w.key("name").str(counter_name(*cid).unwrap_or(&hexid)).key("value").num(v).end_obj();
+        let _ = std::fmt::Write::write_fmt(&mut hexid, format_args!("0x{:04X}", c.id));
+        w.obj().key("id").str(&hexid).key("group").str(c.group);
+        w.key("name").str(c.name.unwrap_or(&hexid)).key("value").num(c.value).end_obj();
     }
     w.end_arr().key("frame_counters");
-    match &fc {
+    match &d.frame_counters {
         Some(f) => {
-            w.obj().key("nwk").num(f.nwk_current).key("nwk_limit").num(f.nwk_limit).key("aps").num(f.aps_current);
+            w.obj().key("nwk").num(f.nwk).key("nwk_limit").num(f.nwk_limit).key("aps").num(f.aps);
             w.key("aps_limit").num(f.aps_limit).key("stride").num(f.stride).end_obj()
         }
         None => w.null(),
     };
     w.key("host_link").arr();
-    for (cid, v) in host.iter().filter(|(_, v)| *v != 0) {
-        w.obj().key("name").str(counter_name(*cid).unwrap_or("?")).key("value").num(v).end_obj();
+    for c in d.host_link.iter().filter(|c| c.value != 0) {
+        w.obj().key("name").str(c.name.unwrap_or("?")).key("value").num(c.value).end_obj();
     }
-    w.end_arr().key("pta").obj().key("capable").num(ncp.ncp_has(caps::PTA_COEX)).key("enabled");
-    match &status {
-        Some(s) => w.num(s.flags & 0x04 != 0),
+    w.end_arr().key("pta").obj().key("capable").num(d.coex).key("enabled");
+    match &d.status {
+        Some(s) => w.num(s.pta_coex),
         None => w.null(),
     };
     w.end_obj().key("tx_power_set");
-    match ncp.stored_tx_power() {
+    match d.tx_power_set {
         Some(p) => w.num(p),
         None => w.null(),
     };
     w.key("unsupported").arr();
-    for u in &unsupported {
+    for u in &d.unsupported {
         w.str(u);
     }
     w.end_arr().key("errors").arr();
-    for e in &errors {
+    for e in &d.errors {
         w.str(e);
     }
     w.end_arr().end_obj();
@@ -1395,16 +1329,54 @@ mod tests {
         assert_eq!(recommend(&busy, Some(1)).0, Some(20));
     }
 
+    /// Every ZRHP status and host core error keeps its API code and message
+    /// (as before the coordinator boundary).
     #[test]
-    fn counter_names() {
-        assert_eq!(counter_name(0x0101), Some("tx_frames"));
-        assert_eq!(counter_name(0x0113), Some("rx_bad_frame"));
-        assert_eq!(counter_name(0x011C), Some("peer_resync"));
-        assert_eq!(counter_name(0x0702), Some("busy_responses"));
-        assert_eq!(counter_name(0x0203), Some("mac_tx_no_ack"));
-        assert_eq!(counter_name(0x0505), Some("devices_left"));
-        assert_eq!(counter_name(0x0805), None);
-        assert_eq!(group_name(0x0805), "gp");
+    fn ncp_errors_keep_their_api_codes_and_messages() {
+        use hub_ncp::Error;
+        use zigbee_zrhp::types::Status;
+        let named = |code: &str, why: &str| (code.to_string(), format!("x: {why}"));
+        let mut table: Vec<(Error, (String, String))> = vec![
+            (Error::Status(Status::Success), named("failed", "NCP status Success")),
+            (Error::Status(Status::Failure), named("failed", "NCP status Failure")),
+            (Error::Status(Status::Busy), named("busy", "the NCP is busy")),
+            (Error::Status(Status::InvalidParameter), named("invalid_value", "the NCP refused a parameter")),
+            (Error::Status(Status::UnsupportedCommand), named("unsupported", "the NCP firmware does not implement it")),
+            (Error::Status(Status::InvalidState), named("invalid_value", "the network is not in a state for this (not up?)")),
+            (Error::Status(Status::NotFound), named("not_found", "not found on the NCP")),
+            (Error::Status(Status::NoSpace), named("failed", "NCP status NoSpace")),
+            (Error::Status(Status::Timeout), named("failed", "NCP status Timeout")),
+            (Error::Status(Status::LinkReset), named("failed", "NCP status LinkReset")),
+            (Error::Status(Status::AccessDenied), named("unauthorized", "the NCP refused (key export locked?)")),
+            (Error::Status(Status::NotFormed), named("failed", "NCP status NotFormed")),
+            (Error::Status(Status::AlreadyExists), named("failed", "NCP status AlreadyExists")),
+            (Error::Status(Status::StorageError), named("failed", "NCP status StorageError")),
+            (Error::Status(Status::SecurityError), named("failed", "NCP status SecurityError")),
+            (Error::Status(Status::VersionMismatch), named("failed", "NCP status VersionMismatch")),
+            (Error::Status(Status::InProgress), named("busy", "the NCP is busy")),
+            (Error::Status(Status::TooLarge), named("failed", "NCP status TooLarge")),
+            (Error::Status(Status::WrongEndpoint), named("failed", "NCP status WrongEndpoint")),
+            (Error::Status(Status::Conflict), named("failed", "NCP status Conflict")),
+            (Error::Status(Status::Aborted), named("failed", "NCP status Aborted")),
+            (Error::Status(Status::LinkRejected), named("failed", "NCP status LinkRejected")),
+        ];
+        // Unnamed statuses, 0x16–0xFF.
+        table.extend((0x16..=0xFF).map(|b| (Error::Status(Status::from_u8(b)), named("failed", &format!("NCP status Other({b})")))));
+        table.extend([
+            (Error::Timeout, named("timeout", "no answer from the NCP")),
+            (Error::LinkReset, named("device_unavailable", "NCP link lost")),
+            (Error::Closed, named("device_unavailable", "NCP link lost")),
+            (Error::Rejected(3), named("failed", "frame rejected (reason 3)")),
+            (Error::Codec, named("failed", "encode/decode error")),
+            (Error::Other("formation failed: state 1 zb_status 0xC2".into()), named("failed", "formation failed: state 1 zb_status 0xC2")),
+        ]);
+        for (i, (e, want)) in table.into_iter().enumerate() {
+            if i < 0x16 {
+                assert_eq!(e, Error::Status(Status::from_u8(i as u8)), "the table follows the status values");
+            }
+            let a = ncp_error("x", hub_ncp::coord::coord_error(e.clone()));
+            assert_eq!((a.code, a.message), want, "{e:?}");
+        }
     }
 
     #[test]

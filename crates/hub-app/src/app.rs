@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use hub_coord::{CoordEvent, NetworkAdmin};
 use hub_devices::api::{ApiExtension, ApiServer, Frame, SessionId};
 use hub_devices::bankcat::StoreCatalog;
 use hub_devices::device::Millis;
@@ -430,6 +431,8 @@ struct Runner {
     permit_left: u32,
     /// Maintenance requests and their jobs.
     admin: Admin,
+    /// Network administration for the maintenance jobs.
+    net: Arc<dyn NetworkAdmin>,
     /// Job results come back on the app's own channel.
     jobs: Sender<Input>,
     /// NCP cookie `hub/info` `maintenance` was computed for.
@@ -586,6 +589,7 @@ impl Runner {
         let mut engine = Engine::new(NcpTransport::new(ncp.clone()), hub_cfg, catalog);
         engine.set_schema_decoder(Box::new(ZdefSchemaDecoder));
         let api = ApiServer::new(cfg.hub_name.clone(), cfg.api_token.clone());
+        let net: Arc<dyn NetworkAdmin> = Arc::new(hub_ncp::coord::ZrhpAdmin::new(ncp.clone()));
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
         admin.start_worker();
@@ -609,6 +613,7 @@ impl Runner {
             refreshed: false,
             permit_left: 0,
             admin,
+            net,
             jobs,
             maintenance_for: None,
             groups_for: None,
@@ -726,7 +731,11 @@ impl Runner {
     fn handle(&mut self, input: Input) {
         let now = self.now();
         match input {
-            Input::Ncp(m) if m.msg_id == crate::jobs::EVT_SCAN_PROGRESS => self.admin.ncp_progress(&m.payload),
+            Input::Ncp(m) if m.msg_id == hub_ncp::coord::EVT_SCAN_PROGRESS => {
+                if let Some(CoordEvent::ScanProgress { done, total, .. }) = hub_ncp::coord::scan_progress(&m) {
+                    self.admin.scan_progress(done, total);
+                }
+            }
             Input::Ncp(m) => match engine_input(&m) {
                 Some(EngineInput::Indication(i)) => {
                     if let Some(ieee) = i.src_ieee {
@@ -891,6 +900,7 @@ impl Runner {
         let jobs = Mutex::new(self.jobs.clone());
         let ctx = admin::Ctx {
             ncp: &self.ncp,
+            net: &self.net,
             api: &mut self.api,
             known: &known,
             app_facts: &app_facts,

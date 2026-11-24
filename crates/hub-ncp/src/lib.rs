@@ -12,9 +12,11 @@
 //! | [`lifecycle`] | [`Hub`]: seamless resume, network ownership, `NWK_INIT` floors, replay, events → store, form, permit join, APS data, NCP update/confirm, reset, ROM-loader hand-off; maintenance (`netops`): energy scan, channel change, TX power, diagnostics, coordinator tables, backup export/restore, leave/reset | 7, 8.4, 8.7, 9, 12.1, 12.4 |
 //! | [`fw`] | `FW_*` streaming into the NCP's inactive slot | 7.9 |
 //! | [`inventory`] | devices the NCP knows (`TBL_READ`, `DIAG_GET_CHILDREN`/`NEIGHBORS`) for import | 8.5, 10 |
+//! | [`coord`] | the ZRHP coordinator backend (`hub-coord`): network administration ([`coord::ZrhpAdmin`]), errors, backups as record streams | 7, 9 |
 //! | [`store`] | re-export of `hub-store`: log-structured journal on raw flash (`hubdata`), file or RAM | 3.4, 8.8 |
 //! | `sim` (feature `sim`) | simulated NCP for tests and `hubctl --sim` | — |
 
+pub mod coord;
 pub mod driver;
 pub mod fw;
 pub mod inventory;
