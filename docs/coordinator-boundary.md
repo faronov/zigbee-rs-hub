@@ -360,9 +360,10 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 
 - **`zrhp-pump` thread** (about 6 KB stack). It replaces the 4 KB forwarder
   (`app.rs:313-325`) and is fed through one unbounded queue (a `VecDeque`
-  under a mutex: no channel type of its own in the firmware): commands from
-  the app, plus subscription messages from a new callback subscriber
-  `Hub::subscribe_into` (no extra thread).
+  of boxed messages under a mutex, shrunk back to 64 slots once drained: no
+  channel type of its own in the firmware, and no RAM kept after a burst):
+  commands from the app, plus subscription messages from a new callback
+  subscriber `Hub::subscribe_into` (no extra thread).
   - **Commands:** `Client::start` with the moved `convert.rs` encoders
     (verbatim, same `Confirm::aps(60 s)`).
   - **Control requests** call today's blocking `Hub` methods **inline**:

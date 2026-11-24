@@ -113,12 +113,22 @@ struct Cancels {
     ids: Vec<u32>,
 }
 
+/// Slots the pump's queue keeps once drained.
+const INBOX_KEEP: usize = 64;
+
 /// The pump's messages, in order: a queue under a mutex rather than a
 /// channel (a channel type costs ~5 KB of firmware). Closed, as a
 /// channel's receiver is dropped, when the pump stops.
+///
+/// A burst (the pump blocked in a control call or on a full event queue:
+/// up to [`COMMAND_CAP`] commands plus the NCP's events) must not hold
+/// RAM for good, which boards without PSRAM cannot spare: messages are
+/// boxed, so the queue's own buffer is a pointer per message (no large
+/// contiguous block, nor a large copy under the lock when it grows), and
+/// it shrinks back to [`INBOX_KEEP`] slots once drained.
 #[derive(Default)]
 struct Inbox {
-    q: Mutex<(VecDeque<PumpMsg>, bool)>,
+    q: Mutex<(VecDeque<Box<PumpMsg>>, bool)>,
     ready: Condvar,
 }
 
@@ -129,7 +139,7 @@ impl Inbox {
         if q.1 {
             return false;
         }
-        q.0.push_back(m);
+        q.0.push_back(Box::new(m));
         self.ready.notify_one();
         true
     }
@@ -141,14 +151,19 @@ impl Inbox {
             .ready
             .wait_timeout_while(q, t, |q| q.0.is_empty())
             .unwrap();
-        q.0.pop_front()
+        let m = q.0.pop_front();
+        if q.0.is_empty() && q.0.capacity() > INBOX_KEEP {
+            q.0.shrink_to(INBOX_KEEP);
+        }
+        m.map(|m| *m)
     }
 
-    /// The pump stopped: what is queued is dropped, later sends fail.
+    /// The pump stopped: what is queued is dropped (the buffer too), later
+    /// sends fail.
     fn close(&self) {
         let mut q = self.q.lock().unwrap();
         q.1 = true;
-        q.0.clear();
+        q.0 = VecDeque::new();
     }
 }
 
@@ -725,6 +740,25 @@ mod tests {
         inbox.close();
         assert!(inbox.recv_timeout(short).is_none());
         assert!(!inbox.send(PumpMsg::Stop));
+    }
+
+    #[test]
+    fn a_drained_inbox_gives_back_the_buffer_of_a_burst() {
+        let inbox = Inbox::default();
+        let short = Duration::from_millis(1);
+        for i in 0..COMMAND_CAP as u32 {
+            assert!(inbox.send(PumpMsg::Cmd(RequestId(i), Cmd::Inventory)));
+        }
+        assert!(inbox.q.lock().unwrap().0.capacity() >= COMMAND_CAP);
+        for i in 0..COMMAND_CAP as u32 {
+            let m = inbox.recv_timeout(short);
+            assert!(matches!(m, Some(PumpMsg::Cmd(RequestId(id), _)) if id == i));
+        }
+        assert!(inbox.recv_timeout(short).is_none());
+        assert!(inbox.q.lock().unwrap().0.capacity() <= INBOX_KEEP);
+        // Still usable.
+        assert!(inbox.send(PumpMsg::Stop));
+        assert!(matches!(inbox.recv_timeout(short), Some(PumpMsg::Stop)));
     }
 
     #[test]
