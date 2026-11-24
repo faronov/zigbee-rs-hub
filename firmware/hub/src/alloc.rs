@@ -28,8 +28,8 @@
 
 #[cfg(target_feature = "s32c1i")]
 compile_error!(
-    "Rust atomics would use S32C1I, which is not atomic on PSRAM: build tbr-hub from firmware/hub \
-     (its .cargo/config.toml sets -C target-feature=-s32c1i)"
+    "Rust atomics would use S32C1I, which is not atomic on PSRAM: build the firmware from its directory \
+     (firmware/hub, firmware/donglem: their .cargo/config.toml sets -C target-feature=-s32c1i)"
 );
 
 use core::alloc::{GlobalAlloc, Layout};

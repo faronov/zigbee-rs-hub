@@ -1,0 +1,14 @@
+# SONOFF Dongle Max (Dongle-M) stock partition table, unchanged: this CSV
+# generates the table at 0x8000 of the stock firmware 1.0.7 byte for byte
+# (sha256 of the 0xC00-byte table 639d27a0…ca66, CI checks it). The
+# firmware is flashed into `ota_1` and selected by `otadata` alone; the
+# bootloader, this table, `nvs`, the stock application in `ota_0` and
+# SONOFF's `files` LittleFS stay as they are (docs/dongle-max.md). The
+# product layout for the hub application is partitions-16mb.csv.
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x1C000,  0x40000
+otadata,  data, ota,      0x5C000,  0x2000
+phy_init, data, phy,      0x5E000,  0x1000
+ota_0,    app,  ota_0,    0x60000,  0x600000
+ota_1,    app,  ota_1,    0x660000, 0x600000
+files,    data, 0x83,     0xC60000, 0x3A0000
