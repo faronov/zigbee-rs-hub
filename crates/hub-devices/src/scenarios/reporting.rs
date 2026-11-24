@@ -612,6 +612,30 @@ fn overrides_persist_and_old_snapshots_load() {
     }
     let e: Earlier = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(e.id, d);
+
+    // Entries are checked as the derived reader did: `mfr` optional (null
+    // too), every other field required and in range.
+    let with = |r: J| {
+        let mut v: J = serde_json::from_slice(&bytes).unwrap();
+        v["reporting"] = json!([r]);
+        DeviceSnapshot::from_bytes(&serde_json::to_vec(&v).unwrap())
+    };
+    let ok = with(json!({"ep": 11, "cluster": 6, "attr": 0, "mfr": null, "report": "revert"}));
+    assert_eq!(
+        ok.unwrap().reporting[0].report,
+        crate::reporting::ReportSetting::Revert
+    );
+    let mfr = with(json!({"ep": 11, "cluster": 6, "attr": 0, "mfr": 4447, "report": [1, 2]}));
+    assert_eq!(mfr.unwrap().reporting[0].mfr, Some(4447));
+    for bad in [
+        json!({"ep": 11, "cluster": 6, "attr": 0}),
+        json!({"ep": 256, "cluster": 6, "attr": 0, "report": "off"}),
+        json!({"cluster": 6, "attr": 0, "report": "off"}),
+        json!({"ep": 11, "cluster": 6, "attr": 0, "mfr": -1, "report": "off"}),
+        json!({"ep": 11, "cluster": 6, "attr": 0, "report": "default"}),
+    ] {
+        assert!(with(bad.clone()).is_err(), "{bad}");
+    }
 }
 
 #[test]

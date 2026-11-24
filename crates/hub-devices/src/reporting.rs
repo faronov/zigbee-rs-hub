@@ -186,13 +186,17 @@ impl serde::Serialize for ReportSetting {
 
 impl<'de> serde::Deserialize<'de> for ReportSetting {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = J::deserialize(d)?;
+        Self::from_store(&J::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ReportSetting {
+    /// The store form: a setting or `"revert"`.
+    pub fn from_store(v: &J) -> Result<Self, String> {
         if v == "revert" {
             return Ok(Self::Revert);
         }
-        Self::parse(&v)
-            .map_err(serde::de::Error::custom)?
-            .ok_or_else(|| serde::de::Error::custom("report: a setting"))
+        Self::parse(v)?.ok_or_else(|| "report: a setting".into())
     }
 }
 
@@ -462,20 +466,22 @@ impl ReportDefaults {
 
     /// Store form (`DEFAULTS_KEY`).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let m: Map<String, J> = self
-            .edits
-            .iter()
-            .map(|(k, s)| ((*k).to_string(), s.to_json()))
-            .collect();
+        // Inserted, not collected: no sort instantiation (firmware size).
+        let mut m = Map::new();
+        for (k, s) in &self.edits {
+            m.insert((*k).to_string(), s.to_json());
+        }
         serde_json::to_vec(&m).unwrap_or_default()
     }
 
     /// Reads the store form; classes this build does not know and invalid
     /// settings are skipped.
     pub fn from_bytes(b: &[u8]) -> Result<Self, String> {
-        let m: Map<String, J> = serde_json::from_slice(b).map_err(|e| e.to_string())?;
+        // Parsed as a value (its parser is in the firmware anyway).
+        let v: J = serde_json::from_slice(b).map_err(|e| e.to_string())?;
+        let m = v.as_object().ok_or("reporting defaults: an object")?;
         let mut d = Self::default();
-        for (k, v) in &m {
+        for (k, v) in m {
             let Some(c) = CLASSES.iter().find(|c| c.key == k) else {
                 continue;
             };
