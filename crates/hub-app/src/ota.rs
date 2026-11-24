@@ -8,8 +8,9 @@
 //!
 //! - **streams** (always): a connected client (Home Assistant, a browser
 //!   tab, `hubctl ota-stream`) offers an image and serves its bytes on
-//!   demand (`ota/block_needed` → `ota/block_data`); the hub keeps an 8 KiB
-//!   window per stream. The 4 MB layout has nothing else;
+//!   demand (`ota/block_needed` → `ota/block_data`); the hub keeps a 4 KiB
+//!   window per stream, at most `AppConfig::ota_streams` streams. The 4 MB
+//!   images have nothing else;
 //! - the **store** (feature `ota-store`, [`crate::ota_store`]): uploaded
 //!   images in the inactive app slot of the 8 MB layout.
 //!

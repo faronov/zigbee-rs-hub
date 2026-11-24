@@ -301,10 +301,15 @@ newer than the running one; the image inside is what the product's
   simulated clients: manual policy and confirmation, block size against
   `max_asdu`, concurrency and queue, abort, page requests, pacing and
   MinimumBlockPeriod, a download across a hub restart, a rejected image,
-  `auto` with window and clock, hardware/version limits, unknown commands;
-  streamed: a whole download with one WAIT_FOR_DATA, the client away and
-  back, ABORT after the grace time. Both with and without the `store`
-  feature.
+  `auto` with window and clock, hardware/version limits, unknown commands,
+  Upgrade End without an approving job (aborted, `off`, never started)
+  answered ABORT, `off` ending a running job, a hostile page request
+  (MaxDataSize 1, PageSize 4096) bounded while another device downloads,
+  MinimumBlockPeriod between page blocks, one queued response per device,
+  an upload begun with `replace`; streamed: a whole download with one
+  WAIT_FOR_DATA, a download in pages, the client away and back, ABORT
+  after the grace time, the hub's stream limit. Both with and without the
+  `store` feature.
 - `hub-app`: upload, query, start, download and confirmation through the
   simulated NCP (`SimNcp::set_aps_hook` with the simulated OTA client;
   every frame ≤ the simulated NCP's 82-B `max_asdu`), app restart, no
@@ -319,10 +324,15 @@ newer than the running one; the image inside is what the product's
   web UI's Updates tab.
 
 **Hardware:** streaming works on the lab board's octal-PSRAM 4 MB build
-(2026-11-23: two complete downloads to the C6, steps 3–10 pass, internal
-heap flat) with one unexplained hub panic during the first run; the first
-test without the memory fixes failed (heap). Results below. The store needs
-an 8 MB board (host tests only so far).
+of the first branch (`zigbee-ota`, 2026-11-23: two complete downloads to
+the C6, steps 3–10 pass, internal heap flat) with one unexplained hub
+panic during the first run; the first test without the memory fixes
+failed (heap). Results below. Still to do on hardware for this branch
+(`zigbee-ota-v2`, on main after PR #51–#53, with the page and Upgrade End
+fixes): the panic output in TinyUSB mode plus a 40-minute baseline soak of
+main on the same octal build (to tell whether OTA causes it), a store run
+on an 8 MB board (host tests only so far), and a device OTA end to end
+with this branch's images.
 
 ## Hardware test
 

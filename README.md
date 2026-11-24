@@ -64,8 +64,9 @@ tools and attaches per layout the full flash image (`…-merged.bin`, offset
 0, padded to the flash size), bootloader, partition table, blank `otadata`
 (8 MB), app, plus the `tbr-bridge` app, `release-manifest.json` and
 `SHA256SUMS`; the release notes list the esptool commands. Both flash sizes
-carry the MQTT bridge; the 8 MB images also enable the advanced console
-(`features` per board in the manifest; `tools/build-hub-firmware.sh`). A suffix
+carry the MQTT bridge; the 8 MB images also enable the advanced console and
+the Zigbee OTA image store (`features` per board in the manifest;
+`tools/build-hub-firmware.sh`). A suffix
 (`hub-v0.2.0-rc.1`) makes a pre-release. The flasher picks the release up
 within six hours, or at once when this repository has the secret
 `FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
@@ -78,12 +79,15 @@ Hardware/backend requirements and the feature/readiness matrix:
 
 The 4 MB image keeps the existing partition table, `nvs`, `hubdata` and
 boot-mode selection. Standard images use feature `mqtt` (4 MB) and
-`mqtt,advanced` (8 MB): normal ZCL, Tuya and Green Power devices,
-groups/scenes/bindings, local automations, the catalog, WebSocket/HA and
-ESP-IDF's esp-mqtt in both. The manual ZCL/Tuya console and live frame tap
-are the optional `advanced` feature; an image without it answers those API
-requests with `unsupported`. `hub/info.advanced` reports whether they are
-present.
+`mqtt,advanced,ota-store` (8 MB): normal ZCL, Tuya and Green Power devices,
+groups/scenes/bindings, local automations, the catalog, WebSocket/HA,
+ESP-IDF's esp-mqtt and the Zigbee OTA server with streamed images in both.
+The manual ZCL/Tuya console and live frame tap are the optional `advanced`
+feature; an image without it answers those API requests with
+`unsupported`. `hub/info.advanced` reports whether they are present. The
+OTA image store (`ota-store`) needs the 8 MB layout's second app slot: the
+4 MB images are built without it and serve streamed images only
+(`hub/info.ota.store`).
 
 ```sh
 RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --locked
@@ -1152,34 +1156,42 @@ UI and the HA integration see.
 
 ## Device firmware updates (Zigbee OTA)
 
-Draft (branch `zigbee-ota`, [docs/ota.md](docs/ota.md), API in
+Draft (branch `zigbee-ota-v2`, [docs/ota.md](docs/ota.md), API in
 device-support 14.11): the hub is the OTA Upgrade server (cluster 0x0019)
 of its network and downloads nothing itself. Two image sources:
-**streaming** (every build): a connected client — Home Assistant
-(preferred), a browser tab (**Updates**, "keep this tab open"), `hubctl
-ota-stream` — offers a file it holds and answers `ota/block_needed` with
-`ota/block_data`; the hub keeps at most 8 KiB per stream, answers the
-device WAIT_FOR_DATA while a chunk is on its way and ends the transfer
+**streaming** (every image): a connected client — Home Assistant
+(preferred), a browser tab (**Updates** on the 4 MB images, "keep this tab
+open"), `hubctl ota-stream` — offers a file it holds and answers
+`ota/block_needed` with `ota/block_data`; the hub keeps a 4 KiB window per
+stream (at most 4 streams with PSRAM, `Resources::ota_streams`), answers
+the device WAIT_FOR_DATA while a chunk is on its way and ends the transfer
 cleanly when the client goes away (the device retries later). **Image
-store** (8 MB layout only, feature `ota-store`): uploads (web UI, Home
-Assistant, `hubctl ota-upload`; resumable, checked in flash: header,
-sub-elements, SHA-256) go to the **inactive app slot** (3 MiB) — locked
-against hub self-updates both ways, lost when the hub updates itself,
-re-checked at boot. The 4 MB dev layout builds without the store. The
-Koenkk/zigbee-OTA index is fetched by the browser / Home Assistant (CORS
-is open). Per device: policy `manual` (default), `auto` (schedule window)
-or `off`; Image Notify (sleepy devices through the queue); blocks of
-min(device, 48 B, NCP `max_asdu` − 17); page requests; pacing; at most 2
-downloads at once; abort; progress events; resumable after a hub restart.
-Home Assistant: one `update` entity per device (upload to the store or
-streaming). Host tests: simulated OTA client behind the simulated NCP,
-Home Assistant end to end with `hubctl --sim --sim-ota`; not on hardware
-yet (procedure: [docs/ota.md](docs/ota.md#hardware-test)). Cost vs main:
-8 MB (store + streaming) +128 352 B, 4 MB (streaming only) +92 944 B app
-image (4 MB: 2 661 408 B, 88.3 % of the 2 944 KiB slot); no static RAM.
-Open: hub self-OTA must take the app-slot lock. zigbee-rs devices
-advertise OTA manufacturer code 0x6D6B (devices on older firmware: one
-transition file with 0x1234).
+store** (8 MB images only, feature `ota-store`): uploads (web UI, Home
+Assistant, `hubctl ota-upload`; resumable, `replace` at begin, checked in
+flash: header, sub-elements, SHA-256) go to the **inactive app slot**
+(3 MiB) — locked against hub self-updates both ways, lost when the hub
+updates itself, re-checked at boot. The 4 MB images have no second app
+slot and are built without the store. The Koenkk/zigbee-OTA index is
+fetched by Home Assistant (the web page has no index search: page
+budget). Per device: policy `manual` (default), `auto` (schedule window)
+or `off` (never: `ota/start` refused, a running job aborted); Image
+Notify (sleepy devices through the queue); blocks of min(device, 48 B,
+NCP `max_asdu` − 17); page requests answered one block at a time (at most
+128, sharing the pacing slots with the other devices); pacing; at most 2
+downloads at once; abort (an aborted or unapproved Upgrade End gets
+ABORT, never "install now"); progress events; resumable after a hub
+restart. Home Assistant: one `update` entity per device (upload to the
+store or streaming). Host tests: simulated OTA client behind the
+simulated NCP, Home Assistant end to end with `hubctl --sim --sim-ota`.
+Hardware: streaming ran on the octal 4 MB lab board (old branch, results
+in [docs/ota.md](docs/ota.md#hardware-results)); not yet: a capture of its
+one unexplained panic with a baseline soak, the 8 MB store, a device OTA
+end to end on this branch. App image cost vs main (ea05081, quad PSRAM):
+4 MB (`mqtt`, streaming only) 2 863 296 B, +102 848 B, 95.0 % of the
+2 944 KiB slot; 8 MB (`mqtt,advanced,ota-store`) 2 915 456 B, +135 040 B,
+92.7 % of the 3 MiB slot; no static RAM. Open: hub self-OTA must take the
+app-slot lock. zigbee-rs devices advertise OTA manufacturer code 0x6D6B
+(devices on older firmware: one transition file with 0x1234).
 
 ## Home Assistant integration
 
