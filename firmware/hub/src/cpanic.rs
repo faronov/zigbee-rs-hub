@@ -9,6 +9,7 @@
 //! does not hide it.
 
 use core::ffi::{c_char, c_void};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 struct PanicInfo {
@@ -82,17 +83,29 @@ fn copy_c(dst: &mut [u8], src: *const c_char) {
     }
 }
 
+/// Set by the first panic of a boot (`.bss`, cleared at every boot): a
+/// fault inside the handler itself (coredump, backtrace) re-enters it and
+/// must not replace the original record.
+static RECORDED: AtomicBool = AtomicBool::new(false);
+
 /// Runs in the panic handler (cache already re-enabled, other core stalled).
 #[unsafe(no_mangle)]
 unsafe extern "C" fn __wrap_esp_panic_handler(info: *mut PanicInfo) {
-    // SAFETY: called once per panic with ESP-IDF's panic info; RECORD is only
-    // read at the next boot.
+    if RECORDED.swap(true, Ordering::Relaxed) {
+        // SAFETY: ESP-IDF's handler with its own info.
+        unsafe { __real_esp_panic_handler(info) };
+        return;
+    }
+    // SAFETY: ESP-IDF's panic info; RECORD is only read at the next boot.
     unsafe {
         let r = &mut *(&raw mut RECORD);
+        // A record cut short by a fault in here fails the magic check.
+        r.magic = 0;
         let i = &*info;
         let f = i.frame;
         let word = |n: usize| if f.is_null() { 0 } else { *f.add(n) };
-        r.boot = (*(&raw const BOOTS))[1];
+        let boots = *(&raw const BOOTS);
+        r.boot = if boots[0] == BOOTS_MAGIC { boots[1] } else { 0 };
         r.core = i.core as u32;
         r.exception = if g_panic_abort { 3 } else { i.exception };
         // XtExcFrame: exit, pc, ps, a0, a1, …, sar (19), exccause (20), excvaddr (21).
@@ -101,7 +114,10 @@ unsafe extern "C" fn __wrap_esp_panic_handler(info: *mut PanicInfo) {
         r.a1 = word(4);
         r.exccause = word(20);
         r.excvaddr = word(21);
-        copy_c(&mut r.task, esp_idf_svc::sys::pcTaskGetName(core::ptr::null_mut()));
+        // No task yet early in start-up: pcTaskGetName(NULL) would assert.
+        let task = esp_idf_svc::sys::xTaskGetCurrentTaskHandle();
+        let name = if task.is_null() { c"-".as_ptr() } else { esp_idf_svc::sys::pcTaskGetName(task) };
+        copy_c(&mut r.task, name);
         let mut text = if g_panic_abort && !g_panic_abort_details.is_null() { g_panic_abort_details } else { i.reason };
         (r.cache_vaddr, r.cache_size) = (0, 0);
         // EXCCAUSE 7 with the pseudo cause: the cache error interrupt.
