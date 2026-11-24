@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin};
+use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin, RegistryState};
 use hub_devices::transport::{CoordError, Outcome, Request, RequestId, Terminal, ZigbeeTransport};
 
 /// Outcome counters of APS requests.
@@ -98,6 +98,8 @@ pub struct CoordTransport {
     control: VecDeque<(RequestId, Outcome)>,
     /// APS outcome counters.
     pub counters: ApsCounters,
+    /// Whose the hub's network-scoped records are (`network/info.registry`).
+    pub registry: Option<Box<dyn Fn() -> RegistryState + Send + Sync>>,
 }
 
 impl CoordTransport {
@@ -114,6 +116,7 @@ impl CoordTransport {
             done: Vec::new(),
             control: VecDeque::new(),
             counters: ApsCounters::default(),
+            registry: None,
         }
     }
 
@@ -198,7 +201,8 @@ impl ZigbeeTransport for CoordTransport {
     }
 
     fn network_info(&mut self) -> Option<serde_json::Value> {
-        Some(network_info(&self.coord.status(), self.admin.tx_power_setting()))
+        let registry = self.registry.as_ref().map(|r| r());
+        Some(network_info(&self.coord.status(), self.admin.tx_power_setting(), registry.as_ref()))
     }
 }
 
@@ -207,9 +211,10 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// `network/info`: the backend's view of the network and the NCP
-/// (`tx_power_requested`: what the operator set). EUI-64 values are
-/// big-endian hex, as in device records.
-pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>) -> serde_json::Value {
+/// (`tx_power_requested`: what the operator set), and whose the hub's
+/// network-scoped records are (`registry`). EUI-64 values are big-endian
+/// hex, as in device records.
+pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>, registry: Option<&RegistryState>) -> serde_json::Value {
     use serde_json::json;
     let be = |b: &[u8; 8]| {
         let mut r = *b;
@@ -235,6 +240,9 @@ pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>) -> serde_j
     if let Some(p) = tx_power_requested {
         o["tx_power_requested"] = p.into();
     }
+    if let Some(r) = registry {
+        o["registry"] = registry_json(r);
+    }
     if let Some(s) = &st.ncp {
         let mut ncp_o = json!({
             "fw": s.fw,
@@ -253,6 +261,18 @@ pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>) -> serde_j
         o["ncp"] = ncp_o;
     }
     o
+}
+
+/// `network/info.registry`: `state`, and for foreign records the tag's
+/// `backend` and `why`.
+pub fn registry_json(r: &RegistryState) -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    o.insert("state".into(), r.as_str().into());
+    if let RegistryState::Foreign { backend, why } = r {
+        o.insert("backend".into(), (*backend).into());
+        o.insert("why".into(), (*why).into());
+    }
+    o.into()
 }
 
 #[cfg(test)]

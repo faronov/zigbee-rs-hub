@@ -15,6 +15,12 @@
 //! The edited reporting defaults (device-support 5.2): `cfg/report`
 //! (JSON), read before the devices, written when they change and removed
 //! when nothing is edited.
+//!
+//! Devices, groups and bindings are network-scoped (design §2.7): while
+//! they belong to another backend or network the store hides them, and
+//! they are loaded ([`Registry::load_network`]) once they are adopted.
+//! They are written, and the sweep deletes stored ones the engine lacks,
+//! only once they were loaded and while they are this hub's.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,7 +33,7 @@ use hub_devices::reporting::DEFAULTS_KEY;
 use hub_devices::transport::ZigbeeTransport;
 use hub_devices::vecmap::{btree_map, btree_set};
 use hub_devices::zdef_adapter::{ZdefSchemaDecoder, load_cbor};
-use hub_store::{KvStore, kv};
+use hub_store::{Gate, KvStore, Scope, kv};
 use log::{info, warn};
 
 /// Device key prefix.
@@ -75,6 +81,8 @@ pub struct Registry {
     pub errors: u64,
     /// Values written.
     pub writes: u64,
+    /// The network-scoped records were loaded (they were readable).
+    pub loaded: bool,
 }
 
 impl Registry {
@@ -87,10 +95,9 @@ impl Registry {
             warn!("registry: {DEFAULTS_KEY}: {e}");
         }
         self.report_gen = engine.reporting_defaults().generation;
-        let (udefs, devs, srcs): (Records, Records, Records) = kv::with(kv, |s| {
+        let (udefs, srcs): (Records, Records) = kv::with(kv, |s| {
             (
                 s.prefix(UDEF).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
-                s.prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
                 s.prefix(USRC).map(|(k, v)| (k.to_string(), v.to_vec())).collect(),
             )
         });
@@ -112,12 +119,29 @@ impl Registry {
                 Err(e) => warn!("registry: {key}: {e:?}"),
             }
         }
+        self.load_network(kv, engine, now);
+        self.last_sweep = now;
+        info!("registry: restored {} devices, {} groups", self.restored, engine.zg.groups.len());
+    }
+
+    /// Restores the devices, then groups and bindings, from the store (at
+    /// start, and once they are adopted: a stored device replaces the one
+    /// the engine made meanwhile); how many devices.
+    pub fn load_network<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) -> usize {
+        let (gate, devs): (Gate, Records) =
+            kv::with(kv, |s| (s.gate(), s.prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect()));
+        let mut n = 0;
         for (key, bytes) in devs {
+            let id = &key[DEV.len()..];
+            if engine.device(id).is_some() {
+                engine.forget_device(id);
+            }
             match decode(&bytes).and_then(|s| engine.restore_device(s, Some(&ZdefSchemaDecoder), now)) {
-                Ok(()) => self.restored += 1,
+                Ok(()) => n += 1,
                 Err(e) => warn!("registry: {key}: {e}"),
             }
         }
+        self.restored += n;
         let zg: Records = kv::with(kv, |s| {
             s.prefix(GROUP_KEY)
                 .chain(s.prefix(BIND_KEY))
@@ -129,8 +153,8 @@ impl Registry {
                 warn!("registry: {key}: {e}");
             }
         }
-        self.last_sweep = now;
-        info!("registry: restored {} devices, {} groups", self.restored, engine.zg.groups.len());
+        self.loaded = gate != Gate::Closed;
+        n
     }
 
     /// Notes engine events (before they go to the API).
@@ -253,8 +277,12 @@ impl Registry {
         }
         self.dirty_since = None;
         kv::with(kv, |s| {
+            // Network records are written (and swept) once they are in the
+            // engine, and only while they are this hub's.
+            let network = self.loaded && s.gate() == Gate::Open;
+            let skip = |k: &str| !network && kv::scope(k) == Scope::Network;
             for (k, v) in &puts {
-                if s.get(k) == Some(v.as_slice()) {
+                if skip(k) || s.get(k) == Some(v.as_slice()) {
                     continue;
                 }
                 match s.put(k, v) {
@@ -265,7 +293,7 @@ impl Registry {
                     }
                 }
             }
-            for k in &dels {
+            for k in dels.iter().filter(|k| !skip(k)) {
                 if let Err(e) = s.delete(k) {
                     self.errors += 1;
                     warn!("registry: delete {k}: {e}");

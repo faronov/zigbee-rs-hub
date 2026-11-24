@@ -44,6 +44,8 @@ pub const TYPES: &[&str] = &[
     "network/job/cancel",
     "network/restore",
     "network/reset",
+    "network/registry/adopt",
+    "network/registry/clear",
     "hub/system",
     "hub/logs",
     "hub/wifi/set",

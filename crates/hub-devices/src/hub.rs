@@ -2659,8 +2659,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         Ok(())
     }
 
-    /// Drops a removed device, its entities and what waits for it.
-    pub(crate) fn forget_device(&mut self, id: &str) {
+    /// Drops a device, its entities and what waits for it, without network
+    /// traffic (a removed device; the hub's records of a network cleared).
+    pub fn forget_device(&mut self, id: &str) {
         if let Some(d) = self.devices.remove(id) {
             for e in &d.entities {
                 self.emit(HubEvent::EntityRemoved(e.uid.clone()));
