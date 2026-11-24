@@ -46,7 +46,7 @@ mqtt-lite = ["mqtt"]
 # production layout (tools/build-hub-firmware.sh enables it there only).
 # Every image serves streamed images (an API client holds the file); the
 # 4 MB dev layout has no second app slot to store images in.
-ota-store = ["app", "hub-app/ota-store"]
+ota-store = ["app", "hub-app/ota-store", "hub-web/ota-store"]
 
 [build-dependencies]
 embuild = "0.33"

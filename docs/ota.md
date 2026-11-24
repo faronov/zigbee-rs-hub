@@ -179,32 +179,34 @@ All clients first find the identifier `0x0BEEF11E` in the first 4 KiB
 (some vendors prefix the file) and cut what is before it. Upload (store):
 `ota/upload/begin` (size, name, SHA-256 when the client can compute it),
 chunks of the hub's `chunk_max` from the returned offset,
-`ota/upload/commit`. Stream: see above. The web UI hides the Updates tab
-on a hub without an OTA server (`ota` missing in `hub/info`), shows the
-upload only with a store, and offers **Install from this tab** (a file,
-or an index entry): the tab serves the image and asks to stay open until
-the update is done (it also warns before closing).
+`ota/upload/commit` (`replace` at begin replaces a stored image of the
+same identity). Stream: see above. The web UI hides the Updates tab on a
+hub without an OTA server (`ota` missing in `hub/info`). Its page is
+built for the image (hub-web feature `ota-store`, set with the
+firmware's): with a store (8 MB) it offers **Upload to the hub**; without
+(4 MB) **Install from this tab**, where the tab serves the image and asks
+to stay open until the update is done (it also warns before closing).
+Both list the devices (Update, Abort, Check, policy), the images and the
+policy, window and concurrency settings; the pacing settings are API
+only. The page has no index search of its own (the 32 KiB page budget):
+a file from the index is downloaded by hand, or Home Assistant does it.
 
-The index URL is a hub setting (`index_url`, default Koenkk's), so the web
-UI and Home Assistant use the same one. Home Assistant fetches it a minute
+The index URL is a hub setting (`index_url`, default Koenkk's) that
+clients share. Home Assistant fetches it a minute
 after set-up and then daily
 and shows a newer image from it as the update entity's latest version;
 Install downloads the file, checks its SHA-512 (Python), cuts a prefix,
 then uploads it (store) or streams it (no store) and starts the upgrade
-with that image. The web UI's **Find updates** lists the index's images
-for the hub's devices with **Download to hub** (store) or **Install from
-this tab** (stream).
+with that image.
 
 **Koenkk/zigbee-OTA** ([index.json](https://raw.githubusercontent.com/Koenkk/zigbee-OTA/master/index.json),
 643 KB): `raw.githubusercontent.com` sends `Access-Control-Allow-Origin: *`
 for the index and the images, and every entry's `url` is on that host
-(checked 2026-11-21), so the web UI fetches both from the browser. Fields
+(checked 2026-11-21), so a browser client could fetch both. Fields
 used: `manufacturerCode`, `imageType`, `fileVersion`, `fileSize`, `url`,
 `sha512`, `minFileVersion`/`maxFileVersion`, `hardwareVersionMin`/`Max`,
-`fileName`. The UI checks SHA-512 with WebCrypto only in a secure context
-(`https://` or `localhost`); on `http://<hub>/` it cannot, and says so
-(the hub still checks the format and its own SHA-256). There is no GitHub
-Pages copy of that repository (koenkk.github.io/zigbee-OTA: 404).
+`fileName`. There is no GitHub Pages copy of that repository
+(koenkk.github.io/zigbee-OTA: 404).
 
 **Pages mirror (proposal)**: a scheduled GitHub Action in
 `faronov/zigbee-rs-definitions` publishes `ota/index.json` on its Pages
@@ -335,19 +337,17 @@ the C6's `zb:<ieee>`.
    hub's current app image and the C6's firmware (build features,
    version) — both are restored at the end.
 2. **Build.** In this branch: `cargo build -p hubctl --release`; the
-   octal hub image (the 4 MB dev build is the one without the store):
+   octal 4 MB hub image (features `mqtt`: no image store, as released):
    ```sh
    . ~/export-esp.sh
-   (cd firmware/hub && \
-     ESP_IDF_SDKCONFIG_DEFAULTS="firmware/bridge/sdkconfig.defaults;firmware/hub/sdkconfig.defaults;firmware/hub/sdkconfig.octal" \
-     CARGO_TARGET_DIR="$PWD/../../target-opi" cargo build --release --no-default-features --features app)
-   cp target-opi/xtensa-esp32s3-espidf/release/tbr-hub /tmp/hub-4mb-opi.elf
-   FLASH_SIZE=4MB MAX_APP_BYTES=3014656 ELF=/tmp/hub-4mb-opi.elf \
-     tools/make-app-image.sh release /tmp/hub-4mb-opi.bin tbr-hub
+   RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --psram octal --locked
+   TARGET_DIR=target-opi FLASH_SIZE=4MB MAX_APP_BYTES=3014656 \
+     tools/make-app-image.sh release target/hub-4mb-opi.bin tbr-hub
    ```
    (or `tbr-hub-4mb-dev-opi-app.bin` from the PR's CI artifact
-   `firmware`; a board without PSRAM takes `tbr-hub-4mb-dev-app.bin`, the
-   same build without `sdkconfig.octal`). Flash **only the app** at
+   `firmware`; a quad-PSRAM board takes `tbr-hub-4mb-dev-app.bin`, the
+   same build without `sdkconfig.octal`; without PSRAM the hub runs no
+   app, so no OTA server). Flash **only the app** at
    0x10000 (`factory`); do not erase `nvs` or `hubdata` (network,
    registry and OTA records stay). The boot log must report the octal
    PSRAM (8 MB) and the Rust heap in PSRAM; `hub/system` then shows the

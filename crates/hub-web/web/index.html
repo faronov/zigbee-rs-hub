@@ -151,17 +151,20 @@ progress{width:12em}
 <section class="card"><h2>Run history</h2><ul class="ents" id="aur"></ul><pre id="aurd" class="hide"></pre></section>
 </div>
 <div data-tab="ota" data-title="Updates" data-need="ota" class="tab">
+<!-- stream:start -->
 <p id="otk" class="badge bad hide"></p>
+<!-- stream:end -->
 <section class="card"><h2>Device firmware <span id="otn" class="mut"></span></h2>
 <p class="mut"><b>manual</b>: after Update; <b>auto</b>: inside the window. Sleepy devices start when they wake up.</p>
 <ul class="ents" id="otd"></ul></section>
 <section class="card"><h2>Images <span id="otu" class="mut"></span></h2><ul class="ents" id="oti"></ul>
-<div class="row acts otst"><input id="otf" type="file"><button class="p" id="otb">Upload to the hub</button><span id="otp" class="mut"></span></div>
-<div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div>
-<p class="mut">The hub stores nothing: this tab serves the image — keep it open until done.</p></section>
-<section class="card"><h2>Online index <span class="mut">(fetched by this browser)</span></h2>
-<div class="row"><input id="otx" size="48"><button id="otc">Find updates</button><span id="ots" class="mut"></span></div><ul class="ents" id="otr"></ul></section>
-<section class="card"><h2>Settings</h2><div class="row"><label>Policy <select id="otpo"><option>manual</option><option>auto</option><option>off</option></select></label><label>Window <input id="otw1" size="5" placeholder="02:00">–<input id="otw2" size="5" placeholder="05:00"></label><label>At once <input id="otmc" type="number" class="num" min="1" max="8"></label><label>Blocks/s <input id="otbs" type="number" class="num" min="0"></label><label>Block period <input id="otbp" type="number" class="num" min="0"> ms</label><button id="otsv">Apply</button></div><p class="mut" id="ota"></p></section>
+<!-- store:start -->
+<div class="row acts"><input id="otf" type="file"><button class="p" id="otb">Upload to the hub</button><span id="otp" class="mut"></span></div></section>
+<!-- store:end -->
+<!-- stream:start -->
+<div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div></section>
+<!-- stream:end -->
+<section class="card"><h2>Settings</h2><div class="row"><label>Policy <select id="otpo"><option>manual</option><option>auto</option><option>off</option></select></label><label>Window <input id="otw1" size="5" placeholder="02:00">–<input id="otw2" size="5" placeholder="05:00"></label><label>At once <input id="otmc" type="number" class="num" min="1" max="8"></label><button id="otsv">Apply</button></div><p class="mut" id="ota"></p></section>
 </div>
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
@@ -864,53 +867,55 @@ $("#aux").onclick=()=>{if(!auId)return toast("Save first");act("automations/run"
 $("#aun").onclick=()=>auEdit(null);
 $("#aud").onclick=()=>{if(auId&&confirm("Delete "+auId+"?"))act("automations/delete",{automation:auId}).then(()=>{delete au.rules[auId];auEdit(null);auRender()}).catch(()=>{})};
 // ---- Updates (OTA) tab ----
-let otD={},otI=[],otA={},otIdx=null,otS={};
+let otD={},otI=[],otA={},otStr={};
 const ver=v=>v==null?"?":hex(v,8),kb=n=>Math.round((n||0)/1024)+" KiB";
-onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()}).catch(()=>{});call("ota/images/list").then(l=>{otI=l;otImg()}).catch(()=>{});call("ota/status").then(s=>{otA=s.area;otSet(s.settings);$("#ota").textContent="Blocks of up to "+s.block_max+" B (NCP max_asdu "+s.asdu_max+")";otImg()}).catch(e=>$("#ota").textContent=e.message)};
-function otEv(e){if(e.topic=="ota_device"&&e.device){const j=e.device.job;otD[e.device.device]=e.device;otDev();if(j&&otStr[j.image]&&["done","failed","aborted"].includes(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}}else if(e.topic=="ota_images"){otA=e.area||otA;call("ota/images/list").then(l=>{otI=l;otImg()}).catch(()=>{})}}
+const otL=()=>call("ota/images/list").then(l=>{otI=l;otImg()},()=>{});
+onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()},()=>{});otL();call("ota/status").then(s=>{otA=s.area;otSet(s.settings);$("#ota").textContent="Blocks of up to "+s.block_max+" B (NCP max_asdu "+s.asdu_max+")";otImg()},e=>$("#ota").textContent=e.message)};
+function otEv(e){const r=e.device;if(!r){otA=e.area||otA;return otL()}otD[r.device]=r;otDev();
+// stream:start
+ const j=r.job;if(j&&otStr[j.image]&&/done|failed|aborted/.test(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}
+// stream:end
+}
 function otDev(){
- const box=$("#otd");box.textContent="";const ids=Object.keys(otD);$("#otn").textContent="("+ids.length+")";
- if(!ids.length)box.append(el("li",{class:"mut"},"No device with an OTA client (cluster 0x0019) yet."));
- const sd=$("#otsd"),sv=sd.value;sd.textContent="";for(const id of ids)sd.append(el("option",{value:id},otD[id].name||id));if(sv)sd.value=sv;
- for(const id of ids){const d=otD[id],j=d.job,a=d.available,run=j&&["waiting","queued","downloading","installing"].includes(j.state);
-  const st=j?j.state+(j.state=="downloading"?" "+j.progress+" %"+(j.stalled?" (stalled)":""):"")+(j.error&&!run?": "+j.error:""):"";
-  const pol=el("select",{onchange:e=>act("ota/devices/policy",{device:id,policy:e.target.value||null}).catch(()=>{})},...[["","default ("+d.effective_policy+")"],["manual","manual"],["auto","auto"],["off","off"]].map(([v,t])=>el("option",{value:v},t)));pol.value=d.policy||"";
+ const box=$("#otd"),ids=Object.keys(otD);box.textContent="";$("#otn").textContent="("+ids.length+")";
+ if(!ids.length)box.append(el("li",{class:"mut"},"No device with an OTA client yet."));
+ for(const id of ids){const d=otD[id],j=d.job,a=d.available,run=j&&/wait|queue|down|install/.test(j.state);
+  const b=(t,c,ty,f)=>el("button",{class:c,disabled:ty=="ota/start"&&!a?"":null,onclick:e=>busy(e.target,act(ty,{device:id}).then(f))},t);
+  const pol=el("select",{onchange:e=>act("ota/devices/policy",{device:id,policy:e.target.value||null}).catch(()=>{})},el("option",{value:""},"default ("+d.effective_policy+")"),...["manual","auto","off"].map(v=>el("option",{},v)));pol.value=d.policy||"";
   box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||id),el("br"),el("span",{class:"mut"},(d.manufacturer_code!=null?hex(d.manufacturer_code,4)+"/"+hex(d.image_type,4)+" ":"")+"runs "+ver(d.current_version)+(a?" → "+ver(a.file_version):"")+(d.sleepy?" · sleepy":""))),
-   el("span",{class:"v mut"},st),pol,
-   el("button",{onclick:e=>busy(e.target,act("ota/devices/check",{device:id}).then(()=>toast(d.sleepy?"Asked; a sleepy device answers when it wakes up":"Asked")))},"Check"),
-   run?el("button",{class:"d",onclick:e=>busy(e.target,act("ota/abort",{device:id}))},"Abort"):el("button",{class:"p",disabled:a?null:"",onclick:e=>busy(e.target,act("ota/start",{device:id}))},"Update")))}
+   el("span",{class:"v mut"},j?j.state+(j.state=="downloading"?" "+j.progress+" %"+(j.stalled?" (stalled)":""):"")+(j.error&&!run?": "+j.error:""):""),pol,
+   b("Check","","ota/devices/check",()=>toast("Asked")),run?b("Abort","d","ota/abort"):b("Update","p","ota/start")))}
+// stream:start
+ const sd=$("#otsd"),sv=sd.value;sd.textContent="";for(const id of ids)sd.append(el("option",{value:id},otD[id].name||id));if(sv)sd.value=sv
+// stream:end
 }
 function otImg(){const box=$("#oti"),a=otA||{};box.textContent="";$("#otu").textContent=a.capacity?kb(a.used)+" of "+kb(a.capacity)+" used, largest free "+kb(a.largest_free)+(a.foreign?"; the area holds other data":""):a.error||"";
- for(const i of otI){const r=i.state=="ready";box.append(el("li",{},el("span",{class:"n"},el("b",{},i.label||i.name||"image "+i.image),el("br"),el("span",{class:"mut"},(i.state=="streamed"?"streamed from a client · ":r?"":"uploading, "+kb(i.written)+" · ")+hex(i.manufacturer_code||0,4)+"/"+hex(i.image_type||0,4)+" "+ver(i.file_version)+" · "+kb(i.size)+(i.hw_min!=null?" · hw "+i.hw_min+"–"+i.hw_max:"")+(i.name?" · "+i.name:""))),
-  el("button",{class:"d",onclick:e=>{if(confirm("Delete this image?"))busy(e.target,act(i.state=="streamed"?"ota/stream/close":r?"ota/images/delete":"ota/upload/abort",i.state=="streamed"?{session:i.image}:r?{image:i.image}:{upload:i.image}).then(onTab.ota))}},"Delete")))}
+ for(const i of otI){const s=i.state=="streamed",r=i.state=="ready";box.append(el("li",{},el("span",{class:"n"},el("b",{},i.label||i.name||"image "+i.image),el("br"),el("span",{class:"mut"},(s?"streamed · ":r?"":"uploading, "+kb(i.written)+" · ")+hex(i.manufacturer_code||0,4)+"/"+hex(i.image_type||0,4)+" "+ver(i.file_version)+" · "+kb(i.size)+(i.hw_min!=null?" · hw "+i.hw_min+"–"+i.hw_max:"")+(i.name?" · "+i.name:""))),
+  el("button",{class:"d",onclick:e=>{if(confirm("Delete this image?"))busy(e.target,act(s?"ota/stream/close":r?"ota/images/delete":"ota/upload/abort",s?{session:i.image}:r?{image:i.image}:{upload:i.image}).then(onTab.ota))}},"Delete")))}
  if(!otI.length)box.append(el("li",{class:"mut"},"No images."))}
-let otStr={};
-function otCut(buf){const u=new Uint8Array(buf),m=otMagic(u);if(m<0)throw new Error("not a Zigbee OTA file");return u.subarray(m)}
-function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: it serves "+n+" image(s) to devices while they download";k.classList.toggle("hide",!n)}
-async function otStream(buf,name,meta,dev){const u=otCut(buf),o=await call("ota/stream/offer",Object.assign({size:u.length,name,header:b64(u.subarray(0,256))},meta||{}));otStr[o.session]=u;otKeep();await call("ota/start",{device:dev,image:o.session});toast("Started: keep this tab open until the update is done");return o}
+// The OTA file in a download (a vendor prefix before the magic is cut).
+function otCut(b){const u=new Uint8Array(b);for(let i=0;i<4096&&i+3<u.length;i++)if(u[i]==30&&u[i+1]==241&&u[i+2]==238&&u[i+3]==11)return u.subarray(i);throw new Error("not a Zigbee OTA file")}
 function otNeed(m){const u=otStr[m.session];if(u)call("ota/block_data",{session:m.session,offset:m.offset,data:b64(u.subarray(m.offset,m.offset+m.len))}).catch(()=>{})}
-// After a reconnect: offer the images again (the hub keeps the sessions for a while).
-function otRe(){const old=otStr;otStr={};for(const k in old)call("ota/stream/offer",{size:old[k].length,name:"image.ota",header:b64(old[k].subarray(0,256))}).then(o=>{otStr[o.session]=old[k];otKeep()}).catch(()=>{});otKeep();for(const e of document.querySelectorAll(".otst"))e.classList.toggle("hide",!(hub.ota&&hub.ota.store))}
-addEventListener("beforeunload",e=>{if(Object.keys(otStr).length){e.preventDefault();e.returnValue=""}});
-$("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otStream(b,f.name,null,d)).catch(x=>toast(x.message)))};
-function otMagic(u){for(let i=0;i+3<Math.min(u.length,4096);i++)if(u[i]==0x1E&&u[i+1]==0xF1&&u[i+2]==0xEE&&u[i+3]==0x0B)return i;return-1}
-async function otUp(buf,name,meta){
- const u=otCut(buf);
- const p=$("#otp"),b=await call("ota/upload/begin",Object.assign({size:u.length,name},meta||{})),n=b.chunk_max||8192;let at=b.offset;
- while(at<u.length){const e=Math.min(at+n,u.length);await call("ota/upload/chunk",{upload:b.upload,offset:at,data:b64(u.subarray(at,e))});at=e;p.textContent=Math.round(at*100/u.length)+" %"}
- const r=await call("ota/upload/commit",{upload:b.upload});p.textContent="";toast("Stored "+(r.label||name)+" "+ver(r.file_version)+(r.devices.length?", for "+r.devices.length+" device(s)":""));onTab.ota();return r}
+// store:start
+// The image store (8 MB): files are uploaded, devices download from the hub.
+function otRe(){}
+async function otUp(b,name){const u=otCut(b),p=$("#otp"),r=await call("ota/upload/begin",{size:u.length,name}),n=r.chunk_max||8192;
+ for(let at=r.offset;at<u.length;at+=n){await call("ota/upload/chunk",{upload:r.upload,offset:at,data:b64(u.subarray(at,at+n))});p.textContent=Math.round(Math.min(at+n,u.length)*100/u.length)+" %"}
+ const i=await call("ota/upload/commit",{upload:r.upload});p.textContent="";toast("Stored "+(i.label||name)+" "+ver(i.file_version)+(i.devices.length?", for "+i.devices.length+" device(s)":""));onTab.ota()}
 $("#otb").onclick=e=>{const f=$("#otf").files[0];if(f)busy(e.target,f.arrayBuffer().then(b=>otUp(b,f.name)).catch(x=>toast(x.message)))};
-$("#otc").onclick=e=>{const url=$("#otx").value.trim();if(url!=otS.index_url)call("ota/settings/set",{index_url:url}).then(otSet,x=>toast(x.message));$("#ots").textContent="fetching…";busy(e.target,fetch(url).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.json()}).then(l=>{otIdx=l;otFind()}).catch(x=>{$("#ots").textContent=x.message}))};
-const otFits=(d,x)=>x.manufacturerCode==d.manufacturer_code&&x.imageType==d.image_type&&x.fileVersion>d.current_version&&!(x.minFileVersion>d.current_version)&&!(x.maxFileVersion<d.current_version)&&(d.hw_version==null||!(x.hardwareVersionMin>d.hw_version)&&!(x.hardwareVersionMax<d.hw_version));
-function otFind(){const box=$("#otr");box.textContent="";let n=0;
- for(const d of Object.values(otD)){if(d.manufacturer_code==null)continue;const c=otIdx.filter(x=>otFits(d,x)).sort((a,b)=>b.fileVersion-a.fileVersion)[0];if(!c)continue;n++;
-  const have=otI.some(i=>i.manufacturer_code==c.manufacturerCode&&i.image_type==c.imageType&&i.file_version==c.fileVersion);
-  box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||d.device),el("br"),el("span",{class:"mut"},ver(d.current_version)+" → "+ver(c.fileVersion)+" · "+kb(c.fileSize)+" · "+c.fileName)),
-   have?el("span",{class:"mut"},"on the hub"):el("button",{class:"p",onclick:e=>{const st=hub.ota&&hub.ota.store,mt={min_file_version:c.minFileVersion,max_file_version:c.maxFileVersion};busy(e.target,fetch(c.url).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.arrayBuffer()}).then(b=>otSha(b,c.sha512).then(()=>st?otUp(b,c.fileName,mt):otStream(b,c.fileName,mt,d.device))).then(otFind).catch(x=>toast(x.message)))}},hub.ota&&hub.ota.store?"Download to hub":"Install from this tab")))}
- $("#ots").textContent=otIdx.length+" images in the index, "+n+" for your devices"+(crypto.subtle?"":" (no SHA-512 check)")}
-function otSha(b,want){if(!want||!crypto.subtle)return Promise.resolve();return crypto.subtle.digest("SHA-512",b).then(h=>{if(bytes([...new Uint8Array(h)])!=want.toLowerCase())throw new Error("SHA-512 mismatch")})}
-function otSet(s){if(!s)return;otS=s;V("otx",s.index_url||"");V("otpo",s.policy);V("otw1",s.window?s.window.start:"");V("otw2",s.window?s.window.end:"");V("otmc",s.max_concurrent);V("otbs",s.blocks_per_s);V("otbp",s.min_block_period_ms)}
-$("#otsv").onclick=e=>{const a=V("otw1"),b=V("otw2");busy(e.target,act("ota/settings/set",{policy:V("otpo"),window:a&&b?{start:a,end:b}:null,max_concurrent:+V("otmc"),blocks_per_s:+V("otbs"),min_block_period_ms:+V("otbp")}).then(otSet,()=>{}))};
+// store:end
+// stream:start
+// No store (4 MB): this tab serves the file while the device downloads.
+function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: it serves "+n+" image(s)";k.classList.toggle("hide",!n)}
+const otOffer=(u,name)=>call("ota/stream/offer",{size:u.length,name,header:b64(u.subarray(0,256))}).then(o=>{otStr[o.session]=u;otKeep();return o});
+// After a reconnect: offer the images again (the hub keeps the sessions for a while).
+function otRe(){const old=otStr;otStr={};for(const k in old)otOffer(old[k],"image.ota").catch(()=>{});otKeep()}
+addEventListener("beforeunload",e=>{if(Object.keys(otStr).length){e.preventDefault();e.returnValue=""}});
+$("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otOffer(otCut(b),f.name)).then(o=>call("ota/start",{device:d,image:o.session})).then(()=>toast("Started")).catch(x=>toast(x.message)))};
+// stream:end
+// Pacing (`blocks_per_s`, `min_block_period_ms`) is set through the API.
+function otSet(s){if(!s)return;V("otpo",s.policy);V("otmc",s.max_concurrent);const w=s.window||{};V("otw1",w.start||"");V("otw2",w.end||"")}
+$("#otsv").onclick=e=>{const a=V("otw1"),b=V("otw2");busy(e.target,act("ota/settings/set",{policy:V("otpo"),max_concurrent:+V("otmc"),window:a&&b?{start:a,end:b}:null}).then(otSet,()=>{}))};
 // ---- end of Updates tab ----
 connect();
 </script>
