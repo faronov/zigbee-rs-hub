@@ -773,22 +773,33 @@ fn gp_requests_are_refused_and_backup_is_not_offered_yet() {
 /// With a traffic gate (an application that decides network ownership,
 /// `NcpNv`): the request queued behind the one on the NCP is not sent in
 /// the next session, which may run another network; it ends
-/// `Refused(LinkDown)`. The worker closes the gate at the loss and again at
-/// the next `Up`; requests go out once the application opens it.
+/// `Refused(LinkDown)`. The worker closes the gate for each new session's
+/// epoch; requests go out once the application opens that epoch, and an
+/// opening for an earlier session does not count.
 #[test]
 fn with_a_traffic_gate_queued_requests_do_not_outlive_the_session() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let gate = Arc::new(AtomicBool::new(true));
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let gate = Arc::new(AtomicU32::new(0));
+    let open = |epoch: u32| {
+        gate.compare_exchange(
+            traffic_closed(epoch),
+            traffic_closed(epoch) | 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    };
     let mut o = opts();
     o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 1));
     o.traffic = Some(gate.clone());
     let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
-    rig.next_up();
-    assert!(
-        !gate.load(Ordering::SeqCst),
-        "closed at Up until the application decides"
+    let first = rig.next_up();
+    assert_eq!(
+        gate.load(Ordering::SeqCst),
+        traffic_closed(first),
+        "closed until the application decides"
     );
-    gate.store(true, Ordering::SeqCst);
+    assert!(open(first));
     rig.sim.ncp(|n| n.hold_message_sent(true));
     let a = rig.submit(unicast(0x1234));
     let b = rig.submit(unicast(0x5678));
@@ -803,15 +814,18 @@ fn with_a_traffic_gate_queued_requests_do_not_outlive_the_session() {
         "{b_t:?}"
     );
     assert!(matches!(rig.outcome(a), Terminal::Unknown(_)));
-    rig.next_up();
-    assert!(!gate.load(Ordering::SeqCst));
+    let second = rig.next_up();
+    assert_ne!(second, first);
     let to = |dst: u16| move |c: &Command| matches!(c, Command::SendUnicast { index_or_destination, .. } if *index_or_destination == dst);
-    // Submitted while the application has not decided yet: not sent either.
+    // A late decision about the first session opens nothing.
+    assert!(!open(first));
+    gate.store(traffic_closed(first) | 1, Ordering::SeqCst);
     let c = rig.submit(unicast(0x5678));
     assert!(matches!(rig.outcome(c), Terminal::Refused(_)));
     assert!(!rig.sent().iter().any(to(0x5678)), "{:?}", rig.sent());
-    // The application's decision opens it.
-    gate.store(true, Ordering::SeqCst);
+    // The decision about this session opens it.
+    gate.store(traffic_closed(second), Ordering::SeqCst);
+    assert!(open(second));
     let d = rig.submit(unicast(0x5678));
     assert_eq!(rig.outcome(d), Terminal::Delivered);
     rig.finish();

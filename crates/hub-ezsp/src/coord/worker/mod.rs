@@ -1328,9 +1328,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// The session is ready: ownership, `Up`, the network state, then the
     /// callbacks that came meanwhile.
     fn announce(&mut self) {
-        // The application decides about this session's network first.
-        self.close_traffic();
         self.epoch = self.epoch.wrapping_add(1).max(1);
+        // The application decides about this session's network first.
+        if let Some(t) = &self.opts.traffic {
+            t.store(super::traffic_closed(self.epoch), Ordering::SeqCst);
+        }
         self.up = true;
         self.state = SessionState::Ready;
         self.stats.sessions += 1;
@@ -1397,20 +1399,18 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.publish();
     }
 
-    /// [`EzspOptions::traffic`]: requests wait for the application's
-    /// decision about the network of the session.
+    /// [`EzspOptions::traffic`] at the end of a session: no epoch, closed.
     fn close_traffic(&self) {
         if let Some(t) = &self.opts.traffic {
-            t.store(false, Ordering::SeqCst);
+            t.store(0, Ordering::SeqCst);
         }
     }
 
     /// Requests may go out ([`EzspOptions::traffic`]).
     pub(super) fn traffic_open(&self) -> bool {
-        self.opts
-            .traffic
-            .as_ref()
-            .is_none_or(|t| t.load(Ordering::SeqCst))
+        self.opts.traffic.as_ref().is_none_or(|t| {
+            self.up && t.load(Ordering::SeqCst) == super::traffic_closed(self.epoch) | 1
+        })
     }
 
     /// While [`EzspOptions::traffic`] is closed, queued requests end

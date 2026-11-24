@@ -19,24 +19,31 @@
 //! | `NoNetwork`, `Unknown`, session down | unchanged | refused until the next match |
 //! | anything, while the records' origin is unknown | `unverified`, closed | refused until adopted or cleared |
 //!
+//! Reports count only for the session they were made in: an `Ownership`
+//! event decides only while the backend's status still shows it, with that
+//! session's epoch ([`Records::reported`]), and device traffic opens with
+//! a compare-and-swap on the epoch the backend stored for its session
+//! ([`NcpNvRecords::traffic`]), so a late report about an earlier session
+//! opens nothing.
+//!
 //! While the operator replaces the network (`network/reset`, `form`,
 //! `restore`), reports decide nothing; the new network then becomes the
 //! records' (the tag is rewritten, as ZRHP's adapter does).
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hub_coord::{
     BackendKind, CoordStatus, NetworkIdentity, NetworkOwnership, OwnerTag, OwnershipModel,
-    RegistryState,
+    RegistryState, SessionState,
 };
 use hub_store::kv::{self, scope};
 use hub_store::{Gate, Guarded, HostState, JournalStats, Kv, KvStore, OWNER_KEY, Scope, Store};
 use log::{info, warn};
 use serde_json::{Value as J, json};
 
-use super::Records;
+use super::{Records, Report};
 
 /// What the records know about the NCP's network.
 #[derive(Debug, Default)]
@@ -44,6 +51,8 @@ struct State {
     registry: RegistryState,
     /// The NCP's network, as last reported in this session.
     observed: Option<NetworkIdentity>,
+    /// The session of the last report.
+    epoch: Option<u32>,
     /// The operator is replacing the network.
     replacing: bool,
     /// Network-scoped records of unknown origin (no tag, no stored
@@ -58,10 +67,14 @@ pub struct NcpNvRecords {
     /// Locked before `state`.
     store: Mutex<Store>,
     state: Mutex<State>,
-    /// The NCP's network of this session matches the tag: device traffic
-    /// may go out. Shared with the backend ([`Self::traffic`]), which
-    /// clears it when a session ends or starts.
-    traffic: Arc<AtomicBool>,
+    /// `(epoch << 1) | open`: device traffic may go out in the backend's
+    /// session `epoch` ([`Self::traffic`]).
+    traffic: Arc<AtomicU32>,
+}
+
+/// The [`NcpNvRecords::traffic`] value of session `epoch`, closed.
+fn closed(epoch: u32) -> u32 {
+    epoch.wrapping_shl(1)
 }
 
 /// Access to the network-scoped records in `st`.
@@ -131,15 +144,35 @@ impl NcpNvRecords {
         Self { backend, store: Mutex::new(store), state: Mutex::new(st), traffic: Arc::default() }
     }
 
-    /// Whether device traffic may go out, for the backend
-    /// (`EzspOptions::traffic`): it clears it when its session ends or a
-    /// new one starts, so nothing queued reaches a network not decided yet.
-    pub fn traffic(&self) -> Arc<AtomicBool> {
+    /// Whether device traffic may go out, shared with the backend
+    /// (`EzspOptions::traffic`): `(epoch << 1) | open`. The backend stores
+    /// `epoch << 1` when its session `epoch` starts (before it reports the
+    /// session's network) and 0 when it ends; the records open it with a
+    /// compare-and-swap for the session whose network matched, so neither
+    /// a request queued earlier nor a late report reaches a network not
+    /// decided yet.
+    pub fn traffic(&self) -> Arc<AtomicU32> {
         self.traffic.clone()
     }
 
-    fn set_traffic(&self, open: bool) {
-        self.traffic.store(open, Ordering::SeqCst);
+    /// Opens device traffic for session `epoch`, if that is still the
+    /// backend's session.
+    fn open_traffic(&self, epoch: Option<u32>) {
+        let Some(e) = epoch else { return };
+        if self.traffic.compare_exchange(closed(e), closed(e) | 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            info!("hub: the NCP's session {e} is over: its network decides nothing");
+        }
+    }
+
+    /// Closes device traffic; the backend's session stays as it is.
+    fn close_traffic(&self) {
+        let mut v = self.traffic.load(Ordering::SeqCst);
+        while v & 1 == 1 {
+            match self.traffic.compare_exchange(v, v & !1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return,
+                Err(now) => v = now,
+            }
+        }
     }
 
     /// The backend-scoped key of the operator's TX power.
@@ -177,10 +210,11 @@ impl NcpNvRecords {
 
     /// The NCP runs `network`: the records' state against the tag (`force`:
     /// the operator made it, it becomes the records' network).
-    fn decide(&self, store: &mut Store, st: &mut State, network: NetworkIdentity, force: bool) {
+    fn decide(&self, store: &mut Store, st: &mut State, network: NetworkIdentity, epoch: Option<u32>, force: bool) {
         st.observed = Some(network);
+        st.epoch = epoch;
         if st.hold && !force {
-            self.set_traffic(false);
+            self.close_traffic();
             return;
         }
         let tag = store.kv_get(OWNER_KEY);
@@ -197,11 +231,11 @@ impl NcpNvRecords {
                     }
                     st.registry = RegistryState::Owned;
                     st.hold = false;
-                    self.set_traffic(true);
+                    self.open_traffic(epoch);
                 }
                 Err(e) => {
                     warn!("hub: writing the ownership tag: {e}");
-                    self.set_traffic(false);
+                    self.close_traffic();
                 }
             },
             foreign @ RegistryState::Foreign { backend, why } => {
@@ -209,9 +243,9 @@ impl NcpNvRecords {
                     warn!("hub: the NCP's network is not the records': {backend}, {why}");
                 }
                 st.registry = foreign;
-                self.set_traffic(false);
+                self.close_traffic();
             }
-            RegistryState::Untagged | RegistryState::Unverified => self.set_traffic(false),
+            RegistryState::Untagged | RegistryState::Unverified => self.close_traffic(),
         }
     }
 }
@@ -238,17 +272,27 @@ impl Records for NcpNvRecords {
         self.state().registry
     }
 
-    fn adopt(&self) -> io::Result<RegistryState> {
+    fn adopt(&self, now: Report<'_>) -> io::Result<RegistryState> {
         let mut store = self.store();
         let mut st = self.state();
-        self.put_tag(&mut store, st.observed)?;
+        // What the backend reports now, not an earlier session's network.
+        let (network, epoch) = match now {
+            Some((NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n), e)) => (Some(*n), Some(e)),
+            Some((_, e)) => (None, Some(e)),
+            None => (None, None),
+        };
+        self.put_tag(&mut store, network)?;
+        (st.observed, st.epoch) = (network, epoch);
         st.registry = RegistryState::Owned;
         st.hold = false;
-        self.set_traffic(st.observed.is_some());
+        match network {
+            Some(_) => self.open_traffic(epoch),
+            None => self.close_traffic(),
+        }
         Ok(st.registry)
     }
 
-    fn clear(&self) -> io::Result<usize> {
+    fn clear(&self, now: Report<'_>) -> io::Result<usize> {
         let keys: Vec<String> = {
             let store = self.store();
             store.state().kv.keys().filter(|k| scope(k) == Scope::Network).cloned().collect()
@@ -259,32 +303,41 @@ impl Records for NcpNvRecords {
                 store.kv_delete(k)?;
             }
         }
-        self.adopt()?;
+        self.adopt(now)?;
         Ok(keys.len())
     }
 
-    fn observe(&self, ownership: Option<&NetworkOwnership>) {
+    fn observe(&self, report: Report<'_>) {
         let mut store = self.store();
         let mut st = self.state();
-        let network = match ownership {
-            Some(NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n)) => Some(*n),
-            _ => None,
-        };
-        match network {
-            Some(n) if !st.replacing => self.decide(&mut store, &mut st, n, false),
-            Some(n) => {
-                st.observed = Some(n);
-                self.set_traffic(false);
+        match report {
+            Some((NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n), e)) if !st.replacing => {
+                self.decide(&mut store, &mut st, *n, Some(e), false)
+            }
+            Some((NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n), e)) => {
+                (st.observed, st.epoch) = (Some(*n), Some(e));
+                self.close_traffic();
+            }
+            Some((_, e)) => {
+                (st.observed, st.epoch) = (None, Some(e));
+                self.close_traffic();
             }
             None => {
-                st.observed = None;
-                self.set_traffic(false);
+                (st.observed, st.epoch) = (None, None);
+                self.close_traffic();
             }
         }
     }
 
+    fn reported(&self, event: &NetworkOwnership, now: &CoordStatus) {
+        match now.epoch {
+            Some(e) if now.session == SessionState::Ready && now.ownership == *event => self.observe(Some((event, e))),
+            _ => info!("hub: ownership report {} of an earlier session ignored", event.as_str()),
+        }
+    }
+
     fn verified(&self) -> bool {
-        self.traffic.load(Ordering::SeqCst)
+        self.traffic.load(Ordering::SeqCst) & 1 == 1
     }
 
     fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {
@@ -300,7 +353,7 @@ impl Records for NcpNvRecords {
     fn replacing(&self) {
         let mut st = self.state();
         st.replacing = true;
-        self.set_traffic(false);
+        self.close_traffic();
     }
 
     fn forming(&self, ext_pan_id: Option<[u8; 8]>) -> Option<[u8; 8]> {
@@ -327,19 +380,20 @@ impl Records for NcpNvRecords {
         Some(epid)
     }
 
-    fn replaced(&self, now: Option<&NetworkOwnership>) {
+    fn replaced(&self, now: Report<'_>) {
         let mut store = self.store();
         let mut st = self.state();
         st.replacing = false;
         match now {
-            Some(NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n)) => {
-                self.decide(&mut store, &mut st, *n, true)
+            Some((NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n), e)) => {
+                self.decide(&mut store, &mut st, *n, Some(e), true)
             }
-            Some(NetworkOwnership::NoNetwork) => st.observed = None,
+            Some((NetworkOwnership::NoNetwork, e)) => (st.observed, st.epoch) = (None, Some(e)),
             // Failed: what the NCP reported meanwhile decides as usual.
             _ => {
                 if let Some(n) = st.observed {
-                    self.decide(&mut store, &mut st, n, false);
+                    let e = st.epoch;
+                    self.decide(&mut store, &mut st, n, e, false);
                 }
             }
         }
@@ -398,16 +452,34 @@ mod tests {
         kv::with(r, |s| s.put(k, b"{}"))
     }
 
+    /// The records of `store`, the backend's session 1 started.
+    fn open(store: Store) -> NcpNvRecords {
+        let r = NcpNvRecords::open(BackendKind::Ezsp, store);
+        r.traffic().store(closed(1), Ordering::SeqCst);
+        r
+    }
+
+    /// The backend reports `o` in session 1.
+    fn see(r: &NcpNvRecords, o: NetworkOwnership) {
+        r.observe(Some((&o, 1)));
+    }
+
+    /// What the backend reports now: `o` in session 1.
+    fn now(o: &NetworkOwnership) -> Report<'_> {
+        Some((o, 1))
+    }
+
+
     #[test]
     fn a_fresh_store_is_tagged_at_the_first_network() {
-        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
+        let r = open(Store::volatile());
         assert_eq!(r.registry(), RegistryState::Untagged);
         assert!(!r.verified());
-        r.observe(Some(&NetworkOwnership::NoNetwork));
+        see(&r, NetworkOwnership::NoNetwork);
         assert_eq!((r.registry(), r.verified(), tag(&r)), (RegistryState::Untagged, false, None));
         // Rules made while the NCP has no network are kept.
         put(&r, "auto/r1").unwrap();
-        r.observe(Some(&observed(id(4, Some(1)))));
+        see(&r, observed(id(4, Some(1))));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         assert_eq!(tag(&r), Some(OwnerTag::new(BackendKind::Ezsp, Some(id(4, Some(1))))));
         put(&r, "dev/zb:1").unwrap();
@@ -422,14 +494,14 @@ mod tests {
         let mut s = Store::volatile();
         s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Ezsp, Some(id(4, Some(1)))).encode().as_bytes()).unwrap();
         s.kv_put("dev/zb:1", b"{}").unwrap();
-        let r = NcpNvRecords::open(BackendKind::Ezsp, s);
+        let r = open(s);
         assert_eq!(r.registry(), RegistryState::Unverified);
         assert_eq!(kv::with(&r, |s| (s.gate(), s.get("dev/zb:1").is_some())), (Gate::ReadOnly, true));
         assert!(put(&r, "dev/zb:2").is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied));
         // PAN ID, channel, key sequence and coordinator are informative;
         // the key is not exportable now: the EPID decides, the key ID stays.
         let moved = NetworkIdentity { pan_id: 0x2B3C, channel: 25, key_seq: 1, coordinator_ieee: [9; 8], key_id: None, ..id(4, Some(1)) };
-        r.observe(Some(&observed(moved)));
+        see(&r, observed(moved));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         let t = tag(&r).unwrap().identity.unwrap();
         assert_eq!((t.pan_id, t.channel, t.key_seq, t.key_id), (0x2B3C, 25, 1, id(4, Some(1)).key_id));
@@ -443,13 +515,13 @@ mod tests {
             let mine = OwnerTag::new(BackendKind::Ezsp, Some(id(4, Some(1)))).encode();
             s.kv_put(OWNER_KEY, mine.as_bytes()).unwrap();
             s.kv_put("dev/zb:1", b"{}").unwrap();
-            let r = NcpNvRecords::open(BackendKind::Ezsp, s);
-            r.observe(Some(&observed(other)));
+            let r = open(s);
+            see(&r, observed(other));
             assert_eq!(r.registry().as_str(), "foreign");
             assert!(!r.verified());
             assert!(!kv::with(&r, |s| s.get("dev/zb:1").is_some()), "hidden");
             assert_eq!(r.store().kv_get(OWNER_KEY), Some(mine.as_bytes()), "nothing written");
-            assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
+            assert_eq!(r.adopt(now(&observed(other))).unwrap(), RegistryState::Owned);
             assert!(r.verified());
             assert_eq!(tag(&r).unwrap().identity, Some(other));
             assert!(kv::with(&r, |s| s.get("dev/zb:1").is_some()));
@@ -459,11 +531,11 @@ mod tests {
         for k in ["dev/zb:1", "st/zb:1", "auto/r", "udef/a", "cfg/tz"] {
             s.kv_put(k, b"{}").unwrap();
         }
-        let r = NcpNvRecords::open(BackendKind::Ezsp, s);
+        let r = open(s);
         assert!(matches!(r.registry(), RegistryState::Foreign { backend: "zrhp", .. }));
-        r.observe(Some(&observed(id(4, Some(1)))));
+        see(&r, observed(id(4, Some(1))));
         assert!(!r.verified() && r.registry().as_str() == "foreign", "another backend's records");
-        assert_eq!(r.clear().unwrap(), 3);
+        assert_eq!(r.clear(now(&observed(id(4, Some(1))))).unwrap(), 3);
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         let left: Vec<String> = r.store().state().kv.keys().cloned().collect();
         assert_eq!(left, ["cfg/tz", OWNER_KEY, "udef/a"]);
@@ -471,7 +543,7 @@ mod tests {
 
     #[test]
     fn the_tx_power_is_kept_under_the_backends_key() {
-        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
+        let r = open(Store::volatile());
         assert_eq!(r.tx_power(), None);
         r.tx_power_set(-3);
         assert_eq!(r.tx_power(), Some(-3));
@@ -507,7 +579,7 @@ mod tests {
     #[test]
     fn a_zrhp_stored_network_makes_untagged_records_foreign() {
         for kv in [&["dev/zb:1", "auto/r1"][..], &[]] {
-            let r = NcpNvRecords::open(BackendKind::Ezsp, zrhp_store(true, kv));
+            let r = open(zrhp_store(true, kv));
             // The tag ZRHP's own migration writes for the same store.
             let mut zrhp = zrhp_store(true, kv);
             assert_eq!(hub_ncp::coord::owner::open(&mut zrhp, true), RegistryState::Owned);
@@ -519,10 +591,10 @@ mod tests {
             assert_eq!(kv::with(&r, |s| (s.gate(), s.get("dev/zb:1").is_some())), (Gate::Closed, false));
             // The NCP runs the same network: still another backend's.
             let n = zrhp_network(r.store().state()).unwrap();
-            r.observe(Some(&observed(n)));
+            see(&r, observed(n));
             assert!(!r.verified() && r.registry().as_str() == "foreign");
             assert_eq!(r.ownership(&observed(n)).map(|o| o.as_str()), Some("mismatch"));
-            assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
+            assert_eq!(r.adopt(now(&observed(n))).unwrap(), RegistryState::Owned);
             assert!(r.verified());
             assert_eq!(tag(&r), Some(OwnerTag::new(BackendKind::Ezsp, Some(n))));
         }
@@ -533,32 +605,32 @@ mod tests {
     /// decides; nothing written.
     #[test]
     fn untagged_records_of_unknown_origin_wait_for_the_operator() {
-        let open = || NcpNvRecords::open(BackendKind::Ezsp, zrhp_store(false, &["auto/r1", "udef/a"]));
-        let r = open();
+        let fresh = || open(zrhp_store(false, &["auto/r1", "udef/a"]));
+        let r = fresh();
         assert_eq!(r.registry(), RegistryState::Unverified);
         assert_eq!(tag(&r), None);
         let denied = |e: io::Error| e.kind() == io::ErrorKind::PermissionDenied;
         assert_eq!(kv::with(&r, |s| (s.gate(), s.get("auto/r1").is_some(), s.get("udef/a").is_some())), (Gate::Closed, false, true));
         assert!(put(&r, "auto/r2").is_err_and(denied));
-        r.observe(Some(&observed(id(4, Some(1)))));
+        see(&r, observed(id(4, Some(1))));
         assert_eq!((r.registry(), r.verified(), tag(&r)), (RegistryState::Unverified, false, None));
         r.replacing();
         r.replaced(None);
         assert_eq!((r.registry(), r.verified()), (RegistryState::Unverified, false), "a failed replacement decides nothing");
-        assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
+        assert_eq!(r.adopt(now(&observed(id(4, Some(1))))).unwrap(), RegistryState::Owned);
         assert!(r.verified());
         assert_eq!(tag(&r).unwrap().identity, Some(id(4, Some(1))));
         assert!(kv::with(&r, |s| s.get("auto/r1").is_some()));
 
         // Cleared instead: the records go.
-        let r = open();
-        r.observe(Some(&observed(id(4, Some(1)))));
-        assert_eq!(r.clear().unwrap(), 1);
+        let r = fresh();
+        see(&r, observed(id(4, Some(1))));
+        assert_eq!(r.clear(now(&observed(id(4, Some(1))))).unwrap(), 1);
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         // A network formed over them takes them, as with ZRHP.
-        let r = open();
+        let r = fresh();
         r.replacing();
-        r.replaced(Some(&observed(id(6, Some(3)))));
+        r.replaced(now(&observed(id(6, Some(3)))));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         assert!(kv::with(&r, |s| s.get("auto/r1").is_some()));
     }
@@ -568,10 +640,10 @@ mod tests {
     /// or a reboot in between, leaves the records the new network's.
     #[test]
     fn the_network_being_formed_is_tagged_before_it_comes_up() {
-        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
-        r.observe(Some(&observed(id(4, Some(1)))));
+        let r = open(Store::volatile());
+        see(&r, observed(id(4, Some(1))));
         r.replacing();
-        r.observe(Some(&NetworkOwnership::NoNetwork));
+        see(&r, NetworkOwnership::NoNetwork);
         let epid = r.forming(None).unwrap();
         assert_ne!(epid, id(4, None).ext_pan_id);
         let pre = tag(&r).unwrap().identity.unwrap();
@@ -582,49 +654,92 @@ mod tests {
         r.replaced(None);
         let new = NetworkIdentity { ext_pan_id: epid, ..id(0, Some(9)) };
         // The network comes up later.
-        r.observe(Some(&observed(new)));
+        see(&r, observed(new));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         assert_eq!(tag(&r).unwrap().identity, Some(new), "filled at the match");
 
         // A reboot between forming and the network: the tag decides.
-        let r2 = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
+        let r2 = open(Store::volatile());
         r2.replacing();
         r2.forming(Some(epid));
         let mut s = Store::volatile();
         s.kv_put(OWNER_KEY, r2.store().kv_get(OWNER_KEY).unwrap()).unwrap();
-        let r3 = NcpNvRecords::open(BackendKind::Ezsp, s);
+        let r3 = open(s);
         assert_eq!(r3.registry(), RegistryState::Unverified);
-        r3.observe(Some(&observed(new)));
+        see(&r3, observed(new));
         assert_eq!((r3.registry(), r3.verified()), (RegistryState::Owned, true));
     }
 
     /// The backend shares the traffic flag and clears it itself.
     #[test]
     fn traffic_is_the_flag_the_backend_shares() {
-        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
-        r.observe(Some(&observed(id(4, Some(1)))));
+        let r = open(Store::volatile());
+        see(&r, observed(id(4, Some(1))));
         assert!(r.verified());
-        r.traffic().store(false, Ordering::SeqCst);
+        r.traffic().store(0, Ordering::SeqCst);
         assert!(!r.verified());
+    }
+
+    /// The backend's status as the app handles an event: session `epoch`
+    /// ready, reporting `o`.
+    fn status(o: &NetworkOwnership, epoch: u32) -> CoordStatus {
+        CoordStatus {
+            session: SessionState::Ready,
+            epoch: Some(epoch),
+            ncp: None,
+            caps: None,
+            network_state: hub_coord::NetState::Up,
+            network: None,
+            ownership: o.clone(),
+            permit_join_s: 0,
+        }
+    }
+
+    /// A report counts for its session only: one the app handles late,
+    /// after the NCP restarted (on whatever network), opens nothing.
+    #[test]
+    fn a_late_report_of_an_earlier_session_opens_nothing() {
+        let r = open(Store::volatile());
+        let (a, b) = (observed(id(4, Some(1))), observed(id(5, Some(1))));
+        r.reported(&a, &status(&a, 1));
+        assert!(r.verified());
+        // The NCP restarts on network B: the backend ends session 1 and
+        // starts session 2 before the app handles session 1's report.
+        r.traffic().store(0, Ordering::SeqCst);
+        r.traffic().store(closed(2), Ordering::SeqCst);
+        r.reported(&a, &status(&b, 2));
+        assert!(!r.verified(), "session 1's report, handled in session 2");
+        assert_eq!(r.registry(), RegistryState::Owned);
+        r.reported(&b, &status(&b, 2));
+        assert_eq!(r.registry().as_str(), "foreign");
+        // Session 3, network A again: session 2's reports decide nothing.
+        r.traffic().store(closed(3), Ordering::SeqCst);
+        r.observe(Some((&a, 2)));
+        assert!(!r.verified(), "an earlier session's network opens nothing");
+        assert_eq!(r.adopt(Some((&a, 2))).unwrap(), RegistryState::Owned);
+        assert!(!r.verified(), "nor adopting it");
+        r.reported(&a, &status(&a, 3));
+        assert!(r.verified());
+        assert_eq!(r.traffic().load(Ordering::SeqCst), closed(3) | 1);
     }
 
     #[test]
     fn a_replaced_network_becomes_the_records_network() {
-        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
-        r.observe(Some(&observed(id(4, Some(1)))));
+        let r = open(Store::volatile());
+        see(&r, observed(id(4, Some(1))));
         r.replacing();
         assert!(!r.verified());
-        r.observe(Some(&NetworkOwnership::NoNetwork));
+        see(&r, NetworkOwnership::NoNetwork);
         // The new network's report may come before the job ends.
-        r.observe(Some(&observed(id(6, Some(3)))));
+        see(&r, observed(id(6, Some(3))));
         assert_eq!(r.registry(), RegistryState::Owned, "undecided while replacing");
         assert!(!r.verified());
-        r.replaced(Some(&observed(id(6, Some(3)))));
+        r.replaced(now(&observed(id(6, Some(3)))));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         assert_eq!(tag(&r).unwrap().identity, Some(id(6, Some(3))));
         // A failed replacement: the reports decide as usual.
         r.replacing();
-        r.observe(Some(&observed(id(7, Some(3)))));
+        see(&r, observed(id(7, Some(3))));
         r.replaced(None);
         assert_eq!(r.registry().as_str(), "foreign");
     }

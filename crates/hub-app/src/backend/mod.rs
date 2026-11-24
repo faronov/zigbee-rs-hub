@@ -25,6 +25,10 @@ mod zrhp;
 
 pub use ncpnv::NcpNvRecords;
 
+/// What the backend reports about the NCP's network now: its ownership
+/// and the epoch of the session it holds for. `None`: no session.
+pub type Report<'a> = Option<(&'a NetworkOwnership, u32)>;
+
 /// The hub's records in the backend's store, and whose the network-scoped
 /// ones are (design §2.5, §2.7). The store's gate follows
 /// [`registry`](Self::registry): foreign records are neither visible nor
@@ -34,18 +38,27 @@ pub trait Records: KvStore {
     fn registry(&self) -> RegistryState;
 
     /// `network/registry/adopt`: the records become this backend's, of the
-    /// NCP's network.
-    fn adopt(&self) -> io::Result<RegistryState>;
+    /// NCP's network as the backend reports it `now`.
+    fn adopt(&self, now: Report<'_>) -> io::Result<RegistryState>;
 
     /// `network/registry/clear`: every network-scoped record deleted, the
-    /// rest adopted; how many were deleted.
-    fn clear(&self) -> io::Result<usize>;
+    /// rest adopted (`now` as for [`adopt`](Self::adopt)); how many were
+    /// deleted.
+    fn clear(&self, now: Report<'_>) -> io::Result<usize>;
 
-    /// The backend's [`NetworkOwnership`] report, `None` when its session
-    /// ended. `HostStore` backends decided already; `NcpNv` records compare
-    /// the NCP's network with the ownership tag here.
-    fn observe(&self, ownership: Option<&NetworkOwnership>) {
-        let _ = ownership;
+    /// The backend's [`NetworkOwnership`] report of its current session,
+    /// `None` when the session ended. `HostStore` backends decided already;
+    /// `NcpNv` records compare the NCP's network with the ownership tag here.
+    fn observe(&self, report: Report<'_>) {
+        let _ = report;
+    }
+
+    /// An `Ownership` event; `now` is the backend's status as the app
+    /// handles it. `NcpNv` records [`observe`](Self::observe) it only while
+    /// `now` still shows it: a report handled late, after an NCP restart,
+    /// is about an earlier session and decides nothing.
+    fn reported(&self, event: &NetworkOwnership, now: &CoordStatus) {
+        let _ = (event, now);
     }
 
     /// Whether device traffic may go to the NCP: `NcpNv` records allow it
@@ -79,7 +92,7 @@ pub trait Records: KvStore {
 
     /// The replacement is over; `now` is what the backend reports then
     /// (`None`: it failed). The NCP's new network becomes the records'.
-    fn replaced(&self, now: Option<&NetworkOwnership>) {
+    fn replaced(&self, now: Report<'_>) {
         let _ = now;
     }
 

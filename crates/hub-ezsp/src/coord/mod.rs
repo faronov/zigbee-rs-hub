@@ -113,7 +113,7 @@ mod tests;
 mod worker;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use crate::ezsp::types::*;
@@ -193,6 +193,12 @@ pub const DEFAULT_POLICIES: &[(PolicyId, u8)] = &[
     ),
 ];
 
+/// The [`EzspOptions::traffic`] value of session `epoch`, closed; `| 1`
+/// opens it.
+pub fn traffic_closed(epoch: u32) -> u32 {
+    epoch.wrapping_shl(1)
+}
+
 /// Parameters of the EZSP backend.
 #[derive(Debug, Clone)]
 pub struct EzspOptions {
@@ -229,13 +235,17 @@ pub struct EzspOptions {
     /// applied in every session until it is changed.
     pub tx_power: Option<i8>,
     /// For an application that decides itself whether the NCP's network is
-    /// its own (`NcpNv`): requests go out only while this is `true`. The
-    /// worker clears it when a session ends and when a new one starts (the
-    /// application sets it again once the new session's network is its
-    /// own), and ends the requests queued meanwhile `Refused(LinkDown)`
-    /// instead of sending them in the next session, which may run another
-    /// network. `None`: queued requests wait for the next session.
-    pub traffic: Option<Arc<AtomicBool>>,
+    /// its own (`NcpNv`): `(epoch << 1) | open`. The worker stores
+    /// `epoch << 1` (closed) when a session starts, before it reports the
+    /// session's ownership, and 0 when the session ends; requests go out
+    /// only while it holds this session's epoch with the open bit. The
+    /// application opens it with `compare_exchange(epoch << 1, epoch << 1 |
+    /// 1)` for the epoch whose network it checked ([`traffic_closed`]), so a
+    /// late decision about an earlier session cannot open a later one.
+    /// Requests queued while it is closed end `Refused(LinkDown)` instead of
+    /// going out in the next session, which may run another network.
+    /// `None`: queued requests wait for the next session.
+    pub traffic: Option<Arc<AtomicU32>>,
 }
 
 impl Default for EzspOptions {

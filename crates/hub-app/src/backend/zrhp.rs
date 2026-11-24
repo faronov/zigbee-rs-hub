@@ -10,18 +10,18 @@ use hub_ncp::Hub;
 use hub_ncp::coord::{ZrhpAdmin, ZrhpCoordinator, ZrhpRadio};
 use serde_json::{Value as J, json};
 
-use super::{Backend, Records};
+use super::{Backend, Records, Report};
 
 impl Records for Hub {
     fn registry(&self) -> RegistryState {
         Hub::registry(self)
     }
 
-    fn adopt(&self) -> io::Result<RegistryState> {
+    fn adopt(&self, _: Report<'_>) -> io::Result<RegistryState> {
         self.registry_adopt()
     }
 
-    fn clear(&self) -> io::Result<usize> {
+    fn clear(&self, _: Report<'_>) -> io::Result<usize> {
         self.registry_clear()
     }
 

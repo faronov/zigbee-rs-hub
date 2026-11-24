@@ -939,7 +939,7 @@ impl Runner {
                 // ownership report.
                 SessionEvent::Down | SessionEvent::Incompatible => self.records.observe(None),
             },
-            CoordEvent::Ownership(o) => self.records.observe(Some(&o)),
+            CoordEvent::Ownership(o) => self.records.reported(&o, &self.engine.transport.status()),
             CoordEvent::Dropped { events } => warn!("app: {events} coordinator events lost"),
         }
     }

@@ -1216,8 +1216,8 @@ fn current_channel(net: &dyn NetworkAdmin) -> Option<u8> {
 fn replace<T>(net: &dyn NetworkAdmin, records: &dyn Records, f: impl FnOnce() -> Result<T, ApiError>) -> Result<T, ApiError> {
     records.replacing();
     let r = f();
-    let now = r.as_ref().ok().and_then(|_| net.status()).map(|s| s.ownership);
-    records.replaced(now.as_ref());
+    let now = r.as_ref().ok().and_then(|_| net.status()).and_then(|s| Some((s.ownership, s.epoch?)));
+    records.replaced(now.as_ref().map(|(o, e)| (o, *e)));
     r
 }
 

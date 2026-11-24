@@ -28,14 +28,17 @@ impl Runner {
         }
         let failed = |e: std::io::Error| ApiError::new("failed", e.to_string());
         let adopt = head.ty == "network/registry/adopt";
+        // The NCP's network as the backend reports it now.
+        let st = self.engine.transport.status();
+        let report = st.epoch.filter(|_| st.session == hub_coord::SessionState::Ready).map(|e| (&st.ownership, e));
         let r = if adopt {
-            self.records.adopt().map_err(failed).map(|_| {
+            self.records.adopt(report).map_err(failed).map(|_| {
                 let n = if self.registry.loaded { 0 } else { self.load_network(now) };
                 format!("\"restored\":{n}")
             })
         } else {
             self.forget_network(now).and_then(|forgotten| {
-                let deleted = self.records.clear().map_err(failed)?;
+                let deleted = self.records.clear(report).map_err(failed)?;
                 self.registry.loaded = true;
                 #[cfg(feature = "ota")]
                 self.ota.forget_devices();
