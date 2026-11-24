@@ -61,6 +61,15 @@ impl EzspVersion {
         self.0 >= 14
     }
 
+    /// EZSP ≥ 14 (Simplicity SDK) layouts of `leaveNetwork` (an options
+    /// byte), `exportKey` (status first, the context echoed after the key),
+    /// `importTransientKey` (no flags byte) and `lookupNodeIdByEui64` (a
+    /// status before the node ID); compared in the `command-functions.h` of
+    /// Gecko SDK 4.4.6 and Simplicity SDK 2024.6.0 / 2025.6.3.
+    pub fn simplicity_layout(self) -> bool {
+        self.0 >= 14
+    }
+
     pub fn is_verified(self) -> bool {
         VERIFIED_VERSIONS.contains(&self.0)
     }

@@ -406,6 +406,39 @@ fn invalid_command_and_narrow_tag_are_typed_errors() {
     );
 }
 
+/// Software flow control end to end: an XOFF from the NCP's UART holds
+/// the host's next command until XON, or until the XOFF timeout when the
+/// XON is lost; the link survives either way.
+#[test]
+fn xoff_from_the_ncp_holds_the_host_until_xon_or_its_timeout() {
+    let (sim, mut host, _) = setup(sim_version(13), Faults::none(), HostConfig::default());
+    host.start().unwrap();
+    let timeout = u64::from(host.ash().config().xoff_timeout_ms);
+
+    sim.xoff();
+    sim.xon();
+    let t = sim.now_ms();
+    assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+    assert!(sim.now_ms() - t < timeout / 2, "XON released it");
+
+    sim.xoff();
+    host.pump(Duration::from_millis(5)).unwrap();
+    assert!(host.ash().tx_paused(sim.now_ms()));
+    let sent = sim.pipe_stats().0.frames;
+    let t = sim.now_ms();
+    assert_eq!(host.network_state().unwrap(), NetworkStatus::NO_NETWORK);
+    assert!(
+        sim.now_ms() - t >= timeout - 5,
+        "held until the XOFF timeout"
+    );
+    assert!(sim.pipe_stats().0.frames > sent);
+    let stats = host.ash().stats();
+    assert_eq!(
+        (stats.rx_xoff, stats.rx_xon, stats.xoff_timeouts),
+        (2, 1, 1)
+    );
+}
+
 #[test]
 fn ncp_error_and_spontaneous_reset_are_reported_and_recoverable() {
     let (sim, mut host, events) = setup(sim_version(18), Faults::none(), HostConfig::default());

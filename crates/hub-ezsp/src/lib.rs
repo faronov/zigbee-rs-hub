@@ -1,5 +1,6 @@
 //! Host-side ASH + EZSP protocol core for Silicon Labs EmberZNet NCPs
-//! (EFR32MG24 running stock EmberZNet NCP-UART firmware).
+//! (EFR32MG24 running stock EmberZNet NCP-UART firmware), and the EZSP
+//! coordinator backend of the hub (`coord`, feature `coord`, default).
 //!
 //! **Status: host-tested only.** The crate is not wired into the hub and
 //! has not run against a real NCP. Every behaviour below is implemented
@@ -17,8 +18,11 @@
 //! | EZSP session | [`ezsp::session`] ([`Session`]) | sans-IO: sequence numbers, correlation, callback routing, NCP status flags |
 //! | Host | [`host`] ([`EzspHost`]) | blocking, one thread, [`Transport`] + [`Clock`], bounded event queue |
 //! | Simulator | `sim` (feature `sim`) | NCP model over a faulty in-memory UART on a virtual clock |
+//! | Coordinator backend | `coord` (feature `coord`) | `hub-coord`'s `Coordinator` and `NetworkAdmin` on a worker thread that owns the host |
 //!
-//! The crate depends on nothing but `std`, and on no other hub crate.
+//! Without the `coord` feature the crate depends on nothing but `std`;
+//! `coord` adds `hub-coord` and `log`. It never depends on `hub-ncp` or
+//! the ZRHP crates.
 //!
 //! # Sources
 //!
@@ -52,8 +56,14 @@
 //! - DATA fields are XORed with the LFSR sequence 0x42, 0x21, 0xA8, …
 //!   (§4 "Data Randomization").
 //! - Receive: Cancel discards the partial frame, Substitute discards up
-//!   to the next flag and sets the Reject Condition, XON/XOFF are
-//!   ignored, 0xFF between frames is ignored (§4).
+//!   to the next flag and sets the Reject Condition, 0xFF between frames
+//!   is ignored (§4).
+//! - Software flow control (§4 "XON: Resume transmission", "XOFF: Stop
+//!   transmission"): a raw 0x11/0x13 is never frame data (senders escape
+//!   them). XOFF holds the host's transmitter (ACK, NAK, DATA, RST) until
+//!   XON or [`AshConfig::xoff_timeout_ms`] (1 s), with the ACK timer
+//!   stopped meanwhile; a frame already written is not recalled. The NCP
+//!   ignores XON/XOFF, so the host never sends them.
 //! - A frame is valid with a correct CRC, a host-receivable control byte
 //!   (DATA, ACK, NAK, RSTACK, ERROR), a valid length and, when connected,
 //!   a valid ackNum (between the last received ackNum and the last sent
@@ -155,8 +165,9 @@
 //!   0.5 s chosen); the host TX window (3) is not documented; ACK_TIMEOUTS
 //!   is defined for the NCP and applied to the host.
 //! - Measuring the ACK time only on frames sent once (UG101 does not say).
-//! - Deframer: Cancel also clears a pending Substitute; the host drops
-//!   XON/XOFF bytes (UG101 only says the NCP ignores them).
+//! - Deframer: Cancel also clears a pending Substitute; XON/XOFF between
+//!   an Escape Byte and the byte it escapes leave the escape pending. The
+//!   XOFF timeout (1 s) has no documented value.
 //! - An RSTACK while connected is treated as an NCP reboot.
 //! - Version negotiation by re-sending `version` with the NCP's number,
 //!   and the format of the NCP's answer to the legacy command (both
@@ -182,12 +193,15 @@
 //! [`VersionError::TooOld`]: ezsp::VersionError::TooOld
 //! [`VersionError::Unverified`]: ezsp::VersionError::Unverified
 //! [`AshConfig::tx_window`]: ash::AshConfig::tx_window
+//! [`AshConfig::xoff_timeout_ms`]: ash::AshConfig::xoff_timeout_ms
 //! [`AshConfig::tx_queue_frames`]: ash::AshConfig::tx_queue_frames
 //! [`AshConfig::rx_queue_frames`]: ash::AshConfig::rx_queue_frames
 //! [`HostConfig::event_queue`]: host::HostConfig::event_queue
 //! [`HostEvent::Dropped`]: host::HostEvent::Dropped
 
 pub mod ash;
+#[cfg(feature = "coord")]
+pub mod coord;
 pub mod ezsp;
 pub mod host;
 #[cfg(any(test, feature = "sim"))]

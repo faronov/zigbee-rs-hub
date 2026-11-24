@@ -75,6 +75,11 @@ impl<'a> Reader<'a> {
         Ok(self.bytes(usize::from(n))?.to_vec())
     }
 
+    /// Bytes not read yet.
+    pub fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     /// Fails if bytes are left.
     pub fn finish(self) -> Result<(), DecodeError> {
         match self.buf.len() - self.pos {

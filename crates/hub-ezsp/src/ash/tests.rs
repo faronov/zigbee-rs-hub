@@ -352,6 +352,79 @@ fn deframer_handles_cancel_substitute_flow_control_and_noise() {
     );
 }
 
+#[test]
+fn xon_xoff_are_reported_never_data_and_transparent_to_an_escape() {
+    // Inside a frame, between frames, and between an Escape Byte and the
+    // byte it escapes (a UART with software flow control may insert them
+    // anywhere): the frame decodes as sent.
+    let f = data(2, 5, false, &[0x7E, 0x11, 0x13, 0x42]);
+    let wire = encode(&f, false);
+    let esc = wire.iter().position(|&b| b == ESCAPE).unwrap();
+    for at in [0, esc + 1, wire.len() - 1, wire.len()] {
+        for fc in [XON, XOFF] {
+            let mut w = wire.clone();
+            w.insert(at, fc);
+            assert_eq!(
+                decode_all(&w, false),
+                vec![Ok(f.clone())],
+                "{fc:02X} at {at}"
+            );
+        }
+    }
+    let mut d = Deframer::new();
+    let seen: Vec<_> = [XOFF, 0x81, XON, 0x60, 0x59, FLAG]
+        .into_iter()
+        .filter_map(|b| d.push(b))
+        .collect();
+    assert_eq!(seen, vec![Deframed::Xoff, Deframed::Xon, Deframed::Frame]);
+    // Our own frames never carry a raw 0x11 or 0x13 (UG101 §4 stuffing).
+    let wire = encode(&data(0, 0, false, &[0x11; 8]), false);
+    assert!(!wire.contains(&XON) && !wire.contains(&XOFF), "{wire:02X?}");
+    assert!(wire.windows(2).any(|w| w == [ESCAPE, 0x31]));
+}
+
+#[test]
+fn xoff_holds_the_transmitter_until_xon_or_its_timeout() {
+    let cfg = AshConfig::default();
+    let mut h = connected_host(cfg.clone());
+    h.handle_rx(&[XOFF], 10);
+    assert!(h.tx_paused(10));
+    h.send(&EZSP).unwrap();
+    assert!(transmit(&mut h, 10).is_empty(), "nothing while paused");
+    assert_eq!(h.next_timeout(), Some(10 + u64::from(cfg.xoff_timeout_ms)));
+    // Data from the NCP is received but not acknowledged while paused.
+    feed(&mut h, &data(0, 0, false, &EZSP), 20);
+    assert_eq!(events(&mut h), vec![AshEvent::Data(EZSP.to_vec())]);
+    assert!(transmit(&mut h, 20).is_empty());
+    h.handle_rx(&[XON], 30);
+    assert!(!h.tx_paused(30));
+    let sent = transmit_frames(&mut h, 30);
+    assert!(
+        matches!(
+            sent[..],
+            [
+                Frame::Ack { ack_num: 1, .. },
+                Frame::Data { frm_num: 0, .. }
+            ]
+        ),
+        "{sent:?}"
+    );
+    assert_eq!((h.stats().rx_xoff, h.stats().rx_xon), (1, 1));
+
+    // An XOFF whose XON is lost: transmission resumes after the timeout,
+    // and the ACK timer did not run meanwhile.
+    h.handle_rx(&[XOFF], 40);
+    h.send(&EZSP).unwrap();
+    let resume = 40 + u64::from(cfg.xoff_timeout_ms);
+    h.handle_timeout(resume - 1);
+    assert!(transmit(&mut h, resume - 1).is_empty());
+    assert_eq!(h.stats().ack_timeouts, 0, "no ACK timeout while held");
+    h.handle_timeout(resume);
+    assert!(!transmit(&mut h, resume).is_empty());
+    assert_eq!(h.stats().xoff_timeouts, 1);
+    assert_eq!(h.state(), LinkState::Connected);
+}
+
 // ---------------------------------------------------------------- link
 
 fn transmit(ash: &mut Ash, now: u64) -> Vec<Vec<u8>> {
