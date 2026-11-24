@@ -39,7 +39,7 @@ pub use coord::{
     BackendConfig, CoordEvent, CoordStatus, Coordinator, EndpointConfig, NcpInfo, NetState,
     NetworkParams, RadioControl, SessionEvent, SessionState,
 };
-pub use error::{BackendKind, Code, CoordError, Kind};
+pub use error::{BackendKind, Code, CoordError, Described, Kind};
 pub use gp::{GpEvent, GpRequest};
 pub use identity::{NetworkIdentity, NetworkOwnership};
 pub use request::{Inventory, InventoryDevice, Progress, Reply, Request, RequestId, Terminal};

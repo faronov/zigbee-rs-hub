@@ -401,6 +401,37 @@ fn tx_power_is_applied_persisted_and_replayed() {
 }
 
 #[test]
+fn zrhp_admin_zdo_requests_and_coordinator_tables() {
+    use hub_coord::{CoordError, NetworkAdmin};
+
+    use crate::coord::ZrhpAdmin;
+    use crate::sim::SimRemote;
+
+    let (hub, sim) = formed(15);
+    let admin = ZrhpAdmin::new(hub.clone());
+    sim.with(|s| {
+        s.remotes = vec![SimRemote { nwk: 0x1111, ieee: [0x11; 8], neighbors: vec![([0x22; 8], 0x2222, 1, 2, 150)], routes: vec![] }];
+        s.undeliverable = vec![(0x3333, 0xA7)];
+    });
+    let t = Duration::from_millis(500);
+    // Mgmt_Lqi_req with TSN 0xA1: the response after its TSN.
+    let rsp = admin.zdo_request(0x1111, 0x0031, &[0xA1, 0], t).unwrap();
+    assert_eq!(&rsp[..4], &[0, 1, 0, 1], "status, total, start, count");
+    assert_eq!(sim.state().aps.last().map(|p| p.ends_with(&[0xA1, 0])), Some(true), "the caller's TSN");
+    assert_eq!(admin.zdo_request(0x2222, 0x0031, &[0xA2, 0], t), Err(CoordError::Timeout), "no response");
+    match admin.zdo_request(0x3333, 0x0031, &[0xA3, 0], t) {
+        Err(CoordError::NoAck(c)) => assert_eq!(c.value, 0xA7),
+        r => panic!("{r:?}"),
+    }
+    let tables = admin.coordinator_tables(false);
+    assert!(tables.routes.is_none());
+    let e = tables.children.unwrap_err();
+    assert_eq!((e.meaning(), e.to_string().as_str()), (&CoordError::Unsupported, "NCP status UnsupportedCommand"));
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
 fn diagnostics_counters_status_and_tables() {
     let (hub, sim) = formed(15);
     let link = hub.diag_counters(0x01).unwrap();

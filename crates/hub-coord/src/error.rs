@@ -1,6 +1,7 @@
 //! Backend-neutral errors (design §2.3). API error codes stay per context
 //! (engine, admin) and are mapped from these by the application.
 
+use std::borrow::Cow;
 use std::fmt;
 
 /// The coordinator protocol a backend speaks.
@@ -81,7 +82,7 @@ pub enum Kind {
 }
 
 /// A request or administration failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordError {
     /// The backend or its NCP does not implement this.
     Unsupported,
@@ -102,6 +103,43 @@ pub enum CoordError {
         /// Its meaning.
         kind: Kind,
     },
+    /// Any other failure, in the backend's words (a host-side check, a
+    /// response it cannot decode).
+    Other(Cow<'static, str>),
+    /// A failure the backend words itself: [`Display`](fmt::Display) shows
+    /// its text, callers classify it by [`CoordError::meaning`].
+    Described(Box<Described>),
+}
+
+/// The content of [`CoordError::Described`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Described {
+    /// What the failure means (never `Described`).
+    pub error: CoordError,
+    /// The backend's message.
+    pub text: Cow<'static, str>,
+}
+
+impl CoordError {
+    /// `error`, shown as `text`.
+    pub fn described(error: CoordError, text: impl Into<Cow<'static, str>>) -> Self {
+        let error = match error {
+            Self::Described(d) => d.error,
+            e => e,
+        };
+        Self::Described(Box::new(Described {
+            error,
+            text: text.into(),
+        }))
+    }
+
+    /// The error to classify: [`Described`] errors without their wording.
+    pub fn meaning(&self) -> &CoordError {
+        match self {
+            Self::Described(d) => d.error.meaning(),
+            e => e,
+        }
+    }
 }
 
 impl fmt::Display for CoordError {
@@ -115,6 +153,8 @@ impl fmt::Display for CoordError {
             Self::Timeout => f.write_str("timeout"),
             Self::DeliveryUnknown => f.write_str("delivery unknown"),
             Self::Backend { code, .. } => write!(f, "{code}"),
+            Self::Other(t) => f.write_str(t),
+            Self::Described(d) => f.write_str(&d.text),
         }
     }
 }
