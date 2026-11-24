@@ -28,6 +28,44 @@ fn sensor() -> SimDevice {
         .attr(1, 0x0001, 0x0020, TypedValue::uint(ZclType::U8, 30))
 }
 
+/// The hub's records adopted after the engine made the device again (an
+/// NCP import): the stored device replaces it in place, without a removal.
+#[test]
+fn restoring_a_device_the_engine_has_replaces_it_in_place() {
+    let id = "zb:00158d0001a2b3c4";
+    let mut sim = Sim::default();
+    sim.devices.push(sensor());
+    let mut hub = hub_with(&[]);
+    sim.join(&mut hub, SENSOR, T0);
+    hub.device_mut(id).unwrap().user_name = Some("Kitchen".into());
+    let snap = hub.snapshot_device(id).unwrap();
+
+    let mut other = hub_with(&[]);
+    other.on_device_joined(SENSOR, 0x4321, T0);
+    let entities = other.device(id).unwrap().entities.len();
+    let _ = other.drain_events();
+    other.restore_device(snap, None, T0 + 1000).unwrap();
+    let events = other.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceRemoved(_) | HubEvent::DeviceAdded(_))),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == id))
+    );
+    let d = other.device(id).unwrap();
+    assert_eq!(d.user_name.as_deref(), Some("Kitchen"));
+    assert_eq!(d.nwk(), Some(0x4321), "the current address");
+    assert!(
+        d.entities.len() > entities,
+        "the interviewed device's entities"
+    );
+}
+
 #[test]
 fn restored_mains_device_reads_unknown_states() {
     let ieee = 0x6055f90000f69688;

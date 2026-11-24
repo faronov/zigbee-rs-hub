@@ -291,17 +291,23 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Re-creates a device from its snapshot (hub start): resolves it with
     /// the current definitions, re-applies entity overrides and, when the
     /// interview had not finished, restarts it. Emits the usual
-    /// `device_added`/`entity_added` events.
+    /// `device_added`/`entity_added` events. A device the engine has (made
+    /// before the hub's records were adopted) is replaced in place: its
+    /// address and entities are kept, `device_updated` and the entities'
+    /// changes are emitted, no removal.
     pub fn restore_device(
         &mut self,
         s: DeviceSnapshot,
         decoder: Option<&dyn SchemaDecoder>,
         now: Millis,
     ) -> Result<(), String> {
-        if self.devices.contains_key(&s.id) {
-            return Err(format!("device {} exists", s.id));
-        }
         let mut d = Device::new(s.id.clone(), s.kind.clone(), now);
+        let old = self.devices.get_mut(&s.id);
+        let replaced = old.is_some();
+        if let Some(old) = old {
+            d.kind = old.kind.clone();
+            d.entities = std::mem::take(&mut old.entities);
+        }
         // Not heard from yet: a sleepy device's requests wait for it.
         d.awake_until = 0;
         d.fp = s.fp;
@@ -370,7 +376,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         if let Some(nwk) = nwk {
             self.index_nwk(nwk, &id);
         }
-        self.emit(HubEvent::DeviceAdded(id.clone()));
+        self.emit(if replaced {
+            HubEvent::DeviceUpdated(id.clone())
+        } else {
+            HubEvent::DeviceAdded(id.clone())
+        });
         self.resolve_device(&id, now);
         if let Some(d) = self.devices.get_mut(&id) {
             for o in s.entities {

@@ -132,10 +132,6 @@ impl Registry {
             kv::with(kv, |s| (s.gate(), s.prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect()));
         let mut n = 0;
         for (key, bytes) in devs {
-            let id = &key[DEV.len()..];
-            if engine.device(id).is_some() {
-                engine.forget_device(id);
-            }
             match decode(&bytes).and_then(|s| engine.restore_device(s, Some(&ZdefSchemaDecoder), now)) {
                 Ok(()) => n += 1,
                 Err(e) => warn!("registry: {key}: {e}"),

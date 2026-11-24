@@ -213,3 +213,58 @@ fn a_backup_while_foreign_is_returned_but_not_kept() {
     r.sim.stop();
     assert_eq!(kv(&mem), before, "the other network's last backup stays");
 }
+
+/// Frames until the result of request `id`, which is sent after `body`.
+fn frames_until(app: &App, sid: u64, rx: &Receiver<String>, id: u64, body: J) -> Vec<J> {
+    let mut body = body;
+    body["id"] = id.into();
+    app.text(sid, body.to_string());
+    let mut out = Vec::new();
+    loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        let done = f["type"] == "result" && f["id"] == id;
+        out.push(f);
+        if done {
+            return out;
+        }
+    }
+}
+
+#[test]
+fn adopt_keeps_the_devices_imported_meanwhile_and_their_last_values() {
+    let mem = foreign();
+    let store = Store::open(Box::new(mem.clone())).unwrap();
+    let n = store.state().network.unwrap();
+    let plug = "zb:5a52530000000001";
+    let st = format!("st/{plug}");
+    let stored_st = kv(&mem)[&st].clone();
+    // The NCP runs the stored network and knows the plug: the app imports
+    // it while the records are foreign.
+    let r = rig_with(store, |sim| {
+        sim.with(|s| {
+            (s.network_state, s.pan_id, s.ext_pan_id, s.channel, s.key) = (2, n.pan_id, n.ext_pan_id, n.channel, n.network_key);
+            s.table_devices = vec![(0x5a52530000000001u64.to_le_bytes(), 0x5A01, None)];
+        })
+    });
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.imported == 1), "{:?}", app.status());
+    let (sid, rx) = session(&app);
+    assert_eq!(devices(&app, sid, &rx), [plug]);
+    ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["devices"]})));
+
+    let frames = frames_until(&app, sid, &rx, 3, json!({"type": "network/registry/adopt", "confirm": true}));
+    let frames = [frames, frames_until(&app, sid, &rx, 4, json!({"type": "devices/list"}))].concat();
+    let topics: Vec<&str> = frames.iter().filter_map(|f| f["event"]["topic"].as_str()).collect();
+    assert!(!topics.contains(&"device_removed"), "{topics:?}");
+    assert_eq!(topics.iter().filter(|t| **t == "device_added").count(), 1, "only the GP switch is new: {topics:?}");
+    assert_eq!(devices(&app, sid, &rx), ["gp:00f40002", plug]);
+    // Written as before a reboot: the plug's last values stay.
+    call(&app, sid, &rx, 5, json!({"type": "hub/reboot"}));
+    let after = kv(&mem);
+    assert!(after.contains_key(&st), "{after:?}");
+    let values = |b: &[u8]| serde_json::from_slice::<J>(b).unwrap()["e"].clone();
+    assert_eq!(values(&after[&st]), values(&stored_st));
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
