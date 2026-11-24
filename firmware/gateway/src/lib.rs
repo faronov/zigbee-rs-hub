@@ -18,8 +18,12 @@
 //!    its application;
 //! 4. network: Ethernet, Wi-Fi station as the fallback ([`net`]);
 //! 5. LED and button ([`led`]), then the console on the calling thread
-//!    ([`console`]): MG24 reset, Gecko bootloader banner ([`gecko`]) and the
-//!    read-only EZSP probe ([`ezsp`]).
+//!    ([`console`]): MG24 reset, Gecko bootloader banner ([`gecko`]), the
+//!    read-only EZSP probe ([`ezsp`]) and the way back to SONOFF's
+//!    application in `ota_0` ([`slots`]).
+//!
+//! The stock partition table stays; SONOFF's `files` partition (the hub's
+//! future data region, `hub_core::layout::dongle_files`) is only read.
 //!
 //! No Bluetooth (off in sdkconfig, its RAM stays with the heap) and no
 //! network access to the MG24 UART.
@@ -42,6 +46,7 @@ pub mod led;
 pub mod lines;
 pub mod net;
 pub mod settings;
+pub mod slots;
 pub mod uart;
 
 use std::sync::OnceLock;
@@ -126,8 +131,10 @@ pub fn run(profile: &'static BoardProfile) -> ! {
     }
     led::start(&board);
     info!("{}", esp::memory_report());
-    // A self-updated image boots PENDING_VERIFY: it got this far, keep it
-    // (no effect on an image that is not on trial).
+    // Only a bootloader with app rollback puts an image on trial
+    // (PENDING_VERIFY); then this confirms it once the core runs. Anything
+    // else is left as is (SONOFF's bootloader very likely has no rollback:
+    // docs/dongle-max.md).
     unsafe { esp_idf_svc::sys::esp_ota_mark_app_valid_cancel_rollback() };
     console::run()
 }

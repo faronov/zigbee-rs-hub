@@ -11,11 +11,12 @@ use std::time::Duration;
 use esp_idf_svc::sys;
 use hub_core::profile::{BoardProfile, Console};
 
-use crate::{board, cpanic, cpu, esp, ezsp, gecko, led, lines, net, settings, uart};
+use crate::{board, cpanic, cpu, esp, ezsp, gecko, led, lines, net, settings, slots, uart};
 
 const HELP: &str = "\
 zigbee-rs-hub gateway console (board bring-up: no coordinator backend yet):\r
-  info                 firmware, chip, memory, partitions, straps, last panic\r
+  info                 firmware, chip, memory, partitions, ota_0, files, straps,\r
+                       last panic\r
   board                pins of the board profile and stored overrides\r
   board set <k=v ...>  store NCP wiring overrides (tx rx rts cts reset reset_od\r
                        baud flow fallback), applied at the next boot\r
@@ -34,6 +35,8 @@ zigbee-rs-hub gateway console (board bring-up: no coordinator backend yet):\r
   mg24 ezsp info init  also networkInit (resumes a stored network), then\r
                        reset the MG24\r
   mg24 baud <rate>     MG24 UART rate until the next boot\r
+  stock                SONOFF's application in ota_0, and how to return to it\r
+  stock confirm        select ota_0 (SONOFF's application) and restart into it\r
   cpu [ms]             CPU use per task\r
   atomics              lost updates of atomic adds from both cores (PSRAM and\r
                        internal RAM; Rust atomics must lose none)\r
@@ -175,6 +178,8 @@ fn command(words: &[&str]) -> String {
             },
             _ => "usage: mg24 baud <9600..3000000>\r\n".into(),
         },
+        ["stock"] => slots::stock(false),
+        ["stock", "confirm"] => slots::stock(true),
         ["cpu", rest @ ..] => {
             let ms = rest.first().and_then(|s| s.parse().ok()).unwrap_or(2000u64).clamp(100, 10_000);
             cpu::report(Duration::from_millis(ms))
@@ -188,7 +193,7 @@ fn command(words: &[&str]) -> String {
     }
 }
 
-fn reply(s: &str) {
+pub(crate) fn reply(s: &str) {
     let mut out = std::io::stdout();
     let _ = out.write_all(s.as_bytes());
     let _ = out.flush();

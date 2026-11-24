@@ -4,6 +4,7 @@
 use std::ffi::CStr;
 
 use esp_idf_svc::sys;
+use hub_core::layout::dongle_files::{self, Content};
 use hub_core::layout::{self, Part, Verdict};
 use hub_core::profile::{BoardProfile, HostChip, Strap};
 use hub_core::resources::Resources;
@@ -124,6 +125,47 @@ unsafe extern "C" {
     fn esp_chip_info(out: *mut ChipInfo);
 }
 
+/// What SONOFF's `files` partition holds (read-only: the first bytes of its
+/// blocks 0 and 1), with its offset and size; `None` without it.
+pub fn files_content() -> (Option<Content>, u32, u32) {
+    let label = c"files";
+    let p = unsafe {
+        sys::esp_partition_find_first(
+            sys::esp_partition_type_t_ESP_PARTITION_TYPE_DATA,
+            sys::esp_partition_subtype_t_ESP_PARTITION_SUBTYPE_ANY,
+            label.as_ptr(),
+        )
+    };
+    if p.is_null() {
+        return (None, 0, 0);
+    }
+    let (addr, size) = unsafe { ((*p).address, (*p).size) };
+    let mut b0 = [0u8; 64];
+    let mut b1 = [0u8; 64];
+    let ok = unsafe {
+        sys::esp_partition_read(p, 0, b0.as_mut_ptr().cast(), b0.len()) == sys::ESP_OK
+            && sys::esp_partition_read(p, 4096, b1.as_mut_ptr().cast(), b1.len()) == sys::ESP_OK
+    };
+    (ok.then(|| dongle_files::classify(&b0, &b1)), addr, size)
+}
+
+fn files_text() -> String {
+    match files_content() {
+        (None, ..) => "files: no `files` partition (not SONOFF's table)".into(),
+        (Some(c), addr, size) => format!(
+            "files @0x{addr:06X} {} KiB{}: {}",
+            size / 1024,
+            if size == dongle_files::SIZE { "" } else { " (unexpected size)" },
+            match c {
+                Content::LittleFs => "SONOFF's LittleFS, kept (this image never writes it)",
+                Content::Blank => "blank",
+                Content::Claimed => "claimed by the hub",
+                Content::Unknown => "unknown content",
+            }
+        ),
+    }
+}
+
 /// The boot report (log and `info`).
 pub fn boot_report(board: &BoardProfile) -> Vec<String> {
     let mut out = Vec::new();
@@ -157,6 +199,8 @@ pub fn boot_report(board: &BoardProfile) -> Vec<String> {
         label(unsafe { sys::esp_ota_get_boot_partition() })
     ));
     out.extend(parts.into_iter().map(|p| format!("  {p}")));
+    out.push(crate::slots::ota0_text());
+    out.push(files_text());
     out.extend(strapping_report(board).into_iter().map(|s| format!("strap: {s}")));
     out
 }

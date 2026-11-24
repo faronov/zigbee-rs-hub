@@ -1,8 +1,8 @@
 # Common to the gateway boards (firmware/donglem); a board's own
 # sdkconfig.defaults is applied after this file. Set for the product
 # feature set (docs/dongle-max.md): hub application, web UI + WebSocket API,
-# MQTT, Zigbee device OTA, self-update, Ethernet + Wi-Fi; the bring-up
-# image already builds with it.
+# MQTT, Zigbee device OTA, self-update, Ethernet + Wi-Fi, all on SONOFF's
+# stock partition table; the bring-up image already builds with it.
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=6144
@@ -30,24 +30,21 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
-# Core dumps to the `coredump` partition of the product table; on the
-# stock table (bring-up) there is none and only the panic recorder (RTC
-# memory, `info`) keeps the last panic.
-CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
-CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=4
+# No core dump: the stock table has no `coredump` partition. The panic
+# recorder keeps the last panic in RTC memory (`info`).
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y
 
-# Self-update with a trial boot: a new image starts PENDING_VERIFY and is
-# confirmed once it runs (zrh_gateway::run). Whether the stock bootloader
-# was built with rollback support is not known (its log is silent); without
-# it a new image simply boots, without the automatic fallback.
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# No app rollback, like SONOFF's build (its application lacks the
+# rollback-only esp_ota_ops code, so the bootloader of the same build very
+# likely too): an image selected in otadata is marked "undefined", which
+# every bootloader boots and never reverts, so `stock confirm` and a
+# self-update hold with either bootloader.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=n
 
-# While the image may run on the stock table, the default NVS partition is
-# shared with the stock firmware's data: the firmware keeps its settings in
-# its own namespace (`zrh`) and nothing else writes NVS (Wi-Fi without NVS
-# storage, the PHY calibrates at every boot). On the product table, NVS is
-# the hub's own and PHY data storage can be turned on.
+# The default NVS partition is SONOFF's (its Wi-Fi and web settings) for
+# good: the firmware keeps its settings in its own namespace (`zrh`) and
+# nothing else writes NVS (Wi-Fi without NVS storage, the PHY calibrates at
+# every boot), so the stock firmware finds its settings unchanged.
 CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n
 
 # Web UI and WebSocket JSON API (esp_http_server), as firmware/hub.
