@@ -832,12 +832,16 @@ upload service ~50 KB), static RAM +32 B.
 **Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
 on `/api`: network (state, PAN ID, channel, extended PAN ID, NCP firmware,
-IEEE and link), permit join with a countdown, the device list (name, model,
-IEEE, NWK, interview state, LQI/RSSI, last seen, availability) with each
-device's entities and their live states (subscription to `devices`,
-`entities` and `network`), controls for switches and lights (on/off,
-brightness), numbers, selects and buttons, rename, re-interview and remove
-(with confirmation), connection status with automatic reconnect; mobile
+IEEE and link), permit join with a countdown, compact device cards (picture,
+name, availability, the main sensors and controls with their live states,
+battery and a signal indicator from LQI/RSSI; subscription to `devices`,
+`entities` and `network`) and, one click on a card away, the device page
+`#device/<id>` (model, IEEE, NWK, LQI/RSSI, last seen, power source,
+definition, every entity grouped as sensors, controls, configuration and
+diagnostic; rename, re-interview, find definition, bindings, reporting per
+attribute and remove with confirmation; back returns to the list where it
+was), controls for switches and lights (on/off, brightness), numbers,
+selects and buttons, connection status with automatic reconnect; mobile
 layout, light/dark from `prefers-color-scheme`. The page is split into
 tabs (`#/devices`, …): each `<div class="tab" data-tab="id" data-title="…">`
 in `<main>` becomes one, in document order, and `onTab[id]` runs when it is
@@ -867,7 +871,7 @@ adds and removes member endpoints (ZCL Groups, with their state: pending,
 ok, failed, or waiting for a sleepy device to wake), switches the group's
 light or switch entity (one groupcast per command), stores the members'
 current state as a scene, recalls, re-captures and removes scenes, and
-identifies the group; each device card has a **Bindings** section: the
+identifies the group; each device page has a **Bindings** section: the
 device's binding table (read with Mgmt_Bind_req), pending requests, and
 bind/unbind of a source endpoint's clusters (presets remote → light: On/Off,
 Level, Color) to a device endpoint or a group (topic `groups`,
