@@ -343,9 +343,11 @@ firmware would **not** honour an EZSP tag (documented limit).
   app's check and its flush. Once readable, the app loads them on its next
   tick: a stored device replaces one the engine made meanwhile in place
   (`restore_device`: `device_updated`, no removal, so its last values and
-  the clients' entities stay). Rule changes (`automations/create`,
-  `update`, `delete`, `enable`, `disable`) are refused with
-  `registry_read_only` while the gate is not open.
+  the clients' entities stay; the interview it was in is dropped, so late
+  answers and timeouts do not touch it). Rule changes
+  (`automations/create`, `update`, `delete`, `enable`, `disable`, and the
+  rules' enable/disable actions) are refused with `registry_read_only`
+  while the gate is not open.
 - `network/registry/adopt` / `clear` take `"confirm": true`. `clear` also
   drops the engine's devices, groups, bindings and rules without network
   traffic and imports the NCP's devices again. `network/info.registry`:
@@ -355,9 +357,12 @@ firmware would **not** honour an EZSP tag (documented limit).
   identity is known, `Gate::ReadOnly` keeps the records loaded and
   unwritable. `CoordTransport` refusing device traffic until then comes
   with the first `NcpNv` backend.
-- Size (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths): app
-  image +3,520 B (`.flash.text` +1,808 B, `.flash.rodata` +1,712 B, IRAM
-  and DRAM unchanged).
+- Size (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths,
+  against `main` 35fb5ac): app image +4,656 B (`.flash.text` +2,896 B,
+  `.flash.rodata` +1,760 B, IRAM and DRAM unchanged). LTO moves the
+  registry and automation loaders and the app thread's body out of line
+  (they have two callers now): that saves 4.4 KB of the ~9 KB that the
+  tag, the gate, the API and the review fixes add.
 
 ## 3. Threading model
 

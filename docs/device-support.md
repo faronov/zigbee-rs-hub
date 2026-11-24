@@ -2520,7 +2520,8 @@ ran on this flash), or a network whose extended PAN ID, or known key, is
 not the tag's, does not load them and cannot change or delete them
 (a backup taken meanwhile is returned but not kept as the last one;
 requests that change automations, `automations/create`, `update`,
-`delete`, `enable` and `disable`, fail with `registry_read_only`):
+`delete`, `enable` and `disable`, and rules' own `enable`/`disable`
+actions fail with `registry_read_only`):
 `network/info.registry.state` is `foreign`. The operator then adopts or
 clears them; `network/reset` and `network/restore` take them for the new
 network too. Adopting keeps devices the hub met meanwhile (an NCP import,
