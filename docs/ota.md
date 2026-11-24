@@ -10,13 +10,29 @@ UI's **Updates** tab, the Home Assistant `update` platform and `hubctl
 ota-upload` / `ota-stream` / `ota-make` / `--sim-ota`. The API is in
 [device-support 14.11](device-support.md#1411-ota-upgrade).
 
+**Zigbee OTA is in the 8 MB images only** (decided 2026-11-24): the
+server costs about 100 KB of app image, which would fill the 4 MB dev
+slot to 95 %. Cargo features (hub-app, hub-web, tbr-hub): `ota` is the
+server with streamed images, `ota-store` adds the image store and implies
+`ota`. `tools/build-hub-firmware.sh` builds the 8 MB images with
+`ota-store` and the 4 MB images without `ota`; `tools/release-images.py`
+refuses a 4 MB image with Zigbee OTA and an 8 MB one without it. Without
+`ota` the hub has no `ota` in `hub/info`, answers `ota/*` with
+`unsupported`, the web page has no Updates tab and a device's OTA cluster
+commands take the engine's generic path as before the server existed (a
+Query Next Image gets the Default Response it asks for, SUCCESS, and no
+Query Next Image Response). The hub endpoint still lists 0x0019 as before.
+
 **The hub downloads nothing.** There is no TLS on the hub. Images reach
 the devices in one of two ways:
 
-| | 8 MB layout (product) | 4 MB dev layout |
-|---|---|---|
-| **Stream** (a connected client serves the image on demand) | yes | yes (the only way) |
-| **Store** (uploaded, kept on the hub) | yes: the inactive app slot (3 MiB) | no (built without it) |
+| | 8 MB images (`ota-store`) | 4 MB images | build with `ota` only |
+|---|---|---|---|
+| **Stream** (a connected client serves the image on demand) | yes | no Zigbee OTA | yes (the only way) |
+| **Store** (uploaded, kept on the hub) | yes: the inactive app slot (3 MiB) | no Zigbee OTA | no |
+
+A build with `ota` but without `ota-store` (e.g. a 4 MB lab image,
+`-- --features ota`, see the hardware test) is in no release.
 
 ## Streaming
 
@@ -78,7 +94,7 @@ deleted when the job is done.
 |---|---|
 | Query Next Image Request (0x01) | Records manufacturer code, image type, current file version and hardware version (persisted). Answers SUCCESS with the image when the device is approved (an `ota/start`, or the `auto` policy inside the window) and a download slot is free; otherwise NO_IMAGE_AVAILABLE (0x98) — the newer image is still shown as `available`. A query with the version a job installed completes the job (`done`) |
 | Image Block Request (0x03) | Answers any offset of a stored or streamed image the device's job is for (so a download continues after a hub restart, after a device reset, from any offset the device asks for); WAIT_FOR_DATA (1 s) while a streamed block is fetched from the client; ABORT (0x95) for unknown or aborted images, a stream whose client did not come back, and devices that are not approved. Block = min(the device's MaxDataSize, `block_max` (48), NCP `max_asdu` − 17) |
-| Image Page Request (0x04) | Serves up to 4 KiB, at most 128 blocks, as Image Block Responses spaced by the request's ResponseSpacing (at least `min_block_period_ms`), through the same pacing. Each block is read when it falls due and takes the next shared pacing slot, so a page holds no buffers and other devices keep their turn; the same request repeated while its page runs is ignored, a new page or block request of the device replaces it. A streamed block not here within 2 s ends the page early (the device asks again) |
+| Image Page Request (0x04) | Serves up to 4 KiB, at most 128 blocks, as Image Block Responses spaced by the request's ResponseSpacing (at least `min_block_period_ms`), through the same pacing. Each block is read when it falls due and takes the next shared pacing slot, so a page holds no buffers and other devices keep their turn; the same request repeated while its page runs is ignored, a new page or block request of the device replaces it. A streamed block not here within 2 s ends the page early (the device asks again). The 128-block cap is decided (2026-11-24): a client with tiny blocks gets a short page and asks again, as the spec allows |
 | Upgrade End Request (0x06) | SUCCESS from a device whose job for this image runs (or under `auto` inside the window): Upgrade End Response with upgrade time 0/0 ("now"; `upgrade_delay_s` > 0 sets a time), job `installing`; an aborted job, the `off` policy or no approval: Default Response ABORT (sent even if the client disabled default responses), never the go-ahead; the hub then reads CurrentFileVersion (0x0002 of the client) every minute from 30 s on, and the device's next query also confirms; not confirmed within 30 min → `failed`. Other status (INVALID_IMAGE, REQUIRE_MORE_IMAGE, ABORT) → job `failed` with the reason, Default Response SUCCESS |
 | Query Device Specific File (0x08) | NO_IMAGE_AVAILABLE |
 | anything else / manufacturer-specific | Default Response UNSUP_CLUSTER_COMMAND / 0x83 |
@@ -94,10 +110,11 @@ deleted when the job is done.
   ZHA). `auto` offers updates inside the schedule window (local time,
   `HH:MM`–`HH:MM`, may wrap midnight) and needs a synchronised clock; an
   automatic download outside the window is told WAIT_FOR_DATA until it
-  opens. `manual` jobs ignore the window. `off`: never — `ota/start` is
-  refused (`invalid_value`), queries get NO_IMAGE_AVAILABLE, block, page
-  and Upgrade End requests ABORT, and a job running when the policy (the
-  device's or the default) becomes `off` ends `aborted` within a second.
+  opens. `manual` jobs ignore the window. `off`: never (decided
+  2026-11-24) — `ota/start` is refused (`invalid_value`), queries get
+  NO_IMAGE_AVAILABLE, block, page and Upgrade End requests ABORT, and a
+  job running when the policy (the device's or the default) becomes `off`
+  ends `aborted` within a second.
 - **Concurrency**: `max_concurrent` (2) devices download at once; a device
   approved beyond that is `queued`, told NO_IMAGE_AVAILABLE and notified
   when a slot frees. A download without a block request for `stall_s`
@@ -180,18 +197,20 @@ All clients first find the identifier `0x0BEEF11E` in the first 4 KiB
 `ota/upload/begin` (size, name, SHA-256 when the client can compute it),
 chunks of the hub's `chunk_max` from the returned offset,
 `ota/upload/commit` (`replace` at begin replaces a stored image of the
-same identity). Stream: see above. The web UI hides the Updates tab on a
-hub without an OTA server (`ota` missing in `hub/info`). Its page is
-built for the image (hub-web feature `ota-store`, set with the
-firmware's): with a store (8 MB) it offers **Upload to the hub**; without
-(4 MB) **Install from this tab**, where the tab serves the image and asks
-to stay open until the update is done (it also warns before closing).
+same identity). Stream: see above. The web page is built for the image
+(hub-web features `ota` and `ota-store`, set with the firmware's): without
+`ota` (4 MB) it has no Updates tab at all; with a store (8 MB) it offers
+**Upload to the hub**; with `ota` alone **Install from this tab**, where
+the tab serves the image and asks to stay open until the update is done
+(it also warns before closing). It also hides the tab when `hub/info` has
+no `ota`.
 Both list the devices (Update, Abort, Check, their policy) and the
 images. The server settings (default policy, window, concurrency,
 pacing, index URL) are API only (`ota/settings/set`, e.g. `hubctl
 ws-call`), and the page has no index search of its own: a file from the
 index is downloaded by hand, or Home Assistant does it (the page budget
-of 32 KiB gzip leaves no room for more).
+of 32 KiB gzip leaves no room for more; the budget stays, decided
+2026-11-24).
 
 The index URL is a hub setting (`index_url`, default Koenkk's) that
 clients share. Home Assistant fetches it a minute
@@ -280,7 +299,7 @@ hubctl ota-make app.bin app.ota --manufacturer 0x6D6B --image-type 0x0001 \
   --version 0x00020001 --label "zigbee-rs C6 0.2.1" --hw 1-1
 # upload to the hub (continue with the same command after a drop)
 hubctl ota-upload ws://<hub>/api --token <token> out/*.ota
-# or stream it (any hub, the 4 MB one included); exits when the device runs it
+# or stream it (any hub with Zigbee OTA); exits when the device runs it
 hubctl ota-stream ws://<hub>/api --token <token> out/*.ota --device zb:<ieee>
 ```
 
@@ -313,7 +332,18 @@ newer than the running one; the image inside is what the product's
 - `hub-app`: upload, query, start, download and confirmation through the
   simulated NCP (`SimNcp::set_aps_hook` with the simulated OTA client;
   every frame ≤ the simulated NCP's 82-B `max_asdu`), app restart, no
-  store; a streamed download served by the test's API session.
+  store; a streamed download served by the test's API session. Without
+  `ota` (`--no-default-features`, the 4 MB combination): `ota/*` answers
+  `unsupported`, `hub/info` has no `ota`, a Query Next Image gets the
+  generic Default Response; CI checks with `cargo tree` that this build
+  links no `hub-ota`.
+- `hub-web`: the page of every feature combination within the 32 KiB
+  gzip budget and parsing; without `ota` no Updates tab and no `ota/*`
+  request.
+- Release tooling (`tools/test_release_images.py`,
+  `tools/test_hub_build.py`): a 4 MB image marked with `ota` or an 8 MB
+  one without it is refused; the board entries are the features the build
+  script selects.
 - Home Assistant: the update entity (versions, install, progress, a
   device added later, a hub without OTA, install from the index with
   upload, streaming to a hub without a store incl. a reconnect that
@@ -332,14 +362,15 @@ failed (heap). Results below. Still to do on hardware for this branch
 fixes): the panic output in TinyUSB mode plus a 40-minute baseline soak of
 main on the same octal build (to tell whether OTA causes it), a store run
 on an 8 MB board (host tests only so far), and a device OTA end to end
-with this branch's images.
+with this branch's 8 MB image (or the 4 MB lab build with `ota`).
 
 ## Hardware test
 
 The lab's 4 MB BR board (since 2026-11-22 an **N4R8, octal PSRAM**; its
-standard state is hub main's octal 4 MB dev image) with **this branch's
-octal 4 MB dev image** (4 MB builds have no image store: streaming only;
-no layout change) and the zigbee-rs **ESP32-C6 sensor**
+standard state is hub main's octal 4 MB dev image) with **a lab build of
+this branch's octal 4 MB dev image with feature `ota`** (the released
+4 MB images have no Zigbee OTA; this build has no image store: streaming
+only; no layout change) and the zigbee-rs **ESP32-C6 sensor**
 (`products/esp32-zigbee-devkit`, image type 0x0001, hardware version 1)
 joined to it. The Mac runs `hubctl` and reaches the hub over Wi-Fi.
 `<hub>` is the hub's IP, `<t>` its API token (hub console `token`), `<c6>`
@@ -349,17 +380,18 @@ the C6's `zb:<ieee>`.
    hub's current app image and the C6's firmware (build features,
    version) — both are restored at the end.
 2. **Build.** In this branch: `cargo build -p hubctl --release`; the
-   octal 4 MB hub image (features `mqtt`: no image store, as released):
+   octal 4 MB hub image with the OTA server (features `mqtt,ota`: no
+   image store; not the CI artifact, whose 4 MB images have no Zigbee
+   OTA):
    ```sh
    . ~/export-esp.sh
-   RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --psram octal --locked
+   RUSTUP_TOOLCHAIN=esp tools/build-hub-firmware.sh --layout 4mb --psram octal --locked -- --features ota
    TARGET_DIR=target-opi FLASH_SIZE=4MB MAX_APP_BYTES=3014656 \
      tools/make-app-image.sh release target/hub-4mb-opi.bin tbr-hub
    ```
-   (or `tbr-hub-4mb-dev-opi-app.bin` from the PR's CI artifact
-   `firmware`; a quad-PSRAM board takes `tbr-hub-4mb-dev-app.bin`, the
-   same build without `sdkconfig.octal`; without PSRAM the hub runs no
-   app, so no OTA server). Flash **only the app** at
+   (a quad-PSRAM board takes `--psram quad` and `TARGET_DIR=target`;
+   without PSRAM the hub runs no app, so no OTA server). Flash **only the
+   app** at
    0x10000 (`factory`); do not erase `nvs` or `hubdata` (network,
    registry and OTA records stay). The boot log must report the octal
    PSRAM (8 MB) and the Rust heap in PSRAM; `hub/system` then shows the

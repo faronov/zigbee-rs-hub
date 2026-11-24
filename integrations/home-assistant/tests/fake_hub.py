@@ -390,7 +390,7 @@ class FakeHub:
         self.files: dict[str, bytes] = {}
         self.uploads: dict[int, bytearray] = {}
         self.images: list[dict[str, Any]] = []
-        # A hub without an image store (4 MB): streams only.
+        # A hub without an image store: streams only.
         self.ota_store = True
         self.streamed: dict[tuple[int, int], bytes] = {}
         # Answer only the first hub/info of a connection (a hung hub).

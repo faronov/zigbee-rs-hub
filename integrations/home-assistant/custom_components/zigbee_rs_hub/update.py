@@ -6,8 +6,9 @@ version, the newest stored image it qualifies for and the running job;
 installing calls `ota/start`. The hub downloads nothing itself: a newer
 image in the provider index the hub names (Koenkk/zigbee-OTA by default)
 is downloaded by Home Assistant at install time and checked; a hub with
-an image store (8 MB) gets it uploaded, a hub without one (4 MB) gets it
+an image store (8 MB) gets it uploaded, a hub without one gets it
 streamed: Home Assistant serves the blocks while the device downloads.
+The 4 MB images have no OTA server (no `ota` in hub/info): no entities.
 """
 
 from __future__ import annotations

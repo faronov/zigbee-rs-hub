@@ -38,12 +38,14 @@ has, and the integration maps them 1:1 onto HA platforms.
   image in the OTA index the hub names (`index_url`, Koenkk/zigbee-OTA by
   default; fetched daily by Home Assistant, not by the hub) counts as the
   latest version: Install downloads it and checks its SHA-512, then
-  uploads it (hubs with an image store, 8 MB) or **streams** it (4 MB
-  hubs: Home Assistant serves the blocks while the device downloads; the
-  file is kept in `.storage/zigbee_rs_hub_ota/` until the update is done
-  and offered again after any reconnect, so a hub or HA restart does not
-  lose the download). Images can also be given from the hub's web UI
-  (Updates tab) or with `hubctl ota-upload` / `ota-stream`.
+  uploads it (hubs with an image store: the 8 MB images) or **streams** it
+  (a hub built without the store: Home Assistant serves the blocks while
+  the device downloads; the file is kept in `.storage/zigbee_rs_hub_ota/`
+  until the update is done and offered again after any reconnect, so a
+  hub or HA restart does not lose the download). Images can also be given
+  from the hub's web UI (Updates tab) or with `hubctl ota-upload` /
+  `ota-stream`. The 4 MB images have no Zigbee OTA (no `ota` in
+  `hub/info`): no update entities.
 - Services: `zigbee_rs_hub.permit_join` (duration, Green Power window, a
   router to join through), `zigbee_rs_hub.reinterview_device`,
   `zigbee_rs_hub.reconfigure_device`, `zigbee_rs_hub.update_catalog`.

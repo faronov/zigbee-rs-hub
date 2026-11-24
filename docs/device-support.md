@@ -2847,7 +2847,12 @@ with a store `chunk_max`, `capacity`} and accepts the topic `ota`; these
 are additions for the next minor API version. Versions are the 32-bit OTA
 file versions as numbers. Image IDs: stored images 1–65535, streams
 (sessions) from 65536. Without a store, the store's requests answer
-`unsupported`.
+`unsupported`. Only the 8 MB images have the server (tbr-hub feature
+`ota`, with the store `ota-store`); the 4 MB images are built without it:
+no `ota` in `hub/info`, every `ota/*` request answers `unsupported`, the
+web page has no Updates tab, and OTA cluster commands from devices take
+the engine's generic path (a Query Next Image gets the Default Response it
+asks for, no Query Next Image Response).
 
 | Type | Parameters | Result |
 |---|---|---|

@@ -421,7 +421,7 @@ TI's ZNP/MT interface specification. Pin them per firmware version.
 # hub-app
 hub-ncp = { workspace = true, optional = true }   # zigbee-zrhp dependency removed
 [features]
-default = ["zrhp"]        # plus "ota-store" from #55
+default = ["zrhp"]        # plus "ota-store" (implies "ota") from #55
 zrhp = ["dep:hub-ncp"]
 ```
 

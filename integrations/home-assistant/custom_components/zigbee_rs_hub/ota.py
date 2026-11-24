@@ -142,7 +142,7 @@ async def upload(hub: ZigbeeRsHub, data: bytes, name: str, meta: dict[str, Any])
 class OtaStreams:
     """Images Home Assistant serves to a hub without an image store.
 
-    The 4 MB layout: `ota/stream/offer`, then `ota/block_data` for every
+    A hub built without the store: `ota/stream/offer`, then `ota/block_data` for every
     `ota/block_needed`. Files are kept on disk too, so a download goes on
     after Home Assistant or the hub restarted (the hub keeps the session
     two minutes; later the upgrade is started again).
