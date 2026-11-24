@@ -52,7 +52,7 @@ features. Order of work: ZRHP (existing), then EZSP, then ZNP.
 | Thread BR + H2, early sample | ESP32-S3, 4 MB flash: development layout, one app slot, no hub OTA | zigbee-rs / ZRHP | as above | Released as `…-4mb-dev`; next-release variant build-tested, hardware run pending |
 | S3 + MG24 | ESP32-S3; actual board/memory to be identified | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM | **First external backend.** Not implemented; UART and reset/boot wiring unspecified |
 | S3 + CC2652P7 | ESP32-S3; actual board/memory to be identified | TI Z-Stack ZNP / ZNP-MT | TI ROM serial bootloader | After EZSP. Not implemented; updater blocked until reset and bootloader-backdoor lines are specified |
-| Dongle-M + MG24, stock NCP | Classic ESP32-D0WDR2-V3, 16 MB flash / 2 MB PSRAM | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM | Separate ESP port (`xtensa-esp32-espidf`, no native USB/TinyUSB); board work in `donglem` |
+| Dongle-M + MG24, stock NCP | Classic ESP32-D0WDR2-V3, 16 MB flash / 2 MB PSRAM | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM (later) | Board bring-up build-tested (`firmware/donglem`: network, MG24 lines, read-only EZSP probe); product layout, sdkconfig and RAM budget planned (`docs/dongle-max.md`); backend not wired, no hardware run |
 | Dongle-M + MG24, zigbee-rs NCP | Same Dongle-M host | zigbee-rs / ZRHP | Gecko bootloader / XMODEM, not H2 `FW_*` | Blocked: zigbee-rs MG24 radio is `SUPPORTED=false` |
 
 PSRAM: Thread BR modules seen so far are N4R8 (lab, 8 MB Octal), N4R2
@@ -60,9 +60,11 @@ PSRAM: Thread BR modules seen so far are N4R8 (lab, 8 MB Octal), N4R2
 image must match it, the size does not matter. Every image detects PSRAM
 at boot (section 4).
 
-The `donglem` branch also contains an S3 SuperMini + RF-BM-MG24B1 board
-profile. It is prior work to reconcile, not permission to assume that
-wiring for every external S3/MG24 assembly.
+The Dongle-M pins are `hub_core::profile::DONGLE_M` (SONOFF's published
+pinout; `docs/dongle-max.md`). The `donglem` branch also contains an S3
+SuperMini + RF-BM-MG24B1 board profile, not ported: prior work to
+reconcile, not permission to assume that wiring for every external S3/MG24
+assembly.
 
 Before creating flashable external-NCP images, record:
 
@@ -123,16 +125,16 @@ explicit error and are not advertised by the API/UI.
 
 ### Host image options
 
-| Option | Standard 4 MB BR | Standard 8 MB BR | Future 16 MB gateway |
+| Option | Standard 4 MB BR | Standard 8 MB BR | Dongle Max 16 MB (planned, `docs/dongle-max.md`) |
 |---|---|---|---|
-| ESP-IDF esp-mqtt | Included; runtime opt-in | Included; runtime opt-in | Planned |
-| Manual ZCL/Tuya console and live frame tap | Off; `advanced` opt-in | On | Planned, build-selectable |
+| ESP-IDF esp-mqtt | Included; runtime opt-in | Included; runtime opt-in | Included, with HA discovery |
+| Manual ZCL/Tuya console and live frame tap | Off; `advanced` opt-in | On | On |
 | Normal ZCL/Tuya/GP device support | Kept | Kept | Shared engine; radio capabilities still apply |
 | Local automations, groups/scenes/bindings | Kept | Kept | Planned through shared engine |
-| Signed catalog and user definitions | Compact catalog/storage areas | Larger areas | Larger areas, after layout integration |
-| Hub application A/B slots | No: existing single-slot layout | Yes | Planned 16 MB board layout |
-| Zigbee device OTA server | Not in this release | Not in this release | Separate OTA qualification |
-| Wi-Fi | Open and WPA2/WPA3-Personal | same | same |
+| Signed catalog and user definitions | Compact catalog/storage areas | Larger areas | The 8 MB areas in a 2 MiB `hubdata` (spare for larger banks) |
+| Hub application A/B slots | No: existing single-slot layout | Yes | Yes, 4 MiB each (`firmware/donglem/partitions-16mb.csv`) |
+| Zigbee device OTA server | Not in this release | Not in this release | Yes, with its own 4 MiB image store; separate OTA qualification |
+| Wi-Fi | Open and WPA2/WPA3-Personal | same | same, as the fallback of Ethernet; no Bluetooth |
 
 The `advanced` flag does not control normal Tuya datapoint decoding or
 entity commands. Host application OTA, Zigbee device OTA and NCP firmware
