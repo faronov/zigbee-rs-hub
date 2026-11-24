@@ -1212,6 +1212,9 @@ impl Runner {
 
     /// [`send`](Self::send) of a frame the caller no longer needs.
     fn send_owned(&mut self, sid: SessionId, frame: String) {
+        if sid == AUTOMATIONS_SESSION {
+            return self.send(sid, &frame);
+        }
         if self.outboxes.contains_key(&sid) {
             self.hold(sid, frame);
         } else if let Some(sink) = self.sinks.get_mut(&sid)

@@ -545,6 +545,58 @@ fn automation_group_delete_is_done_before_the_next_action() {
     r.sim.stop();
 }
 
+/// A command action's result comes after its run (the delivery): it
+/// reaches the trace, also through the event loop's frames.
+#[test]
+fn automation_command_results_reach_the_trace() {
+    use crate::tests_baseline::{Air, PLUG, PLUG_NWK, plug};
+    let r = rig_with(Store::volatile(), |sim| {
+        sim.with(|s| {
+            s.trace = Some(Vec::new());
+            s.table_devices = vec![(PLUG.to_le_bytes(), PLUG_NWK, None)];
+        })
+    });
+    r.ncp.form(hub_ncp::FormRequest::default()).unwrap();
+    let devs = Arc::new(std::sync::Mutex::new(vec![plug()]));
+    let _air = Air::start(&r.sim, devs.clone());
+    let app = App::start(r.ncp.clone(), cfg());
+    let (sid, rx) = session(&app);
+    let id = format!("zb:{PLUG:016x}");
+    let t = std::time::Instant::now();
+    while call(&app, sid, &rx, 1, json!({"type": "devices/get", "device": id}))["result"]["interview"] != "complete" {
+        assert!(t.elapsed() < T, "interview of {id}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let rule = json!({"id": "c", "actions": [{"type": "command", "uid": format!("{id}:1:switch"), "command": "toggle"}]});
+    assert_eq!(call(&app, sid, &rx, 2, json!({"type": "automations/create", "rule": rule}))["success"], true);
+    let mut n = 10;
+    let mut last_trace = |want: &str| {
+        let t = std::time::Instant::now();
+        loop {
+            n += 1;
+            let c = call(&app, sid, &rx, n, json!({"type": "automations/traces", "automation": "c"}));
+            let trace = c["result"][0].clone();
+            if trace["actions"][0]["result"] == want || t.elapsed() > T {
+                return trace;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    call(&app, sid, &rx, 3, json!({"type": "automations/run", "automation": "c"}));
+    let trace = last_trace("ok");
+    assert_eq!((trace["actions"][0]["result"].as_str(), trace["result"].as_str()), (Some("ok"), Some("done")), "{trace}");
+    // Gone (not delivered, no answer): the action and the run end in an
+    // error.
+    devs.lock().unwrap().clear();
+    r.sim.with(|s| s.undeliverable.push((PLUG_NWK, 0xA8)));
+    call(&app, sid, &rx, 4, json!({"type": "automations/run", "automation": "c"}));
+    let trace = last_trace("error");
+    assert_eq!((trace["actions"][0]["result"].as_str(), trace["result"].as_str()), (Some("error"), Some("error")), "{trace}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 fn permit_events(rx: &Receiver<String>, until: impl Fn(&[u64]) -> bool) -> Vec<u64> {
     let mut seen = Vec::new();
     let t = std::time::Instant::now();
