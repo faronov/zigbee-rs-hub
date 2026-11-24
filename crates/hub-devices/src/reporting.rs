@@ -23,6 +23,7 @@ use crate::hub::OpKind;
 use crate::hub::{ApiError, Hub, HubEvent, Purpose, device_of_uid};
 use crate::model::{Binding, ConfigureOp, EntityDef, LayerSource, PowerKind, ReportSpec, ValueDef};
 use crate::transport::ZigbeeTransport;
+use crate::vecmap::VecMap;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
 use crate::zcl::{FrameType, Status, ZclFrame, ZclType, cluster as cl};
 
@@ -145,17 +146,17 @@ impl ReportSetting {
     /// API and store form (an integral change as an integer).
     pub fn to_json(self) -> J {
         match self {
-            Self::Config {
-                min,
-                max,
-                change: Some(c),
-            } if c.fract() == 0.0 && c.abs() < 9e15 => json!([min, max, c as i64]),
-            Self::Config {
-                min,
-                max,
-                change: Some(c),
-            } => json!([min, max, c]),
-            Self::Config { min, max, .. } => json!([min, max]),
+            Self::Config { min, max, change } => {
+                let mut a = vec![J::from(min), J::from(max)];
+                if let Some(c) = change {
+                    a.push(if c.fract() == 0.0 && c.abs() < 9e15 {
+                        J::from(c as i64)
+                    } else {
+                        J::from(c)
+                    });
+                }
+                J::Array(a)
+            }
             Self::Off => "off".into(),
             Self::Revert => "revert".into(),
         }
@@ -185,13 +186,17 @@ impl serde::Serialize for ReportSetting {
 
 impl<'de> serde::Deserialize<'de> for ReportSetting {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = J::deserialize(d)?;
+        Self::from_store(&J::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ReportSetting {
+    /// The store form: a setting or `"revert"`.
+    pub fn from_store(v: &J) -> Result<Self, String> {
         if v == "revert" {
             return Ok(Self::Revert);
         }
-        Self::parse(&v)
-            .map_err(serde::de::Error::custom)?
-            .ok_or_else(|| serde::de::Error::custom("report: a setting"))
+        Self::parse(v)?.ok_or_else(|| "report: a setting".into())
     }
 }
 
@@ -424,7 +429,7 @@ fn values_mut(e: &mut EntityDef) -> impl Iterator<Item = &mut ValueDef> {
 /// The global defaults: edits of the built-in table by class.
 #[derive(Debug, Clone, Default)]
 pub struct ReportDefaults {
-    edits: BTreeMap<&'static str, ReportSetting>,
+    edits: VecMap<&'static str, ReportSetting>,
     /// Bumped on every change (the store writes when it moved).
     pub generation: u64,
 }
@@ -461,20 +466,22 @@ impl ReportDefaults {
 
     /// Store form (`DEFAULTS_KEY`).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let m: Map<String, J> = self
-            .edits
-            .iter()
-            .map(|(k, s)| ((*k).to_string(), s.to_json()))
-            .collect();
+        // Inserted, not collected: no sort instantiation (firmware size).
+        let mut m = Map::new();
+        for (k, s) in &self.edits {
+            m.insert((*k).to_string(), s.to_json());
+        }
         serde_json::to_vec(&m).unwrap_or_default()
     }
 
     /// Reads the store form; classes this build does not know and invalid
     /// settings are skipped.
     pub fn from_bytes(b: &[u8]) -> Result<Self, String> {
-        let m: Map<String, J> = serde_json::from_slice(b).map_err(|e| e.to_string())?;
+        // Parsed as a value (its parser is in the firmware anyway).
+        let v: J = serde_json::from_slice(b).map_err(|e| e.to_string())?;
+        let m = v.as_object().ok_or("reporting defaults: an object")?;
         let mut d = Self::default();
-        for (k, v) in &m {
+        for (k, v) in m {
             let Some(c) = CLASSES.iter().find(|c| c.key == k) else {
                 continue;
             };
@@ -492,7 +499,11 @@ impl ReportDefaults {
         let classes: Vec<J> = CLASSES
             .iter()
             .map(|c| {
-                let attrs: Vec<J> = c.attrs.iter().map(|a| json!([a.0, a.1])).collect();
+                let attrs: Vec<J> = c
+                    .attrs
+                    .iter()
+                    .map(|a| J::Array(vec![a.0.into(), a.1.into()]))
+                    .collect();
                 let mut o = Map::new();
                 o.insert("key".into(), c.key.into());
                 o.insert("attributes".into(), J::Array(attrs));
@@ -509,7 +520,9 @@ impl ReportDefaults {
                 J::Object(o)
             })
             .collect();
-        json!({ "classes": classes })
+        let mut o = Map::new();
+        o.insert("classes".into(), J::Array(classes));
+        J::Object(o)
     }
 
     /// `reporting/defaults/set`: `{class: setting | "default" | null}`,
@@ -524,15 +537,16 @@ impl ReportDefaults {
                 .iter()
                 .find(|c| c.key == k)
                 .ok_or_else(|| format!("unknown class {k}"))?;
-            match ReportSetting::parse(v).map_err(|e| format!("{k}: {e}"))? {
-                Some(s) if s != c.builtin => {
-                    check_class(c, s).map_err(|e| format!("{k}: {e}"))?;
-                    next.insert(c.key, s);
-                }
-                _ => {
-                    next.remove(c.key);
-                }
-            }
+            let edit = ReportSetting::parse(v)
+                .and_then(|s| match s {
+                    Some(s) if s != c.builtin => check_class(c, s).map(|()| Some(s)),
+                    _ => Ok(None),
+                })
+                .map_err(|e| format!("{k}: {e}"))?;
+            match edit {
+                Some(s) => next.insert(c.key, s),
+                None => next.remove(c.key),
+            };
         }
         let changed = next != self.edits;
         self.edits = next;
@@ -715,6 +729,14 @@ pub(crate) struct ReportingRead {
 }
 
 type Groups = BTreeMap<(u8, u16, Option<u16>), Vec<u16>>;
+
+/// An `entities/reporting` answer: `{status, records}`.
+fn answer(status: &str, rows: Vec<J>) -> J {
+    let mut o = Map::new();
+    o.insert("status".into(), status.into());
+    o.insert("records".into(), J::Array(rows));
+    J::Object(o)
+}
 
 impl<T: ZigbeeTransport> Hub<T> {
     /// The global defaults.
@@ -977,7 +999,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let (rows, groups) = self.reporting_rows(&did, uid, now)?;
         if !read || groups.is_empty() {
             let status = if read { "ok" } else { "cached" };
-            return Ok(json!({"status": status, "records": rows}));
+            return Ok(answer(status, rows));
         }
         let d = &self.devices[&did];
         let queued = d.sleepy() && now > d.awake_until;
@@ -1016,7 +1038,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
         }
         let Some(t) = ticket else {
-            return Ok(json!({"status": "queued", "records": rows}));
+            return Ok(answer("queued", rows));
         };
         // Every frame may have failed already (transport refused).
         let done = self
@@ -1132,7 +1154,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             Some(e) => Err(e),
             None => self
                 .reporting_rows(&r.device, r.uid.as_deref(), now)
-                .map(|(rows, _)| json!({"status": "ok", "records": rows})),
+                .map(|(rows, _)| answer("ok", rows)),
         };
         match r.answer {
             Some(ticket) => self.emit(HubEvent::Answer { ticket, result }),

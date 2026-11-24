@@ -25,6 +25,7 @@ use hub_devices::model::LayerSource;
 use hub_devices::persist::DeviceSnapshot;
 use hub_devices::reporting::DEFAULTS_KEY;
 use hub_devices::transport::ZigbeeTransport;
+use hub_devices::vecmap::{btree_map, btree_set};
 use hub_devices::zdef_adapter::{ZdefSchemaDecoder, load_cbor};
 use hub_store::{KvStore, kv};
 use log::{info, warn};
@@ -222,13 +223,14 @@ impl Registry {
         if sweep {
             self.dirty.clear();
             self.last_sweep = now;
-            let defs: BTreeMap<String, Vec<u8>> = engine
-                .user_definitions()
-                .defs
-                .iter()
-                .filter_map(|d| Some((format!("{UDEF}{}", d.id), d.zdef.as_ref()?.encode().ok()?)))
-                .collect();
-            let live: BTreeSet<String> = engine.devices().map(|d| format!("{DEV}{}", d.id)).collect();
+            let defs: BTreeMap<String, Vec<u8>> = btree_map(
+                engine
+                    .user_definitions()
+                    .defs
+                    .iter()
+                    .filter_map(|d| Some((format!("{UDEF}{}", d.id), d.zdef.as_ref()?.encode().ok()?))),
+            );
+            let live: BTreeSet<String> = btree_set(engine.devices().map(|d| format!("{DEV}{}", d.id)));
             // Sources of the user definitions still stored, `<format>\n<text>`
             // (ascending ids, as the map iterates).
             let srcs: Records = engine

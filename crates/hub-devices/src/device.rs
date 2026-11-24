@@ -12,6 +12,7 @@ use crate::gp::types::{GpSinkRecord, GpdId};
 use crate::model::{Binding, Category, EntityDef, LayerSource, Platform, PowerKind, ValueDef};
 use crate::resolve::{Resolution, ResolvedEntity};
 use crate::transport::ApsRequest;
+use crate::vecmap::VecMap;
 use crate::zcl::ZclValue;
 use crate::zdo::NodeDescriptor;
 
@@ -366,9 +367,9 @@ pub struct Device {
     pub tuya_query_at: Option<Millis>,
     /// Reporting configurations the device answered (`entities/reporting`
     /// with `read`) by `(ep, cluster, attr)`; not persisted.
-    pub reporting: BTreeMap<(u8, u16, u16), crate::reporting::Applied>,
+    pub reporting: VecMap<(u8, u16, u16), crate::reporting::Applied>,
     /// User reporting overrides by attribute (5.2, layer 5).
-    pub report_overrides: BTreeMap<crate::reporting::AttrKey, crate::reporting::ReportSetting>,
+    pub report_overrides: VecMap<crate::reporting::AttrKey, crate::reporting::ReportSetting>,
 }
 
 impl Device {
@@ -407,8 +408,8 @@ impl Device {
             schema: SchemaState::default(),
             fp_hash: None,
             tuya_query_at: None,
-            reporting: BTreeMap::new(),
-            report_overrides: BTreeMap::new(),
+            reporting: VecMap::new(),
+            report_overrides: VecMap::new(),
         }
     }
 

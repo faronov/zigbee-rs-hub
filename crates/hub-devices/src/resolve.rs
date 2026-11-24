@@ -800,10 +800,8 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             }
         }
     }
-    let ep_names: BTreeMap<u8, String> = layers
-        .iter()
-        .flat_map(|(d, _)| d.endpoints.clone())
-        .collect();
+    let ep_names: BTreeMap<u8, String> =
+        crate::vecmap::btree_map(layers.iter().flat_map(|(d, _)| d.endpoints.clone()));
     let mut entities: Vec<ResolvedEntity> = order
         .into_iter()
         .filter_map(|k| merged.remove(&k).map(|b| *b))

@@ -423,7 +423,7 @@ pub struct Hub<T: ZigbeeTransport> {
     /// Global reporting defaults (5.2).
     pub(crate) report_defaults: crate::reporting::ReportDefaults,
     /// Reporting readbacks in progress.
-    pub(crate) reporting_reads: BTreeMap<u64, crate::reporting::ReportingRead>,
+    pub(crate) reporting_reads: crate::vecmap::VecMap<u64, crate::reporting::ReportingRead>,
     /// Last readback number.
     pub(crate) reporting_seq: u64,
 }
@@ -512,7 +512,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             features: HUB_FEATURES.to_vec(),
             zg: Default::default(),
             report_defaults: Default::default(),
-            reporting_reads: BTreeMap::new(),
+            reporting_reads: Default::default(),
             reporting_seq: 0,
         }
     }
@@ -1177,7 +1177,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         let old_layers = d.resolution.layers.clone();
         let mut old: BTreeMap<String, Entity> =
-            d.entities.drain(..).map(|e| (e.uid.clone(), e)).collect();
+            crate::vecmap::btree_map(d.entities.drain(..).map(|e| (e.uid.clone(), e)));
         let mut added = Vec::new();
         let mut revived = Vec::new();
         let mut updated = Vec::new();
@@ -1292,7 +1292,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        let seeded: BTreeSet<usize> = work.iter().map(|w| w.0).collect();
+        let seeded: BTreeSet<usize> = crate::vecmap::btree_set(work.iter().map(|w| w.0));
         let unseeded: Vec<String> = d
             .entities
             .iter()
@@ -2565,7 +2565,8 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn clear_pending_state(&mut self, tk: &Ticket) {
-        let uids: BTreeSet<String> = tk.optimistic.iter().map(|o| o.0.clone()).collect();
+        let uids: BTreeSet<String> =
+            crate::vecmap::btree_set(tk.optimistic.iter().map(|o| o.0.clone()));
         for uid in uids {
             if let Some(d) = self.devices.get_mut(device_of_uid(&uid)) {
                 if let Some(i) = d.entity_index(&uid) {

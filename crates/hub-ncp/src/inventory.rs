@@ -147,7 +147,11 @@ impl Hub {
     pub fn ncp_devices(&self) -> Result<Inventory, Error> {
         let opts = CallOpts::timeout(Duration::from_secs(5));
         let mut inv = read(self.client(), opts)?;
-        let mut map: BTreeMap<[u8; 8], NcpDevice> = inv.devices.drain(..).map(|d| (d.ieee, d)).collect();
+        // Inserted, not collected: collecting sorts with code of its own.
+        let mut map: BTreeMap<[u8; 8], NcpDevice> = BTreeMap::new();
+        for d in inv.devices.drain(..) {
+            map.insert(d.ieee, d);
+        }
         for r in self.store_state().devices.values().filter(|r| r.flags & store_flags::LEFT == 0) {
             let nwk = r.nwk;
             add(&mut map, r.ieee, nwk, source::STORE).capability.get_or_insert(r.capability);
