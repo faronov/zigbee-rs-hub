@@ -182,6 +182,14 @@ impl Pipe {
         }
     }
 
+    /// Writes `data` at time `now` as one unit, outside the frame stream and
+    /// without faults (XON/XOFF a UART inserts), in order with the frames.
+    pub fn push_raw(&mut self, data: &[u8], now: u64) {
+        let due = self.last_due.max(now) + 1;
+        self.last_due = due;
+        self.queue.push_back((due, data.to_vec()));
+    }
+
     /// Flips one bit of a non-reserved byte so that it stays non-reserved:
     /// framing is kept and only the CRC check fails.
     fn corrupt(&mut self, frame: &mut [u8]) -> bool {
