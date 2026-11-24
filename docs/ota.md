@@ -292,6 +292,10 @@ zigbee-rs's client (`zigbee-runtime` `OtaManager`/`OtaSession`,
   Upgrade End Response 0/0 ("now") are handled;
 - it sends its hardware version (ESP32 devkit: 1): images built with a
   hardware range must include it.
+- the ESP32 products do not start a new download while the running image
+  is still unconfirmed (application-driven rollback, at most 15 min after
+  an update): it ends the download before the first block with an Upgrade
+  End INVALID_IMAGE and the job fails; start it again later.
 
 **OTA identity**: the zigbee-rs products advertise manufacturer code
 **0x6D6B** in their OTA client since faronov/zigbee-rs#6 (ESP32 devkit
@@ -482,6 +486,40 @@ any NCP errors, the Match_Desc result of step 4, the outcome of steps
 7–10.
 
 ## Hardware results
+
+### Round 4: PSRAM-safe atomics, ticketed transport (2026-11-24)
+
+Lab BR board, S3 N4R8 (octal PSRAM), 4 MB dev layout, H2 NCP 0.1.2. Image
+`zigbee-ota-v2` 6efb7ab (main 6fc074d merged: #68 `-s32c1i`, #69), lab
+build `--features ota` (`mqtt,ota`), octal, 2 880 464 B, app only at
+0x10000. Console `hub atomics`: Rust `AtomicU32` on PSRAM 200 000 /
+200 000, 0 lost. C6 sensor (zigbee-rs master, 0x6D6B / 0x0001 / v3, hw 1,
+sleepy) on PAN 0x1C06 ch 17 with an IKEA remote; files built with
+zigbee-rs master 15ee9550 (`create-esp32-ota.py 4` / `5`, 399 618 /
+399 634 B). **Result: all steps pass, two full downloads, no panic.**
+
+| Step | Result |
+|---|---|
+| 3. Boot | `ota` = `{"stream": true, "store": false, "max_streams": 4, "stream_chunk": 1024}`; internal heap 126.6 KB free (min 121.7 KB, largest block 51 200 B) |
+| 4. Identity | `check` → `sleepy: true`; the C6 queried 3.5 min later: 0x6D6B / 1 / version 3 / hw 1 |
+| 6. Stream (v3 → v4) | `notified`; download from the C6's next poll (4 min), 1 KiB per ~5 s (~200 B/s) |
+| 7. Away 60 s | (at 20 %) `running download, notified again`, continued at 21 % |
+| 8. Away 150 s | (at 40 %) job `aborted` ("the stream's client did not come back"), the C6 kept reporting. Rerun: `notified`, continued at 41 % after 3.8 min |
+| 9. Hub restart | (at 60 %, console `s3 reset`) `connection lost` after 10 s, reconnected 1 s later, `running download, notified again`, continued at 60 % |
+| 10. Done | `installing` → `done` 91 s later; `current_version` 4, job `done`; SWBuildID "4" after a re-interview |
+| Second run (v4 → v5) | uninterrupted: 38 min 40 s of download (172 B/s), `installing` → `done` 61 s later, `current_version` 5 |
+| Heap | 24 five-minute samples over both runs: internal free 124.8–126.2 KB, `min_free` 118.3 KB (first boot) / 121.6 KB (after step 9), largest block 51 200 B throughout; `stream_paused` never true, stream `memory` 4 156 B, `waits` 1 (run 1: 58, while the client was away in step 7) |
+| Transport | `ota/status.tx` from the step-9 restart to the end of the second run: 11 627 submitted + 4 queued for the sleepy C6 = 11 631 delivered, 0 not delivered / refused / unknown; per-device `tx_failed` 0; NCP `last_error` null |
+| Panics | none: the RTC panic record kept only the pre-#68 one from main 95bbd85; the step-9 restart was the requested software reset |
+
+The first attempt of the second run, started 1.5 min after the C6 had
+installed v4, ended at 0 % with `failed: the device rejected the image
+(INVALID_IMAGE)`: the zigbee-rs ESP32 firmware does not erase its other
+slot while the running image is still unconfirmed (application-driven
+rollback, confirmation within 15 min). The hub reported it as it should;
+the retry 16 min later ran through. The round-3 panic did not recur in
+these ~2 h of streaming with #68's fix (its cause was probably the
+cross-core PSRAM atomics #68 fixed).
 
 ### Round 3: memory fixes, octal-PSRAM build (2026-11-23)
 

@@ -1205,10 +1205,11 @@ ABORT, never "install now"); progress events; resumable after a hub
 restart. Home Assistant: one `update` entity per device (upload to the
 store or streaming). Host tests: simulated OTA client behind the
 simulated NCP, Home Assistant end to end with `hubctl --sim --sim-ota`.
-Hardware: streaming ran on the octal 4 MB lab board (old branch, results
-in [docs/ota.md](docs/ota.md#hardware-results)); not yet: a capture of its
-one unexplained panic with a baseline soak, the 8 MB store, a device OTA
-end to end on this branch. App image vs main (95bbd85, quad PSRAM, CI):
+Hardware (octal 4 MB lab board, lab build with `ota` of this branch
+at 6efb7ab): the zigbee-rs C6 updated twice by streaming, with the client
+away and a hub restart mid-download, no panic, internal heap flat
+(results in [docs/ota.md](docs/ota.md#hardware-results)); not yet on
+hardware: the 8 MB store. App image vs main (95bbd85, quad PSRAM, CI):
 8 MB (`mqtt,advanced,ota-store`) 3 018 768 B, +135 568 B, 96.0 % of the
 3 MiB slot; 4 MB (`mqtt`, no Zigbee OTA) 2 868 432 B, +4 896 B (generic
 plumbing kept in every image: app clusters and their outcomes, events
