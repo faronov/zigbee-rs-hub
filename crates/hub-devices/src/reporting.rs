@@ -567,8 +567,8 @@ pub fn value_report(d: &Device, ep: u8, v: &ValueDef) -> Option<ReportSpec> {
     }
 }
 
-/// The reporting of a definition `configure: report` op for the attribute
-/// (the last one), if any.
+/// The reporting of the last definition `configure: report` op for the
+/// attribute that sends a record (`report: off` ops send nothing), if any.
 pub fn op_report(d: &Device, key: AttrKey) -> Option<ReportSpec> {
     d.resolution.configure.iter().rev().find_map(|op| match op {
         ConfigureOp::Report {
@@ -579,6 +579,7 @@ pub fn op_report(d: &Device, key: AttrKey) -> Option<ReportSpec> {
             report,
             ..
         } if (*cluster, *attr, *mfr) == (key.1, key.2, key.3)
+            && matches!(report, ReportSpec::Config { .. })
             && ep.unwrap_or_else(|| crate::configure::first_ep_with(d, *cluster)) == key.0 =>
         {
             Some(*report)

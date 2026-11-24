@@ -270,8 +270,9 @@ pub struct ConfigureState {
     /// The user changed reporting settings: the next op rebuild forgets
     /// superseded Configure Reporting results.
     pub reports_changed: bool,
-    /// Superseded Configure Reporting ops still in flight: their results
-    /// are not recorded.
+    /// Superseded Configure Reporting ops still in flight (one entry per
+    /// key, dropped when the key is current again): their results are not
+    /// recorded.
     pub stale: Vec<String>,
 }
 

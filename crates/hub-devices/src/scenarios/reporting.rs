@@ -1153,3 +1153,93 @@ fn entities_sharing_an_attribute_share_its_override() {
         assert_eq!(row(&r, u)["report"], json!([1, 3600, 1]), "{u}");
     }
 }
+
+#[test]
+fn a_definition_op_with_report_off_is_not_inherited() {
+    // The entity's record is what the attribute inherits; the `off` op
+    // sends nothing.
+    let yaml = format!(
+        "{TEMP_NO_REPORT}    report: [30, 900, 50]\nconfigure:\n  - report: {{ep: 1, cluster: 0x0402, attr: 0x0000, type: i16, report: off}}\n"
+    );
+    let (mut hub, mut sim) = with_definition(&yaml, def_device(&[0x0000, 0x0402]));
+    let uid = format!("{}:1:temperature", id(DEF));
+    assert_eq!(device_config(&mut sim, 0x0402, 0), Some((30, 900)));
+    hub.set_entity_report(&uid, None, &json!("off"), T0 + 1000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 1000);
+    let x = row(&rows(&mut hub, &id(DEF)), &uid);
+    assert_eq!(
+        (x["report"].clone(), x["default"].clone()),
+        (json!("off"), json!([30, 900, 50]))
+    );
+    // Cleared: the entity's record again, no revert.
+    sim.log.clear();
+    hub.set_entity_report(&uid, None, &J::Null, T0 + 2000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 2000);
+    let builtin = vec![0x00, 0x00, 0x00, 0x29, 30, 0, 0x84, 0x03, 50, 0];
+    assert_eq!(configure_frames(&sim), [(0x6001, 0x0402, builtin.clone())]);
+    assert!(hub.device(&id(DEF)).unwrap().report_overrides.is_empty());
+    let x = row(&rows(&mut hub, &id(DEF)), &uid);
+    assert_eq!(
+        (x["report"].clone(), x["source"].clone()),
+        (json!([30, 900, 50]), json!("definition"))
+    );
+    sim.log.clear();
+    hub.reconfigure(&id(DEF), T0 + 3000).unwrap();
+    sim.run(&mut hub, T0 + 3000);
+    let temp: Vec<Vec<u8>> = configure_frames(&sim)
+        .into_iter()
+        .filter(|f| f.1 == 0x0402)
+        .map(|f| f.2)
+        .collect();
+    assert_eq!(temp, [builtin]);
+}
+
+#[test]
+fn a_setting_superseded_twice_while_asleep_counts_when_set_again() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(sleepy());
+    sim.join(&mut hub, SLEEPY, T0);
+    let d = id(SLEEPY);
+    let uid = format!("{d}:1:humidity");
+    let t = T0 + 120_000;
+    sim.log.clear();
+    // A goes out while asleep (queued), then B and C replace it.
+    for (i, v) in [[60, 3600, 50], [61, 3600, 50], [62, 3600, 50]]
+        .iter()
+        .enumerate()
+    {
+        hub.set_entity_report(&uid, None, &json!(v), t + i as u64)
+            .unwrap();
+    }
+    let s = sim.dev(SLEEPY).clone();
+    hub.on_aps_indication(
+        s.report(1, 0x0402, None, &[(0, TypedValue::int(ZclType::I16, 2200))]),
+        t + 60_000,
+    );
+    sim.run(&mut hub, t + 60_000);
+    let hum = |sim: &Sim| -> Vec<u8> {
+        configure_frames(sim)
+            .into_iter()
+            .filter(|f| f.1 == 0x0405)
+            .map(|f| f.2[4])
+            .collect()
+    };
+    assert_eq!(hum(&sim), [60, 62]);
+    assert!(hub.device(&d).unwrap().configure.stale.is_empty());
+    // A again (awake): its result is recorded, so a rebuild sends nothing.
+    sim.log.clear();
+    hub.set_entity_report(&uid, None, &json!([60, 3600, 50]), t + 61_000)
+        .unwrap();
+    sim.run(&mut hub, t + 61_000);
+    assert_eq!(hum(&sim), [60]);
+    sim.log.clear();
+    hub.redo_configure(&d, t + 62_000);
+    sim.run(&mut hub, t + 62_000);
+    assert!(sim.aps().is_empty(), "{:?}", sim.aps());
+    let dev = hub.device(&d).unwrap();
+    assert!(dev.configure.done.values().all(|v| *v));
+    assert!(dev.configure.stale.is_empty());
+}

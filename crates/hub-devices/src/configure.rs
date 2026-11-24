@@ -495,6 +495,10 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         let ops = build_ops(d, coord, hub_ep, &crate::hub::DevEnv { dev: d, now, tz });
         d.configure.hash = Some(configure_hash(&ops));
+        // A superseded op whose key is current again: its result counts.
+        d.configure
+            .stale
+            .retain(|k| !ops.iter().any(|o| o.key == *k));
         if std::mem::take(&mut d.configure.reports_changed) {
             // Reporting settings changed: forget the results of superseded
             // Configure Reporting ops (so that going back re-sends the old
@@ -517,8 +521,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .filter_map(|p| match p {
                     Purpose::Configure(k) if !live(k) => Some(k.clone()),
                     _ => None,
-                });
-            d.configure.stale.extend(in_flight);
+                })
+                .collect::<Vec<_>>();
+            for k in in_flight {
+                if !d.configure.stale.contains(&k) {
+                    d.configure.stale.push(k);
+                }
+            }
             let done = &d.configure.done;
             d.configure.unreportable.retain(|&(ep, c, a)| {
                 !ops.iter().any(|o| match &o.kind {

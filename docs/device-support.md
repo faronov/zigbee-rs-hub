@@ -584,9 +584,10 @@ it applies to all, and `entities/reporting` lists the others as `shared`.
 Precedence for one attribute, highest first:
 
 1. the user's override;
-2. the definition: a `configure: - report:` op (6.8), sent after the
-   entity records, then the `report` of the first entity bound to it (a
-   definition entity, or `generic.patch`);
+2. the definition: a `configure: - report:` op with `[min, max, change]`
+   (6.8; sent after the entity records; an op with `report: off` sends
+   nothing and does not count), then the `report` of the first entity
+   bound to it (a definition entity, or `generic.patch`);
 3. the edited global default of the attribute's class;
 4. the built-in table above.
 
