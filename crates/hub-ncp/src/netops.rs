@@ -188,6 +188,7 @@ impl Hub {
             n.channel = channel;
             n.nwk_update_id = nwk_update_id;
             self.commit(Change::Network(n));
+            self.sync_owner(false);
         }
         self.update(|s| {
             if let Some(n) = s.network.as_mut() {
@@ -450,6 +451,7 @@ impl Hub {
             meta.ncp_ieee = ieee;
         }
         self.commit(Change::Meta(meta));
+        self.sync_owner(true);
         let mut nwk = self.get_network_info(CallOpts::default())?;
         if nwk.state == 1 {
             let stride = self.inner.client.session().and_then(|s| s.negotiated.capacity(zigbee_zrhp::msg::system::capacity::FC_STRIDE));

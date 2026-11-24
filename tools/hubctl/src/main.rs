@@ -388,6 +388,8 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                 let _ = hub.fw_slots();
             }
             print_status(&hub.status());
+            // Whose the hub's device registry and other network records are.
+            println!("registry: {:?}", hub.registry());
             if !ready {
                 return Err("no session".into());
             }
