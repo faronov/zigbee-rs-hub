@@ -2153,14 +2153,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let mut decoded = Vec::new();
         {
             let env = DevEnv { dev: d, now, tz };
-            let scale = |c: u16, a: u16| {
-                d.attrs
-                    .map
-                    .iter()
-                    .find(|((_, cc, aa, m), _)| *cc == c && *aa == a && m.is_none())
-                    .and_then(|(_, e)| e.value.as_ref())
-                    .and_then(ZclValue::as_f64)
-            };
+            let scale = |c: u16, a: u16| d.attrs.number(c, a);
             for (i, p, raw) in work {
                 let e = &d.entities[i];
                 let vd = value_of(&e.r.def, p);

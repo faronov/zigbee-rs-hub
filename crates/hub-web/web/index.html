@@ -21,8 +21,11 @@ main{max-width:1100px;margin:0 auto;padding:1em;display:grid;gap:1em}
 .kv dt{color:var(--mut)}.kv dd{margin:0;word-break:break-all}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:.5em}
 .devs{display:grid;gap:1em;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
-.dev .top{display:flex;gap:.5em;align-items:baseline}
-.dev .top b{flex:1;font-size:1.05em}
+.dev .top{display:flex;gap:.5em;align-items:baseline;overflow-wrap:anywhere}
+.dev .top b{flex:1;font-size:1.05em}.top a{flex:1;color:inherit;text-decoration:none}
+.devs .dev[id]{cursor:pointer}
+.rp{overflow-x:auto}.rp [data-l]::before{content:attr(data-l)": ";color:var(--mut)}
+@media(max-width:800px){.rp table{display:block}.rp tr{display:flex;flex-wrap:wrap;gap:.2em .6em;padding:.4em 0;border-top:1px solid var(--line)}.rp td:nth-child(n+3){flex-basis:100%}.rp .num{flex:1;min-width:0}}
 .mono{font-family:monospace;word-break:break-all}#zo{max-height:20em;overflow:auto}
 .pic{width:2.6em;height:2.6em;object-fit:contain;flex:none;align-self:center}.pic.s{width:1.6em;height:1.6em;vertical-align:middle;margin-right:.4em}
 .mut{color:var(--mut);font-size:.88em}
@@ -75,6 +78,7 @@ progress{width:12em}
 <nav id="tabs" class="hide"></nav>
 <main id="app" class="hide">
 <div data-tab="devices" data-title="Devices" class="tab">
+<div id="dash" class="tab">
 <section class="card"><h2>Network</h2>
 <dl class="kv" id="net"></dl>
 <div class="row acts">
@@ -83,6 +87,7 @@ progress{width:12em}
 </div>
 </section>
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
+</div>
 <section class="devs" id="devs"></section>
 </div>
 <div data-tab="groups" data-title="Groups" class="tab">
@@ -271,7 +276,7 @@ function onEvent(e){
   if(e.states){states={};for(const s of e.states)states[s.uid]=s}
   if(e.network)setNet(e.network);
   if(e.groups){grps={};for(const g of e.groups)grps[g.id]=g;binds={};for(const b of e.bindings)binds[b.device]=b}
-  renderAll();renderNet();gpForm();renderGroups();break;
+  snap=1;renderAll();renderNet();gpForm();renderGroups();break;
  case"group_updated":grps[e.group.id]=e.group;renderGroups();break;
  case"group_removed":delete grps[e.group];renderGroups();break;
  case"bindings_updated":binds[e.device]=e;if(bOpen.has(e.device))renderDev(e.device);break;
@@ -283,7 +288,7 @@ function onEvent(e){
  case"entity_added":case"entity_updated":if(e.entity){ents[e.entity.uid]=e.entity;renderDev(e.entity.device);if(e.topic=="entity_added")cnt()}break;
  case"entity_removed":{const x=ents[e.uid];delete ents[e.uid];if(x)renderDev(x.device);cnt()}break;
  case"entity_state":states[e.uid]=e;{const x=ents[e.uid];if(x)renderEnt(x)}break;
- case"entity_reporting":{const o=document.getElementById("rp-"+e.device);if(o)o.replaceWith(repPanel(e.device,0,e.uid?0:e))}break;
+ case"entity_reporting":if(document.getElementById("rp-"+e.device))repPanel(e.device,0,e.uid?0:e);break;
 // advanced:start
  case"frame":zFrame(e);break;
 // advanced:end
@@ -301,16 +306,10 @@ function onEvent(e){
 function cnt(){renderNet();clearTimeout(cnt.h);cnt.h=setTimeout(()=>{if($("#ssys").offsetParent)loadSys()},500)}
 function setNet(n){net=n||{};if(net.time)skew=net.time-Date.now()/1000;if(net.permit_join_s)pjEnd=Date.now()+net.permit_join_s*1000;renderNet();renderSNet();pjTick()}
 function renderNet(){
- const n=net,c=n.ncp||{},kv=$("#net");kv.textContent="";
- const add=(k,v)=>{if(v!=null&&v!==""){kv.append(el("dt",{},k),el("dd",{},String(v)))}};
- add("State",n.state+(n.ownership&&n.ownership!="owned"?" ("+n.ownership+")":""));
- if(n.pan_id!=null)add("PAN ID",hex(n.pan_id,4));
- add("Coordinator",hub.coordinator_ieee);
- add("Channel",n.channel);add("Extended PAN ID",n.ext_pan_id);
- add("NCP firmware",c.fw&&(c.fw+(c.protocol?" · ZRHP "+c.protocol:"")));
- add("NCP IEEE",c.ieee);add("NCP board",c.board);
- if(c.baud)add("NCP link",c.baud+" baud"+(c.flow_control?", RTS/CTS":""));
- if(hub.api_version)add("Hub API",hub.api_version+" · "+Object.keys(devs).length+" devices, "+Object.values(ents).filter(x=>!x.orphaned).length+" entities");
+ const n=net,c=n.ncp||{};
+ kv($("#net"),[["State",n.state+(n.ownership&&n.ownership!="owned"?" ("+n.ownership+")":"")],["PAN ID",n.pan_id!=null&&hex(n.pan_id,4)],["Coordinator",hub.coordinator_ieee],["Channel",n.channel],["Extended PAN ID",n.ext_pan_id],
+  ["NCP firmware",c.fw&&(c.fw+(c.protocol?" · ZRHP "+c.protocol:""))],["NCP IEEE",c.ieee],["NCP board",c.board],["NCP link",c.baud&&c.baud+" baud"+(c.flow_control?", RTS/CTS":"")],
+  ["Hub API",hub.api_version&&hub.api_version+" · "+Object.keys(devs).length+" devices, "+Object.values(ents).filter(x=>!x.orphaned).length+" entities"]]);
 }
 function pjTick(){
  clearTimeout(pjTick.h);const left=Math.max(0,Math.round((pjEnd-Date.now())/1000));
@@ -320,12 +319,19 @@ function pjTick(){
 $("#pj").onclick=()=>{const d=+$("#pjd").value;act("network/permit_join",{duration_s:d}).then(()=>{pjEnd=Date.now()+d*1000;pjTick()}).catch(()=>{})};
 $("#pjc").onclick=()=>act("network/permit_join",{duration_s:0}).then(()=>{pjEnd=0;pjTick()}).catch(()=>{});
 function ago(t){if(!t)return"never";const s=Math.max(0,Date.now()/1000+skew-t);return s<60?Math.round(s)+" s ago":s<3600?Math.round(s/60)+" min ago":s<86400?Math.round(s/3600)+" h ago":Math.round(s/86400)+" d ago"}
-function renderAll(){const box=$("#devs");box.textContent="";const ids=Object.keys(devs).filter(i=>devs[i].group==null).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));for(const id of ids)box.append(devCard(id));$("#nd").textContent="("+ids.length+")";if(!ids.length)box.append(el("p",{class:"mut"},"No devices yet. Permit join and pair a device."));
+// The dashboard, or one device's page (#device/<id>): its card in full.
+// Built before the old list goes: a device page keeps its reporting panel.
+function renderAll(){const p=pgId(),ids=p?devs[p]?[p]:[]:Object.keys(devs).filter(i=>devs[i].group==null).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));$("#dash").classList.toggle("hide",!!p);$("#nd").textContent="("+ids.length+")";
+ keep($("#devs"),()=>el("section",{id:"devs",class:p?"tab":"devs"},...ids.map(id=>devCard(id,p)),!ids.length&&snap?el("p",{class:"mut"},p?"No device "+p+". ":"No devices yet. Permit join and pair a device.",p?el("a",{href:"#/devices"},"All devices"):""):""));
 // advanced:start
 if($("#zd").offsetParent)onTab.zcl()
 // advanced:end
 }
-function renderDev(id){if(/^grp:/.test(id))return renderGroups();const old=document.getElementById("d-"+id);if(!devs[id]){if(old)old.remove();return}const c=devCard(id);if(old)old.replaceWith(c);else renderAll()}
+function renderDev(id){if(/^grp:/.test(id))return renderGroups();const old=document.getElementById("d-"+id),p=pgId();if(!devs[id]){if(old)old.remove();return}if(old)keep(old,()=>devCard(id,p));else if(!p)renderAll()}
+// Replace a live-updated node by f(); a field being edited keeps the focus:
+// the same field when f() reused it, else the one at its place in the nearest
+// element with an id (its entity row, card or panel), never another device's.
+function keep(o,f){const a=document.activeElement,r=o.contains(a)&&a.matches("input,select")&&a.closest("[id]"),q=x=>x?[...x.querySelectorAll("input,select")]:[],i=q(r).indexOf(a),n=f();o.replaceWith(n);const b=r&&(n.contains(a)?a:q(document.getElementById(r.id))[i]);if(b)b.focus({preventScroll:true})}
 // Device pictures: the Zigbee2MQTT site's image of the resolved definition's
 // herdsman model (white label first, then its base model; their file name
 // rule replaces / : ' and space by -). Loaded by the browser, never by the
@@ -343,27 +349,48 @@ function pic(d,c){const us=picL(d),i=el("img",{class:"pic"+(c?" "+c:""),alt:"",l
 function findDef(id){ctSerial(async()=>{try{ct=await call("catalog/status");const m=(ct.missing||[]).find(x=>x.device==id);
  if(!m||!(m.shards||[]).length)return toast("The catalog has no definition for this device");
  await ctShards(m.shards);toast("Catalog checked for "+(devs[id]&&devs[id].name||id))}catch(e){toast(e.message)}})}
-function devCard(id){
- const d=devs[id];
- const iv=d.interview=="complete"?null:el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:""));
- const av=el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline");
+// Device cards (#/devices): sensors, controls, battery and signal; a click
+// outside the controls opens the device page (#device/<id>) with the rest.
+// Entity groups: 0 sensors, 1 controls, 2 config, 3 diagnostic.
+const eg=e=>e.category=="diagnostic"?3:e.category?2:/sensor/.test(e.platform)?0:1,
+ dEnts=id=>Object.values(ents).filter(e=>e.device==id&&!e.orphaned).sort((a,b)=>eg(a)-eg(b)||(a.uid>b.uid?1:-1)),
+ onCard=e=>eg(e)<2&&e.enabled_default!==false,
  // No definition matched: generic ZCL support only (the picture needs one).
- const gen=d.interview=="complete"&&!d.definition_model?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):null;
- // Definition vendor/model (white label first), then the device's own Basic model ID.
- const info=el("div",{class:"mut"},[d.manufacturer,d.model,d.model_id&&d.model_id!=d.model?"("+d.model_id+")":""].filter(Boolean).join(" · ")||"unknown model");
- const ids=el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):""));
- const q=el("div",{class:"mut"},"LQI "+(d.lqi??"–")+(d.rssi!=null?" · RSSI "+d.rssi+" dBm":"")+" · seen "+ago(d.last_seen)+" · "+d.power);
- const ul=el("ul",{class:"ents"});
- for(const u of Object.keys(ents).filter(u=>ents[u].device==id&&!ents[u].orphaned).sort())ul.append(entRow(ents[u]));
- const acts=el("div",{class:"row acts"},
-  el("button",{onclick:()=>{const n=prompt("Device name",d.name||"");if(n!=null)act("devices/update",{device:id,name:n.trim()}).catch(()=>{})}},"Rename"),
-  el("button",{onclick:()=>act("devices/reinterview",{device:id}).catch(()=>{})},"Re-interview"),
-  gen?el("button",{onclick:()=>findDef(id)},"Find definition"):"",
-  d.ieee?el("button",{onclick:()=>{bOpen.has(id)?bOpen.delete(id):bOpen.add(id);gEps().then(()=>renderDev(id),()=>{})}},"Bindings"):"",
-  d.ieee?el("button",{onclick:()=>{rOpen.has(id)?rOpen.delete(id):rOpen.add(id);renderDev(id)}},"Reporting"):"",
-  el("button",{class:"d",onclick:()=>{if(confirm("Remove "+(d.name||id)+" from the network?"))act("devices/remove",{device:id}).catch(()=>{})}},"Remove"));
- return el("article",{class:"card dev",id:"d-"+id},el("div",{class:"top"},pic(d),el("b",{},d.name||id),iv,gen,av),info,ids,q,ul,acts,bOpen.has(id)?bindPanel(id):"",rOpen.has(id)?repPanel(id):"");
+ gn=d=>d.interview=="complete"&&!d.definition_model,
+ bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
+  gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
+  el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
+ pgId=()=>(/^#device\/(.+)/.exec(location.hash)||[])[1];
+let sy,pgOn,snap;
+// Live values: battery (s: %, b: low), linkquality, rssi and last seen (t),
+// from the device's entities (updated with every frame), else its record.
+function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen};
+ for(const e of dEnts(id)){const s=states[e.uid]||{};v.t=Math.max(v.t||0,s.last_reported||0);if(s.state!=null)v[e.device_class=="battery"?e.platform[0]:e.key]=s.state}
+ return v}
+// Battery, signal (a dot coloured by LQI as on the map: ≥ 150, ≥ 80, below)
+// and on the page last seen and power source.
+function netLine(id,f){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.s<20;
+ return el("div",{class:"row mut acts",id:"n-"+id},v.s!=null||v.b!=null?el("span",{class:lo?"warn":null},"🔋"+(v.s!=null?" "+Math.round(v.s)+" %":"")+(lo?" low":"")):"",
+  el("span",{class:"dot "+(q>=150?"on":q>=80?"wait":"")}),"LQI "+(q??"–")+(v.rssi!=null?" · RSSI "+v.rssi+" dBm":"")+(f?" · seen "+ago(v.t)+" · "+d.power:""))}
+// f: the device page (everything, entities grouped), else the card.
+function devCard(id,f){
+ const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),c=[];let ul,k;
+ for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{},["Sensors","Controls","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
+ return el("article",{class:"card dev",id:"d-"+id,onclick:f?null:x=>{x=x.target;if(!x.closest("button,input,select")){sy=scrollY;if(!x.closest("a"))location.hash=h}}},
+  el("div",{class:"top"},f?el("button",{"aria-label":"Back",onclick:()=>sy!=null?history.back():location.hash="#/devices"},"←"):"",pic(d),f?el("b",{},d.name||id):el("a",{href:h},el("b",{},d.name||id)),...bdg(d)),...f?[
+   // Definition vendor/model (white label first), then the device's own Basic model ID.
+   el("div",{class:"mut"},[d.manufacturer,d.model,d.model_id&&d.model_id!=d.model?"("+d.model_id+")":""].filter(Boolean).join(" · ")||"unknown model"),
+   el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):"")+" · definition: "+((d.definition||[]).map(l=>l.id+" ("+l.source+")").join(", ")||"none")),
+   netLine(id,f),el("div",{class:"row acts"},
+   bt("Rename",()=>{const n=prompt("Device name",d.name||"");return n!=null?act("devices/update",{device:id,name:n.trim()}):Promise.resolve()}),
+   bt("Re-interview",()=>act("devices/reinterview",{device:id})),
+   gn(d)?bt("Find definition",async()=>findDef(id)):"",
+   d.ieee?bt("Bindings",()=>{bOpen.delete(id)||bOpen.add(id);return gEps().then(()=>renderDev(id))}):"",
+   d.ieee?bt("Reporting",async()=>{rOpen.delete(id)||rOpen.add(id);renderDev(id)}):"",
+   bt("Remove",()=>confirm("Remove "+(d.name||id)+" from the network?")?act("devices/remove",{device:id}):Promise.resolve(),"d"))]:[],
+  ...c,f?"":netLine(id),f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
 }
+onTab.devices=()=>{const p=pgId(),o=pgOn;pgOn=p;renderAll();if(p!=o)scrollTo(0,p?0:sy)};
 function fmt(e,s){
  if(!s||s.state==null)return"–";let v=s.state;
  if(e.device_class=="timestamp"&&typeof v=="number")return ago(v);
@@ -402,18 +429,34 @@ function entRow(e){
  return li;
 }
 // Reporting (device-support 5.2): hub setting (* = override) and what the
-// device applied; input "min max change", "off", empty = default. ⇄: the
+// device applied; inputs min and max (both; change only for analog types,
+// optional), off, or none = default; saved when the row is left. ⇄: the
 // attribute (and its setting) is shared with other entities.
 const rOpen=new Set,rTxt=r=>r==null?"–":r=="off"?r:r.join(" "),rVal=v=>(v=v.trim())?v=="off"?v:v.split(/[\s,]+/).map(Number):"default";
+// The change raw ⇄ in the entity's units (`scale`: entity units per raw
+// unit, 14.3); entered ones round to a whole raw unit, f: float types keep it.
+const chU=(c,k)=>+(c*k).toFixed(9),chR=(v,k,f)=>(v=+v.replace(",",".")/k,f?+v.toFixed(9):Math.round(v));
 // `data`: an entity_reporting event (a sleeping device answered the read).
-function repPanel(id,read,data){const box=el("div",{id:"rp-"+id},el("h3",{},"Reporting"));
- (data?Promise.resolve(data):call("entities/reporting",{device:id,read:!!read})).then(r=>{const t=el("table",{},el("tr",{},...["entity","attribute","hub","device",""].map(h=>el("th",{},h))));
-  for(const x of r.records||[]){const e=ents[x.uid]||{},o=x.source=="override",i=el("input",{size:9,value:o?rTxt(x.report):"",placeholder:"min max change"}),a=x.applied;
-   i.onchange=()=>act("entities/update",{uid:x.uid,part:x.part||"",report:rVal(i.value)}).then(()=>renderDev(id),()=>{});
-   t.append(el("tr",{},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{title:x.source},rTxt(x.report)+(o?" *":"")),el("td",{title:a?a.status:""},a?a.report?rTxt(a.report):a.status:"?"),el("td",{},i)))}
-  box.append(t,r.status=="queued"?el("p",{class:"mut"},"Read queued until the device wakes."):r.error?el("p",{class:"mut"},r.error.message):"",bt("Read from device",async()=>box.replaceWith(repPanel(id,1))))}).catch(e=>box.append(e.message));
+// A panel already shown is replaced once the new one is loaded.
+function repPanel(id,read,data){const box=el("div",{id:"rp-"+id,class:"rp"},el("h3",{},"Reporting"));
+ (data?Promise.resolve(data):call("entities/reporting",{device:id,read:!!read})).then(r=>{const t=el("table");
+  for(const x of r.records||[]){let dt;const e=ents[x.uid]||{},o=x.source=="override",a=x.applied,y=x.type,off=o&&x.report=="off",v=o&&!off?x.report:[],sc=x.scale||1,u=x.unit?" "+x.unit:"",fl=y>55&&y<59,
+   // Analog (ZCL r8 2.5.7.1.7: integers, floats, time) take a reportable change.
+   an=y>31&&y<48||fl||y>223&&y<227,f=el("input",{type:"checkbox",checked:off?"":null,onchange:()=>go()}),
+   rs=r=>r&&r.map?r.map((c,j)=>j>1?chU(c,sc)+u:c).join(" / "):rTxt(r),
+   i=["min s","max s","change"+u].map((p,k)=>el("input",{class:"num",inputmode:"decimal",placeholder:p,"aria-label":p,value:k>1&&v[2]!=null?chU(v[2],sc):v[k],disabled:off?"":null,style:k>1&&!an?"visibility:hidden":null,oninput:()=>dt=1})),
+   go=()=>{const[m,M,c]=i.map(n=>n.value.trim()),w=c&&chR(c,sc,fl);dt=0;if(!f.checked&&(!m!=!M||!m&&c))return toast("Set both min and max");
+    act("entities/update",{uid:x.uid,part:x.part||"",report:f.checked?"off":m?[+m,+M,...c?[w==w?w:c]:[]]:"default"}).finally(()=>repPanel(id)).catch(()=>{})};
+   // Left the row? Asked a tick later: a re-render moving the panel blurs the
+   // field (keep() puts the focus back), a refresh replaces the row.
+   t.append(el("tr",{onfocusout:n=>{const w=n.currentTarget;setTimeout(()=>{if(dt&&w.isConnected&&!w.contains(document.activeElement))go()})},onkeydown:n=>{if(dt&&n.key=="Enter")go()}},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{class:"mut"},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{"data-l":"hub",title:x.source},rs(x.report)+(o?" *":"")),el("td",{"data-l":"device",title:a?a.status:""},a?a.report?rs(a.report):a.status:"?"),el("td",{},el("div",{class:"row"},...i,el("label",{},f,"off")))))}
+  box.append(t,r.status=="queued"?el("p",{class:"mut"},"Read queued until the device wakes."):r.error?el("p",{class:"mut"},r.error.message):"",bt("Read from device",async()=>repPanel(id,1)))}).catch(e=>box.append(e.message)).then(()=>{const o=document.getElementById("rp-"+id);if(o&&o!=box)keep(o,()=>box)});
  return box}
-function renderEnt(e){const o=document.getElementById("e-"+e.uid);if(o)o.replaceWith(entRow(e));else renderDev(e.device)}
+// Rows of other entities shown nowhere; the battery and signal line (card)
+// or the facts (page) follow every state.
+function renderEnt(e){const o=document.getElementById("e-"+e.uid),n=document.getElementById("n-"+e.device),p=pgId();
+ if(o)keep(o,()=>entRow(e));else if(p||onCard(e))renderDev(e.device);
+ if(n){const x=netLine(e.device,p);if(x.textContent!=n.textContent)n.replaceWith(x)}}
 setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById("d-"+id);if(c&&!c.contains(document.activeElement))renderDev(id)}},30000);
 // ── Views: map and settings (API 1.2, device-support 14.6) ──
 const has=f=>(hub.maintenance||[]).includes(f);
@@ -726,7 +769,7 @@ $("#gbf").onsubmit=e=>{
 function gpCfg(c){V("gsl",c.security_level);V("gcm",c.communication_mode);$("#gcx").textContent=c.source+", group "+hex(c.group,4);const w=$("#gcw");w.textContent=c.warning;w.classList.toggle("hide",!c.warning)}
 $("#gcs").onclick=()=>{const l=+V("gsl");if(!l||confirm("Reject GPDs below level "+l+"?"))act("gp/config",{security_level:l,communication_mode:+V("gcm")}).then(gpCfg,()=>{})};
 // ---- end of Green Power tab ----
-// ---- Groups tab, bindings in the device cards (device-support 14.9) ----
+// ---- Groups tab, bindings on the device pages (device-support 14.9) ----
 let grps={},binds={},geps=null;const bOpen=new Set,CLN={5:"Scenes",6:"On/Off",8:"Level",768:"Color",258:"Cover"};
 const gEps=()=>geps?Promise.resolve(geps):call("groups/endpoints").then(l=>geps=l);
 const gName=g=>grps[g]?grps[g].name:"group "+hex(g,4),clN=c=>CLN[c]||hex(c,4);

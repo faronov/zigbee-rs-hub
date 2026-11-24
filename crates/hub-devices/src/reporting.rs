@@ -23,6 +23,7 @@ use crate::hub::OpKind;
 use crate::hub::{ApiError, Hub, HubEvent, Purpose, device_of_uid};
 use crate::model::{Binding, ConfigureOp, EntityDef, LayerSource, PowerKind, ReportSpec, ValueDef};
 use crate::transport::ZigbeeTransport;
+use crate::values;
 use crate::vecmap::VecMap;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
 use crate::zcl::{FrameType, Status, ZclFrame, ZclType, cluster as cl};
@@ -944,6 +945,17 @@ impl<T: ZigbeeTransport> Hub<T> {
                 o.insert("cluster".into(), cluster.into());
                 o.insert("attribute".into(), attr.into());
                 o.insert("type".into(), ty.0.into());
+                // The change in the entity's units: × scale (14.3).
+                if let Some(k) = values::change_scale(&v.transforms, &|c, a| d.attrs.number(c, a))
+                    .filter(|_| ty.is_analog())
+                {
+                    if k != 1.0 {
+                        o.insert("scale".into(), k.into());
+                    }
+                    if let Some(u) = e.r.def.unit.as_ref().filter(|_| part.is_none()) {
+                        o.insert("unit".into(), u.clone().into());
+                    }
+                }
                 if let Some(m) = mfr {
                     o.insert("manufacturer".into(), m.into());
                 }
