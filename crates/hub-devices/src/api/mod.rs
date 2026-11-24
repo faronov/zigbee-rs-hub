@@ -683,10 +683,9 @@ impl ApiServer {
                 if let Some(r) = replace.filter(|r| *r != d.id) {
                     hub.delete_user_definition(&r, now)?;
                 }
-                let before: BTreeMap<String, Vec<String>> = hub
-                    .devices()
-                    .map(|x| (x.id.clone(), uids_of(hub, &x.id)))
-                    .collect();
+                let before: BTreeMap<String, Vec<String>> = crate::vecmap::btree_map(
+                    hub.devices().map(|x| (x.id.clone(), uids_of(hub, &x.id))),
+                );
                 let id = d.id.clone();
                 let matched = hub.upload_user_definition(d, now)?;
                 match source {

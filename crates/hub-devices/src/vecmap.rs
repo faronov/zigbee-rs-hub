@@ -1,9 +1,24 @@
-//! A map kept as a vector sorted by key, for the small maps of the
-//! reporting configuration: lookups, inserts, removals and iteration in
-//! key order like a `BTreeMap`, in a fraction of the firmware code a
-//! `BTreeMap` instantiation takes.
+//! Maps that cost less firmware code: [`VecMap`], a map kept as a vector
+//! sorted by key, for the small maps of the reporting configuration
+//! (lookups, inserts, removals and iteration in key order like a
+//! `BTreeMap`, in a fraction of the code of a `BTreeMap` instantiation),
+//! and [`btree_map`], which builds a `BTreeMap` without the sort that
+//! collecting into one instantiates for every iterator type.
 
 use std::borrow::Borrow;
+use std::collections::BTreeMap;
+
+/// The `BTreeMap` of `it`, as `collect()` builds it (a later entry
+/// replaces an earlier one with the same key), by inserts: `collect()`
+/// sorts the entries first, with a sort instantiated per iterator type
+/// (~3 KB of firmware each).
+pub fn btree_map<K: Ord, V>(it: impl IntoIterator<Item = (K, V)>) -> BTreeMap<K, V> {
+    let mut m = BTreeMap::new();
+    for (k, v) in it {
+        m.insert(k, v);
+    }
+    m
+}
 
 /// A map kept as a vector sorted by key (iterates in key order).
 #[derive(Debug, Clone, PartialEq)]

@@ -1177,7 +1177,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         let old_layers = d.resolution.layers.clone();
         let mut old: BTreeMap<String, Entity> =
-            d.entities.drain(..).map(|e| (e.uid.clone(), e)).collect();
+            crate::vecmap::btree_map(d.entities.drain(..).map(|e| (e.uid.clone(), e)));
         let mut added = Vec::new();
         let mut revived = Vec::new();
         let mut updated = Vec::new();

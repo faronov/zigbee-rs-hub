@@ -231,11 +231,9 @@ impl DeviceSnapshot {
             user_name: d.user_name.clone(),
             disabled: d.disabled,
             pinned: d.pinned.clone(),
-            options: d
-                .options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.to_json()))
-                .collect(),
+            options: crate::vecmap::btree_map(
+                d.options.iter().map(|(k, v)| (k.clone(), v.to_json())),
+            ),
             configure_hash: d.configure.hash.clone(),
             configure_done: d.configure.done.clone(),
             unreportable: d.configure.unreportable.clone(),
@@ -334,11 +332,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             .map(|r| ((r.ep, r.cluster, r.attr, r.mfr), r.report))
             .collect();
         d.pinned = s.pinned;
-        d.options = s
-            .options
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::from_json(v)))
-            .collect();
+        d.options = crate::vecmap::btree_map(
+            s.options
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from_json(v))),
+        );
         d.configure.hash = s.configure_hash;
         d.configure.done = s.configure_done;
         d.configure.unreportable = s.unreportable;
