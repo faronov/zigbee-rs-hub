@@ -344,7 +344,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `power` | mains / battery / energy_harvesting | battery / energy_harvesting | (diagnostic) |
 | `availability`, `last_seen`, `lqi`, `rssi` | 4.6 | 4.6 | device availability |
 | `warnings` | e.g. configure failures | `gp_unsecured` (13.1) | repair issues (15) |
-| `definition` | resolved layer sources and revisions | same | diagnostics only |
+| `definition` | resolved layers, bottom (`generic`, always) to top: `source`, `id`, `revision`, `content_hash`; `partial: true` on a partially translated catalog definition (`x-partial`, 17.2: generic support gives what it lacks) | same | diagnostics only |
 
 ### 4.2 Entity record
 
