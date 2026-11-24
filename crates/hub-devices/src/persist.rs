@@ -31,6 +31,7 @@ use crate::generic::Support;
 use crate::gp::types::GpSinkRecord;
 use crate::hub::{Hub, HubEvent, SchemaDecoder};
 use crate::model::LayerSource;
+use crate::reporting::ReportSetting;
 use crate::transport::ZigbeeTransport;
 use crate::zcl::ZclValue;
 use crate::zdo::NodeDescriptor;
@@ -148,8 +149,44 @@ pub struct DeviceSnapshot {
     pub entities: Vec<EntitySnap>,
     /// Reporting overrides; absent without any (and in snapshots of
     /// earlier builds, which ignore the field).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "report_snaps"
+    )]
     pub reporting: Vec<ReportSnap>,
+}
+
+/// [`DeviceSnapshot::reporting`] read through a JSON value: the value
+/// parser is in the firmware anyway, a visitor of its own is not.
+fn report_snaps<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ReportSnap>, D::Error> {
+    let v = J::deserialize(d)?;
+    let bad = |m: String| serde::de::Error::custom(format!("reporting: {m}"));
+    let J::Array(a) = v else {
+        return Err(bad("an array".into()));
+    };
+    let int = |r: &J, k: &str, max: u16| {
+        r.get(k)
+            .and_then(J::as_u64)
+            .filter(|x| *x <= u64::from(max))
+            .map(|x| x as u16)
+            .ok_or_else(|| format!("{k}: an integer 0–{max}"))
+    };
+    a.iter()
+        .map(|r| {
+            Ok(ReportSnap {
+                ep: int(r, "ep", 0xFF)? as u8,
+                cluster: int(r, "cluster", 0xFFFF)?,
+                attr: int(r, "attr", 0xFFFF)?,
+                mfr: match r.get("mfr") {
+                    None | Some(J::Null) => None,
+                    Some(_) => Some(int(r, "mfr", 0xFFFF)?),
+                },
+                report: ReportSetting::from_store(r.get("report").unwrap_or(&J::Null))?,
+            })
+        })
+        .collect::<Result<_, String>>()
+        .map_err(bad)
 }
 
 impl DeviceSnapshot {
@@ -194,11 +231,9 @@ impl DeviceSnapshot {
             user_name: d.user_name.clone(),
             disabled: d.disabled,
             pinned: d.pinned.clone(),
-            options: d
-                .options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.to_json()))
-                .collect(),
+            options: crate::vecmap::btree_map(
+                d.options.iter().map(|(k, v)| (k.clone(), v.to_json())),
+            ),
             configure_hash: d.configure.hash.clone(),
             configure_done: d.configure.done.clone(),
             unreportable: d.configure.unreportable.clone(),
@@ -221,7 +256,7 @@ impl DeviceSnapshot {
             reporting: d
                 .report_overrides
                 .iter()
-                .map(|(&(ep, cluster, attr, mfr), &report)| ReportSnap {
+                .map(|&((ep, cluster, attr, mfr), report)| ReportSnap {
                     ep,
                     cluster,
                     attr,
@@ -297,11 +332,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             .map(|r| ((r.ep, r.cluster, r.attr, r.mfr), r.report))
             .collect();
         d.pinned = s.pinned;
-        d.options = s
-            .options
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::from_json(v)))
-            .collect();
+        d.options = crate::vecmap::btree_map(
+            s.options
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from_json(v))),
+        );
         d.configure.hash = s.configure_hash;
         d.configure.done = s.configure_done;
         d.configure.unreportable = s.unreportable;

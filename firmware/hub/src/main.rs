@@ -73,6 +73,8 @@ hub firmware:\r
                        (manual recovery: esptool on CDC 0)\r
   hub crash            panic on purpose (tests the restart after a crash)\r
   hub cpu [ms]         CPU use per task over a window (default 2000 ms)\r
+  hub atomics          lost updates of atomic adds from both cores, PSRAM and\r
+                       internal RAM (Rust atomics and bare S32C1I)\r
   wifi                 Wi-Fi state and the API address (hub mode, app build)\r
   wifi set <ssid> [pw] store Wi-Fi credentials (hub mode: connect with them now)\r
   wifi clear           forget them\r
@@ -246,6 +248,7 @@ fn extension(words: &[&str]) -> Option<String> {
         ["hub", "stacks"] => format!("{}\r\n", tasks_snapshot()),
         ["hub", "crash"] => panic!("console: hub crash"),
         ["hub", "bench"] => cpu::bench(),
+        ["hub", "atomics"] => cpu::atomics(),
         ["hub", "cpu", rest @ ..] => {
             let ms = rest.first().and_then(|s| s.parse().ok()).unwrap_or(2000u64).clamp(100, 30_000);
             cpu::report(Duration::from_millis(ms))

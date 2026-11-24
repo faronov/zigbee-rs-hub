@@ -506,7 +506,13 @@ impl<T: ZigbeeTransport> Hub<T> {
             // already sent. An attribute that will be configured again
             // learns anew whether the device refuses it.
             let live = |k: &str| !k.starts_with("report:") || ops.iter().any(|o| o.key == k);
-            d.configure.done.retain(|k, _| live(k));
+            // Rebuilt, not `retain`ed: no BTreeMap removal code for this
+            // map in the firmware.
+            for (k, ok) in std::mem::take(&mut d.configure.done) {
+                if live(&k) {
+                    d.configure.done.insert(k, ok);
+                }
+            }
             d.configure.queue.retain(|o| live(&o.key));
             let in_flight = d
                 .queue

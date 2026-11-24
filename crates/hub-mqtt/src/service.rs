@@ -310,10 +310,12 @@ impl RequestHook for MqttHook {
                     .and_then(J::as_object)
                     .cloned()
                     .unwrap_or_default();
-                let fields: serde_json::Map<String, J> = fields
-                    .into_iter()
-                    .filter(|(k, _)| k != "id" && k != "type")
-                    .collect();
+                // Inserted, not collected (no sort instantiation).
+                let mut kept = serde_json::Map::new();
+                for (k, v) in fields.into_iter().filter(|(k, _)| k != "id" && k != "type") {
+                    kept.insert(k, v);
+                }
+                let fields = kept;
                 self.svc
                     .set(&fields)
                     .map(|c| c.to_api())

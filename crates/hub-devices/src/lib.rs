@@ -39,6 +39,7 @@ pub mod transport;
 pub mod tuya;
 mod tuya_rt;
 pub mod values;
+pub mod vecmap;
 pub mod zcl;
 pub mod zdef_adapter;
 pub mod zdo;

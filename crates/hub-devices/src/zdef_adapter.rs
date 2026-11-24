@@ -591,7 +591,7 @@ pub fn adapt(
             disable: g.disable.unwrap_or(false),
         };
     }
-    d.endpoints = zd.endpoints.iter().cloned().collect();
+    d.endpoints = crate::vecmap::btree_map(zd.endpoints.iter().cloned());
     d.self_description = match zd.self_description {
         Some(z::SelfDescription::Ignore) => SelfDescMode::Ignore,
         Some(z::SelfDescription::Under) => SelfDescMode::Under,

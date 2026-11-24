@@ -3,7 +3,7 @@
 //!
 //! [`Coordinator::submit`] checks the session, encodes the request and
 //! queues it for the `zrhp-pump` thread; it never waits. The pump takes,
-//! from one channel and in order, the application's commands and the NCP's
+//! from one queue and in order, the application's commands and the NCP's
 //! events (a [`Hub::subscribe_into`] subscriber):
 //!
 //! - **APS data** goes out with [`Client::start`](crate::Client::start)
@@ -15,7 +15,7 @@
 //!   (refusals, driver errors, timeouts) are emitted before the next event.
 //! - **Control requests** (GP, group membership, removal, permit join, the
 //!   device inventory) are today's blocking [`Hub`] calls, made inline:
-//!   later commands and events wait in the channel until the call returns.
+//!   later commands and events wait in the queue until the call returns.
 //!   That makes them barriers, as when the application thread made them.
 //! - **Hub endpoints** ([`BackendConfig`]): added once per process unless
 //!   the store has them (the lifecycle replays them on every resume), then
@@ -24,9 +24,9 @@
 //! Events go to the application's bounded [`EventQueue`]; the pump waits
 //! while it is full.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -113,18 +113,72 @@ struct Cancels {
     ids: Vec<u32>,
 }
 
+/// Slots the pump's queue keeps once drained.
+const INBOX_KEEP: usize = 64;
+
+/// The pump's messages, in order: a queue under a mutex rather than a
+/// channel (a channel type costs ~5 KB of firmware). Closed, as a
+/// channel's receiver is dropped, when the pump stops.
+///
+/// A burst (the pump blocked in a control call or on a full event queue:
+/// up to [`COMMAND_CAP`] commands plus the NCP's events) must not hold
+/// RAM for good, which boards without PSRAM cannot spare: messages are
+/// boxed, so the queue's own buffer is a pointer per message (no large
+/// contiguous block, nor a large copy under the lock when it grows), and
+/// it shrinks back to [`INBOX_KEEP`] slots once drained.
+#[derive(Default)]
+struct Inbox {
+    q: Mutex<(VecDeque<Box<PumpMsg>>, bool)>,
+    ready: Condvar,
+}
+
+impl Inbox {
+    /// `false` once the pump has stopped.
+    fn send(&self, m: PumpMsg) -> bool {
+        let mut q = self.q.lock().unwrap();
+        if q.1 {
+            return false;
+        }
+        q.0.push_back(Box::new(m));
+        self.ready.notify_one();
+        true
+    }
+
+    /// The next message, waiting up to `t` for one.
+    fn recv_timeout(&self, t: Duration) -> Option<PumpMsg> {
+        let q = self.q.lock().unwrap();
+        let (mut q, _) = self
+            .ready
+            .wait_timeout_while(q, t, |q| q.0.is_empty())
+            .unwrap();
+        let m = q.0.pop_front();
+        if q.0.is_empty() && q.0.capacity() > INBOX_KEEP {
+            q.0.shrink_to(INBOX_KEEP);
+        }
+        m.map(|m| *m)
+    }
+
+    /// The pump stopped: what is queued is dropped (the buffer too), later
+    /// sends fail.
+    fn close(&self) {
+        let mut q = self.q.lock().unwrap();
+        q.1 = true;
+        q.0 = VecDeque::new();
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     queued: AtomicUsize,
     high_water: AtomicUsize,
     cancels: Mutex<Cancels>,
     facts: Facts,
+    inbox: Inbox,
 }
 
 /// The ZRHP coordinator backend. Dropping it stops the pump.
 pub struct ZrhpCoordinator {
     hub: Hub,
-    tx: Sender<PumpMsg>,
     events: Arc<EventQueue>,
     shared: Arc<Shared>,
     next_id: u32,
@@ -144,13 +198,11 @@ fn endpoint_record(e: EndpointConfig) -> EndpointRecord {
 impl ZrhpCoordinator {
     /// Starts the pump on `hub`; its events go to `events`.
     pub fn start(hub: Hub, cfg: BackendConfig, events: Arc<EventQueue>) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let sub = tx.clone();
-        hub.subscribe_into(Box::new(move |m| sub.send(PumpMsg::Ncp(m.clone())).is_ok()));
         let shared = Arc::new(Shared::default());
+        let sub = shared.clone();
+        hub.subscribe_into(Box::new(move |m| sub.inbox.send(PumpMsg::Ncp(m.clone()))));
         let pump = Pump {
             hub: hub.clone(),
-            rx,
             events: events.clone(),
             shared: shared.clone(),
             endpoints: cfg.endpoints.into_iter().map(endpoint_record).collect(),
@@ -165,7 +217,6 @@ impl ZrhpCoordinator {
             .expect("zrhp pump thread");
         Self {
             hub,
-            tx,
             events,
             shared,
             next_id: 0,
@@ -248,7 +299,7 @@ impl Coordinator for ZrhpCoordinator {
         if n > self.shared.high_water.load(Ordering::Relaxed) {
             self.shared.high_water.store(n, Ordering::Relaxed);
         }
-        if self.tx.send(PumpMsg::Cmd(id, cmd)).is_err() {
+        if !self.shared.inbox.send(PumpMsg::Cmd(id, cmd)) {
             self.shared.queued.fetch_sub(1, Ordering::Relaxed);
             return Err(CoordError::LinkDown);
         }
@@ -269,7 +320,7 @@ impl Coordinator for ZrhpCoordinator {
 
 impl Drop for ZrhpCoordinator {
     fn drop(&mut self) {
-        let _ = self.tx.send(PumpMsg::Stop);
+        self.shared.inbox.send(PumpMsg::Stop);
         // A pump waiting for room in the queue returns.
         self.events.close();
     }
@@ -335,7 +386,6 @@ struct Inflight {
 
 struct Pump {
     hub: Hub,
-    rx: Receiver<PumpMsg>,
     events: Arc<EventQueue>,
     shared: Arc<Shared>,
     /// Hub endpoints still to register.
@@ -344,6 +394,14 @@ struct Pump {
     /// Epoch of the session announced up.
     up: Option<u32>,
     inflight: Vec<Inflight>,
+}
+
+/// Like a channel receiver going: queued messages are dropped and later
+/// sends fail (the NCP subscriber unsubscribes, `submit` says `LinkDown`).
+impl Drop for Pump {
+    fn drop(&mut self) {
+        self.shared.inbox.close();
+    }
 }
 
 impl Pump {
@@ -357,16 +415,16 @@ impl Pump {
 
     /// One message (or a poll); `false` stops the pump.
     fn step(&mut self) -> bool {
-        let msg = self.rx.recv_timeout(POLL);
+        let msg = self.shared.inbox.recv_timeout(POLL);
         // The session as it is now: `Up` goes before whatever the NCP sent
         // in the new session.
         if !self.session() {
             return false;
         }
-        let msg = match msg {
-            Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) => return self.replies(true),
-            Err(RecvTimeoutError::Disconnected) => return false,
+        // `ZrhpCoordinator` sends `Stop` when it goes: no sender is ever
+        // gone without one.
+        let Some(msg) = msg else {
+            return self.replies(true);
         };
         // Nothing more reaches the NCP once the coordinator is gone.
         if self.events.is_closed() {
@@ -474,7 +532,7 @@ impl Pump {
 
     /// Emits the outcomes of APS requests a response (or the driver)
     /// decided; parks those a confirm decided until their event comes.
-    /// `idle`: the channel is empty, so a confirm parked for long is not
+    /// `idle`: the queue is empty, so a confirm parked for long is not
     /// coming (the time the pump spent blocked does not count otherwise).
     fn replies(&mut self, idle: bool) -> bool {
         let mut i = 0;
@@ -674,6 +732,39 @@ mod tests {
 
     fn done(ev: &CoordEvent, want: RequestId) -> bool {
         matches!(ev, CoordEvent::Done { id, .. } if *id == want)
+    }
+
+    #[test]
+    fn the_inbox_keeps_order_and_closes_like_a_dropped_receiver() {
+        let inbox = Inbox::default();
+        let short = Duration::from_millis(1);
+        assert!(inbox.recv_timeout(short).is_none());
+        assert!(inbox.send(PumpMsg::Stop));
+        assert!(inbox.send(PumpMsg::Cmd(RequestId(1), Cmd::Inventory)));
+        assert!(matches!(inbox.recv_timeout(short), Some(PumpMsg::Stop)));
+        // Closing drops what is queued; later sends fail.
+        inbox.close();
+        assert!(inbox.recv_timeout(short).is_none());
+        assert!(!inbox.send(PumpMsg::Stop));
+    }
+
+    #[test]
+    fn a_drained_inbox_gives_back_the_buffer_of_a_burst() {
+        let inbox = Inbox::default();
+        let short = Duration::from_millis(1);
+        for i in 0..COMMAND_CAP as u32 {
+            assert!(inbox.send(PumpMsg::Cmd(RequestId(i), Cmd::Inventory)));
+        }
+        assert!(inbox.q.lock().unwrap().0.capacity() >= COMMAND_CAP);
+        for i in 0..COMMAND_CAP as u32 {
+            let m = inbox.recv_timeout(short);
+            assert!(matches!(m, Some(PumpMsg::Cmd(RequestId(id), _)) if id == i));
+        }
+        assert!(inbox.recv_timeout(short).is_none());
+        assert!(inbox.q.lock().unwrap().0.capacity() <= INBOX_KEEP);
+        // Still usable.
+        assert!(inbox.send(PumpMsg::Stop));
+        assert!(matches!(inbox.recv_timeout(short), Some(PumpMsg::Stop)));
     }
 
     #[test]

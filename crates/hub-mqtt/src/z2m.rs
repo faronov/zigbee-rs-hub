@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value as J};
 
+use hub_devices::vecmap::btree_map;
+
 use crate::model::{Device, Entity, Model, Platform, State};
 use crate::obj::{Obj, put};
 
@@ -165,7 +167,7 @@ impl Names {
                 changes.push((id.clone(), Some(old.clone()), None));
             }
         }
-        self.by_name = next.iter().map(|(id, n)| (n.clone(), id.clone())).collect();
+        self.by_name = btree_map(next.iter().map(|(id, n)| (n.clone(), id.clone())));
         for (id, d) in devices {
             self.by_name
                 .entry(d.ieee_address())
