@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -12,6 +13,21 @@ ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("release_images", ROOT / "tools/release-images.py")
 release_images = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(release_images)
+
+
+def marked_features(selected: str) -> list[str]:
+    """The features firmware/hub/build.rs marks in an image built with
+    `--features selected`: those and the tbr-hub features they imply,
+    without `default` and `app`."""
+    table = tomllib.loads((ROOT / "firmware/hub/Cargo.toml").read_text())["features"]
+    out, todo = set(), selected.split(",")
+    while todo:
+        f = todo.pop()
+        # `dep:x` and `crate/feature` entries are not features of tbr-hub.
+        if f in table and f not in out:
+            out.add(f)
+            todo.extend(table[f])
+    return sorted(out - {"default", "app"})
 
 
 class HubBuildTests(unittest.TestCase):
@@ -78,12 +94,14 @@ elf.write_text(" ".join(sys.argv[1:]))
         # release-images.py checks each image's marker against its board
         # entry: the entries must name the features this script builds.
         calls = self.run_build("--psram", "quad")
-        built = {"target-8mb": self.features(calls[0]), "target": self.features(calls[1])}
-        for layout in release_images.LAYOUTS:
-            with self.subTest(layout=layout["id"]):
-                self.assertEqual(sorted(built[layout["target"]].split(",")), sorted(layout["features"]))
-        self.assertIn("ota-store", built["target-8mb"])
-        self.assertNotIn("ota-store", built["target"])
+        built = {"target-8mb": marked_features(self.features(calls[0])),
+                 "target": marked_features(self.features(calls[1]))}
+        for spec in release_images.BOARDS:
+            with self.subTest(board=spec["id"]):
+                release_images.check_build(spec, built[spec["target"].removesuffix("-opi")], spec["psram"])
+        # Zigbee device OTA in the 8 MB images only.
+        self.assertEqual(built["target-8mb"], ["advanced", "mqtt", "ota", "ota-store"])
+        self.assertEqual(built["target"], ["mqtt"])
 
     def test_one_psram_mode_and_extra_features_reach_cargo(self):
         calls = self.run_build("--layout", "4mb", "--psram", "octal", "--", "--features", "advanced")
