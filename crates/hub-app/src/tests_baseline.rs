@@ -115,30 +115,30 @@ fn plug() -> SimDevice {
 }
 
 /// Journal records as programmed: `(type, payload)`.
-type Records = Vec<(u8, Vec<u8>)>;
+pub(crate) type Records = Vec<(u8, Vec<u8>)>;
 
 /// A host store region, readable after the scenario, that also logs every
 /// record the journal programs.
 #[derive(Clone)]
-struct SharedMem {
-    flash: Arc<Mutex<MemFlash>>,
+pub(crate) struct SharedMem {
+    pub(crate) flash: Arc<Mutex<MemFlash>>,
     log: Arc<Mutex<Records>>,
 }
 
 impl SharedMem {
-    fn new(sectors: u32, sector_size: u32) -> Self {
+    pub(crate) fn new(sectors: u32, sector_size: u32) -> Self {
         SharedMem {
             flash: Arc::new(Mutex::new(MemFlash::new(sectors, sector_size))),
             log: Arc::default(),
         }
     }
 
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         self.flash.lock().unwrap().bytes().to_vec()
     }
 
     /// The records programmed since the last call.
-    fn take_log(&self) -> Records {
+    pub(crate) fn take_log(&self) -> Records {
         std::mem::take(&mut self.log.lock().unwrap())
     }
 }

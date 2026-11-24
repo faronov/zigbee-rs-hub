@@ -43,7 +43,7 @@ jobs:
       - name: S3 flashing helpers (partition offsets from the device's table)
         run: python3 -m unittest discover -s tools/flow -p 'test_*.py'
       - name: Firmware build selection, release image checks, size accounting
-        run: python3 -m unittest tools/test_hub_build.py tools/test_release_images.py tools/test_size_report.py
+        run: python3 -m unittest tools/test_hub_build.py tools/test_release_images.py tools/test_size_report.py tools/test_make_otadata.py
 
   home-assistant:
     name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)
@@ -226,3 +226,60 @@ jobs:
             target/release-dryrun/
             target/xtensa-esp32s3-espidf/release/tbr-bridge
             target/xtensa-esp32s3-espidf/release/tbr-hub
+
+  donglem:
+    name: zrh-donglem firmware (SONOFF Dongle Max, classic ESP32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        env:
+          # espup queries the GitHub API; unauthenticated runners hit its rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          default: true
+          buildtargets: esp32
+          ldproxy: true
+          version: "1.90.0.0"
+      - name: Cache ESP-IDF and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .embuild
+          key: donglem-${{ runner.os }}-idf-v5.5.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: donglem-${{ runner.os }}-idf-v5.5.1-
+      - name: Rust atomics without S32C1I (the target enables it; firmware/donglem/.cargo/config.toml removes it)
+        run: |
+          default=$(rustc +esp --print cfg --target xtensa-esp32-espidf)
+          flagged=$(rustc +esp --print cfg --target xtensa-esp32-espidf -C target-feature=-s32c1i 2>/dev/null)
+          grep -qx 'target_feature="s32c1i"' <<<"$default"
+          if grep -qx 'target_feature="s32c1i"' <<<"$flagged"; then echo "-s32c1i did not remove the feature"; exit 1; fi
+          grep -q '"target-feature=-s32c1i"' firmware/donglem/.cargo/config.toml
+      - name: Build zrh-donglem
+        working-directory: firmware/donglem
+        run: cargo build --release
+      - name: No S32C1I in Rust code (disassembly, attributed through the line table)
+        run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" target/xtensa-esp32-espidf/release/zrh-donglem
+      - name: App image (DIO 40 MHz, chip v3.0+; must fit the 6 MiB ota_1 slot of SONOFF's stock table)
+        run: |
+          pip install --quiet "esptool>=5,<6"
+          CHIP=esp32 FLASH_SIZE=16MB FLASH_FREQ=40m MIN_REV_FULL=300 MAX_APP_BYTES=6291456 tools/make-app-image.sh release target/zrh-donglem-app.bin zrh-donglem
+      - name: Partition table identical to SONOFF's stock one, otadata sector selecting ota_1
+        run: |
+          tools/make-partition-table.sh firmware/donglem/partitions.csv target/partitions-donglem.bin 16MB
+          echo "639d27a0418b260e0242fa6d4c93514bf5273c2ffd22f6229066ebac21f3ca66  target/partitions-donglem.bin" | sha256sum -c
+          python3 tools/make-otadata.py --seq 2 -o target/otadata-donglem-ota1.bin
+      - name: Static RAM (internal DRAM/IRAM)
+        run: |
+          size="$(find .embuild/espressif/tools -name xtensa-esp32-elf-size -type f | head -1)"
+          "$size" -A target/xtensa-esp32-espidf/release/zrh-donglem | grep -E "^\.(iram0\.text|dram0\.(data|bss)|flash\.(text|rodata)) "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donglem-firmware
+          path: |
+            target/zrh-donglem-app.bin
+            target/partitions-donglem.bin
+            target/otadata-donglem-ota1.bin
+            target/xtensa-esp32-espidf/release/zrh-donglem

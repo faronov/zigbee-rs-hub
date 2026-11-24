@@ -111,6 +111,20 @@ pub fn hexdump(bytes: &[u8]) -> String {
     s
 }
 
+/// The image of a [`hexdump`].
+pub fn unhexdump(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((at, rest)) = line.split_once(' ') else { continue };
+        assert_eq!(usize::from_str_radix(at, 16).unwrap(), out.len(), "{line}");
+        match rest.strip_prefix("ff × ") {
+            Some(n) => out.resize(out.len() + n.parse::<usize>().unwrap(), 0xFF),
+            None => out.extend(unhex(rest)),
+        }
+    }
+    out
+}
+
 /// Replaces the values at `paths` (JSON pointers, `*` = every key or index)
 /// with `"<volatile>"`; paths that do not exist are left alone.
 pub fn normalize(v: &mut J, paths: &[&str]) {
@@ -582,5 +596,6 @@ mod tests {
                 "ff".repeat(30)
             )
         );
+        assert_eq!(unhexdump(&hexdump(&img)), img);
     }
 }

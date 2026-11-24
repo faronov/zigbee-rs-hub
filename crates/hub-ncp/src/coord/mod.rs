@@ -15,12 +15,15 @@
 //! - ZRHP messages ⇄ neutral events and requests ([`convert`]);
 //! - backups as ZRHP record streams ⇄ [`BackupItem`](hub_coord::BackupItem)s
 //!   ([`RecordEncoder`], [`export_items`]);
-//! - [`scan_progress`]: the NCP's optional scan progress event.
+//! - [`scan_progress`]: the NCP's optional scan progress event;
+//! - [`owner`]: the ownership tag of the hub's network-scoped records
+//!   (migration, upkeep from the stored network, adopt and clear).
 
 mod admin;
 mod backup;
 pub mod convert;
 mod error;
+pub mod owner;
 pub mod pump;
 mod status;
 

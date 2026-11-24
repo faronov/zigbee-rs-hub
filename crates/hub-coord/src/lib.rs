@@ -10,6 +10,8 @@
 //! - [`RadioControl`]: Wi-Fi coexistence, called by the firmware;
 //! - [`CoordError`], [`Capabilities`], [`NetworkIdentity`] and
 //!   [`NetworkOwnership`];
+//! - the ownership tag of the hub's network-scoped records ([`OwnerTag`])
+//!   and their [`RegistryState`];
 //! - the APS and Green Power types the engine exchanges with the backend
 //!   ([`ApsRequest`], [`ApsIndication`], [`gp`]), re-exported by
 //!   `hub-devices` at their old paths.
@@ -23,6 +25,7 @@ mod coord;
 mod error;
 pub mod gp;
 mod identity;
+mod owner;
 mod queue;
 mod request;
 
@@ -43,6 +46,7 @@ pub use coord::{
 pub use error::{BackendKind, Code, CoordError, Described, Kind};
 pub use gp::{GpEvent, GpRequest};
 pub use identity::{NetworkIdentity, NetworkOwnership};
+pub use owner::{OwnerTag, RegistryState};
 pub use queue::{Doorbell, EVENT_SLOTS, EventQueue};
 pub use request::{Inventory, InventoryDevice, Progress, Reply, Request, RequestId, Terminal};
 

@@ -16,6 +16,9 @@
   "ownership": "owned",
   "pan_id": 6699,
   "permit_join_s": 0,
+  "registry": {
+    "state": "owned"
+  },
   "session": "ready",
   "state": "up",
   "time": "<volatile>",

@@ -24,6 +24,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hub_coord::RegistryState;
 use log::{error, info, warn};
 use zigbee_zrhp::codec::List;
 use zigbee_zrhp::msg::data::{ApsDataRequest, EvtApsDataConfirm};
@@ -39,6 +40,7 @@ use zigbee_zrhp::msg::tables::{TblSync, TblSyncRsp};
 use zigbee_zrhp::msg::{Kind, MessageDef};
 use zigbee_zrhp::types::Status;
 
+use crate::coord::owner;
 use crate::driver::{self, CallOpts, Client, Confirm, DriverConfig, DriverEvent, Error, Message, NcpSession, SessionState};
 use crate::fw::{self, FwImage, FwSource, Slot, slot_state};
 use crate::store::{Change, DeviceRecord, EndpointRecord, FcRecord, FwPending, JournalStats, Meta, NetworkRecord, Store};
@@ -262,6 +264,8 @@ struct Inner {
     coex: Mutex<Option<bool>>,
     /// Set by [`Hub::shutdown`] under the store lock: no commits afterwards.
     closed: std::sync::atomic::AtomicBool,
+    /// Whose the hub's network-scoped records are (locked after `store`).
+    registry: Mutex<RegistryState>,
 }
 
 /// The running hub core. Cheap to clone.
@@ -272,11 +276,13 @@ pub struct Hub {
 
 impl Hub {
     /// Start the driver and the lifecycle thread.
-    pub fn start<R, T>(cfg: HubConfig, rx: R, tx: T, control: Option<Box<dyn NcpControl>>, store: Store, rng: Rng) -> Hub
+    pub fn start<R, T>(cfg: HubConfig, rx: R, tx: T, control: Option<Box<dyn NcpControl>>, mut store: Store, rng: Rng) -> Hub
     where
         R: PortRx + 'static,
         T: PortTx + 'static,
     {
+        // Before the lifecycle runs and the application loads its records.
+        let registry = owner::open(&mut store, cfg.resume.adopt || cfg.resume.init_network);
         let mut cookie = [0u8; 4];
         while u32::from_le_bytes(cookie) == 0 {
             rng(&mut cookie);
@@ -318,6 +324,7 @@ impl Hub {
             pending_fc: Mutex::new([0; 2]),
             coex: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
+            registry: Mutex::new(registry),
         });
         let hub = Hub { inner };
         let worker = hub.clone();
@@ -634,6 +641,9 @@ impl Hub {
         }
         if policy.adopt || policy.init_network || meta.ncp_ieee != [0; 8] {
             self.commit(Change::Meta(new_meta));
+        }
+        if ownership == Ownership::Owned {
+            self.sync_owner(false);
         }
 
         // 6. NCP firmware.
@@ -963,6 +973,9 @@ impl Hub {
             nwk_manager: 0,
         };
         self.commit(Change::Network(record));
+        // The records follow it now: an interrupted formation leaves them
+        // this network's, not foreign.
+        self.sync_owner(true);
         let body = NwkForm {
             channel_mask: req.channel_mask,
             pan_id,
@@ -987,6 +1000,7 @@ impl Hub {
             meta.ncp_ieee = i.ieee_active;
         }
         self.commit(Change::Meta(meta));
+        self.sync_owner(true);
         self.update(|s| s.ownership = Ownership::Owned);
         info!("hub: formed PAN 0x{:04X} on channel {}", pan_id, nwk.channel);
         Ok(record)
@@ -1023,6 +1037,55 @@ impl Hub {
             s.journal = journal;
         });
         r
+    }
+
+    /// Whose the hub's network-scoped records are (`network/info.registry`):
+    /// foreign ones are neither readable nor writable through
+    /// [`KvStore`](hub_store::KvStore).
+    pub fn registry(&self) -> RegistryState {
+        *self.inner.registry.lock().unwrap()
+    }
+
+    /// `network/registry/adopt`: the records become this hub's, of the
+    /// stored network.
+    pub fn registry_adopt(&self) -> std::io::Result<RegistryState> {
+        let mut r = Err(std::io::ErrorKind::Interrupted.into());
+        self.registry_op(&mut |s, state| {
+            r = owner::adopt(s);
+            *state = *r.as_ref().unwrap_or(state);
+        });
+        r
+    }
+
+    /// `network/registry/clear`: the network-scoped records deleted, the
+    /// rest adopted; how many were deleted.
+    pub fn registry_clear(&self) -> std::io::Result<usize> {
+        let mut r = Err(std::io::ErrorKind::Interrupted.into());
+        self.registry_op(&mut |s, state| {
+            r = owner::clear(s);
+            if r.is_ok() {
+                *state = RegistryState::Owned;
+            }
+        });
+        r
+    }
+
+    /// The tag follows the stored network once it is owned or changed
+    /// (`force`: the operator formed or restored one). Not while observing.
+    fn sync_owner(&self, force: bool) {
+        if self.inner.policy.adopt || self.inner.policy.init_network {
+            self.registry_op(&mut |s, state| *state = owner::mirror(s, *state, force));
+        }
+    }
+
+    /// `op` on the store and the records' state (locked in this order),
+    /// unless the hub was shut down.
+    fn registry_op(&self, op: &mut dyn FnMut(&mut Store, &mut RegistryState)) {
+        self.with_store(|s| {
+            if !self.inner.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                op(s, &mut self.inner.registry.lock().unwrap());
+            }
+        });
     }
 
     /// `NWK_PERMIT_JOIN` on one router (`Some(nwk)`, not replayed) or the
@@ -1166,8 +1229,15 @@ impl Hub {
 /// lifecycle; every call refreshes the status counters as
 /// [`Hub::with_store`] does.
 impl hub_store::KvStore for Hub {
+    /// Network-scoped records behind the registry's gate ([`Hub::registry`]).
     fn with_kv(&self, f: &mut dyn FnMut(&mut dyn hub_store::Kv)) {
-        self.with_store(|s| f(s));
+        self.with_store(|s| {
+            let gate = owner::gate(*self.inner.registry.lock().unwrap());
+            match gate {
+                hub_store::Gate::Open => f(s),
+                gate => f(&mut hub_store::Guarded::new(s, gate)),
+            }
+        });
     }
     fn stats(&self) -> JournalStats {
         self.inner.status.lock().unwrap().journal

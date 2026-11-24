@@ -190,6 +190,9 @@ pub struct Automations {
     /// Free heap, when the platform tells it: new and changed rules are
     /// refused below [`MIN_FREE_HEAP`].
     pub free_heap: Option<usize>,
+    /// Rules cannot be stored (the hub's network records are not its own):
+    /// enable and disable actions fail.
+    pub read_only: bool,
 }
 
 fn key(s: &StateRef) -> String {
@@ -783,7 +786,9 @@ impl Automations {
                 }
                 Action::Enable { rule, enabled } => {
                     out["type"] = if *enabled { "enable" } else { "disable" }.into();
-                    if self.set_enabled(rule, *enabled, Some(run), clk) {
+                    if self.read_only {
+                        failed = Some(ApiError::new("registry_read_only", "the device registry is not writable"));
+                    } else if self.set_enabled(rule, *enabled, Some(run), clk) {
                         out["result"] = "ok".into();
                     } else {
                         failed = Some(ApiError::new("not_found", format!("no automation {rule}")));

@@ -1,0 +1,28 @@
+[package]
+name = "zrh-gateway"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "zigbee-rs-hub gateway firmware library for boards described by a hub-core board profile (SONOFF Dongle-M): NCP lines and UART, EZSP and Gecko bootloader probes, TCP bridge, Ethernet/Wi-Fi, LED, button, console"
+publish = false
+
+[lib]
+name = "zrh_gateway"
+harness = false
+test = false
+doctest = false
+
+[dependencies]
+esp-idf-svc = "0.53"
+embedded-svc = "0.29"
+hub-core = { workspace = true }
+hub-ezsp = { path = "../../crates/hub-ezsp" }
+log = "0.4"
+
+[build-dependencies]
+embuild = "0.33"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(esp32)", "cfg(esp32s3)"] }

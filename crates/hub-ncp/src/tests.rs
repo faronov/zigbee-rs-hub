@@ -523,3 +523,65 @@ fn leave_reset_then_form_a_new_network() {
     hub.shutdown();
     sim.stop();
 }
+
+#[test]
+fn ownership_tag_follows_the_owned_network() {
+    use hub_coord::{NetworkIdentity, OwnerTag, RegistryState};
+    use hub_store::{KvStore, OWNER_KEY, kv};
+    let tag = |hub: &Hub| hub.with_store(|s| s.kv_get(OWNER_KEY).map(|t| OwnerTag::decode(t).unwrap()));
+    let (hub, sim) = start(Store::volatile());
+    assert!(hub.wait_ready(T));
+    assert_eq!((hub.registry(), tag(&hub)), (RegistryState::Untagged, None), "nothing stored, nothing tagged");
+
+    // Forming tags the records with the network.
+    hub.form(FormRequest { channel_mask: 1 << 15, ..FormRequest::default() }).unwrap();
+    let net = hub.store_state().network.unwrap();
+    let t = tag(&hub).unwrap();
+    assert_eq!((t.backend.as_str(), hub.registry()), ("zrhp", RegistryState::Owned));
+    let id = t.identity.unwrap();
+    assert_eq!((id.ext_pan_id, id.pan_id, id.channel), (net.ext_pan_id, net.pan_id, 15));
+    assert_eq!(id.key_id, Some(NetworkIdentity::key_id_for(&net.network_key)));
+
+    // A channel change rewrites the informative channel.
+    hub.change_channel(20).unwrap();
+    assert_eq!(tag(&hub).unwrap().identity.unwrap().channel, 20);
+
+    // The NCP left its network and runs another one the hub adopts: the
+    // records are not that network's.
+    hub.leave_reset().unwrap();
+    sim.with(|s| (s.network_state, s.pan_id, s.ext_pan_id, s.channel, s.key) = (2, 0x5555, [9; 8], 11, [7; 16]));
+    let resumes = hub.status().resumes;
+    reboot(&hub, &sim);
+    assert!(hub.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(hub.status().ownership, Ownership::Owned, "the lifecycle adopted the NCP's network");
+    assert_eq!(hub.registry().as_str(), "foreign");
+    assert_eq!(tag(&hub).unwrap().identity.unwrap().ext_pan_id, net.ext_pan_id, "the tag is kept");
+    let denied = kv::with(&hub, |s| s.put("dev/zb:1", b"{}"));
+    assert_eq!(denied.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    kv::with(&hub, |s| s.put("udef/a", b"x")).unwrap();
+    assert_eq!(hub.stats(), hub.status().journal);
+
+    // The operator adopts them for the running network.
+    assert_eq!(hub.registry_adopt().unwrap(), RegistryState::Owned);
+    assert_eq!(tag(&hub).unwrap().identity.unwrap().ext_pan_id, [9; 8]);
+    kv::with(&hub, |s| s.put("dev/zb:1", b"{}")).unwrap();
+    hub.shutdown();
+    sim.stop();
+}
+
+#[test]
+fn an_interrupted_formation_keeps_the_records_owned() {
+    use hub_coord::RegistryState;
+    let (hub, sim) = formed(15);
+    hub.with_store(|s| s.kv_put("dev/zb:1", b"{}")).unwrap();
+    hub.leave_reset().unwrap();
+    // The new network is stored, then NWK_FORM fails.
+    sim.with(|s| s.unsupported.push(ids::NWK_FORM));
+    assert!(hub.form(FormRequest { channel_mask: 1 << 20, ..FormRequest::default() }).is_err());
+    assert!(hub.store_state().network.is_some());
+    assert_eq!(hub.registry(), RegistryState::Owned);
+    // The next start finds the records the stored network's.
+    assert_eq!(hub.with_store(|s| crate::coord::owner::open(s, true)), RegistryState::Owned);
+    hub.shutdown();
+    sim.stop();
+}
