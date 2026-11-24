@@ -359,7 +359,8 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 ## 4. ZRHP mapping (`hub_ncp::coord`)
 
 - **`zrhp-pump` thread** (about 6 KB stack). It replaces the 4 KB forwarder
-  (`app.rs:313-325`) and is fed through one unbounded channel: commands from
+  (`app.rs:313-325`) and is fed through one unbounded queue (a `VecDeque`
+  under a mutex: no channel type of its own in the firmware): commands from
   the app, plus subscription messages from a new callback subscriber
   `Hub::subscribe_into` (no extra thread).
   - **Commands:** `Client::start` with the moved `convert.rs` encoders
@@ -367,7 +368,7 @@ admin job threads ─► NetworkAdmin (blocking allowed)
   - **Control requests** call today's blocking `Hub` methods **inline**:
     `call_raw` for GP, `group_membership`, `remove_device`,
     `permit_join_on`, the `add_endpoint` rule, `ncp_devices`. Later commands
-    wait in a hold buffer, and events wait in the channel. This is exactly
+    wait in a hold buffer, and events wait in the queue. This is exactly
     what the blocked app thread does today, minus the stalled API.
   - **Ordering:** the driver completes a ticket in `match_confirm` before it
     emits the event (`driver.rs:1156-1157`), but the event reaches the pump
@@ -459,12 +460,13 @@ admin job threads ─► NetworkAdmin (blocking allowed)
   answer waits for such a run, so its trace is the same as before. Other
   triggers of the rule that come meanwhile fire once the run goes on, as
   they would have after a run that finished in place.
-- A confirm the pump parked expires after 2 s only while its channel is
+- A confirm the pump parked expires after 2 s only while its queue is
   empty, so time spent blocked does not let an APS outcome overtake the
   indications queued before it.
 - Size (tbr-hub `mqtt,advanced`, local build): app image +15.4 KB (text
-  +12.2 KB), above the 2–6 KB estimate of §6. `AtomicUsize::fetch_max` is
-  avoided: the Xtensa backend of Rust 1.90 miscompiles it ("Undefined
+  +12.2 KB), above the 2–6 KB estimate of §6; the queue in place of a
+  channel of its own later took 5.4 KB of it back. `AtomicUsize::fetch_max`
+  is avoided: the Xtensa backend of Rust 1.90 miscompiles it ("Undefined
   temporary symbol").
 - `zb_status_text`, `legacy_zb_status` and `zrhp_not_delivered` moved from
   hub-devices into `hub_ncp::coord`. ZRHP decoding and encoding
