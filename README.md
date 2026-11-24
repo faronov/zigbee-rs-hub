@@ -1158,7 +1158,7 @@ UI and the HA integration see.
   (`mqtt/status` state `low_memory` until then).
 - **Desktop**: `hubctl --sim --sim-z2m-devices serve --mqtt HOST[:PORT]
   [--mqtt-discovery] [--mqtt-base T] [--mqtt-user U --mqtt-password P]
-  [--mqtt-settings FILE]` runs the bridge with three simulated devices;
+  [--mqtt-settings FILE]` runs the bridge with four simulated devices;
   `hubctl mqtt-broker` is a small broker for tests (not for production).
 - **Firmware**: both **4 MB and 8 MB images** select cargo feature `mqtt`
   through `tools/build-hub-firmware.sh`; the release manifest lists it

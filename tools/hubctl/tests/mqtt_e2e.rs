@@ -132,12 +132,12 @@ fn z2m_tool_against_hubctl_sim() {
     let mut c = Client::connect(&host, port, &base);
     let t = |s: &str| format!("{base}/{s}");
     c.wait(&t("bridge/state"), |v| v["state"] == "online");
-    // The three devices with their Zigbee2MQTT names and states.
+    // The four devices with their Zigbee2MQTT names and states.
     let devs = c.wait(&t("bridge/devices"), |v| {
-        v.as_array().is_some_and(|a| a.len() == 4 && a.iter().all(|d| d["interview_completed"] == true))
+        v.as_array().is_some_and(|a| a.len() == 5 && a.iter().all(|d| d["interview_completed"] == true))
     });
     let names: Vec<&str> = devs.as_array().unwrap().iter().map(|d| d["friendly_name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec!["Coordinator", "lumi.weather", LIGHT, "SP 120"]);
+    assert_eq!(names, vec!["Coordinator", "lumi.weather", LIGHT, "SP 120", "Remote Control N2"]);
     let sensor = c.wait(&t("lumi.weather"), |v| v.get("temperature").is_some() && v.get("humidity").is_some());
     assert_eq!((sensor["humidity"].clone(), sensor["battery"].clone()), (json!(55.2), json!(100)));
     c.wait(&t(&format!("{LIGHT}/availability")), |v| v["state"] == "online");

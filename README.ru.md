@@ -1181,7 +1181,7 @@ openHAB, MQTT discovery Home Assistant, скрипты. `crates/hub-mqtt` —
   `low_memory` в `mqtt/status`).
 - **Компьютер**: `hubctl --sim --sim-z2m-devices serve --mqtt HOST[:PORT]
   [--mqtt-discovery] [--mqtt-base T] [--mqtt-user U --mqtt-password P]
-  [--mqtt-settings FILE]` запускает мост с тремя симулированными
+  [--mqtt-settings FILE]` запускает мост с четырьмя симулированными
   устройствами; `hubctl mqtt-broker` — маленький брокер для тестов (не для
   эксплуатации).
 - **Прошивка**: MQTT входит в образы **4 МБ и 8 МБ** (cargo-фича `mqtt`,
