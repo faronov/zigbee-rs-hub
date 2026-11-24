@@ -428,7 +428,9 @@ admin job threads ─► NetworkAdmin (blocking allowed)
   `SessionEvent::Up`. The app registers on the first `Up` (coordinator
   IEEE, `endpoint_registered`, automations `started`).
 - The device inventory is the app's own `Request::DeviceInventory`
-  (`CoordTransport::submit_own`); its outcome imports the devices.
+  (`CoordTransport::submit_own`); its outcome imports the devices. The
+  unknown states of restored devices are read after that outcome, so the
+  imported devices' interviews go first, as before.
 - `CoordEvent::NetworkState` carries `NetChange` (down, forming, up,
   leaving: the `network_state` API event); `NetState` stays the snapshot.
 - `network/info` is rendered from `CoordStatus` plus
@@ -436,7 +438,16 @@ admin job threads ─► NetworkAdmin (blocking allowed)
 - Automations: a `request` action whose control requests are still open
   waits for them (the run resumes when no control request is open), so the
   rule's next action still sees what they decided. An `automations/run`
-  answer waits for such a run, so its trace is the same as before.
+  answer waits for such a run, so its trace is the same as before. Other
+  triggers of the rule that come meanwhile fire once the run goes on, as
+  they would have after a run that finished in place.
+- A confirm the pump parked expires after 2 s only while its channel is
+  empty, so time spent blocked does not let an APS outcome overtake the
+  indications queued before it.
+- Size (tbr-hub `mqtt,advanced`, local build): app image +15.4 KB (text
+  +12.2 KB), above the 2–6 KB estimate of §6. `AtomicUsize::fetch_max` is
+  avoided: the Xtensa backend of Rust 1.90 miscompiles it ("Undefined
+  temporary symbol").
 - `zb_status_text`, `legacy_zb_status` and `zrhp_not_delivered` moved from
   hub-devices into `hub_ncp::coord`. ZRHP decoding and encoding
   (`convert.rs`) moved there from hub-app.
