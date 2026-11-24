@@ -21,6 +21,8 @@ struct Fake {
     fail: Option<ApiError>,
     deferred: bool,
     ticket: u64,
+    /// Request results follow later ([`Automations::request_result`]).
+    requests_wait: bool,
 }
 
 impl Fake {
@@ -57,7 +59,7 @@ impl World for Fake {
     }
     fn request(&mut self, req: &J) -> Result<(u64, Option<J>), ApiError> {
         self.requests.push(req.clone());
-        Ok((self.requests.len() as u64, Some(J::Null)))
+        Ok((self.requests.len() as u64, (!self.requests_wait).then_some(J::Null)))
     }
 }
 
@@ -426,6 +428,33 @@ fn errors_and_late_command_results_reach_the_trace() {
     r.w.deferred = false;
     let out = r.req("automations/run", json!({"automation": "x"})).unwrap();
     assert_eq!(out["trace"]["actions"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn a_waiting_request_action_holds_its_run_and_later_triggers() {
+    let mut r = Rig::new();
+    r.w.requests_wait = true;
+    r.w.states.insert("s".into(), json!("off"));
+    let req = json!({"type": "request", "request": {"type": "network/permit_join", "duration_s": 30}});
+    r.create(json!({"id": "pj", "triggers": [{"type": "state", "uid": "s", "op": "changed"}], "actions": [req, cmd("x", "turn_on")]}));
+    r.state("s", json!("on"));
+    // The command waits for the request's result; so does the next trigger.
+    r.state("s", json!("off"));
+    assert_eq!(r.w.requests.len(), 1);
+    assert!(r.cmds().is_empty());
+    assert_eq!(r.a.waiting_requests(), [1]);
+    let err = ApiError::new("busy", "ZRHP status 0x04");
+    r.a.request_result(1, Err(err), &mut r.w, &r.clk);
+    // The first run went on, then the deferred trigger ran its own.
+    assert_eq!(r.cmds(), [("x", "turn_on")]);
+    assert_eq!(r.w.requests.len(), 2);
+    assert_eq!(r.a.waiting_requests(), [2]);
+    r.a.request_result(2, Ok(J::Null), &mut r.w, &r.clk);
+    let t = r.traces("pj");
+    assert_eq!((t[1]["result"].as_str(), t[0]["result"].as_str()), (Some("error"), Some("done")), "{t:?}");
+    assert_eq!(t[1]["actions"][0]["error"]["message"], "ZRHP status 0x04");
+    assert_eq!(t[1]["actions"][1]["result"], "ok");
+    assert_eq!(t[0]["trigger"]["to"], "off");
 }
 
 #[test]

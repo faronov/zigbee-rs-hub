@@ -1232,14 +1232,7 @@ impl Runner {
         if self.registered && self.cfg.import_ncp_devices && ready {
             self.import_ncp_devices(cookie);
         }
-        // The registry keeps devices, not live states.
-        if self.registered && !self.refreshed && ready {
-            self.refreshed = true;
-            let n = self.engine.refresh_unknown(now);
-            if n > 0 {
-                info!("app: reading {n} unknown states of restored devices");
-            }
-        }
+        self.refresh(ready, now);
         self.admin.clock_tick(&mut self.engine.cfg, now);
         // Background maintenance jobs report progress once a second.
         for ev in self.admin.progress_events() {
@@ -1320,19 +1313,36 @@ impl Runner {
         let Some((_, cookie, generation)) = self.import.filter(|(r, ..)| *r == id) else { return };
         let Outcome::Done(t) = o else { return };
         self.import = None;
-        let inv = match t {
-            Terminal::Done(Reply::Inventory(inv)) => inv,
-            Terminal::Refused(e) | Terminal::NotDelivered(e) | Terminal::Unknown(e) => {
-                warn!("app: NCP device inventory: {e}");
-                self.import_retry = Some(Instant::now() + Duration::from_secs(30));
-                return;
-            }
+        match t {
+            Terminal::Done(Reply::Inventory(inv)) => self.import_devices(&inv, cookie, generation, now),
             t => {
-                warn!("app: NCP device inventory: {t:?}");
+                match t {
+                    Terminal::Refused(e) | Terminal::NotDelivered(e) | Terminal::Unknown(e) => {
+                        warn!("app: NCP device inventory: {e}")
+                    }
+                    t => warn!("app: NCP device inventory: {t:?}"),
+                }
                 self.import_retry = Some(Instant::now() + Duration::from_secs(30));
-                return;
             }
-        };
+        }
+        let ready = self.engine.transport.status().session == CoordSession::Ready;
+        self.refresh(ready, now);
+    }
+
+    /// The unknown states of restored devices are read once (the registry
+    /// keeps devices, not live states), after the import of the NCP's
+    /// devices, whose interviews go first, as before.
+    fn refresh(&mut self, ready: bool, now: Millis) {
+        if self.registered && !self.refreshed && ready && self.import.is_none() {
+            self.refreshed = true;
+            let n = self.engine.refresh_unknown(now);
+            if n > 0 {
+                info!("app: reading {n} unknown states of restored devices");
+            }
+        }
+    }
+
+    fn import_devices(&mut self, inv: &hub_coord::Inventory, cookie: u32, generation: u32, now: Millis) {
         if generation == self.import_gen {
             self.imported_in = Some(cookie);
         }

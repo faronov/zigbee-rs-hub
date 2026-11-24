@@ -140,6 +140,17 @@ impl Trace {
     }
 }
 
+/// A trigger that came while a run of its rule waited for the result of a
+/// request action: it fires once that run goes on, as it would have after
+/// a run that finished in place.
+#[derive(Debug)]
+struct Deferred {
+    rule: String,
+    trigger: J,
+    chain: Vec<String>,
+    check: bool,
+}
+
 /// The automations of a hub (see the module docs).
 #[derive(Debug, Default)]
 pub struct Automations {
@@ -156,6 +167,8 @@ pub struct Automations {
     avail: VecMap<String, bool>,
     minute: Option<i64>,
     started: bool,
+    /// Triggers of rules whose run waits for a request action.
+    deferred: Vec<Deferred>,
     /// Events for the `automations` topic.
     pub events: Vec<J>,
     /// Rule IDs to write to the store (or delete, when gone), sorted.
@@ -565,6 +578,10 @@ impl Automations {
     fn fire(&mut self, id: &str, trigger: J, chain: Vec<String>, w: &mut dyn World, clk: &Clock, check: bool) -> u32 {
         let Some((mode, per_min)) = self.rules.get(id).map(|r| (r.mode, r.max_per_min)) else { return 0 };
         let manual = trigger["type"] == "manual";
+        if !manual && self.deferred.len() < MAX_RUNS && self.runs.iter().any(|r| r.rule == id && r.waits.is_some()) {
+            self.deferred.push(Deferred { rule: id.into(), trigger, chain, check });
+            return 0;
+        }
         let rt = self.rt.or_default(id);
         if clk.mono_ms.saturating_sub(rt.window) >= 60_000 {
             rt.window = clk.mono_ms;
@@ -623,6 +640,7 @@ impl Automations {
 
     /// Ends the runs of rule `id` (except `keep`) as cancelled.
     fn cancel(&mut self, id: &str, keep: Option<u32>) {
+        self.deferred.retain(|d| d.rule != id);
         let gone: Vec<u32> = self.runs.iter().filter(|r| r.rule == id && Some(r.id) != keep).map(|r| r.id).collect();
         self.runs.retain(|r| !gone.contains(&r.id));
         for run in gone {
@@ -732,11 +750,12 @@ impl Automations {
     }
 
     /// The result of a request action a run waits for ([`World::request`]):
-    /// recorded, and the run goes on.
+    /// recorded, the run goes on, then the triggers of its rule that came
+    /// meanwhile fire.
     pub fn request_result(&mut self, key: u64, result: Result<J, ApiError>, w: &mut dyn World, clk: &Clock) {
         let Some(r) = self.runs.iter_mut().find(|r| r.waits.is_some_and(|(k, _)| k == key)) else { return };
         let Some((_, pc)) = r.waits.take() else { return };
-        let run = r.id;
+        let (run, rule) = (r.id, r.rule.clone());
         let mut out = json!({"i": pc, "type": "request"});
         let failed = match result {
             Ok(_) => {
@@ -747,6 +766,11 @@ impl Automations {
         };
         self.action_done(run, pc, out, failed);
         self.step(run, w, clk);
+        while !self.runs.iter().any(|r| r.rule == rule && r.waits.is_some()) {
+            let Some(i) = self.deferred.iter().position(|d| d.rule == rule) else { break };
+            let d = self.deferred.remove(i);
+            self.fire(&d.rule, d.trigger, d.chain, w, clk, d.check);
+        }
     }
 
     /// Keys of the request actions runs wait for.

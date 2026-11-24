@@ -65,7 +65,8 @@ pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(100);
 
 /// A completed request waits this long for its `EVT_APS_DATA_CONFIRM` to
-/// come through the lifecycle before its outcome is emitted anyway.
+/// come through the lifecycle before its outcome is emitted anyway (once
+/// the pump has read every message the lifecycle passed on).
 const CONFIRM_SLACK: Duration = Duration::from_secs(2);
 
 /// Delay before an endpoint registration that failed is tried again.
@@ -242,7 +243,11 @@ impl Coordinator for ZrhpCoordinator {
         self.next_id = self.next_id.wrapping_add(1);
         let id = RequestId(self.next_id);
         let n = self.shared.queued.fetch_add(1, Ordering::Relaxed) + 1;
-        self.shared.high_water.fetch_max(n, Ordering::Relaxed);
+        // Only `submit` raises the mark. Not `fetch_max`: the Xtensa LLVM
+        // backend of Rust 1.90 miscompiles it ("Undefined temporary symbol").
+        if n > self.shared.high_water.load(Ordering::Relaxed) {
+            self.shared.high_water.store(n, Ordering::Relaxed);
+        }
         if self.tx.send(PumpMsg::Cmd(id, cmd)).is_err() {
             self.shared.queued.fetch_sub(1, Ordering::Relaxed);
             return Err(CoordError::LinkDown);
@@ -354,7 +359,7 @@ impl Pump {
         }
         let msg = match self.rx.recv_timeout(POLL) {
             Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) => return self.replies(),
+            Err(RecvTimeoutError::Timeout) => return self.replies(true),
             Err(RecvTimeoutError::Disconnected) => return false,
         };
         // Nothing more reaches the NCP once the coordinator is gone.
@@ -362,7 +367,7 @@ impl Pump {
             return false;
         }
         // Outcomes the driver had before this message came.
-        if !self.replies() {
+        if !self.replies(false) {
             return false;
         }
         match msg {
@@ -457,7 +462,9 @@ impl Pump {
 
     /// Emits the outcomes of APS requests a response (or the driver)
     /// decided; parks those a confirm decided until their event comes.
-    fn replies(&mut self) -> bool {
+    /// `idle`: the channel is empty, so a confirm parked for long is not
+    /// coming (the time the pump spent blocked does not count otherwise).
+    fn replies(&mut self, idle: bool) -> bool {
         let mut i = 0;
         while i < self.inflight.len() {
             let f = &mut self.inflight[i];
@@ -475,9 +482,10 @@ impl Pump {
                 }
             }
             // The event should have come by now.
-            if f.done
-                .as_ref()
-                .is_some_and(|(_, at)| at.elapsed() >= CONFIRM_SLACK)
+            if idle
+                && f.done
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() >= CONFIRM_SLACK)
             {
                 let f = self.inflight.remove(i);
                 if let Some((r, _)) = f.done
