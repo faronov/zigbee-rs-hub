@@ -5,12 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Portable core of zigbee-rs-hub: board wiring and profiles, flash layouts, NCP reset/boot line logic and the ZRHP protocol crate"
+description = "Portable core of zigbee-rs-hub: board wiring and profiles, flash layouts, NCP reset/boot line logic and (feature zrhp) the ZRHP protocol crate"
 publish = false
 
 [dependencies]
-zigbee-zrhp = { workspace = true }
+zigbee-zrhp = { workspace = true, optional = true }
 
 [features]
 default = []
-std = ["zigbee-zrhp/std"]
+# The `zrhp` re-export of the ZRHP protocol crate (no workspace user needs
+# it: images of other coordinator backends link no ZRHP code).
+zrhp = ["dep:zigbee-zrhp"]
+std = ["zigbee-zrhp?/std"]
