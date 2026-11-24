@@ -112,6 +112,8 @@ mod convert;
 mod tests;
 mod worker;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::ezsp::types::*;
@@ -226,6 +228,14 @@ pub struct EzspOptions {
     /// The TX power the operator set in an earlier run (the hub keeps it),
     /// applied in every session until it is changed.
     pub tx_power: Option<i8>,
+    /// For an application that decides itself whether the NCP's network is
+    /// its own (`NcpNv`): requests go out only while this is `true`. The
+    /// worker clears it when a session ends and when a new one starts (the
+    /// application sets it again once the new session's network is its
+    /// own), and ends the requests queued meanwhile `Refused(LinkDown)`
+    /// instead of sending them in the next session, which may run another
+    /// network. `None`: queued requests wait for the next session.
+    pub traffic: Option<Arc<AtomicBool>>,
 }
 
 impl Default for EzspOptions {
@@ -244,6 +254,7 @@ impl Default for EzspOptions {
             retry_max: Duration::from_secs(30),
             worker_stack: 16 * 1024,
             tx_power: None,
+            traffic: None,
         }
     }
 }

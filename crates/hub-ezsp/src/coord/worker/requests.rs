@@ -29,6 +29,13 @@ impl<T: Transport, C: Clock> Worker<T, C> {
 
     /// Runs the next queued request, if it may go now.
     pub(super) fn step_queue(&mut self) -> bool {
+        if self.fifo.is_empty() {
+            return false;
+        }
+        if !self.traffic_open() {
+            self.drop_held_requests();
+            return true;
+        }
         let Some((_, cmd)) = self.fifo.front() else {
             return false;
         };

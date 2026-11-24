@@ -1328,6 +1328,8 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// The session is ready: ownership, `Up`, the network state, then the
     /// callbacks that came meanwhile.
     fn announce(&mut self) {
+        // The application decides about this session's network first.
+        self.close_traffic();
         self.epoch = self.epoch.wrapping_add(1).max(1);
         self.up = true;
         self.state = SessionState::Ready;
@@ -1359,6 +1361,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// The session ended (NCP reset, ERROR, link failure).
     fn lose_session(&mut self) {
         self.lost = false;
+        self.close_traffic();
         let was_up = self.up;
         if was_up {
             // What the NCP sent before the failure goes first.
@@ -1390,7 +1393,41 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.scan = None;
         self.refresh_pending = false;
         self.retry_at = self.now();
+        self.drop_held_requests();
         self.publish();
+    }
+
+    /// [`EzspOptions::traffic`]: requests wait for the application's
+    /// decision about the network of the session.
+    fn close_traffic(&self) {
+        if let Some(t) = &self.opts.traffic {
+            t.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Requests may go out ([`EzspOptions::traffic`]).
+    pub(super) fn traffic_open(&self) -> bool {
+        self.opts
+            .traffic
+            .as_ref()
+            .is_none_or(|t| t.load(Ordering::SeqCst))
+    }
+
+    /// While [`EzspOptions::traffic`] is closed, queued requests end
+    /// `Refused(LinkDown)`: they were meant for a network that may not be
+    /// the one of the next session.
+    pub(super) fn drop_held_requests(&mut self) {
+        if self.traffic_open() {
+            return;
+        }
+        for (id, _) in std::mem::take(&mut self.fifo) {
+            self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+            let e = CoordError::described(
+                CoordError::LinkDown,
+                "not sent: the NCP's network is not verified as the application's",
+            );
+            self.done(id, Terminal::Refused(e));
+        }
     }
 
     /// Runs the link until `cond` holds, the deadline passes or the link
