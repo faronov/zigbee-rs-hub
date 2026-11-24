@@ -1,0 +1,27 @@
+[build]
+target = "xtensa-esp32-espidf"
+
+[target.xtensa-esp32-espidf]
+linker = "ldproxy"
+# `-s32c1i`: as in firmware/hub. The Rust heap is in PSRAM (the shared
+# firmware/hub/src/alloc.rs), and on the classic ESP32 too the S32C1I
+# compare-and-set is not atomic between the two cores on PSRAM. Without the
+# feature, Rust atomics (std included, built here) call ESP-IDF's
+# `__atomic_*` functions, which take a lock for PSRAM addresses
+# (CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND, on for SPIRAM on the ESP32
+# and the S3). alloc.rs refuses to compile without this flag; `atomics` on
+# the console measures it. rustc warns that the feature is unstable.
+rustflags = ["--cfg", "espidf_time64", "-C", "target-feature=-s32c1i"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+# No backtrace symbolisation (gimli/addr2line); panic messages stay.
+build-std-features = []
+
+[env]
+MCU = "esp32"
+# Pinned so local and CI builds use the same ESP-IDF (as firmware/hub).
+ESP_IDF_VERSION = "v5.5.1"
+# The workspace root has no [package]; tell esp-idf-sys whose metadata
+# (sdkconfig.defaults) to use.
+ESP_IDF_SYS_ROOT_CRATE = "zrh-donglem"

@@ -1,0 +1,25 @@
+# SONOFF Dongle Max (Dongle-M): ESP32-D0WDR2-V3 rev v3.1, 2 MB in-package
+# quad PSRAM, 16 MB Puya flash. Applied after firmware/gateway/sdkconfig.defaults.
+#
+# The image is made to boot from the stock ESP-IDF v5.2.1 second-stage
+# bootloader, which is never rewritten: flash DIO at 40 MHz and minimum chip
+# revision v3.0, as the bootloader and SONOFF's own application are built
+# (their image headers). PSRAM at 80 MHz would need the flash at 80 MHz
+# (esp_psram_impl_quad.c sets both clocks), so PSRAM runs at 40 MHz too.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_SPIRAM_SPEED_40M=y
+# v3 silicon: no PSRAM cache workaround (CONFIG_SPIRAM_CACHE_WORKAROUND needs
+# a minimum revision below v3.0), smaller and faster code.
+CONFIG_ESP32_REV_MIN_3=y
+
+# Console and logs on UART0 (CP2102N USB bridge).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# Internal EMAC + IP101 (RMII, 50 MHz in on GPIO0); configured at run time
+# from the board profile.
+CONFIG_ETH_USE_ESP32_EMAC=y
+
+CONFIG_APP_PROJECT_VER="zrh-donglem-0.1.0"
