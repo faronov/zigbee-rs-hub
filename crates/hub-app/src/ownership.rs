@@ -54,6 +54,21 @@ impl Runner {
         }
     }
 
+    /// Rules are network records: while those are not writable, requests
+    /// that change rules are refused, naming the registry state.
+    pub(super) fn automations_refused(&self, kind: &str) -> Option<ApiError> {
+        let changes = ["create", "update", "delete", "enable", "disable"];
+        if !kind.strip_prefix("automations/").is_some_and(|k| changes.contains(&k)) {
+            return None;
+        }
+        let why = match self.ncp.registry() {
+            RegistryState::Untagged | RegistryState::Owned => return None,
+            RegistryState::Unverified => "the device registry is unverified",
+            RegistryState::Foreign { .. } => "the device registry is foreign: adopt or clear it first",
+        };
+        Some(ApiError::new("registry_read_only", why))
+    }
+
     /// Records that became readable after the start are loaded (every
     /// tick, before the registry is written).
     pub(super) fn check_registry(&mut self, now: Millis) {

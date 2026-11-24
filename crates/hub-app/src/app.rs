@@ -971,7 +971,10 @@ impl Runner {
                     && let (Some(id), Some(kind)) = (v["id"].as_u64(), v["type"].as_str())
                     && let Some(r) = {
                         self.automations.free_heap = self.cfg.platform.as_ref().and_then(|p| p.data_heap_free());
-                        self.with_automations(|a, w, clk| a.request(kind, &v, w, clk))
+                        match self.automations_refused(kind) {
+                            Some(e) => Some(Err(e)),
+                            None => self.with_automations(|a, w, clk| a.request(kind, &v, w, clk)),
+                        }
                     }
                 {
                     // A run waiting for its request action (or deferred behind

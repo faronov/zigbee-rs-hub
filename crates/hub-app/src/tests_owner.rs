@@ -268,3 +268,32 @@ fn adopt_keeps_the_devices_imported_meanwhile_and_their_last_values() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+#[test]
+fn rules_cannot_change_while_the_records_are_foreign() {
+    let mem = foreign();
+    let r = rig(Store::open(Box::new(mem.clone())).unwrap());
+    let app = App::start(r.ncp.clone(), cfg());
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (sid, rx) = session(&app);
+    let rule = json!({"id": "night", "triggers": [{"type": "time", "cron": "0 22 * * *"}],
+        "actions": [{"type": "request", "request": {"type": "network/permit_join", "duration_s": 0}}]});
+    let create = json!({"type": "automations/create", "rule": rule});
+    let f = call(&app, sid, &rx, 1, create.clone());
+    assert_eq!(f["error"]["code"], "registry_read_only", "{f}");
+    assert!(f["error"]["message"].as_str().unwrap().contains("foreign"), "{f}");
+    let f = call(&app, sid, &rx, 2, json!({"type": "automations/enable", "automation": "night"}));
+    assert_eq!(f["error"]["code"], "registry_read_only", "{f}");
+    // Reading and validating still work.
+    ok(&call(&app, sid, &rx, 3, json!({"type": "automations/list"})));
+    assert_eq!(ok(&call(&app, sid, &rx, 4, json!({"type": "automations/validate", "rule": rule})))["ok"], true);
+    assert_eq!(key_records(&mem.take_log()), Vec::<String>::new());
+    // Once adopted, rules are stored.
+    ok(&call(&app, sid, &rx, 5, json!({"type": "network/registry/adopt", "confirm": true})));
+    ok(&call(&app, sid, &rx, 6, create));
+    call(&app, sid, &rx, 7, json!({"type": "hub/reboot"}));
+    assert!(kv(&mem).contains_key("auto/night"));
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
