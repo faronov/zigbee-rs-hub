@@ -508,8 +508,8 @@ impl Pump {
             .session()
             .is_some_and(|s| legacy_zb_status(&s.negotiated.fw));
         let t = aps_terminal(r, legacy);
-        if !matches!(t, Terminal::Delivered | Terminal::Sent) {
-            debug!("APS_DATA_REQUEST tid {tid}: {t:?}");
+        if let Terminal::NotDelivered(e) | Terminal::Refused(e) | Terminal::Unknown(e) = &t {
+            debug!("APS_DATA_REQUEST tid {tid}: {e}");
         }
         self.done(id, t)
     }

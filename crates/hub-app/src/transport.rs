@@ -14,7 +14,7 @@
 //!   ([`CoordTransport::take_control`]).
 //! - The app's own requests (the device inventory) come back to the app.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin};
@@ -71,18 +71,25 @@ pub fn count(c: &mut ApsCounters, t: &Terminal) {
     }
 }
 
+/// Removes `id` from `ids`; `false` when it was not there.
+fn take(ids: &mut Vec<RequestId>, id: RequestId) -> bool {
+    let i = ids.iter().position(|x| *x == id);
+    i.map(|i| ids.swap_remove(i)).is_some()
+}
+
 /// The transport.
 pub struct CoordTransport {
     coord: Box<dyn Coordinator>,
     admin: Arc<dyn NetworkAdmin>,
     /// IEEE → NWK of known devices (the address a removal names).
     pub nwk: BTreeMap<u64, u16>,
-    /// The engine's APS requests in flight.
-    aps: BTreeSet<RequestId>,
+    /// The engine's APS requests in flight (`Vec`s: far less code than
+    /// B-tree sets on the hub).
+    aps: Vec<RequestId>,
     /// The engine's control requests in flight.
-    controls: BTreeSet<RequestId>,
+    controls: Vec<RequestId>,
     /// The app's own requests in flight.
-    own: BTreeSet<RequestId>,
+    own: Vec<RequestId>,
     /// Control requests the engine submitted so far.
     submitted: u64,
     /// Outcomes of finished APS requests, for the tick.
@@ -100,9 +107,9 @@ impl CoordTransport {
             coord,
             admin,
             nwk: BTreeMap::new(),
-            aps: BTreeSet::new(),
-            controls: BTreeSet::new(),
-            own: BTreeSet::new(),
+            aps: Vec::new(),
+            controls: Vec::new(),
+            own: Vec::new(),
             submitted: 0,
             done: Vec::new(),
             control: VecDeque::new(),
@@ -119,7 +126,7 @@ impl CoordTransport {
     /// back from [`Self::outcome`].
     pub fn submit_own(&mut self, req: Request) -> Result<RequestId, CoordError> {
         let id = self.coord.submit(req, None)?;
-        self.own.insert(id);
+        self.own.push(id);
         Ok(id)
     }
 
@@ -129,18 +136,18 @@ impl CoordTransport {
         let done = matches!(o, Outcome::Done(_));
         if self.own.contains(&id) {
             if done {
-                self.own.remove(&id);
+                take(&mut self.own, id);
             }
             return Some(o);
         }
         match o {
-            Outcome::Done(t) if self.aps.remove(&id) => {
+            Outcome::Done(t) if take(&mut self.aps, id) => {
                 count(&mut self.counters, &t);
                 self.done.push((id, t));
             }
             o => {
                 if done {
-                    self.controls.remove(&id);
+                    take(&mut self.controls, id);
                 }
                 self.control.push_back((id, o));
             }
@@ -182,9 +189,9 @@ impl ZigbeeTransport for CoordTransport {
         let aps = matches!(req, Request::Aps(_));
         let id = self.coord.submit(req, None)?;
         if aps {
-            self.aps.insert(id);
+            self.aps.push(id);
         } else {
-            self.controls.insert(id);
+            self.controls.push(id);
             self.submitted += 1;
         }
         Ok(id)

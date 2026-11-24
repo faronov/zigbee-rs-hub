@@ -497,7 +497,7 @@ struct AppWorld<'a> {
 }
 
 type ApiResult = Result<serde_json::Value, hub_devices::hub::ApiError>;
-type RequestResults = BTreeMap<u64, ApiResult>;
+type RequestResults = Vec<(u64, ApiResult)>;
 
 /// A result frame of the internal session.
 fn reply(frame: &str) -> Option<(u64, Result<serde_json::Value, hub_devices::hub::ApiError>)> {
@@ -563,7 +563,7 @@ impl World for AppWorld<'_> {
         let submitted = self.engine.transport.controls_submitted() != before;
         if self.engine.transport.controls_open() && (submitted || r.is_none()) {
             if let Some(r) = r {
-                self.results.insert(id, r);
+                self.results.push((id, r));
             }
             return Ok((id, None));
         }
@@ -683,7 +683,7 @@ impl Runner {
             automations: Automations::default(),
             automation_requests: 0,
             run_answers: Vec::new(),
-            request_results: BTreeMap::new(),
+            request_results: Vec::new(),
             hooks: Vec::new(),
         };
         let now = r.now();
@@ -718,7 +718,7 @@ impl Runner {
             api: &mut r.api,
             now,
             next_id: &mut 0,
-            results: &mut BTreeMap::new(),
+            results: &mut Vec::new(),
         });
         r
     }
@@ -885,18 +885,19 @@ impl Runner {
     fn resume_requests(&mut self) {
         loop {
             let keys = self.automations.waiting_requests();
-            self.request_results.retain(|k, _| keys.contains(k));
+            self.request_results.retain(|(k, _)| keys.contains(k));
             for key in &keys {
                 // Taken before the session's frames are sent.
                 if let Some(r) = self.api.take_result(&mut self.engine, AUTOMATIONS_SESSION, *key) {
-                    self.request_results.insert(*key, r);
+                    self.request_results.push((*key, r));
                 }
             }
             if keys.is_empty() || self.engine.transport.controls_open() {
                 break;
             }
             for key in keys {
-                let r = self.request_results.remove(&key).unwrap_or(Ok(serde_json::Value::Null));
+                let i = self.request_results.iter().position(|(k, _)| *k == key);
+                let r = i.map_or(Ok(serde_json::Value::Null), |i| self.request_results.swap_remove(i).1);
                 self.with_automations(|a, w, clk| a.request_result(key, r, w, clk));
             }
         }
@@ -1320,7 +1321,7 @@ impl Runner {
                     Terminal::Refused(e) | Terminal::NotDelivered(e) | Terminal::Unknown(e) => {
                         warn!("app: NCP device inventory: {e}")
                     }
-                    t => warn!("app: NCP device inventory: {t:?}"),
+                    _ => warn!("app: NCP device inventory: no devices in the answer"),
                 }
                 self.import_retry = Some(Instant::now() + Duration::from_secs(30));
             }
