@@ -2298,7 +2298,8 @@ code feels familiar:
   misses a change between "list" and "subscribe".
 - Errors: `unauthorized`, `not_found`, `invalid_format`, `invalid_value`,
   `unsupported`, `busy`, `timeout`, `device_unavailable`, `no_space`,
-  `verification_failed`, `not_delivered`, plus the ZCL/ZRHP status for device commands
+  `verification_failed`, `not_delivered`, `registry_read_only` (the hub's
+  network records are not its own: `network/registry/adopt` or `clear`), plus the ZCL/ZRHP status for device commands
   (`{"code": "zcl_status", "zcl_status": "UNSUPPORTED_ATTRIBUTE"}`).
 - Delivery: every `APS_DATA_REQUEST` waits for its `EVT_APS_DATA_CONFIRM`
   (up to 60 s). A confirmed failure retries once at once (a sleepy device's
@@ -2517,10 +2518,14 @@ PAN ID, channel, key sequence and coordinator are informative and follow
 the network). An image that finds another backend's records (an EZSP image
 ran on this flash), or a network whose extended PAN ID, or known key, is
 not the tag's, does not load them and cannot change or delete them
-(a backup taken meanwhile is returned but not kept as the last one):
+(a backup taken meanwhile is returned but not kept as the last one;
+requests that change automations, `automations/create`, `update`,
+`delete`, `enable` and `disable`, fail with `registry_read_only`):
 `network/info.registry.state` is `foreign`. The operator then adopts or
 clears them; `network/reset` and `network/restore` take them for the new
-network too. Records written before the tag existed are tagged for the
+network too. Adopting keeps devices the hub met meanwhile (an NCP import,
+a join): the stored record replaces each in place (`device_updated`, no
+removal; its last values stay). Records written before the tag existed are tagged for the
 stored network at the first start.
 
 **Background jobs.** `network/energy_scan`, `network/active_scan` and

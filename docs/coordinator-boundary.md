@@ -330,7 +330,9 @@ firmware would **not** honour an EZSP tag (documented limit).
 - Migration runs in `Hub::start`, before the lifecycle thread and before
   the app's `registry.load`, so neither a resume nor a sweep sees an
   undecided state. A read-only (observing) hub tags nothing.
-- Upkeep: after the resume's `Meta` commit when `Owned`, after `form` and
+- Upkeep: after the resume's `Meta` commit when `Owned`, in `form` right
+  after the new network is stored and again once formed (an interrupted
+  formation leaves the records the stored network's), after
   `backup_restore` (forced: they rewrite a foreign tag), and after a
   channel change. A non-forced `Owned` whose stored network does not match
   the tag (an auto-adopt into a store emptied by `leave_reset`) makes the
@@ -339,7 +341,11 @@ firmware would **not** honour an EZSP tag (documented limit).
   them with the gate open (`Registry::loaded`); this also covers a gate
   opened by a job thread (`network/reset`, `network/restore`) between the
   app's check and its flush. Once readable, the app loads them on its next
-  tick (stored devices replace the ones made meanwhile).
+  tick: a stored device replaces one the engine made meanwhile in place
+  (`restore_device`: `device_updated`, no removal, so its last values and
+  the clients' entities stay). Rule changes (`automations/create`,
+  `update`, `delete`, `enable`, `disable`) are refused with
+  `registry_read_only` while the gate is not open.
 - `network/registry/adopt` / `clear` take `"confirm": true`. `clear` also
   drops the engine's devices, groups, bindings and rules without network
   traffic and imports the NCP's devices again. `network/info.registry`:
@@ -350,7 +356,7 @@ firmware would **not** honour an EZSP tag (documented limit).
   unwritable. `CoordTransport` refusing device traffic until then comes
   with the first `NcpNv` backend.
 - Size (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths): app
-  image +3,632 B (`.flash.text` +2,036 B, `.flash.rodata` +1,600 B, IRAM
+  image +3,520 B (`.flash.text` +1,808 B, `.flash.rodata` +1,712 B, IRAM
   and DRAM unchanged).
 
 ## 3. Threading model
