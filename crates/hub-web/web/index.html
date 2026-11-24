@@ -296,8 +296,10 @@ if($("#zd").offsetParent)onTab.zcl()
 // advanced:end
 }
 function renderDev(id){if(/^grp:/.test(id))return renderGroups();const old=document.getElementById("d-"+id),p=pgId();if(!devs[id]){if(old)old.remove();return}if(old)keep(old,()=>devCard(id,p));else if(!p)renderAll()}
-// Replace a live-updated node by f(); a field being edited keeps the focus.
-function keep(o,f){const q=x=>[...x.querySelectorAll("input,select")],i=q(o).indexOf(document.activeElement),n=f();o.replaceWith(n);if(q(n)[i])q(n)[i].focus({preventScroll:true})}
+// Replace a live-updated node by f(); a field being edited keeps the focus:
+// the same field when f() reused it, else the one at its place in the nearest
+// element with an id (its entity row, card or panel), never another device's.
+function keep(o,f){const a=document.activeElement,r=o.contains(a)&&a.matches("input,select")&&a.closest("[id]"),q=x=>x?[...x.querySelectorAll("input,select")]:[],i=q(r).indexOf(a),n=f();o.replaceWith(n);const b=r&&(n.contains(a)?a:q(document.getElementById(r.id))[i]);if(b)b.focus({preventScroll:true})}
 // Device pictures: the Zigbee2MQTT site's image of the resolved definition's
 // herdsman model (white label first, then its base model; their file name
 // rule replaces / : ' and space by -). Loaded by the browser, never by the
@@ -411,9 +413,11 @@ function repPanel(id,read,data){const box=el("div",{id:"rp-"+id,class:"rp"},el("
    an=y>31&&y<48||fl||y>223&&y<227,f=el("input",{type:"checkbox",checked:off?"":null,onchange:()=>go()}),
    rs=r=>r&&r.map?r.map((c,j)=>j>1?chU(c,sc)+u:c).join(" / "):rTxt(r),
    i=["min s","max s","change"+u].map((p,k)=>el("input",{class:"num",inputmode:"decimal",placeholder:p,"aria-label":p,value:k>1&&v[2]!=null?chU(v[2],sc):v[k],disabled:off?"":null,style:k>1&&!an?"visibility:hidden":null,oninput:()=>dt=1})),
-   go=()=>{const[m,M,c]=i.map(n=>n.value.trim()),w=c&&chR(c,sc,fl);dt=0;if(!f.checked&&(!m!=!M||!m&&c))return toast("Reporting: set both min and max");
+   go=()=>{const[m,M,c]=i.map(n=>n.value.trim()),w=c&&chR(c,sc,fl);dt=0;if(!f.checked&&(!m!=!M||!m&&c))return toast("Set both min and max");
     act("entities/update",{uid:x.uid,part:x.part||"",report:f.checked?"off":m?[+m,+M,...c?[w==w?w:c]:[]]:"default"}).finally(()=>repPanel(id)).catch(()=>{})};
-   t.append(el("tr",{onfocusout:n=>{if(dt&&!n.currentTarget.contains(n.relatedTarget))go()},onkeydown:n=>{if(dt&&n.key=="Enter")go()}},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{class:"mut"},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{"data-l":"hub",title:x.source},rs(x.report)+(o?" *":"")),el("td",{"data-l":"device",title:a?a.status:""},a?a.report?rs(a.report):a.status:"?"),el("td",{},el("div",{class:"row"},...i,el("label",{},f,"off")))))}
+   // Left the row? Asked a tick later: a re-render moving the panel blurs the
+   // field (keep() puts the focus back), a refresh replaces the row.
+   t.append(el("tr",{onfocusout:n=>{const w=n.currentTarget;setTimeout(()=>{if(dt&&w.isConnected&&!w.contains(document.activeElement))go()})},onkeydown:n=>{if(dt&&n.key=="Enter")go()}},el("td",{title:x.shared?"shared with "+x.shared.map(u=>(ents[u]||{}).key||u).join(", "):""},(e.name||e.key||x.uid)+(x.part?" "+x.part:"")+(x.shared?" ⇄":"")),el("td",{class:"mut"},hex(x.cluster,4)+"/"+hex(x.attribute,4)),el("td",{"data-l":"hub",title:x.source},rs(x.report)+(o?" *":"")),el("td",{"data-l":"device",title:a?a.status:""},a?a.report?rs(a.report):a.status:"?"),el("td",{},el("div",{class:"row"},...i,el("label",{},f,"off")))))}
   box.append(t,r.status=="queued"?el("p",{class:"mut"},"Read queued until the device wakes."):r.error?el("p",{class:"mut"},r.error.message):"",bt("Read from device",async()=>repPanel(id,1)))}).catch(e=>box.append(e.message)).then(()=>{const o=document.getElementById("rp-"+id);if(o&&o!=box)keep(o,()=>box)});
  return box}
 // Rows of other entities shown nowhere; the battery and signal line (card)
