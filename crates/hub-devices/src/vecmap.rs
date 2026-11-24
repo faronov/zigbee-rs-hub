@@ -2,11 +2,11 @@
 //! sorted by key, for the small maps of the reporting configuration
 //! (lookups, inserts, removals and iteration in key order like a
 //! `BTreeMap`, in a fraction of the code of a `BTreeMap` instantiation),
-//! and [`btree_map`], which builds a `BTreeMap` without the sort that
-//! collecting into one instantiates for every iterator type.
+//! and [`btree_map`]/[`btree_set`], which build a `BTreeMap`/`BTreeSet`
+//! without the sort that collecting into one instantiates.
 
 use std::borrow::Borrow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The `BTreeMap` of `it`, as `collect()` builds it (a later entry
 /// replaces an earlier one with the same key), by inserts: `collect()`
@@ -18,6 +18,16 @@ pub fn btree_map<K: Ord, V>(it: impl IntoIterator<Item = (K, V)>) -> BTreeMap<K,
         m.insert(k, v);
     }
     m
+}
+
+/// The `BTreeSet` of `it`, as `collect()` builds it, by inserts:
+/// `collect()` sorts first, with a sort instantiated per element type.
+pub fn btree_set<T: Ord>(it: impl IntoIterator<Item = T>) -> BTreeSet<T> {
+    let mut s = BTreeSet::new();
+    for x in it {
+        s.insert(x);
+    }
+    s
 }
 
 /// A map kept as a vector sorted by key (iterates in key order).

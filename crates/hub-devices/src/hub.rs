@@ -1292,7 +1292,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        let seeded: BTreeSet<usize> = work.iter().map(|w| w.0).collect();
+        let seeded: BTreeSet<usize> = crate::vecmap::btree_set(work.iter().map(|w| w.0));
         let unseeded: Vec<String> = d
             .entities
             .iter()
@@ -2565,7 +2565,8 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn clear_pending_state(&mut self, tk: &Ticket) {
-        let uids: BTreeSet<String> = tk.optimistic.iter().map(|o| o.0.clone()).collect();
+        let uids: BTreeSet<String> =
+            crate::vecmap::btree_set(tk.optimistic.iter().map(|o| o.0.clone()));
         for uid in uids {
             if let Some(d) = self.devices.get_mut(device_of_uid(&uid)) {
                 if let Some(i) = d.entity_index(&uid) {

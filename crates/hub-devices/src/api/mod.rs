@@ -384,7 +384,8 @@ impl ApiServer {
             ));
         }
         if let Some(sess) = self.sessions.get_mut(&s) {
-            sess.subs.insert(id, topics.iter().cloned().collect());
+            sess.subs
+                .insert(id, crate::vecmap::btree_set(topics.iter().cloned()));
         }
         Ok((
             ServerMessage::ok(id, json!({"seq": self.seq})),
