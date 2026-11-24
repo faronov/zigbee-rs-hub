@@ -624,7 +624,7 @@ zrhp = ["dep:hub-ncp"]
   ownership reports (`observe`), whether device traffic may go out
   (`verified`), the hub's reading of `network/info.ownership`
   (`ownership`), the operator replacing the network (`replacing`,
-  `replaced`), the TX power for backends that do not keep it
+  `forming`, `replaced`), the TX power for backends that do not keep it
   (`tx_power_set`) and `hub/system`'s `store`/`ncp` objects (`system`).
   `Backend::zrhp(hub)` (`Records for hub_ncp::Hub`: the host core decides,
   as in PR I) and `Backend::ezsp(transport, clock, opts, store)`
@@ -677,14 +677,28 @@ zrhp = ["dep:hub-ncp"]
   `CoordTransport` refuses the engine's and the app's requests until the
   NCP's network of the session matches (`LinkDown`, "not verified"); the
   hub endpoint's group replay, the NCP device import and the state refresh
-  wait for it too. `network/info.ownership` shows the hub's decision for
-  `NcpNv` backends (`owned`, `mismatch`) instead of the backend's
-  `observed`. `network/reset`, `network/restore` and the new
-  `network/form` (forms only where the backend reports `no_network`, no
-  `confirm`; EZSP forms only then anyway) tell the records that the
-  operator replaces the network: reports meanwhile decide nothing, and
-  the new network becomes the records' (the tag is rewritten, as ZRHP's
-  adapter does). A `DeviceLeft` keeps the device (EZSP does not say
+  wait for it too. The flag is shared with the backend
+  (`NcpNvRecords::traffic`, `EzspOptions::traffic`): the EZSP worker
+  clears it itself when a session ends and when the next one starts, and
+  ends the requests queued meanwhile `Refused(LinkDown)` instead of sending
+  them in the next session, which may run another network; the records
+  open it once that network matches. `network/info.ownership` shows the
+  hub's decision for `NcpNv` backends (`owned`, `mismatch`) instead of the
+  backend's `observed`. `network/reset`, `network/restore` and the new
+  `network/form` tell the records that the operator replaces the network:
+  reports meanwhile decide nothing, and the new network becomes the
+  records' (the tag is rewritten, as ZRHP's adapter does). Before
+  `form`, `NcpNv` records pick the extended PAN ID (unless the request
+  names one) and tag it (key ID unknown), so a form that times out with
+  the network coming up later, or a reboot in between, leaves the records
+  the new network's (as PR I's ZRHP fix does for ZRHP). `network/form`
+  forms only where the backend reports `no_network` and takes no
+  `confirm`, so it refuses (`registry_read_only`) unless the records are
+  `untagged` or `owned`: foreign or unverified records (a blank EmberZNet
+  NCP over a ZRHP image's records is exactly that migration) need
+  adopt/clear with `confirm`, or `network/reset` with "RESET". A
+  restore on an `NcpNv` backend (none restores yet) will need the backup's
+  extended PAN ID for the same tag. A `DeviceLeft` keeps the device (EZSP does not say
   whether it rejoins): the engine marks it unavailable with
   `unavailable_reason: "left"` (`device_updated`, its entities' states)
   until its next frame or rejoin; removal stays the operator's
@@ -703,10 +717,11 @@ zrhp = ["dep:hub-ncp"]
   without hub-ncp or zigbee-zrhp; the `hub-app-ezsp` job (both backends,
   the EZSP-only app and its tree, the hubctl end to end).
 - **Size** (tbr-hub 4 MB octal, `--locked`, equal-length worktree paths,
-  against `main` 9efb313): app image +3,312 B (2,787,552 → 2,790,864 B;
-  `.flash.text` +3,076 B, `.flash.rodata` +224 B, `.dram0.data` +16 B;
-  IRAM and bss unchanged); +464 B of it is the engine's handling of device
-  leaves, the rest (+2,848 B) the boundary. 857 B is a second copy of a BTreeMap
+  against `main` 9efb313): app image +3,792 B (2,787,552 → 2,791,344 B;
+  `.flash.text` +3,448 B, `.flash.rodata` +336 B, `.dram0.data` +16 B;
+  IRAM and bss unchanged): the boundary +2,848 B, the engine's handling of
+  device leaves +464 B, the review fixes (the `network/form` guard,
+  `Records::forming`) +480 B. 857 B is a second copy of a BTreeMap
   rebalancing instance (`bulk_steal_left`/`_right`) that hub-store's
   `HostState::apply` now calls instead of the copy it shared with
   hub-devices (LTO's choice; no hub-store code changed). The rest is the

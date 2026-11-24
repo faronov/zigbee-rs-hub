@@ -24,7 +24,8 @@
 //! records' (the tag is rewritten, as ZRHP's adapter does).
 
 use std::io;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hub_coord::{
     BackendKind, CoordStatus, NetworkIdentity, NetworkOwnership, OwnerTag, OwnershipModel,
@@ -43,8 +44,6 @@ struct State {
     registry: RegistryState,
     /// The NCP's network, as last reported in this session.
     observed: Option<NetworkIdentity>,
-    /// That network matches the tag.
-    verified: bool,
     /// The operator is replacing the network.
     replacing: bool,
     /// Network-scoped records of unknown origin (no tag, no stored
@@ -59,6 +58,10 @@ pub struct NcpNvRecords {
     /// Locked before `state`.
     store: Mutex<Store>,
     state: Mutex<State>,
+    /// The NCP's network of this session matches the tag: device traffic
+    /// may go out. Shared with the backend ([`Self::traffic`]), which
+    /// clears it when a session ends or starts.
+    traffic: Arc<AtomicBool>,
 }
 
 /// Access to the network-scoped records in `st`.
@@ -69,6 +72,19 @@ fn gate(st: &State) -> Gate {
         RegistryState::Unverified => Gate::ReadOnly,
         RegistryState::Untagged | RegistryState::Owned => Gate::Open,
     }
+}
+
+/// A random extended PAN ID (the OS's random keys of `RandomState`, and
+/// the time), neither all zeros nor all ones.
+fn random_epid() -> [u8; 8] {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    let mut e = h.finish().to_le_bytes();
+    if e == [0; 8] || e == [0xFF; 8] {
+        e[0] = 0x5A;
+    }
+    e
 }
 
 /// The network a ZRHP image stored (its host records), as the identity
@@ -112,7 +128,18 @@ impl NcpNvRecords {
             warn!("hub: network records not ours: {backend}, {why}");
         }
         let st = State { registry, hold, ..State::default() };
-        Self { backend, store: Mutex::new(store), state: Mutex::new(st) }
+        Self { backend, store: Mutex::new(store), state: Mutex::new(st), traffic: Arc::default() }
+    }
+
+    /// Whether device traffic may go out, for the backend
+    /// (`EzspOptions::traffic`): it clears it when its session ends or a
+    /// new one starts, so nothing queued reaches a network not decided yet.
+    pub fn traffic(&self) -> Arc<AtomicBool> {
+        self.traffic.clone()
+    }
+
+    fn set_traffic(&self, open: bool) {
+        self.traffic.store(open, Ordering::SeqCst);
     }
 
     /// The backend-scoped key of the operator's TX power.
@@ -153,7 +180,7 @@ impl NcpNvRecords {
     fn decide(&self, store: &mut Store, st: &mut State, network: NetworkIdentity, force: bool) {
         st.observed = Some(network);
         if st.hold && !force {
-            st.verified = false;
+            self.set_traffic(false);
             return;
         }
         let tag = store.kv_get(OWNER_KEY);
@@ -170,11 +197,11 @@ impl NcpNvRecords {
                     }
                     st.registry = RegistryState::Owned;
                     st.hold = false;
-                    st.verified = true;
+                    self.set_traffic(true);
                 }
                 Err(e) => {
                     warn!("hub: writing the ownership tag: {e}");
-                    st.verified = false;
+                    self.set_traffic(false);
                 }
             },
             foreign @ RegistryState::Foreign { backend, why } => {
@@ -182,9 +209,9 @@ impl NcpNvRecords {
                     warn!("hub: the NCP's network is not the records': {backend}, {why}");
                 }
                 st.registry = foreign;
-                st.verified = false;
+                self.set_traffic(false);
             }
-            RegistryState::Untagged | RegistryState::Unverified => st.verified = false,
+            RegistryState::Untagged | RegistryState::Unverified => self.set_traffic(false),
         }
     }
 }
@@ -217,7 +244,7 @@ impl Records for NcpNvRecords {
         self.put_tag(&mut store, st.observed)?;
         st.registry = RegistryState::Owned;
         st.hold = false;
-        st.verified = st.observed.is_some();
+        self.set_traffic(st.observed.is_some());
         Ok(st.registry)
     }
 
@@ -247,24 +274,24 @@ impl Records for NcpNvRecords {
             Some(n) if !st.replacing => self.decide(&mut store, &mut st, n, false),
             Some(n) => {
                 st.observed = Some(n);
-                st.verified = false;
+                self.set_traffic(false);
             }
             None => {
                 st.observed = None;
-                st.verified = false;
+                self.set_traffic(false);
             }
         }
     }
 
     fn verified(&self) -> bool {
-        self.state().verified
+        self.traffic.load(Ordering::SeqCst)
     }
 
     fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {
         let NetworkOwnership::Observed(n) = reported else { return None };
         let st = self.state();
         match st.registry {
-            _ if st.verified => Some(NetworkOwnership::Owned(*n)),
+            _ if self.verified() => Some(NetworkOwnership::Owned(*n)),
             RegistryState::Foreign { why, .. } => Some(NetworkOwnership::Mismatch { found: Some(*n), why: why.into() }),
             _ => None,
         }
@@ -273,7 +300,31 @@ impl Records for NcpNvRecords {
     fn replacing(&self) {
         let mut st = self.state();
         st.replacing = true;
-        st.verified = false;
+        self.set_traffic(false);
+    }
+
+    fn forming(&self, ext_pan_id: Option<[u8; 8]>) -> Option<[u8; 8]> {
+        let epid = ext_pan_id.unwrap_or_else(random_epid);
+        let mut store = self.store();
+        let mut st = self.state();
+        // The key ID is unknown until the network is up: the EPID alone
+        // decides meanwhile; informative fields follow at the first match.
+        let network = NetworkIdentity {
+            ext_pan_id: epid,
+            key_id: None,
+            pan_id: 0,
+            channel: 0,
+            key_seq: 0,
+            coordinator_ieee: st.observed.map_or([0; 8], |n| n.coordinator_ieee),
+        };
+        match store.kv_put(OWNER_KEY, OwnerTag::new(self.backend, Some(network)).encode().as_bytes()) {
+            Ok(()) => {
+                st.registry = RegistryState::Owned;
+                st.hold = false;
+            }
+            Err(e) => warn!("hub: tagging the network being formed: {e}"),
+        }
+        Some(epid)
     }
 
     fn replaced(&self, now: Option<&NetworkOwnership>) {
@@ -396,7 +447,7 @@ mod tests {
             r.observe(Some(&observed(other)));
             assert_eq!(r.registry().as_str(), "foreign");
             assert!(!r.verified());
-            assert_eq!(kv::with(&r, |s| s.get("dev/zb:1").is_some()), false, "hidden");
+            assert!(!kv::with(&r, |s| s.get("dev/zb:1").is_some()), "hidden");
             assert_eq!(r.store().kv_get(OWNER_KEY), Some(mine.as_bytes()), "nothing written");
             assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
             assert!(r.verified());
@@ -497,7 +548,7 @@ mod tests {
         assert_eq!(r.adopt().unwrap(), RegistryState::Owned);
         assert!(r.verified());
         assert_eq!(tag(&r).unwrap().identity, Some(id(4, Some(1))));
-        assert_eq!(kv::with(&r, |s| s.get("auto/r1").is_some()), true);
+        assert!(kv::with(&r, |s| s.get("auto/r1").is_some()));
 
         // Cleared instead: the records go.
         let r = open();
@@ -510,6 +561,51 @@ mod tests {
         r.replaced(Some(&observed(id(6, Some(3)))));
         assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
         assert!(kv::with(&r, |s| s.get("auto/r1").is_some()));
+    }
+
+    /// The network being formed is tagged before `form` (its EPID, the key
+    /// ID unknown): a form that times out with the network coming up later,
+    /// or a reboot in between, leaves the records the new network's.
+    #[test]
+    fn the_network_being_formed_is_tagged_before_it_comes_up() {
+        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
+        r.observe(Some(&observed(id(4, Some(1)))));
+        r.replacing();
+        r.observe(Some(&NetworkOwnership::NoNetwork));
+        let epid = r.forming(None).unwrap();
+        assert_ne!(epid, id(4, None).ext_pan_id);
+        let pre = tag(&r).unwrap().identity.unwrap();
+        assert_eq!((pre.ext_pan_id, pre.key_id), (epid, None));
+        assert_eq!(r.forming(Some([7; 8])), Some([7; 8]), "the operator's EPID is kept");
+        let epid = [7; 8];
+        // The form job timed out.
+        r.replaced(None);
+        let new = NetworkIdentity { ext_pan_id: epid, ..id(0, Some(9)) };
+        // The network comes up later.
+        r.observe(Some(&observed(new)));
+        assert_eq!((r.registry(), r.verified()), (RegistryState::Owned, true));
+        assert_eq!(tag(&r).unwrap().identity, Some(new), "filled at the match");
+
+        // A reboot between forming and the network: the tag decides.
+        let r2 = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
+        r2.replacing();
+        r2.forming(Some(epid));
+        let mut s = Store::volatile();
+        s.kv_put(OWNER_KEY, r2.store().kv_get(OWNER_KEY).unwrap()).unwrap();
+        let r3 = NcpNvRecords::open(BackendKind::Ezsp, s);
+        assert_eq!(r3.registry(), RegistryState::Unverified);
+        r3.observe(Some(&observed(new)));
+        assert_eq!((r3.registry(), r3.verified()), (RegistryState::Owned, true));
+    }
+
+    /// The backend shares the traffic flag and clears it itself.
+    #[test]
+    fn traffic_is_the_flag_the_backend_shares() {
+        let r = NcpNvRecords::open(BackendKind::Ezsp, Store::volatile());
+        r.observe(Some(&observed(id(4, Some(1)))));
+        assert!(r.verified());
+        r.traffic().store(false, Ordering::SeqCst);
+        assert!(!r.verified());
     }
 
     #[test]

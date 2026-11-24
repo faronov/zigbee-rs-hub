@@ -28,6 +28,9 @@ impl Backend {
         if opts.tx_power.is_none() {
             opts.tx_power = records.tx_power();
         }
+        // Nothing queued goes out to a network the records have not
+        // vouched for (the worker closes it when a session ends or starts).
+        opts.traffic = Some(records.traffic());
         Backend {
             coordinator: Box::new(move |cfg, events| {
                 let (coord, admin) =

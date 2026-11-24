@@ -244,6 +244,7 @@ struct Rig {
     link: Arc<dyn SimLink>,
     kv: Arc<dyn KvStore>,
     zrhp: Option<hub_ncp::Hub>,
+    ezsp: Option<hub_ezsp::sim::Sim>,
     stop: Arc<AtomicBool>,
     pump: Option<JoinHandle<()>>,
 }
@@ -274,7 +275,11 @@ impl Rig {
     }
 
     fn zrhp(formed: bool) -> Rig {
-        let r = crate::tests::rig(Store::volatile());
+        Rig::zrhp_with(Store::volatile(), formed)
+    }
+
+    fn zrhp_with(store: Store, formed: bool) -> Rig {
+        let r = crate::tests::rig(store);
         if formed {
             r.ncp.form(hub_ncp::FormRequest { channel_mask: 1 << 15, ..hub_ncp::FormRequest::default() }).unwrap();
         }
@@ -285,17 +290,23 @@ impl Rig {
     }
 
     fn ezsp(sim_cfg: hub_ezsp::sim::SimConfig, store: Store) -> Rig {
+        Rig::ezsp_with(sim_cfg, store, hub_ezsp::coord::EzspOptions::default())
+    }
+
+    fn ezsp_with(sim_cfg: hub_ezsp::sim::SimConfig, store: Store, opts: hub_ezsp::coord::EzspOptions) -> Rig {
         let (sim, transport, clock) = hub_ezsp::sim::Sim::new(sim_cfg, hub_ezsp::sim::Faults::none());
         sim.set_pace(Some(1));
-        let backend = Backend::ezsp(transport, clock, hub_ezsp::coord::EzspOptions::default(), store);
-        Rig::start(backend, Arc::new(Ezsp { sim, seen: Mutex::new(0) }), None)
+        let backend = Backend::ezsp(transport, clock, opts, store);
+        let mut rig = Rig::start(backend, Arc::new(Ezsp { sim: sim.clone(), seen: Mutex::new(0) }), None);
+        rig.ezsp = Some(sim);
+        rig
     }
 
     fn start(backend: Backend, link: Arc<dyn SimLink>, zrhp: Option<hub_ncp::Hub>) -> Rig {
         let kv: Arc<dyn KvStore> = backend.kv.clone();
         let app = App::start_backend(backend, cfg(), None);
         assert!(app.wait(T, |s| s.endpoint_registered), "the first NCP session");
-        Rig { app, link, kv, zrhp, stop: Arc::new(AtomicBool::new(false)), pump: None }
+        Rig { app, link, kv, zrhp, ezsp: None, stop: Arc::new(AtomicBool::new(false)), pump: None }
     }
 
     /// `devs` answer the hub's requests, as `answered` counts.
@@ -607,5 +618,109 @@ fn untagged_records_wait_for_the_operator() {
     assert_eq!(ok(&a)["registry"]["state"], "owned", "{a}");
     assert_eq!(rules(&rig.app, sid, &rx), 1);
     assert_eq!(info(&rig.app, sid, &rx)["ownership"], "owned");
+    rig.finish();
+}
+
+/// `network/form` takes the records, so only the hub's own (or none):
+/// foreign or unverified records need adopt/clear or a `network/reset`
+/// ("RESET"). A blank EmberZNet NCP over a ZRHP image's records is exactly
+/// a ZRHP → EZSP migration; a blank ZRHP NCP over an EZSP image's records
+/// the reverse.
+#[test]
+fn form_needs_records_that_are_the_hubs() {
+    use hub_store::{Change, Meta, NetworkRecord};
+    let refused = |rig: &Rig, what: &str| {
+        let (sid, rx) = session(&rig.app);
+        let before = kv::with(&*rig.kv, |s| s.get(OWNER_KEY).map(<[u8]>::to_vec));
+        let f = call(&rig.app, sid, &rx, 1, json!({"type": "network/form"}));
+        assert_eq!(f["error"]["code"], "registry_read_only", "{what}: {f}");
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(info(&rig.app, sid, &rx)["state"], "none", "{what}: nothing formed");
+        assert_eq!(kv::with(&*rig.kv, |s| s.get(OWNER_KEY).map(<[u8]>::to_vec)), before, "{what}: tag kept");
+        (sid, rx)
+    };
+
+    // EZSP over a ZRHP image's store (its stored network, untagged).
+    let mut s = Store::volatile();
+    s.commit(Change::Meta(Meta { ncp_ieee: [0x5A, 0x51, 0, 0, 0, 0, 1, 2], ..Meta::default() })).unwrap();
+    let n = NetworkRecord {
+        pan_id: 0x1A2B,
+        ext_pan_id: [0x31; 8],
+        channel: 15,
+        channel_mask: 1 << 15,
+        network_key: [0x42; 16],
+        key_seq: 0,
+        nwk_update_id: 0,
+        tx_power: 8,
+        nwk_manager: 0,
+    };
+    s.commit(Change::Network(n)).unwrap();
+    s.kv_put("dev/zb:1", b"{}").unwrap();
+    let rig = Rig::ezsp(ezsp_sim(false, 0xDD), s);
+    let (sid, rx) = refused(&rig, "ZRHP records, blank EZSP NCP");
+    assert_eq!(info(&rig.app, sid, &rx)["registry"]["backend"], "zrhp");
+    // An explicit reset takes them.
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/reset", "confirm": "RESET", "skip_backup": true}));
+    ok(&r);
+    wait("owned after the reset", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    rig.finish();
+
+    // EZSP over records of unknown origin.
+    let mut s = Store::volatile();
+    s.kv_put("auto/r1", b"{}").unwrap();
+    let rig = Rig::ezsp(ezsp_sim(false, 0xDD), s);
+    refused(&rig, "untagged records, blank EZSP NCP");
+    rig.finish();
+
+    // ZRHP over an EZSP image's records.
+    let mut s = Store::volatile();
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Ezsp, None).encode().as_bytes()).unwrap();
+    s.kv_put("dev/zb:1", b"{}").unwrap();
+    let rig = Rig::zrhp_with(s, false);
+    refused(&rig, "EZSP records, blank ZRHP NCP");
+    rig.finish();
+}
+
+/// EZSP: a request queued behind a control request on the NCP does not go
+/// out after an NCP reset into another network (whose ownership is decided
+/// first; here it is foreign): the backend shares the records' traffic
+/// flag.
+#[test]
+fn queued_requests_do_not_reach_the_network_after_an_ncp_reset() {
+    use hub_ezsp::ezsp::command::id;
+    let mut rig = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered.clone());
+    let (sid, rx) = session(&rig.app);
+    rig.link.join(PLUG, PLUG_NWK);
+    wait("the plug's state", || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+    let sim = rig.ezsp.clone().unwrap();
+    let on_off = |cmd: u8| {
+        sim.ncp(|n| {
+            n.sent().iter().filter(|m| {
+                matches!(&m.command, Command::SendUnicast { index_or_destination, aps, message, .. }
+                    if *index_or_destination == PLUG_NWK && aps.cluster_id == 6
+                        && message.first().is_some_and(|fc| fc & 0x03 == 0x01) && message.get(2) == Some(&cmd))
+            }).count()
+        })
+    };
+    // A group membership the NCP does not answer (a barrier), and a
+    // command behind it; the results come with the outcomes.
+    sim.ncp(|n| n.stall(Some(id::SET_MULTICAST_TABLE_ENTRY)));
+    let text = |v: J| rig.app.text(sid, v.to_string());
+    text(json!({"id": 1, "type": "groups/create", "name": "Kitchen"}));
+    wait("the barrier on the NCP", || sim.ncp(|n| n.commands().contains(&id::SET_MULTICAST_TABLE_ENTRY)));
+    text(json!({"id": 2, "type": "entities/command", "uid": SWITCH, "command": "turn_off"}));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(on_off(0), 0, "Off waits behind the barrier");
+    // The NCP restarts into another network.
+    sim.ncp(|n| {
+        n.stall(None);
+        n.config_mut().network.extended_pan_id = [0xEE; 8];
+        n.spontaneous_reset(hub_ezsp::ResetCode::WATCHDOG);
+    });
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(on_off(0), 0, "the queued Off did not go to the other network");
     rig.finish();
 }

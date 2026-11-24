@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use hub_coord::{
     Beacon, Capabilities, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams, Kind, NetState, NetworkAdmin,
-    NetworkOwnership, RestoreOptions,
+    NetworkOwnership, RegistryState, RestoreOptions,
 };
 use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
@@ -1107,6 +1107,16 @@ impl Admin {
             Ok(q) => q,
             Err(e) => return fail(e),
         };
+        // Forming takes the records: only the hub's own (or none yet).
+        // Foreign or unverified ones need adopt/clear (with confirm), or a
+        // network/reset ("RESET").
+        if form_only && !matches!(ctx.records.registry(), RegistryState::Untagged | RegistryState::Owned) {
+            let state = ctx.records.registry().as_str();
+            return fail(ApiError::new(
+                "registry_read_only",
+                format!("the device registry is {state}: network/registry/adopt or clear it, or replace the network with network/reset"),
+            ));
+        }
         if form_only && ctx.status.ownership != NetworkOwnership::NoNetwork {
             return fail(bad(format!(
                 "the NCP reports {} network ownership, not no_network: network/reset replaces a network",
@@ -1167,7 +1177,7 @@ impl Admin {
                 let req = FormParams {
                     channel_mask: mask,
                     pan_id: q.pan_id,
-                    ext_pan_id: epid,
+                    ext_pan_id: records.forming(epid),
                     network_key: None,
                     tx_power: tx_power.or(net.tx_power_setting()).unwrap_or(0),
                 };

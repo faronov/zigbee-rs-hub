@@ -186,7 +186,9 @@ exhaustion is `Refused(Busy)`; no `messageSentHandler` within the deadline
 (60 s default; checked only after the callbacks received before it) is
 `Unknown(Timeout)`; an NCP reset ends the requests on the
 NCP with `Unknown(DeliveryUnknown)` after `Session::Down` and keeps the
-queued ones for the next session. Control requests are barriers.
+queued ones for the next session (with `EzspOptions::traffic`, as the
+hub app sets it: ends them `Refused(LinkDown)` instead, see "In the hub
+app"). Control requests are barriers.
 `RemoveDevice` only forgets the address: the engine's ZDO Mgmt_Leave_req
 stays the primary removal path, and with hashed link keys the trust center
 keeps no key for the device. An EZSP `removeDevice` to the parent, as an
@@ -256,13 +258,21 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
 3. Device traffic (APS, groups, permit join, removal, the device
    inventory) is refused until step 2 matched in the current session; a
    session loss, `NoNetwork` or `Unknown` stop it again until the next
-   match. The hub endpoint's group replay, the import of the NCP's devices
-   and the state refresh wait for it.
+   match. The flag is shared with this backend (`EzspOptions::traffic`):
+   the worker clears it at the end and at the start of every session and
+   ends queued requests `Refused(LinkDown)` while it is clear, so nothing
+   queued before a reset reaches a network not decided yet. The hub
+   endpoint's group replay, the import of the NCP's devices and the state
+   refresh wait for it.
 4. `NoNetwork`: `network/info.ownership` `no_network`; `network/form`
-   forms a network (only then; no `confirm`), or `network/reset`. While the
-   operator replaces the network (`network/form`, `network/reset`,
-   `network/restore`), reports decide nothing; afterwards the NCP's new
-   network becomes the records' (the tag is rewritten).
+   forms a network (only then, and only over `untagged` or `owned` records;
+   no `confirm`), or `network/reset` ("RESET"). While the operator
+   replaces the network (`network/form`, `network/reset`,
+   `network/restore`), reports decide nothing; just before `formNetwork`
+   the records are tagged with the extended PAN ID it forms (picked by the
+   hub unless the request names one; key ID unknown), so an interrupted
+   job (a timeout, a reboot) still leaves them the new network's;
+   afterwards the tag gets the full identity.
 5. `foreign`: `network/info.ownership` `mismatch` and
    `network/info.registry` `{"state":"foreign","backend","why"}`;
    `network/registry/adopt` (the records become the NCP network's) or

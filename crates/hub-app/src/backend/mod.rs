@@ -66,6 +66,17 @@ pub trait Records: KvStore {
     /// [`replaced`](Self::replaced), what the NCP reports decides nothing.
     fn replacing(&self) {}
 
+    /// The operator's network is about to be formed with `ext_pan_id`
+    /// (`None`: the backend picks one), after [`replacing`](Self::replacing);
+    /// returns the extended PAN ID to form with. `NcpNv` records pick one
+    /// when none is given and tag the records for it now (its key ID not
+    /// known yet), so that the network that comes up is theirs even when
+    /// the job is interrupted (a timeout, a reboot). `HostStore` backends
+    /// keep it themselves (ZRHP stores the network before `NWK_FORM`).
+    fn forming(&self, ext_pan_id: Option<[u8; 8]>) -> Option<[u8; 8]> {
+        ext_pan_id
+    }
+
     /// The replacement is over; `now` is what the backend reports then
     /// (`None`: it failed). The NCP's new network becomes the records'.
     fn replaced(&self, now: Option<&NetworkOwnership>) {
