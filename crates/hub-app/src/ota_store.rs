@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use hub_devices::device::Millis;
 use hub_devices::hub::{ApiError, Hub as Engine};
 use hub_devices::transport::ZigbeeTransport;
-use hub_ncp::store::Flash;
+use hub_store::Flash;
 use hub_ota::json::Obj;
 use hub_ota::server::{JobState, Server};
 use hub_ota::store::{Image, ImageState};

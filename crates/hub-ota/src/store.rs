@@ -26,7 +26,7 @@
 
 use std::io;
 
-use hub_ncp::store::Flash;
+use hub_store::Flash;
 use sha2::{Digest, Sha256};
 
 use crate::file::{FileError, Header, MAX_HEADER_LEN, Walker};
@@ -862,7 +862,7 @@ impl crate::images::Images for ImageStore {
 
 #[cfg(test)]
 mod tests {
-    use hub_ncp::store::MemFlash;
+    use hub_store::MemFlash;
 
     use super::*;
     use crate::file::build;

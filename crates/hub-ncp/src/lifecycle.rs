@@ -1151,3 +1151,15 @@ impl Hub {
         control.enter_rom_loader().map_err(|e| Error::Other(e.to_string()))
     }
 }
+
+/// The hub's own records share the journal and its lock with the
+/// lifecycle; every call refreshes the status counters as
+/// [`Hub::with_store`] does.
+impl hub_store::KvStore for Hub {
+    fn with_kv(&self, f: &mut dyn FnMut(&mut dyn hub_store::Kv)) {
+        self.with_store(|s| f(s));
+    }
+    fn stats(&self) -> JournalStats {
+        self.inner.status.lock().unwrap().journal
+    }
+}

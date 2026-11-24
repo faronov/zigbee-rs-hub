@@ -23,12 +23,12 @@ use hub_devices::hub::{ApiError, Hub as Engine};
 use hub_devices::transport::ZigbeeTransport;
 use hub_devices::zcl::frame::global;
 use hub_devices::zcl::{Direction, FrameType, ZclFrame, ZclHeader, ZclValue};
-use hub_ncp::Hub as Ncp;
 use hub_ota::images::{Images, Offer, Sources, View};
 use hub_ota::json::{Obj, array, try_array};
 use hub_ota::server::{Action, CLUSTER, Command, DEFAULT_ASDU, attr};
 use hub_ota::stream::{CHUNK as STREAM_CHUNK, Streams};
 use hub_ota::{Device, Policy, Server, Settings};
+use hub_store::{KvStore, kv};
 use log::{info, warn};
 use serde_json::{Value as J, json};
 
@@ -242,10 +242,10 @@ impl Ota {
     }
 
     /// Settings and device states from the journal.
-    pub fn load<T: ZigbeeTransport>(&mut self, ncp: &Ncp, engine: &Engine<T>, now: Millis) {
+    pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis) {
         type Records = Vec<(String, Vec<u8>)>;
-        let (cfg, devs): (Option<Vec<u8>>, Records) = ncp.with_store(|s| {
-            (s.kv_get(SETTINGS_KEY).map(<[u8]>::to_vec), s.kv_prefix(DEV_PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect())
+        let (cfg, devs): (Option<Vec<u8>>, Records) = kv::with(kv, |s| {
+            (s.get(SETTINGS_KEY).map(<[u8]>::to_vec), s.prefix(DEV_PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect())
         });
         if let Some(b) = cfg {
             let tz = self.server.settings.tz_offset_s;
@@ -263,9 +263,9 @@ impl Ota {
             }
         }
         if !stale.is_empty() {
-            ncp.with_store(|s| {
+            kv::with(kv, |s| {
                 for k in &stale {
-                    let _ = s.kv_delete(k);
+                    let _ = s.delete(k);
                 }
             });
         }
@@ -327,7 +327,7 @@ impl Ota {
 
     /// Paced responses, housekeeping, version reads, persistence and the
     /// topic snapshot.
-    pub fn poll<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, ncp: &Ncp, now: Millis) {
+    pub fn poll<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, kv: &dyn KvStore, now: Millis) {
         self.heap_guard();
         let gone = self.streams.poll(now);
         if !gone.is_empty() {
@@ -374,18 +374,18 @@ impl Ota {
             let gone: Vec<String> = self.server.devices.keys().filter(|id| engine.device(id).is_none()).cloned().collect();
             for id in gone {
                 self.server.devices.remove(&id);
-                ncp.with_store(|s| {
-                    let _ = s.kv_delete(&format!("{DEV_PREFIX}{id}"));
+                kv::with(kv, |s| {
+                    let _ = s.delete(&format!("{DEV_PREFIX}{id}"));
                 });
                 self.snapshot_dirty = true;
             }
         }
         if !self.dirty.is_empty() {
             let dirty = std::mem::take(&mut self.dirty);
-            ncp.with_store(|s| {
+            kv::with(kv, |s| {
                 for id in &dirty {
                     if let Some(st) = self.server.devices.get(id)
-                        && let Err(e) = s.kv_put(&format!("{DEV_PREFIX}{id}"), &st.to_bytes())
+                        && let Err(e) = s.put(&format!("{DEV_PREFIX}{id}"), &st.to_bytes())
                     {
                         warn!("ota: persist {id}: {e}");
                     }
@@ -548,14 +548,14 @@ impl Ota {
     }
 
     /// One `ota/*` request of session `sid`.
-    pub fn request<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, ncp: &Ncp, sid: u64, ty: &str, v: &J, now: Millis) -> Result<Reply, ApiError> {
-        self.request_json(engine, ncp, sid, ty, v, now).map(|r| match r {
+    pub fn request<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, kv: &dyn KvStore, sid: u64, ty: &str, v: &J, now: Millis) -> Result<Reply, ApiError> {
+        self.request_json(engine, kv, sid, ty, v, now).map(|r| match r {
             J::String(t) if ty.ends_with("/list") => Reply::Text(t),
             v => Reply::Json(v),
         })
     }
 
-    fn request_json<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, ncp: &Ncp, sid: u64, ty: &str, v: &J, now: Millis) -> Result<J, ApiError> {
+    fn request_json<T: ZigbeeTransport>(&mut self, engine: &mut Engine<T>, kv: &dyn KvStore, sid: u64, ty: &str, v: &J, now: Millis) -> Result<J, ApiError> {
         let str_ = |k: &str| v.get(k).and_then(J::as_str);
         let u32_ = |k: &str| v.get(k).and_then(J::as_u64).and_then(|n| u32::try_from(n).ok());
         let device = || -> Result<Device, ApiError> {
@@ -587,7 +587,7 @@ impl Ota {
             }
             "ota/settings/set" => {
                 self.server.settings.apply(v).map_err(|m| err("invalid_value", m))?;
-                ncp.with_store(|s| s.kv_put(SETTINGS_KEY, &self.server.settings.to_bytes())).map_err(|e| err("failed", e.to_string()))?;
+                kv::with(kv, |s| s.put(SETTINGS_KEY, &self.server.settings.to_bytes())).map_err(|e| err("failed", e.to_string()))?;
                 self.snapshot_dirty = true;
                 Ok(self.server.settings.to_json())
             }

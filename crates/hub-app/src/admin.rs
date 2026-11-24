@@ -16,6 +16,7 @@ use std::time::Duration;
 use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
 use hub_ncp::lifecycle::{EnergyChannel, FormRequest, RestoreOptions};
+use hub_store::kv;
 use hub_ncp::{Error, Hub as Ncp};
 use log::{info, warn};
 use serde_json::{Value as J, json};
@@ -521,9 +522,9 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
         ncp_build_id: session.as_ref().map(|s| hex(&s.negotiated.build_id)).unwrap_or_default(),
         host_devices: known.iter().map(|k| (k.ieee.to_le_bytes(), k.nwk)).collect(),
         // The hub's groups as stored (device-support 14.9).
-        groups: ncp.with_store(|s| {
+        groups: kv::with(ncp, |s| {
             let v: Vec<&str> = s
-                .kv_prefix(hub_devices::hub::zgroups::GROUP_KEY)
+                .prefix(hub_devices::hub::zgroups::GROUP_KEY)
                 .filter_map(|(_, v)| std::str::from_utf8(v).ok())
                 .collect();
             format!("[{}]", v.join(","))
@@ -542,7 +543,7 @@ fn take_backup(ncp: &Ncp, keys: bool, known: &[Known], source: &str, now_s: f64,
     frame.push('}');
     let b = Backup { frame, file: start..end };
     if summary.complete {
-        ncp.with_store(|s| s.kv_put(LAST_BACKUP_KEY, b.file().as_bytes()))
+        kv::with(ncp, |s| s.put(LAST_BACKUP_KEY, b.file().as_bytes()))
             .map_err(|e| ApiError::new("failed", format!("backup not stored: {e}")))?;
     }
     info!("admin: backup taken ({} devices, {} link keys, complete {})", summary.devices, summary.link_keys, summary.complete);
@@ -598,8 +599,8 @@ impl Admin {
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
             "hub/mode/set" => self.mode(v),
             "network/backup/last" => {
-                let r = ctx.ncp.with_store(|s| {
-                    let last = s.kv_get(LAST_BACKUP_KEY).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
+                let r = kv::with(ctx.ncp, |s| {
+                    let last = s.get(LAST_BACKUP_KEY).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
                     let mut w = Jw::result(id, last.len() + 80)?;
                     w.obj().key("backup").raw(last).end_obj();
                     w.finish()
@@ -680,8 +681,8 @@ impl Admin {
     /// Time settings from the host store; hands them to the platform.
     #[inline(never)]
     pub fn load_clock(&mut self, ncp: &Ncp) {
-        let (tz, ntp) = ncp.with_store(|s| {
-            let get = |k| s.kv_get(k).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string);
+        let (tz, ntp) = kv::with(ncp, |s| {
+            let get = |k| s.get(k).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string);
             (get(TZ_KEY), get(NTP_KEY))
         });
         if let Some(t) = tz.as_deref().and_then(clock::parse) {
@@ -774,7 +775,7 @@ impl Admin {
     fn set_time(&mut self, ncp: &Ncp, v: &J) -> Result<(), ApiError> {
         if let Some(tz) = text(v, "tz")? {
             let t = clock::parse(tz).ok_or_else(|| bad("tz: a POSIX TZ string such as EET-2EEST,M3.5.0/3,M10.5.0/4"))?;
-            ncp.with_store(|s| s.kv_put(TZ_KEY, tz.trim().as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            kv::with(ncp, |s| s.put(TZ_KEY, tz.trim().as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
             self.clock.tz = t;
             self.clock.tz_text = tz.trim().to_string();
         }
@@ -784,7 +785,7 @@ impl Admin {
                 .and_then(|a| a.iter().map(|s| s.as_str().map(|s| s.trim().to_string())).collect::<Option<Vec<_>>>())
                 .filter(|l| (1..=3).contains(&l.len()) && l.iter().all(|s| (1..=64).contains(&s.len()) && !s.contains(',')))
                 .ok_or_else(|| bad("servers: 1–3 host names"))?;
-            ncp.with_store(|s| s.kv_put(NTP_KEY, servers.join(",").as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            kv::with(ncp, |s| s.put(NTP_KEY, servers.join(",").as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
             self.clock.servers = servers;
         }
         if let Some(p) = &self.platform {

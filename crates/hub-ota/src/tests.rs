@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use hub_ncp::store::MemFlash;
+use hub_store::MemFlash;
 
 use crate::file::build;
 use crate::server::{
