@@ -962,7 +962,7 @@ const otL=()=>call("ota/images/list").then(l=>{otI=l;otImg()},()=>{});
 onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()},()=>{});otL();call("ota/status").then(s=>{otA=s.area;otImg()},()=>{})};
 function otEv(e){const r=e.device;if(!r){otA=e.area||otA;return otL()}otD[r.device]=r;otDev();
 // stream:start
- const j=r.job;if(j&&otStr[j.image]&&/done|failed|aborted/.test(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}
+ const j=r.job;if(j&&otStr[j.image]&&!/wait|queue|down|install/.test(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}
 // stream:end
 }
 function otDev(){
@@ -995,11 +995,11 @@ $("#otb").onclick=e=>{const f=$("#otf").files[0];if(f)busy(e.target,f.arrayBuffe
 // store:end
 // stream:start
 // No store: this tab serves the file while the device downloads.
-function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: it serves "+n+" image(s)";k.classList.toggle("hide",!n)}
+function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: serving "+n+" image(s)";k.classList.toggle("hide",!n)}
 const otOffer=(u,name)=>call("ota/stream/offer",{size:u.length,name,header:b64(u.subarray(0,256))}).then(o=>{otStr[o.session]=u;otKeep();return o});
 // After a reconnect: offer the images again (the hub keeps the sessions for a while).
 function otRe(){const old=otStr;otStr={};for(const k in old)otOffer(old[k],"image.ota").catch(()=>{});otKeep()}
-addEventListener("beforeunload",e=>{if(Object.keys(otStr).length){e.preventDefault();e.returnValue=""}});
+onbeforeunload=e=>{if(Object.keys(otStr).length)e.preventDefault()};
 $("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otOffer(otCut(b),f.name)).then(o=>call("ota/start",{device:d,image:o.session})).then(()=>toast("Started")).catch(x=>toast(x.message)))};
 // stream:end
 // ---- end of Updates tab ----
