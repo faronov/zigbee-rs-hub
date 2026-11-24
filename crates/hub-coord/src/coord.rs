@@ -17,8 +17,8 @@ pub enum CoordEvent {
     Session(Box<SessionEvent>),
     /// Network ownership change.
     Ownership(Box<NetworkOwnership>),
-    /// The NCP's network state changed.
-    NetworkState(NetState),
+    /// The NCP's network changed state.
+    NetworkState(NetChange),
     /// Joining opened or closed.
     PermitJoin {
         /// Seconds left (0 closed).
@@ -68,7 +68,8 @@ pub enum CoordEvent {
 /// NCP session change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
-    /// A session is ready for requests.
+    /// A session is ready for requests, and the backend has registered
+    /// the hub's endpoints ([`BackendConfig`]).
     Up {
         /// Session epoch: changes with every NCP restart (ZRHP: the peer
         /// cookie).
@@ -78,8 +79,10 @@ pub enum SessionEvent {
         /// What it can do.
         caps: Arc<Capabilities>,
     },
-    /// The session ended; every request in flight ended with
-    /// `Terminal::Unknown(CoordError::DeliveryUnknown)`.
+    /// The session ended. Requests in flight still get one terminal each:
+    /// backends that lose them across an NCP reset end them with
+    /// `Terminal::Unknown(CoordError::DeliveryUnknown)`; ZRHP holds them
+    /// and reports their real terminal after the next `Up`.
     Down,
     /// The NCP speaks no supported protocol version.
     Incompatible,
@@ -108,6 +111,20 @@ pub struct NcpInfo {
     pub baud: u32,
     /// RTS/CTS flow control on the host line.
     pub flow_control: bool,
+}
+
+/// A change of the NCP's network, as the NCP reports it (the API's
+/// `network_state` event). [`NetState`] is the state in a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetChange {
+    /// The network went down.
+    Down,
+    /// Forming or joining.
+    Forming,
+    /// The network is up.
+    Up,
+    /// Leaving the network.
+    Leaving,
 }
 
 /// The NCP's network state.

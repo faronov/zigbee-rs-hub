@@ -18,7 +18,7 @@ use crate::store::{EndpointRecord, Flash, MemFlash, Store};
 
 use crate::transport::{Line, pipe};
 
-const T: Duration = Duration::from_secs(10);
+pub(crate) const T: Duration = Duration::from_secs(10);
 
 fn rng() -> Rng {
     let n = Arc::new(AtomicU32::new(0x1234_5678));
@@ -30,7 +30,7 @@ fn rng() -> Rng {
     })
 }
 
-fn start(store: Store) -> (Hub, SimNcp) {
+pub(crate) fn start(store: Store) -> (Hub, SimNcp) {
     start_with(store, HubConfig::default())
 }
 

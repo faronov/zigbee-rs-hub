@@ -43,6 +43,14 @@ pub const CAUSE_MS: u64 = 10_000;
 /// Free heap a rule change needs (a hub without PSRAM; each rule takes
 /// about 1.2 KB, each trace with its waiting run as much).
 pub const MIN_FREE_HEAP: usize = 48 * 1024;
+/// Triggers of one rule deferred while its run waits for a request
+/// action (a few milliseconds); more are dropped (trace
+/// `deferred_overflow`).
+pub const MAX_DEFERRED: usize = 16;
+/// Deferred triggers of all rules together.
+const MAX_DEFERRED_ALL: usize = 64;
+/// `automations/run` answers of deferred manual runs kept for the app.
+const MAX_LATE: usize = 16;
 const MAX_CAUSES: usize = 64;
 const MAX_TICKETS: usize = 64;
 
@@ -80,8 +88,11 @@ pub trait World {
     /// or `pending`/`queued` with [`Automations::command_result`] for `key`
     /// to follow).
     fn command(&mut self, uid: &str, command: &str, params: &J) -> Result<(u64, &'static str), ApiError>;
-    /// Any other allowed API request (`rule::REQUEST_PREFIXES`).
-    fn request(&mut self, req: &J) -> Result<J, ApiError>;
+    /// Any other allowed API request (`rule::REQUEST_PREFIXES`): `(key,
+    /// result)`; no result yet when it follows from what the coordinator
+    /// still has to do: the run waits for [`Automations::request_result`]
+    /// for `key`.
+    fn request(&mut self, req: &J) -> Result<(u64, Option<J>), ApiError>;
 }
 
 #[derive(Debug, Default)]
@@ -99,6 +110,8 @@ struct Run {
     actions: Vec<Action>,
     pc: usize,
     wake: Option<u64>,
+    /// Waits for the result of its request action: `(key, action index)`.
+    waits: Option<(u64, usize)>,
     chain: Vec<String>,
     errors: u32,
 }
@@ -135,6 +148,20 @@ impl Trace {
     }
 }
 
+/// A trigger that came while a run of its rule waited for the result of a
+/// request action: it fires once that run goes on, as it would have after
+/// a run that finished in place. Its run ID is given at once.
+#[derive(Debug)]
+struct Deferred {
+    run: u32,
+    rule: String,
+    /// The trigger as text (a `Value` object takes half a kilobyte).
+    trigger: String,
+    chain: Vec<String>,
+    check: bool,
+    manual: bool,
+}
+
 /// The automations of a hub (see the module docs).
 #[derive(Debug, Default)]
 pub struct Automations {
@@ -151,6 +178,11 @@ pub struct Automations {
     avail: VecMap<String, bool>,
     minute: Option<i64>,
     started: bool,
+    /// Triggers of rules whose run waits for a request action.
+    deferred: Vec<Deferred>,
+    /// Deferred manual runs that fired (or were dropped): `(run, started,
+    /// rule)`, for their `automations/run` answer.
+    late: Vec<(u32, bool, String)>,
     /// Events for the `automations` topic.
     pub events: Vec<J>,
     /// Rule IDs to write to the store (or delete, when gone), sorted.
@@ -556,8 +588,59 @@ impl Automations {
     }
 
     /// Starts a run of rule `id` unless a guard stops it; returns the run
-    /// (0: none started). `check` evaluates the conditions.
+    /// (0: none started). `check` evaluates the conditions. While a run of
+    /// the rule waits for a request action, the trigger waits for it
+    /// ([`Self::pending`] tells such a run).
     fn fire(&mut self, id: &str, trigger: J, chain: Vec<String>, w: &mut dyn World, clk: &Clock, check: bool) -> u32 {
+        if !self.rules.contains_key(id) {
+            return 0;
+        }
+        if self.runs.iter().any(|r| r.rule == id && r.waits.is_some()) || self.deferred.iter().any(|d| d.rule == id) {
+            let mine = self.deferred.iter().filter(|d| d.rule == id).count();
+            if mine >= MAX_DEFERRED || self.deferred.len() >= MAX_DEFERRED_ALL {
+                self.skipped(id, trigger, chain, Vec::new(), "deferred_overflow", clk);
+                return 0;
+            }
+            let run = self.new_run();
+            let manual = trigger["type"] == "manual";
+            self.deferred.push(Deferred { run, rule: id.into(), trigger: trigger.to_string(), chain, check, manual });
+            return run;
+        }
+        self.start(id, trigger, chain, w, clk, check, None)
+    }
+
+    /// The deferred triggers of rule `rule`, in order, while none of its
+    /// runs waits for a request action.
+    fn fire_deferred(&mut self, rule: &str, w: &mut dyn World, clk: &Clock) {
+        while !self.runs.iter().any(|r| r.rule == rule && r.waits.is_some()) {
+            let Some(i) = self.deferred.iter().position(|d| d.rule == rule) else { break };
+            let d = self.deferred.remove(i);
+            let started = self.start(&d.rule, parse(&d.trigger), d.chain, w, clk, d.check, Some(d.run)) > 0;
+            if d.manual {
+                self.late_answer(d.run, started, d.rule);
+            }
+        }
+    }
+
+    fn late_answer(&mut self, run: u32, started: bool, rule: String) {
+        if self.late.len() >= MAX_LATE {
+            self.late.remove(0);
+        }
+        self.late.push((run, started, rule));
+    }
+
+    /// [`Self::fire`] without waiting; `run`: the ID a deferred trigger got.
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &mut self,
+        id: &str,
+        trigger: J,
+        chain: Vec<String>,
+        w: &mut dyn World,
+        clk: &Clock,
+        check: bool,
+        run: Option<u32>,
+    ) -> u32 {
         let Some((mode, per_min)) = self.rules.get(id).map(|r| (r.mode, r.max_per_min)) else { return 0 };
         let manual = trigger["type"] == "manual";
         let rt = self.rt.or_default(id);
@@ -590,7 +673,7 @@ impl Automations {
             return 0;
         }
         if mode == Mode::Restart {
-            self.cancel(id, None);
+            self.cancel_runs(id, None);
         }
         if self.runs.len() >= MAX_RUNS {
             self.skipped(id, trigger, chain, conds, "busy", clk);
@@ -599,7 +682,7 @@ impl Automations {
         let rt = self.rt.or_default(id);
         rt.in_window += 1;
         rt.runs += 1;
-        let run = self.new_run();
+        let run = run.unwrap_or_else(|| self.new_run());
         self.push_trace(Trace {
             run,
             rule: id.into(),
@@ -611,13 +694,24 @@ impl Automations {
             result: "running",
             count: 1,
         });
-        self.runs.push(Run { id: run, rule: id.into(), actions, pc: 0, wake: None, chain, errors: 0 });
+        self.runs.push(Run { id: run, rule: id.into(), actions, pc: 0, wake: None, waits: None, chain, errors: 0 });
         self.step(run, w, clk);
         run
     }
 
-    /// Ends the runs of rule `id` (except `keep`) as cancelled.
+    /// Ends the runs of rule `id` (except `keep`) as cancelled, and drops
+    /// its deferred triggers (the rule changed).
     fn cancel(&mut self, id: &str, keep: Option<u32>) {
+        let (dropped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred).into_iter().partition(|d| d.rule == id);
+        self.deferred = kept;
+        for d in dropped.into_iter().filter(|d| d.manual) {
+            self.late_answer(d.run, false, d.rule);
+        }
+        self.cancel_runs(id, keep);
+    }
+
+    /// Ends the runs of rule `id` (except `keep`) as cancelled.
+    fn cancel_runs(&mut self, id: &str, keep: Option<u32>) {
         let gone: Vec<u32> = self.runs.iter().filter(|r| r.rule == id && Some(r.id) != keep).map(|r| r.id).collect();
         self.runs.retain(|r| !gone.contains(&r.id));
         for run in gone {
@@ -648,6 +742,7 @@ impl Automations {
             let mut out = json!({"i": pc});
             let mut wait = None;
             let mut failed = None;
+            let mut waits = None;
             match &a {
                 Action::Command { uid, command, params } => {
                     out["type"] = "command".into();
@@ -668,7 +763,8 @@ impl Automations {
                 Action::Request(req) => {
                     out["type"] = "request".into();
                     match w.request(&parse(req)) {
-                        Ok(_) => out["result"] = "ok".into(),
+                        Ok((_, Some(_))) => out["result"] = "ok".into(),
+                        Ok((key, None)) => waits = Some(key),
                         Err(e) => failed = Some(e),
                     }
                 }
@@ -694,16 +790,13 @@ impl Automations {
                     }
                 }
             }
-            if let Some(e) = failed {
-                out["result"] = "error".into();
-                out["error"] = json!({"code": e.code, "message": e.message});
+            if let Some(key) = waits {
                 if let Some(r) = self.runs.iter_mut().find(|r| r.id == run) {
-                    r.errors += 1;
+                    r.waits = Some((key, pc));
                 }
+                return;
             }
-            if let Some(t) = self.traces.iter_mut().find(|t| t.run == run) {
-                t.actions.push((pc, out.to_string()));
-            }
+            self.action_done(run, pc, out, failed);
             if let Some(at) = wait {
                 if let Some(r) = self.runs.iter_mut().find(|r| r.id == run) {
                     r.wake = Some(at);
@@ -711,6 +804,65 @@ impl Automations {
                 return;
             }
         }
+    }
+
+    /// The action's trace entry `out`, with its error.
+    fn action_done(&mut self, run: u32, pc: usize, mut out: J, failed: Option<ApiError>) {
+        if let Some(e) = failed {
+            out["result"] = "error".into();
+            out["error"] = json!({"code": e.code, "message": e.message});
+            if let Some(r) = self.runs.iter_mut().find(|r| r.id == run) {
+                r.errors += 1;
+            }
+        }
+        if let Some(t) = self.traces.iter_mut().find(|t| t.run == run) {
+            t.actions.push((pc, out.to_string()));
+        }
+    }
+
+    /// The result of a request action a run waits for ([`World::request`]):
+    /// recorded, the run goes on, then the triggers of its rule that came
+    /// meanwhile fire.
+    pub fn request_result(&mut self, key: u64, result: Result<J, ApiError>, w: &mut dyn World, clk: &Clock) {
+        let Some(r) = self.runs.iter_mut().find(|r| r.waits.is_some_and(|(k, _)| k == key)) else { return };
+        let Some((_, pc)) = r.waits.take() else { return };
+        let (run, rule) = (r.id, r.rule.clone());
+        let mut out = json!({"i": pc, "type": "request"});
+        let failed = match result {
+            Ok(_) => {
+                out["result"] = "ok".into();
+                None
+            }
+            Err(e) => Some(e),
+        };
+        self.action_done(run, pc, out, failed);
+        self.step(run, w, clk);
+        self.fire_deferred(&rule, w, clk);
+    }
+
+    /// Keys of the request actions runs wait for.
+    pub fn waiting_requests(&self) -> Vec<u64> {
+        self.runs.iter().filter_map(|r| r.waits.map(|(k, _)| k)).collect()
+    }
+
+    /// Whether run `run` waits for a request action, or for a run of its
+    /// rule that does (a deferred trigger).
+    pub fn pending(&self, run: u32) -> bool {
+        self.runs.iter().any(|r| r.id == run && r.waits.is_some()) || self.deferred.iter().any(|d| d.run == run)
+    }
+
+    /// The `automations/run` result of run `run` once it is not
+    /// [`pending`](Self::pending) any more: as the request answers at once
+    /// (`run` null and the rule's last trace when a guard stopped it).
+    pub fn run_result(&mut self, run: u32) -> J {
+        if let Some(i) = self.late.iter().position(|(r, ..)| *r == run)
+            && let (_, false, rule) = self.late.remove(i)
+        {
+            let t = self.traces.iter().rev().find(|t| t.rule == rule).map_or(J::Null, Trace::json);
+            return json!({"run": null, "trace": t});
+        }
+        let t = self.traces.iter().rev().find(|t| t.run == run).map_or(J::Null, Trace::json);
+        json!({"run": run, "trace": t})
     }
 
     /// Changes of `uid` in the next [`CAUSE_MS`] count as caused by rule

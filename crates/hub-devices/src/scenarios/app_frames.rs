@@ -5,7 +5,7 @@
 use super::*;
 use crate::hub::{AppOutcome, zigbee_id};
 use crate::testutil::sim::{Sim, SimDevice};
-use crate::transport::{CoordError, Request, Terminal, zrhp_not_delivered};
+use crate::transport::{CoordError, Request, Terminal};
 use crate::zcl::{Direction, FrameType, ZclFrame, ZclHeader};
 use crate::zdo::LogicalType;
 
@@ -41,6 +41,11 @@ fn frame(direction: Direction, tsn: u8, cmd: u8, payload: Vec<u8>) -> ZclFrame {
 /// An Image Block Response (status ABORT) of the server.
 fn block_rsp(tsn: u8) -> ZclFrame {
     frame(Direction::ServerToClient, tsn, 0x05, vec![0x95])
+}
+
+/// A delivery failure as a backend reports it.
+fn not_delivered() -> Terminal {
+    Terminal::NotDelivered(CoordError::Other("no APS ACK".into()))
 }
 
 /// The OTA frames submitted and not completed, by request.
@@ -92,7 +97,7 @@ fn app_frames_are_requests_whose_outcomes_go_to_the_app() {
         .unwrap()
         .expect("sent");
     assert_eq!(open_ota(&hub), [a, b]);
-    hub.on_outcome(b, zrhp_not_delivered(0xA7, false).into(), T0 + 1100);
+    hub.on_outcome(b, not_delivered().into(), T0 + 1100);
     hub.on_outcome(a, Terminal::Delivered.into(), T0 + 1100);
     hub.tick(T0 + 1100);
     let outcome = |id, terminal| AppOutcome {
@@ -103,10 +108,7 @@ fn app_frames_are_requests_whose_outcomes_go_to_the_app() {
     };
     assert_eq!(
         hub.take_app_outcomes(),
-        [
-            outcome(b, zrhp_not_delivered(0xA7, false)),
-            outcome(a, Terminal::Delivered)
-        ]
+        [outcome(b, not_delivered()), outcome(a, Terminal::Delivered)]
     );
     assert_eq!(open_ota(&hub), [a, b], "nothing re-sent");
     hub.transport.open.clear();
