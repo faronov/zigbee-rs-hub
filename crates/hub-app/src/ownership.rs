@@ -45,6 +45,7 @@ impl Runner {
         };
         match r {
             Ok(fields) => {
+                self.automations.read_only = false;
                 let reason = if adopt { "registry_adopted" } else { "registry_cleared" };
                 self.engine.network_event(json!({"topic": "network_updated", "reason": reason}));
                 let registry = registry_json(&self.ncp.registry());
@@ -69,10 +70,13 @@ impl Runner {
         Some(ApiError::new("registry_read_only", why))
     }
 
-    /// Records that became readable after the start are loaded (every
-    /// tick, before the registry is written).
+    /// Every tick, before the registry is written: records that became
+    /// readable after the start are loaded, and the rules learn whether
+    /// they can be stored (their enable and disable actions).
     pub(super) fn check_registry(&mut self, now: Millis) {
-        if !self.registry.loaded && !matches!(self.ncp.registry(), RegistryState::Foreign { .. }) {
+        let state = self.ncp.registry();
+        self.automations.read_only = !matches!(state, RegistryState::Untagged | RegistryState::Owned);
+        if !self.registry.loaded && !matches!(state, RegistryState::Foreign { .. }) {
             self.load_network(now);
         }
     }

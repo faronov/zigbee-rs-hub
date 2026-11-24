@@ -407,6 +407,20 @@ fn enable_disable_actions_and_start() {
 }
 
 #[test]
+fn enable_disable_actions_fail_while_rules_cannot_be_stored() {
+    let mut r = Rig::new();
+    r.create(json!({"id": "x", "actions": [{"type": "disable", "automation": "y"}, cmd("a", "turn_on")]}));
+    r.create(json!({"id": "y", "actions": [cmd("b", "turn_on")]}));
+    r.a.dirty.clear();
+    r.a.read_only = true;
+    let out = r.req("automations/run", json!({"automation": "x"})).unwrap();
+    assert_eq!(out["trace"]["actions"][0]["error"]["code"], "registry_read_only", "{out}");
+    assert!(r.a.rule("y").unwrap().enabled);
+    assert!(r.a.dirty.is_empty());
+    assert_eq!(r.cmds(), [("a", "turn_on")], "the run goes on");
+}
+
+#[test]
 fn errors_and_late_command_results_reach_the_trace() {
     let mut r = Rig::new();
     r.w.deferred = true;
