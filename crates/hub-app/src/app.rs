@@ -911,10 +911,12 @@ impl Runner {
                 self.engine.transport.nwk.insert(ieee, nwk);
                 self.engine.on_device_joined(ieee, nwk, now);
             }
-            // Logged: a device stays until it is removed (`devices/remove`),
-            // as with ZRHP, which reports no leaves.
+            // The device stays (whether it rejoins is not said), unavailable
+            // with the reason `left` until it is heard again; removal stays
+            // the operator's (`devices/remove`).
             CoordEvent::DeviceLeft { ieee, nwk, rejoin } => {
-                info!("app: device {ieee:016x} (0x{nwk:04X}) left, rejoin {rejoin:?}")
+                info!("app: device {ieee:016x} (0x{nwk:04X}) left, rejoin {rejoin:?}");
+                self.engine.on_device_left(ieee);
             }
             CoordEvent::Gp(e) => self.engine.on_gp_event(*e, now),
             CoordEvent::NetworkState(c) => {

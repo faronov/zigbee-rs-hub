@@ -470,6 +470,7 @@ State message (WebSocket, 14.3):
 | GP sensor without a known interval | Unavailable after 25 h without an accepted GPDF (D19; FlowerX GP and BGT1 GP today). |
 | Any device, per definition | `device.availability.timeout_s` replaces the computed timeout; `gp.report_interval_s` sets 3 × that for GP sensors. |
 | GP switch or energy harvesting | Never unavailable. `last_seen` only. |
+| A Zigbee device the coordinator reports as left (EZSP's trust center) | Unavailable at once, device record `unavailable_reason: "left"`, no checks; kept (whether it rejoins is not said) until its next frame or rejoin, or `devices/remove`. |
 
 `available` is per device; HA marks all its entities. `last_seen`, `lqi` and
 `rssi` (from `EVT_APS_DATA_INDICATION` / `EVT_GP_FRAME`) are device fields and

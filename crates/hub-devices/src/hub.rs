@@ -990,7 +990,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                 *n = nwk;
             }
             d.awake_until = now + AWAKE_AFTER_JOIN_MS;
+            let left = d.left;
             self.nwk_index.insert(nwk, id.clone());
+            // A device that had left is back.
+            if left {
+                self.seen(&id, None, None, now);
+            }
             self.on_rejoin(&id, now);
             return;
         }
@@ -1533,6 +1538,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             d.rssi = rssi;
         }
         d.available = true;
+        d.left = false;
         d.check = None;
         let mut fields = vec![
             (
@@ -2690,6 +2696,22 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .find(|e| e.in_clusters.contains(&cl::BASIC))
                 .map_or(1, |e| e.ep);
         self.read_attrs(id, ep, cl::BASIC, None, &[0x0000], Purpose::Check, now);
+    }
+
+    /// The coordinator reports that a device left the network (whether it
+    /// rejoins is not said): it stays, unavailable with the reason `left`
+    /// (`device_updated`, its entities' states), until its next frame or
+    /// rejoin. Unknown devices are ignored.
+    pub fn on_device_left(&mut self, ieee: u64) {
+        let id = zigbee_id(ieee);
+        let Some(d) = self.devices.get_mut(&id) else {
+            return;
+        };
+        if d.left {
+            return;
+        }
+        d.left = true;
+        self.set_unavailable(&id);
     }
 
     fn set_unavailable(&mut self, id: &str) {
