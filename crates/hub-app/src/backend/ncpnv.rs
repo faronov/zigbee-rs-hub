@@ -158,7 +158,9 @@ impl KvStore for NcpNvRecords {
     /// Network-scoped records behind the gate of [`Records::registry`].
     fn with_kv(&self, f: &mut dyn FnMut(&mut dyn Kv)) {
         let mut store = self.store();
-        match gate(self.state().registry) {
+        // The state is not held while `f` runs.
+        let g = gate(self.state().registry);
+        match g {
             Gate::Open => f(&mut *store),
             g => f(&mut Guarded::new(&mut *store, g)),
         }

@@ -888,6 +888,7 @@ fn main() -> ExitCode {
     let sim_devices = args.flag("--sim-devices");
     let sim_z2m_devices = args.flag("--sim-z2m-devices");
     let sim_ota = args.flag("--sim-ota");
+    let _ = OTA_STORE.set(args.value("--ota-store"));
     match args.value("--backend").as_deref() {
         None | Some("zrhp") => {}
         Some("ezsp") => {
@@ -908,7 +909,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let _ = OTA_STORE.set(args.value("--ota-store"));
     let serial = args.value("--serial");
     let baud = args
         .value("--baud")
