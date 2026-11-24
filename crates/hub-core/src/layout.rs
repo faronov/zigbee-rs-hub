@@ -12,10 +12,9 @@
 //! flash size is a fatal configuration error; any other table (the stock
 //! Thread BR table during bring-up) runs with the host store in RAM.
 //!
-//! The SONOFF Dongle-M's 16 MB product table
-//! (`firmware/donglem/partitions-16mb.csv`: 4 MiB slots, 2 MiB `hubdata`)
-//! is a [`Layout::Production`] with the 8 MB `hubdata` map; its stock
-//! table (no `hubdata`) is foreign.
+//! The SONOFF Dongle-M keeps SONOFF's stock table (no `hubdata`, so
+//! [`Verdict::Foreign`]); its hub data go into the stock `files` partition
+//! once the hub has claimed it ([`dongle_files`]).
 
 /// App partition subtypes.
 pub mod subtype {
@@ -155,6 +154,77 @@ impl HubdataMap {
     }
 }
 
+/// The SONOFF Dongle-M's stock `files` partition (SONOFF's LittleFS:
+/// configuration, MG24 update staging; 3 712 KiB at 0xC60000) as the
+/// hub's data region. The stock partition table never changes (users
+/// install the hub through SONOFF's web console into `ota_1`), so this is
+/// the only space the hub can own. It does so only through an explicit
+/// claim (docs/dongle-max.md): the claim keeps a copy of SONOFF's LittleFS
+/// blocks in [`STOCK_COPY`] for the way back to the stock firmware and
+/// replaces the LittleFS superblock pair (blocks 0 and 1) with
+/// [`CLAIM`]. Until then the region is only read ([`classify`]).
+pub mod dongle_files {
+    use super::Area;
+
+    /// Partition label.
+    pub const LABEL: &str = "files";
+    /// Partition size.
+    pub const SIZE: u32 = 0x3A_0000;
+    /// Claim record, two sectors written alternately (where LittleFS keeps
+    /// its superblock pair).
+    pub const CLAIM: Area = Area { offset: 0, size: 0x2000 };
+    /// `hubdata` window: the 8 MB map ([`super::HubdataMap::for_size`] of
+    /// [`super::PRODUCTION_HUBDATA`]).
+    pub const HUBDATA: Area = Area { offset: 0x2000, size: super::PRODUCTION_HUBDATA };
+    /// Zigbee device OTA images (the store of docs/ota.md); larger images
+    /// are streamed from a client.
+    pub const OTA_STORE: Area = Area { offset: 0x1E_2000, size: 0x10_0000 };
+    /// MG24 firmware image, reserved for the Gecko bootloader updater.
+    pub const RADIO: Area = Area { offset: 0x2E_2000, size: 0xA_0000 };
+    /// SONOFF's LittleFS blocks in use at the claim (an index sector and up
+    /// to 29 blocks), written back by "return to stock". The claim requires
+    /// these blocks to be free in SONOFF's file system.
+    pub const STOCK_COPY: Area = Area { offset: 0x38_2000, size: 0x1_E000 };
+    /// Every area, in order.
+    pub const AREAS: [(&str, Area); 5] =
+        [("claim", CLAIM), ("hubdata", HUBDATA), ("ota_store", OTA_STORE), ("radio", RADIO), ("stock_copy", STOCK_COPY)];
+
+    /// First bytes of a claim record sector.
+    pub const CLAIM_MAGIC: [u8; 4] = *b"ZRHF";
+    /// LittleFS v2 superblock: revision count (4 bytes), tag (4 bytes),
+    /// then the name "littlefs".
+    pub const LITTLEFS_MAGIC: [u8; 8] = *b"littlefs";
+
+    /// What the region holds, from the first bytes of its blocks 0 and 1.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Content {
+        /// Erased.
+        Blank,
+        /// SONOFF's LittleFS (the stock firmware's data).
+        LittleFs,
+        /// Claimed by the hub.
+        Claimed,
+        /// Anything else: never claimed without a backup.
+        Unknown,
+    }
+
+    /// Classify from the first 16 or more bytes of blocks 0 and 1.
+    pub fn classify(block0: &[u8], block1: &[u8]) -> Content {
+        let claim = |b: &[u8]| b.starts_with(&CLAIM_MAGIC);
+        let lfs = |b: &[u8]| b.get(8..16) == Some(&LITTLEFS_MAGIC[..]);
+        let blank = |b: &[u8]| b.len() >= 16 && b.iter().all(|&x| x == 0xFF);
+        if claim(block0) || claim(block1) {
+            Content::Claimed
+        } else if lfs(block0) || lfs(block1) {
+            Content::LittleFs
+        } else if blank(block0) && blank(block1) {
+            Content::Blank
+        } else {
+            Content::Unknown
+        }
+    }
+}
+
 /// Result of the boot check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -231,15 +301,7 @@ mod tests {
         app("ota_1", subtype::OTA_1, 0x1B0000, 0x190000),
         data("rcp_fw", 0x340000, 0x7D000),
     ];
-    // firmware/donglem/partitions-16mb.csv (product) and partitions.csv (stock).
-    const DONGLE_PRODUCT: [Part<'static>; 6] = [
-        data("nvs", 0x9000, 0x14000),
-        app("ota_0", subtype::OTA_0, 0x30000, 0x400000),
-        app("ota_1", subtype::OTA_1, 0x430000, 0x400000),
-        data("hubdata", 0x830000, 0x200000),
-        data("otastore", 0xA30000, 0x400000),
-        data("radio", 0xE30000, 0x1D0000),
-    ];
+    // firmware/donglem/partitions.csv: SONOFF's stock table.
     const DONGLE_STOCK: [Part<'static>; 4] = [
         data("nvs", 0x1C000, 0x40000),
         app("ota_0", subtype::OTA_0, 0x60000, 0x600000),
@@ -281,11 +343,39 @@ mod tests {
     }
 
     #[test]
-    fn dongle_m_product_table_is_a_production_layout_and_the_stock_one_foreign() {
-        let mb16 = 16 << 20;
-        assert_eq!(check(mb16, &DONGLE_PRODUCT), Verdict::Ok(Layout::Production));
-        assert_eq!(HubdataMap::for_size(0x200000), HubdataMap::for_size(PRODUCTION_HUBDATA));
-        assert_eq!(check(MB8, &DONGLE_PRODUCT), Verdict::Fatal(Mismatch::BeyondFlash));
-        assert_eq!(check(mb16, &DONGLE_STOCK), Verdict::Foreign);
+    fn dongle_m_stock_table_is_foreign_and_its_files_region_holds_the_hub_areas() {
+        assert_eq!(check(16 << 20, &DONGLE_STOCK), Verdict::Foreign);
+        let files = DONGLE_STOCK.iter().find(|p| p.label == dongle_files::LABEL).unwrap();
+        assert_eq!(files.size, dongle_files::SIZE);
+        let mut at = 0;
+        for (name, a) in dongle_files::AREAS {
+            assert_eq!(a.offset, at, "{name} follows the previous area");
+            assert_eq!((a.offset % 4096, a.size % 4096), (0, 0), "{name}");
+            at = a.end();
+        }
+        assert_eq!(at, dongle_files::SIZE, "the areas fill the region");
+        assert_eq!(HubdataMap::for_size(dongle_files::HUBDATA.size), HubdataMap::for_size(PRODUCTION_HUBDATA));
+        assert!(HubdataMap::for_size(dongle_files::HUBDATA.size).is_some());
+    }
+
+    // The stock copy holds an index sector and 29 LittleFS blocks.
+    const _: () = assert!(dongle_files::STOCK_COPY.size >= 30 * 4096);
+
+    #[test]
+    fn dongle_files_content_is_classified_from_the_first_blocks() {
+        use dongle_files::{Content, classify};
+        // A LittleFS superblock: revision count, tag, "littlefs" (block 1 may be the newer one).
+        let mut lfs = [0xFFu8; 32];
+        lfs[..8].copy_from_slice(&[1, 0, 0, 0, 0xF0, 0x0F, 0xFF, 0xF7]);
+        lfs[8..16].copy_from_slice(b"littlefs");
+        let blank = [0xFFu8; 32];
+        let mut claimed = [0xFFu8; 32];
+        claimed[..4].copy_from_slice(b"ZRHF");
+        assert_eq!(classify(&lfs, &lfs), Content::LittleFs);
+        assert_eq!(classify(&blank, &lfs), Content::LittleFs);
+        assert_eq!(classify(&blank, &blank), Content::Blank);
+        assert_eq!(classify(&claimed, &lfs), Content::Claimed);
+        assert_eq!(classify(&[0u8; 32], &blank), Content::Unknown);
+        assert_eq!(classify(&blank[..8], &blank[..8]), Content::Unknown, "too short to call blank");
     }
 }

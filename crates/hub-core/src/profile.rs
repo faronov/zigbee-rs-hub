@@ -282,11 +282,11 @@ pub enum FlashLayout {
     Dev4,
     /// 8 MB production layout (`firmware/hub/partitions-8mb.csv`).
     Production8,
-    /// 16 MB product layout of the Dongle-M
-    /// (`firmware/donglem/partitions-16mb.csv`): two 4 MiB app slots,
-    /// `hubdata`, a Zigbee OTA image store and the NCP image banks. The
-    /// bring-up image also runs on the stock table (`partitions.csv`).
-    Production16,
+    /// SONOFF's stock 16 MB table of the Dongle-M, never changed
+    /// (`firmware/donglem/partitions.csv`): the stock application in
+    /// `ota_0`, the hub in `ota_1` (6 MiB each); the hub's data go into
+    /// the `files` region once claimed ([`dongle_files`](crate::layout::dongle_files)).
+    DongleStock16,
 }
 
 /// Memory of the host module.
@@ -417,7 +417,7 @@ pub const DONGLE_M: BoardProfile = BoardProfile {
     led: Led::Rgb { rgb: [Output::high(4), Output::high(14), Output::high(2)] },
     button: Some(Input { gpio: 34, active_low: true, pull_up: false }),
     console: Console::Uart0,
-    memory: Memory { flash: 16 * MIB, psram: 2 * MIB, layout: FlashLayout::Production16 },
+    memory: Memory { flash: 16 * MIB, psram: 2 * MIB, layout: FlashLayout::DongleStock16 },
     pta: false,
 };
 
