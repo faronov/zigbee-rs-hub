@@ -18,6 +18,7 @@
 mod alloc;
 #[cfg(feature = "app")]
 mod catalog;
+mod cpanic;
 mod cpu;
 mod esp;
 mod mode;
@@ -210,6 +211,9 @@ fn extension(words: &[&str]) -> Option<String> {
             }
             if let Some(p) = last_panic() {
                 s += &format!("previous boot panicked: {p}\r\n");
+            }
+            if let Some(p) = cpanic::last() {
+                s += &format!("last ESP-IDF panic, {p}\r\n");
             }
             s += &alloc_failures();
             if let Some(hub) = hub {
@@ -692,6 +696,7 @@ fn main() {
     load_prev_tasks();
     let _ = last_panic();
     record_panics();
+    cpanic::count_boot();
     record_alloc_failures();
     info!("tbr-hub {} starting", env!("CARGO_PKG_VERSION"));
     resources::log();

@@ -523,7 +523,7 @@ so the bridge hands the PHY back to the USJ explicitly:
 |---|---|
 | console `s3 usj` / `s3 download`, or the console port set to 1200 baud | PHY → USJ, the app keeps running with the bridge off (verified) |
 | USB not enumerated within 20 s of boot | PHY → USJ |
-| boot after a panic or watchdog reset | persisted hub mode: the hub restarts (`info` shows the panic and the crash streak); bridge mode, or a fourth crash in a row each within 10 min of boot: safe mode, TinyUSB never starts, PHY → USJ |
+| boot after a panic or watchdog reset | persisted hub mode: the hub restarts (`info` shows the panic, the last ESP-IDF panic with its PC, caller, task and how many boots ago (RTC memory; the coredump can stay empty), and the crash streak); bridge mode, or a fourth crash in a row each within 10 min of boot: safe mode, TinyUSB never starts, PHY → USJ |
 | power cycle, or S3 BOOT held + RESET pressed | cold boot / ROM download on USJ |
 
 The hand-back makes the host see a real detach and a new attach. It drops the
