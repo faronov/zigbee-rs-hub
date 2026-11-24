@@ -915,6 +915,17 @@ fn coordinator_boundary_scenario() {
             // The build's feature (a workspace build with hubctl has it).
             assert_eq!(v["advanced"], cfg!(feature = "advanced"), "{v}");
             v["advanced"] = "<feature>".into();
+            // Zigbee OTA (feature `ota`, the 8 MB images) likewise.
+            assert_eq!(v.get("ota").is_some(), cfg!(feature = "ota"), "{v}");
+            #[cfg(feature = "ota")]
+            {
+                let store = cfg!(feature = "ota-store");
+                assert_eq!(v["ota"]["store"], store, "{v}");
+                assert_eq!(v["ota"]["stream"], true, "{v}");
+                assert_eq!(v["ota"]["max_streams"], 4, "{v}");
+                assert_eq!(v["ota"].get("capacity").is_some(), store, "{v}");
+            }
+            v["ota"] = "<feature>".into();
         }
         goldens.push(baseline::check(
             &format!("api/{name}.json"),

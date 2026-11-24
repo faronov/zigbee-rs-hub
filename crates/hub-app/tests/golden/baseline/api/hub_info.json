@@ -35,5 +35,6 @@
   "name": "zigbee-rs-hub",
   "ncp_board": "sim",
   "ncp_product": "sim-ncp",
+  "ota": "<feature>",
   "seq": "<volatile>"
 }
