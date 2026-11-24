@@ -223,6 +223,9 @@ pub struct EzspOptions {
     pub retry_max: Duration,
     /// Stack of the worker thread.
     pub worker_stack: usize,
+    /// The TX power the operator set in an earlier run (the hub keeps it),
+    /// applied in every session until it is changed.
+    pub tx_power: Option<i8>,
 }
 
 impl Default for EzspOptions {
@@ -240,6 +243,7 @@ impl Default for EzspOptions {
             retry_min: Duration::from_secs(1),
             retry_max: Duration::from_secs(30),
             worker_stack: 16 * 1024,
+            tx_power: None,
         }
     }
 }

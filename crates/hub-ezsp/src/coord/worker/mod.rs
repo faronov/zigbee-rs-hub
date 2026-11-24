@@ -122,7 +122,7 @@ pub(crate) struct Shared {
     queued: AtomicUsize,
     high_water: AtomicUsize,
     cancels: Mutex<Cancels>,
-    status: Mutex<CoordStatus>,
+    pub(crate) status: Mutex<CoordStatus>,
     pub(crate) tx_power: Mutex<Option<i8>>,
     pub(crate) stopped: AtomicBool,
 }
@@ -171,7 +171,7 @@ impl EzspCoordinator {
             high_water: AtomicUsize::new(0),
             cancels: Mutex::default(),
             status: Mutex::new(initial_status()),
-            tx_power: Mutex::new(None),
+            tx_power: Mutex::new(opts.tx_power),
             stopped: AtomicBool::new(false),
         });
         let stack = opts.worker_stack;
@@ -319,6 +319,10 @@ impl Coordinator for EzspCoordinator {
     fn status(&self) -> CoordStatus {
         self.shared.status.lock().unwrap().clone()
     }
+
+    fn permit_join_s(&self) -> u32 {
+        self.shared.status.lock().unwrap().permit_join_s
+    }
 }
 
 impl Drop for EzspCoordinator {
@@ -446,6 +450,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         events: Arc<EventQueue>,
     ) -> Self {
         let backoff_ms = opts.retry_min.as_millis() as u64;
+        let tx_power = opts.tx_power;
         Self {
             host,
             rx,
@@ -481,7 +486,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             nwk_cache: VecDeque::new(),
             zdo_tsn: 0,
             out: VecDeque::new(),
-            tx_power: None,
+            tx_power,
             scan: None,
             channel_changed: false,
             refresh_pending: false,

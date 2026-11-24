@@ -1,12 +1,14 @@
 //! [`NetworkAdmin`] on the host core: each method is the [`Hub`] call (with
 //! its call options) the maintenance API made directly before.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hub_coord::{
-    BackendKind, BackupSink, Beacon, ChannelChange, Child, Code, CoordError, DiagCounter,
-    Diagnostics, EnergyChannel, FormParams, FrameCounters, NcpStatus, Neighbor, NetworkAdmin,
-    NetworkParams, RestoreBlob, RestoreEncoder, RestoreOptions, RestoreReport, Route, TablesRead,
+    BackendKind, BackupSink, Beacon, ChannelChange, Child, Code, CoordError, CoordStatus,
+    DiagCounter, Diagnostics, EnergyChannel, FormParams, FrameCounters, NcpStatus, Neighbor,
+    NetworkAdmin, NetworkParams, RestoreBlob, RestoreEncoder, RestoreOptions, RestoreReport, Route,
+    TablesRead,
 };
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication};
 use zigbee_zrhp::msg::ids;
@@ -14,7 +16,8 @@ use zigbee_zrhp::msg::system::caps;
 use zigbee_zrhp::types::Status;
 
 use super::backup::{RecordEncoder, export_items};
-use super::error::coord_error;
+use super::error::{coord_error, legacy_zb_status, zb_status_text};
+use super::status::{self, Facts};
 use crate::driver::Error;
 use crate::lifecycle::{FormRequest, Hub};
 
@@ -25,12 +28,16 @@ use crate::lifecycle::{FormRequest, Hub};
 #[derive(Clone)]
 pub struct ZrhpAdmin {
     hub: Hub,
+    facts: Arc<Facts>,
 }
 
 impl ZrhpAdmin {
     /// Administration through `hub`.
     pub fn new(hub: Hub) -> Self {
-        Self { hub }
+        Self {
+            hub,
+            facts: Arc::default(),
+        }
     }
 }
 
@@ -118,6 +125,10 @@ fn counter((id, value): (u16, u32)) -> DiagCounter {
 }
 
 impl NetworkAdmin for ZrhpAdmin {
+    fn status(&self) -> Option<CoordStatus> {
+        Some(status::status(&self.hub, &self.facts))
+    }
+
     fn form(&self, p: FormParams) -> Result<NetworkParams, CoordError> {
         let req = FormRequest {
             channel_mask: p.channel_mask,
@@ -277,10 +288,13 @@ impl NetworkAdmin for ZrhpAdmin {
             e => coord_error(e),
         })?;
         if confirm.status != 0 {
+            // Named in the numbering of the NCP image in use.
+            let legacy =
+                (self.hub.client().session()).is_some_and(|s| legacy_zb_status(&s.negotiated.fw));
             let code = Code {
                 backend: BackendKind::Zrhp,
                 value: u16::from(confirm.zb_status),
-                text: None,
+                text: zb_status_text(confirm.zb_status, legacy),
             };
             return Err(CoordError::NoAck(code));
         }
