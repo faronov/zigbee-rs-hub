@@ -1194,11 +1194,11 @@ simulated NCP, Home Assistant end to end with `hubctl --sim --sim-ota`.
 Hardware: streaming ran on the octal 4 MB lab board (old branch, results
 in [docs/ota.md](docs/ota.md#hardware-results)); not yet: a capture of its
 one unexplained panic with a baseline soak, the 8 MB store, a device OTA
-end to end on this branch. App image vs main (d87c223, quad PSRAM, built
-the same way): 8 MB (`mqtt,advanced,ota-store`) 2 933 216 B, +139 952 B,
-93.2 % of the 3 MiB slot; 4 MB (`mqtt`, no Zigbee OTA) 2 774 672 B,
-+1 984 B (generic plumbing kept in every image: app clusters, events
-serialized once), 92.0 % of the 2 944 KiB slot; no static RAM. Open: hub self-OTA must take the
+end to end on this branch. App image vs main (95bbd85, quad PSRAM, CI):
+8 MB (`mqtt,advanced,ota-store`) 3 018 768 B, +135 568 B, 96.0 % of the
+3 MiB slot; 4 MB (`mqtt`, no Zigbee OTA) 2 868 432 B, +4 896 B (generic
+plumbing kept in every image: app clusters and their outcomes, events
+serialized once), 95.1 % of the 2 944 KiB slot; no static RAM. Open: hub self-OTA must take the
 app-slot lock. zigbee-rs devices advertise OTA manufacturer code 0x6D6B
 (devices on older firmware: one transition file with 0x1234).
 
