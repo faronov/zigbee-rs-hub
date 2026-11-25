@@ -5,12 +5,15 @@
 # __atomic_* functions (-C target-feature=-s32c1i,
 # firmware/*/.cargo/config.toml). Only each function's own bytes are
 # scanned (FUNC symbols, address and size from `readelf -sW`): literal
-# pools and other data in .text lie outside them, and decoded as
-# instructions they gave false hits whenever the code layout moved. Inside
-# a Rust function — its line-table file is *.rs (`objdump -d -l`) or its
-# name is Rust-mangled (_ZN…17h<hash>E, _R…) — any S32C1I or RSR/WSR/XSR
-# SCOMPARE1 fails (exit 1); ESP-IDF's C code and blobs may use them, and
-# none found in any function at all means the scan does not work (exit 2).
+# pools and other data in .text mostly lie outside them, and decoded as
+# instructions they gave false hits whenever the code layout moved. A match
+# that overlaps a literal word (the target of an L32R; a real instruction
+# never is one) is data as well, also inside a function's range: listed,
+# not counted. Inside a Rust function — its line-table file is *.rs
+# (`objdump -d -l`) or its name is Rust-mangled (_ZN…17h<hash>E, _R…) —
+# any other S32C1I or RSR/WSR/XSR SCOMPARE1 fails (exit 1); ESP-IDF's C
+# code and blobs may use them, and none found in any function at all means
+# the scan does not work (exit 2).
 # The positive control (tools/s32c1i-control, CI): a Rust fetch_add and
 # compare_exchange built with S32C1I must fail the check.
 #   tools/check-s32c1i.sh <xtensa objdump> <elf or object>
@@ -34,6 +37,8 @@ re="${READELF:-${od%objdump}readelf}"
     }
     return v
   }
+  # The 4-byte word holding address a, as an array key.
+  function word(a) { return sprintf("%.0f", a - a % 4) }
   $1 == "S" && NF == 3 { size[hex($2)] = ($3 ~ /^0x/) ? hex($3) : $3 + 0; next }
   # A symbol: a function starts (its end from its size); a label inside the
   # current function keeps it; anything else is not code of a function.
@@ -45,15 +50,25 @@ re="${READELF:-${od%objdump}readelf}"
   }
   /^\/.*:[0-9]+/ { src = $1; next }
   /^ *[0-9a-f]+:\t/ {
+    # Literal words: L32R targets (an L32R loads from below itself, so its
+    # pool comes first: matches are classified at the end).
+    if (match($0, /\tl32r\t[a-z0-9]+, [0-9a-f]+/)) { t = substr($0, RSTART, RLENGTH); sub(/.*, /, "", t); lit[word(hex(t))] = 1 }
     if (!/\ts32c1i\t|\t[rwx]sr\.scompare1\t/) next
     if (end < 0 || hex($1) >= end) { data++; next }
-    n++
-    if (src ~ /\.rs:[0-9]+$/ || fn ~ /^<_ZN.*17h[0-9a-f]+E>:$/ || fn ~ /^<_R/) {
-      r++; print "S32C1I/SCOMPARE1 in Rust: " fn " " src " " $0
-    }
+    m++; at[m] = hex($1)
+    rust[m] = (src ~ /\.rs:[0-9]+$/) || (fn ~ /^<_ZN.*17h[0-9a-f]+E>:$/) || (fn ~ /^<_R/)
+    what[m] = fn " " src " " $0
   }
   END {
-    printf "S32C1I/SCOMPARE1 in functions: %d (Rust: %d); outside functions (data): %d\n", n, r, data
+    # The 3-byte match at a overlaps the words of a and a + 2.
+    for (i = 1; i <= m; i++) {
+      if ((word(at[i]) in lit) || (word(at[i] + 2) in lit)) {
+        l++; if (rust[i]) print "literal word (an L32R target), data: " what[i]
+      } else {
+        n++; if (rust[i]) { r++; print "S32C1I/SCOMPARE1 in Rust: " what[i] }
+      }
+    }
+    printf "S32C1I/SCOMPARE1 in functions: %d (Rust: %d); literal words in functions: %d; outside functions (data): %d\n", n, r, l, data
     if (n == 0) { print "error: none in any function, the scan does not work" > "/dev/stderr"; exit 2 }
     exit (r > 0)
   }'
