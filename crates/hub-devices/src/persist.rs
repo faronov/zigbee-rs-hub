@@ -155,6 +155,15 @@ pub struct DeviceSnapshot {
         deserialize_with = "report_snaps"
     )]
     pub reporting: Vec<ReportSnap>,
+    /// Imported from another coordinator's records, not verified yet
+    /// ([`Device::imported`]); absent when 0 (and in snapshots of earlier
+    /// builds).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub imported: u8,
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
 }
 
 /// [`DeviceSnapshot::reporting`] read through a JSON value: the value
@@ -225,7 +234,9 @@ impl DeviceSnapshot {
             fp: d.fp.clone(),
             node_desc: d.node_desc,
             active_eps: d.active_eps.clone(),
-            interviewed: d.interview == InterviewStep::Done,
+            // An imported device that is being configured again keeps its
+            // imported records: a restart verifies it again.
+            interviewed: d.interview == InterviewStep::Done || d.imported != 0,
             interview_partial: d.interview_partial,
             attrs,
             user_name: d.user_name.clone(),
@@ -264,6 +275,7 @@ impl DeviceSnapshot {
                     report,
                 })
                 .collect(),
+            imported: d.imported,
         }
     }
 
@@ -329,6 +341,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             InterviewStep::NodeDesc
         };
         d.interview_partial = s.interview_partial;
+        d.imported = s.imported;
         for (ep, cl, at, mfr, supported, value) in s.attrs {
             let support = if supported {
                 Support::Supported

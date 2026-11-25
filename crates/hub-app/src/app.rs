@@ -1111,6 +1111,7 @@ impl Runner {
                     self.import_retry = None;
                     self.import_gen = self.import_gen.wrapping_add(1);
                 }
+                JobOut::Import(b) => self.apply_import(*b, now),
             },
             Input::Shutdown => {}
         }
@@ -1214,10 +1215,12 @@ impl Runner {
         };
         let jobs = Mutex::new(self.jobs.clone());
         let st = self.engine.transport.status();
+        let preview = |d: &hub_devices::hub::import::ImportedDevice| engine.preview_import(d);
         let ctx = admin::Ctx {
             records: &self.records,
             status: &st,
             net: &self.net,
+            preview: &preview,
             api: &mut self.api,
             known: &known,
             app_facts: &app_facts,
@@ -1389,7 +1392,9 @@ impl Runner {
                 info!("app: hub endpoint joined {n} groups");
             }
         }
-        if self.registered && self.cfg.import_ncp_devices && ready && verified {
+        // Not while a migration imports its devices: the NCP's would all
+        // be interviewed first.
+        if self.registered && self.cfg.import_ncp_devices && ready && verified && !self.admin.import_holds() {
             self.import_ncp_devices(cookie);
         }
         self.refresh(ready && verified, now);
@@ -1532,6 +1537,47 @@ impl Runner {
                 inv.unsupported
             );
         }
+    }
+
+    /// The devices and groups of a migration (`network/import`): into the
+    /// engine (they appear with their entities), the registry written at
+    /// once; the answer goes back to the import job.
+    #[inline(never)]
+    fn apply_import(&mut self, b: crate::migrate::Batch, now: Millis) {
+        let mut a = crate::migrate::Applied::default();
+        for d in &b.devices {
+            match self.engine.import_device(d, b.mode, now) {
+                Ok(action) => a.counts.add(action),
+                Err(e) => {
+                    warn!("app: import of {:016x}: {e}", d.ieee);
+                    a.failed += 1;
+                }
+            }
+            self.engine.transport.nwk.insert(d.ieee, d.nwk);
+        }
+        if b.remove_missing {
+            let gone: Vec<String> = self
+                .engine
+                .devices()
+                .filter(|d| d.ieee().is_some_and(|i| !b.devices.iter().any(|x| x.ieee == i)))
+                .map(|d| d.id.clone())
+                .collect();
+            for id in &gone {
+                self.engine.forget_device(id);
+            }
+            a.removed = gone.len();
+        }
+        a.groups = self.engine.zg_merge_groups(&b.groups, now);
+        let errors = self.registry.errors;
+        self.registry.flush(&*self.records, &self.engine, now, true);
+        let open = kv::with(&*self.records, |s| s.gate()) == hub_store::Gate::Open;
+        a.stored = self.registry.loaded && open && self.registry.errors == errors;
+        a.pending = self.engine.imported_pending();
+        info!(
+            "app: imported {} new, {} replaced, {} kept, {} failed, {} removed, {} groups (stored {})",
+            a.counts.new, a.counts.replace, a.counts.keep, a.failed, a.removed, a.groups, a.stored
+        );
+        let _ = b.done.send(a);
     }
 
     /// `permit_join` events whoever opened or closed joining (API, console,

@@ -14,6 +14,7 @@
 //! does RTS/CTS towards the H2 itself; opening the port asserts DTR and
 //! RTS, which leaves the H2 running (esptool auto-reset mapping).
 
+mod import;
 mod ota;
 mod platform;
 mod push;
@@ -118,6 +119,21 @@ also, without a hub:
   hubctl catalog-verify FILE...
                             check catalog banks (.zdb) and manifest.cose with
                             the firmware's trusted keys
+  hubctl import z2m DIR|FILE... [--url URL --token T] [--out FILE] [options]
+  hubctl import zha ZIGBEE_DB [--backup FILE] [--ha-storage DIR] [--url …] [options]
+  hubctl import doc FILE [--url …] [options]
+                            migrate from Zigbee2MQTT (its data directory or
+                            database.db, coordinator_backup.json,
+                            configuration.yaml/devices.yaml) or ZHA (zigbee.db,
+                            the newest network backup in it or --backup, names
+                            and areas from Home Assistant's .storage) without
+                            pairing again (docs/migration.md): the import
+                            document to stdout or --out; with --url the hub's
+                            preview, with --apply the import; options --force
+                            (replace the running network), --confirm (re-tag
+                            another network's records), --confirm-ieee-write-once
+                            (EZSP), --keep-ieee, --skip-backup, --remove-missing,
+                            --reconfigure auto|always|never, --json
 ";
 
 /// `serve`'s MQTT bridge settings: `--mqtt-settings FILE` (else RAM), with
@@ -840,6 +856,16 @@ fn main() -> ExitCode {
         }
         println!("{out}: {} B, manufacturer 0x{m:04X} image type 0x{t:04X} file version 0x{v:08X}", f.len());
         return ExitCode::SUCCESS;
+    }
+    if args.0.first().map(String::as_str) == Some("import") {
+        args.0.remove(0);
+        return match import::main(std::mem::take(&mut args.0)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
     if args.0.first().map(String::as_str) == Some("ws-call") {
         args.0.remove(0);

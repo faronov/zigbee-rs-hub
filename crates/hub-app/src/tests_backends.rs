@@ -1229,3 +1229,7 @@ fn ezsp_an_incomplete_backup_of_the_same_extended_pan_id_is_refused() {
     assert!(sim.ncp(|n| n.config().network_formed && n.config().network_key == [0x5E; 16]), "nothing changed");
     rig.finish();
 }
+
+// Migration from Zigbee2MQTT or ZHA, on both backends.
+#[path = "tests_import.rs"]
+mod import;

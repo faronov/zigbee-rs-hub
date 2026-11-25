@@ -33,6 +33,9 @@ use crate::ocb;
 use crate::platform::Platform;
 use crate::topology::{self, Known, ScanOpts};
 
+#[path = "admin_import.rs"]
+mod import;
+
 /// Request types handled here.
 pub const TYPES: &[&str] = &[
     "network/energy_scan",
@@ -48,6 +51,8 @@ pub const TYPES: &[&str] = &[
     "network/job/result",
     "network/job/cancel",
     "network/restore",
+    "network/import/preview",
+    "network/import",
     "network/reset",
     "network/form",
     "network/registry/adopt",
@@ -121,6 +126,9 @@ pub enum JobOut {
     /// A restored backup's groups (`metadata.internal.zigbee_rs.groups`)
     /// replace the hub's.
     Groups(Vec<J>),
+    /// An import's devices and groups for the engine (`network/import`);
+    /// the app answers on the batch's channel once they are stored.
+    Import(Box<crate::migrate::Batch>),
 }
 
 /// Delivery of [`JobOut`]s.
@@ -134,6 +142,8 @@ pub struct Ctx<'a> {
     pub status: &'a CoordStatus,
     /// Network administration (its blocking calls on job threads only).
     pub net: &'a Arc<dyn NetworkAdmin>,
+    /// What the engine would make of an imported device.
+    pub preview: &'a dyn Fn(&hub_devices::hub::import::ImportedDevice) -> hub_devices::hub::import::ImportPreview,
     /// API sessions (token rotation).
     pub api: &'a mut ApiServer,
     /// Devices the engine knows.
@@ -200,6 +210,10 @@ pub struct Admin {
     /// console): shared with the HTTP server, which serves the web UI's
     /// developer tools (the ZCL console module) only while it is on.
     pub developer: Arc<AtomicBool>,
+    /// The import being staged (`network/import`, `network/import/preview`).
+    import_stage: Option<Box<import::Stage>>,
+    /// An import is being applied ([`Admin::import_holds`]).
+    import_hold: Arc<AtomicBool>,
 }
 
 fn ncp_error(what: &str, e: CoordError) -> ApiError {
@@ -688,6 +702,8 @@ impl Admin {
             worker: None,
             clock: ClockState::default(),
             developer: Arc::default(),
+            import_stage: None,
+            import_hold: Arc::default(),
         }
     }
 
@@ -768,6 +784,8 @@ impl Admin {
                 None => Err(bad("job: the job ID")),
             },
             "network/restore" => return self.restore(ctx, sid, id, v),
+            "network/import/preview" => return self.import(ctx, sid, id, v, true),
+            "network/import" => return self.import(ctx, sid, id, v, false),
             _ => return self.ncp_job(ctx, sid, head, v),
         };
         vec![frame(id, r)]
@@ -1372,12 +1390,7 @@ impl Admin {
                 out(JobOut::Groups(g));
             }
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "restored"})));
-            let note = |n: u8| {
-                ["", "host_backed", "child_demoted", "ignored", "floor_raised", "ieee_kept", "ieee_written_once", "ieee_rewritten", "tclk_root_generated", "update_id_not_restored"]
-                    .get(usize::from(n))
-                    .copied()
-                    .unwrap_or("unknown")
-            };
+            let note = note_name;
             // The previous network's backup (kept as bkp/replaced/<epid>
             // unless it is the backup's network, and as bkp/last unless the
             // records were another network's), as network/reset answers it.
@@ -1508,6 +1521,14 @@ impl Admin {
             Ok(Reply::Frame(w.finish()?))
         })
     }
+}
+
+/// The API name of a [`hub_coord::restore_note`].
+fn note_name(n: u8) -> &'static str {
+    ["", "host_backed", "child_demoted", "ignored", "floor_raised", "ieee_kept", "ieee_written_once", "ieee_rewritten", "tclk_root_generated", "update_id_not_restored"]
+        .get(usize::from(n))
+        .copied()
+        .unwrap_or("unknown")
 }
 
 /// The NCP's network state as the backend reports it now.

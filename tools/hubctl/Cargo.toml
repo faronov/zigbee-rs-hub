@@ -26,8 +26,16 @@ ureq = "3"
 base64 = "0.22"
 tungstenite = "0.29"
 log = "0.4"
+# `import zha`: ZHA's zigbee.db (SQLite, compiled in: no system library).
+rusqlite = { version = "0.43", features = ["bundled"] }
+# `import z2m`: Zigbee2MQTT's configuration.yaml / devices.yaml.
+yaml-rust2 = { version = "0.10", default-features = false }
 # No libudev: the tool only opens a port by path.
 serialport = { version = "4.7", default-features = false }
+
+[dev-dependencies]
+# The import tests restore a converted backup.
+hub-coord = { workspace = true }
 
 [features]
 # The developer edition ("devtools", as those images): the web UI's

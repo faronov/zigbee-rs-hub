@@ -579,6 +579,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             let Some(op) = d.configure.queue.pop_front() else {
                 if d.interview == InterviewStep::Configure {
                     d.interview = InterviewStep::Done;
+                    // An imported device configured again: verified.
+                    d.imported = 0;
                     self.emit(HubEvent::InterviewProgress {
                         device: id.to_string(),
                         step: "done".into(),

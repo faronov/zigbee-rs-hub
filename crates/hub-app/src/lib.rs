@@ -13,6 +13,7 @@
 //! | [`automations`] | local automations: rules (triggers → conditions → actions) and schedules evaluated on the app thread, `automations/*` API, rules in the host store journal (`auto/<id>`) |
 //! | [`admin`] | network and hub maintenance API (energy scan, channel, TX power, diagnostics, map, backup/restore, reset; Wi-Fi, token, reboot, mode, logs) |
 //! | [`ocb`] | Open Coordinator Backup JSON ⇄ ZRHP record streams |
+//! | [`migrate`] | the import document of a migration from Zigbee2MQTT or ZHA (`network/import`) |
 //! | `ota` | (feature `ota`) OTA Upgrade server (cluster 0x0019, `hub-ota`): streamed images, `ota/*` requests, `ota` topic |
 //! | `ota_store` | (feature `ota-store`) the image store in the inactive app slot, its lock against the hub's own update |
 //! | [`topology`] | network map: coordinator tables and Mgmt_Lqi/Mgmt_Rtg over the air |
@@ -31,6 +32,7 @@ pub mod clock;
 pub mod jobs;
 pub mod jw;
 pub mod laststate;
+pub mod migrate;
 pub mod ocb;
 #[cfg(feature = "ota")]
 pub mod ota;

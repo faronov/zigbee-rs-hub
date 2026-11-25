@@ -2070,4 +2070,53 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         self.groups_resync(now)
     }
+
+    /// Adds imported groups (in their stored form) to the hub's: a group
+    /// the hub has gets the members and, if it has none, the name; the
+    /// members already hold the group (it is device-side), so nothing is
+    /// sent to them. The hub endpoint joins the new groups while the
+    /// coordinator's group table has room. How many groups were added or
+    /// changed.
+    #[inline(never)]
+    pub fn zg_merge_groups(&mut self, groups: &[J], now: Millis) -> usize {
+        let mut changed = 0;
+        for g in groups.iter().filter_map(group_from) {
+            let id = g.id;
+            let join = match self.zg.get_mut(id) {
+                Some(have) if !have.deleting => {
+                    let before = (have.name.clone(), have.members.len());
+                    if have.name.is_empty() {
+                        have.name = g.name;
+                    }
+                    for m in g.members {
+                        if !have
+                            .members
+                            .iter()
+                            .any(|x| x.device == m.device && x.endpoint == m.endpoint)
+                        {
+                            have.members.push(m);
+                        }
+                    }
+                    if (have.name.clone(), have.members.len()) == before {
+                        continue;
+                    }
+                    false
+                }
+                _ => {
+                    let mut g = g;
+                    g.hub_member = g.hub_member && self.hub_group_room().is_ok();
+                    let join = g.hub_member;
+                    self.zg.insert(g);
+                    join
+                }
+            };
+            changed += 1;
+            self.zg_sync(id);
+            self.group_event(id);
+            if join {
+                self.hub_membership(id, true, GroupTail::None, None, now);
+            }
+        }
+        changed
+    }
 }
