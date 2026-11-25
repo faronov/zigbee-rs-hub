@@ -24,9 +24,8 @@ zigbee-rs-hub gateway console:\r
   token                the API token (WebSocket API, web UI, Home Assistant)\r
   files                what SONOFF's files partition holds (claim, copy)\r
   files claim          what claiming it would copy, or why it is refused\r
-  files claim confirm  claim it for the hub's data (SONOFF's files are saved\r
-                       first), then restart; until then the hub's data are in\r
-                       RAM only\r
+  files claim confirm  claim it by hand (the first boot claims it unless that\r
+                       is refused; SONOFF's files are saved first), restart\r
   board                pins of the board profile and stored overrides\r
   board set <k=v ...>  store NCP wiring overrides (tx rx rts cts reset reset_od\r
                        baud flow fallback), applied at the next boot; the\r

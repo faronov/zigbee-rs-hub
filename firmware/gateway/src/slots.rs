@@ -91,8 +91,8 @@ pub fn stock(confirm: bool) -> String {
     }
     if files.is_some() {
         crate::console::reply("stopping the hub and writing SONOFF's data back to `files` (up to a minute)\r\n");
-        if !crate::hub::stop() {
-            return "the hub did not stop within 5 s; nothing written back, stock firmware not selected (`restart`, then `stock confirm`)\r\n".into();
+        if let Err(e) = crate::hub::stop() {
+            return format!("{e}; nothing written back, stock firmware not selected (`stock confirm` again, or `restart`)\r\n");
         }
         match crate::files::restore() {
             Ok(r) => crate::console::reply(&format!("files: {r:?}\r\n")),
@@ -103,6 +103,7 @@ pub fn stock(confirm: bool) -> String {
     }
     match unsafe { sys::esp_ota_set_boot_partition(ota0()) } {
         sys::ESP_OK => {
+            crate::files::forget_first_boot();
             crate::console::reply(&format!("{what} selected; restarting into the stock firmware\r\n"));
             crate::restart()
         }

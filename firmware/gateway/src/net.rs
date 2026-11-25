@@ -202,9 +202,13 @@ fn client(ssid: &str, pass: &str) -> Configuration {
 }
 
 fn wifi(modem: Modem<'static>, sys_loop: EspSystemEventLoop, mut ssid: String, pass: &str) -> Result<(), EspError> {
-    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), None)?, sys_loop)?;
-    wifi.set_configuration(&client(&ssid, pass))?;
-    wifi.start()?;
+    // The radio starts: not while `entropy::fill` has its ADC source on.
+    let mut wifi = crate::entropy::radio_start(|| {
+        let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), None)?, sys_loop)?;
+        wifi.set_configuration(&client(&ssid, pass))?;
+        wifi.start()?;
+        Ok::<_, EspError>(wifi)
+    })?;
     // Mains powered: modem sleep (the default) holds frames to the hub
     // until the next DTIM beacon, adding 100-300 ms and lost pings.
     esp!(unsafe { esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE) })?;

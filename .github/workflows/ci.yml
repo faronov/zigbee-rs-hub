@@ -305,6 +305,12 @@ jobs:
         run: cargo build --release
       - name: No S32C1I in Rust code (disassembly, attributed through the line table)
         run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" target/xtensa-esp32-espidf/release/zrh-donglem
+      - name: The API token reads the RNG with an entropy source (bootloader_random_enable/disable linked; the classic ESP32 has none without the radio)
+        run: |
+          nm="$(find .embuild/espressif/tools -name xtensa-esp32-elf-nm -type f | head -1)"
+          syms=$("$nm" target/xtensa-esp32-espidf/release/zrh-donglem)
+          grep -q " T bootloader_random_enable$" <<<"$syms"
+          grep -q " T bootloader_random_disable$" <<<"$syms"
       - name: App image (DIO 40 MHz, chip v3.0+; must fit the 6 MiB ota_1 slot of SONOFF's stock table)
         run: |
           pip install --quiet "esptool>=5,<6"

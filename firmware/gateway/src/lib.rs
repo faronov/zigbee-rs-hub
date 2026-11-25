@@ -16,8 +16,9 @@
 //! 3. the NCP UART at the profile's rate ([`uart`]) and an MG24 reset into
 //!    its application;
 //! 4. the hub ([`hub`]): the application on the EZSP backend over the NCP
-//!    UART, its data on SONOFF's `files` partition once claimed
-//!    ([`files`]; RAM only until then), the `storage/*` and `firmware/*`
+//!    UART, its data on SONOFF's `files` partition, claimed at the first
+//!    boot ([`files`]; RAM only if that is refused), the API token from an
+//!    entropy source ([`entropy`]), the `storage/*` and `firmware/*`
 //!    requests ([`update`]: self-update into the other app slot), MQTT;
 //! 5. network: Ethernet, Wi-Fi station as the fallback ([`net`]); the
 //!    HTTP server (web UI, WebSocket API) once an interface has an address;
@@ -33,6 +34,7 @@
 //! RAM stays with the heap) and no network access to the MG24 UART.
 
 pub mod console;
+pub mod entropy;
 pub mod esp;
 #[cfg(esp32)]
 pub mod eth;

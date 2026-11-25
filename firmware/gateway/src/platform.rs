@@ -76,7 +76,8 @@ impl hub_app::Platform for Gateway {
         Ok(())
     }
     fn random(&self, buf: &mut [u8]) {
-        zrh_espapp::fill_random(buf)
+        // Token rotation: from an entropy source also without the radio.
+        crate::entropy::fill(buf)
     }
     fn logs(&self, max: usize) -> Vec<String> {
         logs::lines(max)

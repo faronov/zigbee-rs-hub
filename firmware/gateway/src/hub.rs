@@ -3,9 +3,9 @@
 //! web UI, WebSocket API, MQTT bridge, catalog and automations as the S3
 //! hub (`firmware/hub`), with the gateway's platform
 //! ([`Gateway`](crate::platform::Gateway)), its data on SONOFF's `files`
-//! partition once claimed ([`files`](crate::files), RAM only until then),
-//! the Zigbee device OTA image store there too, the `storage/*` and
-//! `firmware/*` requests, and the button's permit join.
+//! partition, claimed at the first boot ([`files`](crate::files), RAM only
+//! if that is refused), the Zigbee device OTA image store there too, the
+//! `storage/*` and `firmware/*` requests, and the button's permit join.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -50,10 +50,11 @@ impl SettingsStore for MqttSettings {
     }
 }
 
-/// The API token (generated and stored at the first boot with the hub).
+/// The API token (generated and stored at the first boot with the hub,
+/// from an entropy source: `entropy`).
 pub fn token() -> String {
     settings::get("api_token").unwrap_or_else(|| {
-        let t = zrh_espapp::new_token();
+        let t = crate::entropy::token();
         if let Err(e) = settings::set("api_token", Some(&t)) {
             warn!("API token not stored: {e}");
         }
@@ -71,6 +72,9 @@ pub fn start(board: &BoardProfile) -> Option<App> {
             return None;
         }
     };
+    // The token first (from an entropy source, before Wi-Fi), then the
+    // first boot's claim.
+    let api_token = token();
     let on_flash = files::boot();
     let store = if on_flash {
         match files::journal().map(|f| Store::open(Box::new(f))) {
@@ -90,7 +94,7 @@ pub fn start(board: &BoardProfile) -> Option<App> {
     let r = zrh_espapp::resources::get();
     let mut cfg = AppConfig {
         hub_name: format!("zigbee-rs-hub {} ({})", env!("CARGO_PKG_VERSION"), board.name),
-        api_token: token(),
+        api_token,
         stack_size: APP_STACK,
         // The example definitions take ~90 KB decoded (PSRAM).
         builtin_catalog: r.builtin_catalog,
@@ -124,10 +128,25 @@ pub fn start(board: &BoardProfile) -> Option<App> {
     Some(app)
 }
 
-/// Stops the application (it saves the registry first); `stock confirm`.
-/// Whether it no longer runs (and so writes nothing more).
-pub fn stop() -> bool {
-    APP.get().is_none_or(|app| app.shutdown())
+/// Stops the application for `stock confirm` (it saves the registry
+/// first), then closes the `files` gate: no write of the app, of a
+/// maintenance job thread or of anything else holding a window reaches the
+/// region afterwards. Refused while a maintenance job runs (it writes the
+/// records from its own thread) or when the app does not stop.
+pub fn stop() -> Result<(), String> {
+    if let Some(app) = APP.get() {
+        let jobs = app.status().jobs;
+        if jobs > 0 {
+            return Err(format!(
+                "{jobs} maintenance job(s) running (network/jobs: a scan, a channel change, a network reset or restore): wait for it or cancel it"
+            ));
+        }
+        if !app.shutdown() {
+            return Err("the hub did not stop within 5 s".into());
+        }
+    }
+    files::close_gate();
+    Ok(())
 }
 
 /// Replies to the board's own requests (button, console): logged.
@@ -184,6 +203,6 @@ pub fn status_text() -> String {
         a.aps.delivered,
         a.aps.not_delivered,
         a.aps.unconfirmed,
-        if files::in_use() { "files region" } else { "RAM only (claim the files region to keep it)" },
+        files::ram_only_reason().map_or("files region".into(), |why| format!("!!! RAM only, lost at every restart: {why}")),
     )
 }

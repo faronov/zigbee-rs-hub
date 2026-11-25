@@ -24,6 +24,9 @@ pub struct HubData {
     offset: u32,
     base: *const u8,
     size: u32,
+    /// Writes and erases pass it (the Dongle-M closes it before the
+    /// return to stock).
+    gate: Option<hub_store::WriteGate>,
 }
 
 // The partition descriptor is a static ESP-IDF table entry; the mapping is
@@ -74,11 +77,24 @@ impl HubData {
             return None;
         }
         info!("catalog: {name} at 0x{offset:X} mapped at {ptr:?} ({} KiB)", size / 1024);
-        Some(Self { part, offset, base: ptr.cast(), size })
+        Some(Self { part, offset, base: ptr.cast(), size, gate: None })
     }
 }
 
 impl HubData {
+    /// Writes and erases behind `gate`.
+    pub fn with_gate(mut self, gate: hub_store::WriteGate) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    fn gated(&self, f: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        match &self.gate {
+            Some(g) => g.write(f),
+            None => f(),
+        }
+    }
+
     /// The partition offset of window offset `offset`, if `len` bytes fit.
     fn at(&self, offset: u32, len: usize) -> io::Result<usize> {
         if offset as u64 + len as u64 > self.size as u64 {
@@ -98,11 +114,13 @@ impl DataFlash for HubData {
     }
     fn write(&mut self, offset: u32, data: &[u8]) -> io::Result<()> {
         let at = self.at(offset, data.len())?;
-        check(unsafe { sys::esp_partition_write(self.part, at, data.as_ptr().cast(), data.len()) })
+        let part = self.part;
+        self.gated(|| check(unsafe { sys::esp_partition_write(part, at, data.as_ptr().cast(), data.len()) }))
     }
     fn erase(&mut self, offset: u32, len: u32) -> io::Result<()> {
         let at = self.at(offset, len as usize)?;
-        check(unsafe { sys::esp_partition_erase_range(self.part, at, len as usize) })
+        let part = self.part;
+        self.gated(|| check(unsafe { sys::esp_partition_erase_range(part, at, len as usize) }))
     }
     fn map(&self, offset: u32, len: u32) -> &'static [u8] {
         let end = offset.saturating_add(len).min(self.size);
