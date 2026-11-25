@@ -2,7 +2,8 @@
 //! ([`hub_core::layout::dongle_files`]): what it holds, the **claim** that
 //! makes it the hub's, and the **return to stock** that gives SONOFF's
 //! data back. Every step is idempotent and survives a power cut at any
-//! point: running the same operation again finishes it.
+//! point: running the same operation again finishes it. The hub claims
+//! the region on its first boot ([`boot_action`]).
 //!
 //! Until the claim the region is SONOFF's LittleFS (or erased) and the hub
 //! never writes it. The claim:
@@ -258,6 +259,35 @@ pub enum ScanMethod {
     LittleFs,
     /// Every block that is not erased (no LittleFS the walk understands).
     NonErased,
+}
+
+/// What a boot of the hub does with the region ([`boot_action`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootAction {
+    /// The hub's region: use it.
+    Use,
+    /// A committed claim was cut short: finish it ([`FilesRegion::claim`]),
+    /// then use it.
+    Finish,
+    /// The first boot: claim it ([`FilesRegion::claim`]: SONOFF's blocks
+    /// are copied first; a refusal writes nothing).
+    Claim,
+    /// Leave it: the hub's data stay in RAM.
+    RamOnly,
+}
+
+/// The hub claims the region by itself on its first boot: `attempted` says
+/// an earlier boot tried (the claim was made or refused). A return to
+/// stock cut short (`restoring`) is not undone by a boot; `stock confirm`
+/// resumes it. An interrupted first claim is resumed.
+pub fn boot_action(st: &Status, attempted: bool) -> BootAction {
+    match st.record.map(|r| r.state) {
+        Some(ClaimState::Ready) => BootAction::Use,
+        Some(ClaimState::Erasing) => BootAction::Finish,
+        Some(ClaimState::Restoring) => BootAction::RamOnly,
+        None if attempted => BootAction::RamOnly,
+        None => BootAction::Claim,
+    }
 }
 
 /// What the claim found ([`FilesRegion::scan`]).
@@ -975,6 +1005,36 @@ mod tests {
                 assert!(bytes(&again) == original);
             }
         }
+    }
+
+    /// The boot policy over the life of a region: first boot claims,
+    /// claimed boots use it, a refusal is not retried, an interrupted first
+    /// claim is resumed, a return to stock is left alone.
+    #[test]
+    fn the_first_boot_claims_the_region() {
+        let original = sonoff(&[]);
+        let mut r = region(original.clone());
+        let st = r.status().unwrap();
+        assert_eq!(boot_action(&st, false), BootAction::Claim, "first boot");
+        assert_eq!(boot_action(&st, true), BootAction::RamOnly, "refused before");
+        // A first claim cut short before its commit: resumed.
+        let mut cut = FilesRegion::new(CutFlash::new(original.clone()).cut_at(2, 9));
+        assert!(cut.claim().is_err());
+        cut.flash.power_on();
+        assert_eq!(boot_action(&cut.status().unwrap(), false), BootAction::Claim);
+        // Claimed: used; cut short after the commit: finished.
+        r.claim().unwrap();
+        assert_eq!(boot_action(&r.status().unwrap(), true), BootAction::Use);
+        let mut erasing = FilesRegion::new(r.flash.clone());
+        erasing.flash.erase(1).unwrap();
+        assert_eq!(boot_action(&erasing.status().unwrap(), true), BootAction::Finish);
+        // A return to stock cut short: left for `stock confirm`.
+        let mut back = FilesRegion::new(r.flash.clone().cut_at(r.flash.ops + 3, 0));
+        assert!(back.restore().is_err());
+        back.flash.power_on();
+        let st = back.status().unwrap();
+        assert_eq!(st.record.map(|x| x.state), Some(ClaimState::Restoring));
+        assert_eq!(boot_action(&st, true), BootAction::RamOnly);
     }
 
     #[test]
