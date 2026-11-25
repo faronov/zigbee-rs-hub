@@ -24,6 +24,7 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
 from . import zha_import
@@ -178,19 +179,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def copy_names_areas(call: ServiceCall) -> ServiceResponse:
         return await zha_import.async_copy_names_areas(hass, one_hub(call), call.data["overwrite"])
 
-    hass.services.async_register(
+    # Both read files and use the hub's token: administrators only.
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_IMPORT_FROM_ZHA,
         import_from_zha,
         IMPORT_FROM_ZHA_SCHEMA,
-        supports_response=SupportsResponse.OPTIONAL,
+        SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_COPY_NAMES_AREAS,
         copy_names_areas,
         COPY_NAMES_AREAS_SCHEMA,
-        supports_response=SupportsResponse.OPTIONAL,
+        SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(DOMAIN, SERVICE_PERMIT_JOIN, permit_join, PERMIT_JOIN_SCHEMA)
     hass.services.async_register(

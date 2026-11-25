@@ -58,7 +58,8 @@ has, and the integration maps them 1:1 onto HA platforms.
   persistent notification); with `apply` (and `force`, `confirm`,
   `confirm_ieee_write_once`, `keep_ieee`, `reconfigure`, `remove_missing`)
   it imports — refused while ZHA is loaded: disable ZHA first, never run
-  both — and gives the hub's new devices ZHA's areas.
+  both — and gives the hub's new devices ZHA's areas. Both migration
+  services are for administrators only.
   `zigbee_rs_hub.copy_names_areas` gives the hub's devices the names set in
   HA and the areas of the same devices in ZHA or Zigbee2MQTT (MQTT
   discovery `zigbee2mqtt_0x…`), e.g. after an import from the web UI or

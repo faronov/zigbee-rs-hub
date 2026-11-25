@@ -63,7 +63,8 @@ bridge uses for its topics, so MQTT automations keep their topics.
 
 ## From ZHA
 
-With the zigbee-rs hub integration in the same Home Assistant:
+With the zigbee-rs hub integration in the same Home Assistant (as an
+administrator: the migration services refuse other users):
 
 1. Settings › Developer tools › Actions: `zigbee_rs_hub.import_from_zha`
    (preview). It reads ZHA's `zigbee.db` (default `<config>/zigbee.db`,
@@ -182,8 +183,10 @@ from (any frame, an announce, the answer to a probe):
 - the same coordinator IEEE: the definition's configure is taken as done
   (the previous coordinator did it), the identity (DateCode, SWBuildID)
   and the states the hub does not know are read;
-- another coordinator IEEE: the definition's configure runs, two devices
-  at a time;
+- another coordinator IEEE: the definition's configure runs, two awake
+  devices at a time (a sleepy device that finds both turns taken tries
+  again at its next wake; a sleeping one's requests wait for its wake and
+  do not hold a turn);
 - a record without endpoints (the source's interview never finished): the
   device is interviewed.
 
@@ -250,7 +253,8 @@ and take the document in requests of a few kilobytes: the first carries
 (OCB `devices[]` entries), `devices` and `groups`; `more: true` on all but
 the last. The options go with the first. A staging belongs to its session
 and ends with its last request or after 10 minutes. Clients send at most
-6 KB of entries per request (the hub takes 16 KiB frames).
+6 KB of entries per request, the groups in batches too (the hub takes
+16 KiB frames).
 
 | Type | Parameters | Result |
 |---|---|---|

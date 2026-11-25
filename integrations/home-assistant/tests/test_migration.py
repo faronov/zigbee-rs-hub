@@ -13,9 +13,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.zigbee_rs_hub import migrate
 from custom_components.zigbee_rs_hub.const import DOMAIN
 from custom_components.zigbee_rs_hub.hub import find_device
+from homeassistant.auth.models import User
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.helpers import area_registry as ar, device_registry as dr
 
 from .fake_hub import SENSOR_DEV, FakeHub
@@ -228,12 +229,22 @@ def test_a_document_goes_in_small_requests() -> None:
             "devices": [{"ieee_address": f"{i:016x}"} for i in range(300)],
         },
         "devices": [{"ieee": f"{i:016x}", "name": "x" * 200} for i in range(100)],
+        "groups": [
+            {
+                "id": i,
+                "name": "Room",
+                "members": [{"ieee": f"{m:016x}", "ep": 1} for m in range(10)],
+            }
+            for i in range(60)
+        ],
     }
     reqs = migrate.requests(doc, {"force": True})
     assert reqs[0]["document"]["network"]["devices"] == []
     assert reqs[0]["force"] is True and "devices" not in reqs[0]["document"]
+    assert "groups" not in reqs[0]["document"]
     assert sum(len(r.get("network_devices", [])) for r in reqs) == 300
     assert sum(len(r.get("devices", [])) for r in reqs) == 100
+    assert sum(len(r.get("groups", [])) for r in reqs) == 60
     assert all(len(json.dumps(r)) < migrate.BATCH + 512 for r in reqs[1:])
     assert [r["more"] for r in reqs] == [True] * (len(reqs) - 1) + [False]
     assert doc["network"]["devices"], "the document itself is not changed"
@@ -323,6 +334,26 @@ async def test_import_from_zha_refuses_what_it_cannot_read(
             DOMAIN, "import_from_zha", {"database": str(empty)}, blocking=True
         )
     assert not fake_hub.calls("network/import/preview")
+
+
+@pytest.mark.parametrize("service", ["import_from_zha", "copy_names_areas"])
+async def test_migration_services_are_for_administrators(
+    hass: HomeAssistant,
+    fake_hub: FakeHub,
+    setup_entry: MockConfigEntry,
+    hass_read_only_user: User,
+    tmp_path: Path,
+    service: str,
+) -> None:
+    path = tmp_path / "zigbee.db"
+    make_db(path, 17)
+    data = {"database": str(path), "apply": True} if service == "import_from_zha" else {}
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN, service, data, blocking=True, context=Context(user_id=hass_read_only_user.id)
+        )
+    assert not fake_hub.calls("network/import/preview")
+    assert not fake_hub.calls("network/import")
 
 
 async def test_copy_names_areas_from_zigbee2mqtt_devices(

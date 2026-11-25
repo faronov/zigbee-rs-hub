@@ -255,11 +255,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.devices.values().filter(|d| d.imported != 0).count()
     }
 
-    /// Imported devices being configured again.
-    fn import_configuring(&self) -> usize {
+    /// Imported devices being configured again; a sleeping one's requests
+    /// wait for its wake and take no slot.
+    fn import_configuring(&self, now: Millis) -> usize {
         self.devices
             .values()
-            .filter(|d| d.imported != 0 && d.interview == InterviewStep::Configure)
+            .filter(|d| {
+                d.imported != 0
+                    && d.interview == InterviewStep::Configure
+                    && !(d.sleepy() && now > d.awake_until)
+            })
             .count()
     }
 
@@ -281,8 +286,14 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         if d.imported == IMPORT_RECONFIGURE {
-            if self.import_configuring() >= IMPORT_SLOTS {
-                if !self.import_queue.iter().any(|q| q == id) {
+            let sleepy = d.sleepy();
+            if self.import_configuring(now) >= IMPORT_SLOTS {
+                if sleepy {
+                    // Asleep when a slot frees: its next wake tries again.
+                    if let Some(d) = self.devices.get_mut(id) {
+                        d.import_contacted = false;
+                    }
+                } else if !self.import_queue.iter().any(|q| q == id) {
                     self.import_queue.push_back(id.to_string());
                 }
                 return;
@@ -319,18 +330,24 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// Every tick: queued reconfigures as slots free, and one probe of an
     /// imported mains device not heard from every [`IMPORT_PROBE_MS`].
     pub(crate) fn import_tick(&mut self, now: Millis) {
-        while self.import_configuring() < IMPORT_SLOTS {
+        while self.import_configuring(now) < IMPORT_SLOTS {
             let Some(id) = self.import_queue.pop_front() else {
                 break;
             };
-            if self.devices.get(&id).is_some_and(|d| {
-                d.imported == IMPORT_RECONFIGURE && d.interview == InterviewStep::Done
-            }) {
-                self.import_reconfigure(&id, now);
+            let Some(d) = self.devices.get_mut(&id) else {
+                continue;
+            };
+            if d.imported != IMPORT_RECONFIGURE || d.interview != InterviewStep::Done {
+                continue;
             }
+            if d.sleepy() && now > d.awake_until {
+                d.import_contacted = false;
+                continue;
+            }
+            self.import_reconfigure(&id, now);
         }
         if !self.import_queue.is_empty()
-            || self.import_configuring() >= IMPORT_SLOTS
+            || self.import_configuring(now) >= IMPORT_SLOTS
             || self
                 .import_probe_last
                 .is_some_and(|t| now.saturating_sub(t) < IMPORT_PROBE_MS)

@@ -182,6 +182,85 @@ fn another_coordinator_ieee_configures_again_two_at_a_time() {
     }
 }
 
+#[test]
+fn a_sleepy_device_tries_again_at_its_next_wake_when_the_slots_are_busy() {
+    let mut sim = Sim::default();
+    let mut hub = hub_with(&[]);
+    for i in 0..2u64 {
+        let p = plug(PLUG + i, 0x5A01 + i as u16);
+        hub.import_device(&imported(&p), IMPORT_RECONFIGURE, T0)
+            .unwrap();
+        sim.devices.push(p);
+    }
+    let s = sensor();
+    hub.import_device(&imported(&s), IMPORT_RECONFIGURE, T0)
+        .unwrap();
+    sim.devices.push(s.clone());
+    let _ = hub.drain_events();
+    for i in 0..2u64 {
+        let report = sim.dev(PLUG + i).report(
+            1,
+            0x0006,
+            None,
+            &[(
+                0x0000,
+                TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(false))),
+            )],
+        );
+        hub.on_aps_indication(report, T0 + 10);
+    }
+    let temp = |v| {
+        s.report(
+            1,
+            0x0402,
+            None,
+            &[(0x0000, TypedValue::int(ZclType::I16, v))],
+        )
+    };
+    hub.on_aps_indication(temp(2000), T0 + 20);
+    assert!(
+        !hub.transport
+            .sent
+            .iter()
+            .any(|x| matches!(x, Sent::Aps(a) if a.dst == crate::transport::ApsDst::Nwk(0x4321))),
+        "its new attributes do not start its configure either"
+    );
+    assert_eq!(hub_configuring(&hub), IMPORT_SLOTS);
+    assert!(
+        hub.import_queue.is_empty(),
+        "a sleepy device is not queued: it would be asleep when popped"
+    );
+    let id = "zb:00158d0001a2b3c4";
+    let d = hub.device(id).unwrap();
+    assert_eq!(
+        (d.interview, d.import_contacted),
+        (InterviewStep::Done, false)
+    );
+    let mut t = T0 + 20;
+    for _ in 0..20 {
+        sim.run(&mut hub, t);
+        t += 1000;
+        hub.tick(t);
+        if hub_configuring(&hub) == 0 {
+            break;
+        }
+    }
+    assert_eq!(hub.imported_pending(), 1, "only the sensor is left");
+    // Its next report starts its configure.
+    t += 600_000;
+    hub.on_aps_indication(temp(2100), t);
+    assert_eq!(hub.device(id).unwrap().interview, InterviewStep::Configure);
+    for _ in 0..20 {
+        sim.run(&mut hub, t);
+        t += 1000;
+        hub.tick(t);
+        if hub.imported_pending() == 0 {
+            break;
+        }
+    }
+    assert_eq!(hub.imported_pending(), 0);
+}
+
 fn hub_configuring(hub: &Hub<crate::transport::MockTransport>) -> usize {
     hub.devices()
         .filter(|d| d.imported != 0 && d.interview == InterviewStep::Configure)

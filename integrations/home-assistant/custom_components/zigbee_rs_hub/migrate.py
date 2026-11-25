@@ -306,7 +306,10 @@ def document(
 
 
 def requests(doc: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
-    """The document in requests: `document` first, then batches; `more` on all but the last."""
+    """The document in requests: `document` first, then batches; `more` on all but the last.
+
+    Every list goes in batches: a request over 16 KiB is refused.
+    """
     head = dict(doc)
     net_devices: list[Any] = []
     if isinstance(head.get("network"), dict):
@@ -314,8 +317,13 @@ def requests(doc: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any
         net_devices = head["network"].pop("devices", None) or []
         head["network"]["devices"] = []
     devices = head.pop("devices", None) or []
+    groups = head.pop("groups", None) or []
     out: list[dict[str, Any]] = [{"document": head, **options}]
-    for key, items in (("network_devices", net_devices), ("devices", devices)):
+    for key, items in (
+        ("network_devices", net_devices),
+        ("devices", devices),
+        ("groups", groups),
+    ):
         batch: list[Any] = []
         size = 0
         for e in items:

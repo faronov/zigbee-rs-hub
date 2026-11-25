@@ -476,6 +476,7 @@ class FakeHub:
                 self.import_stage[k] += req["document"].get(k) or []
         stage = self.import_stage
         stage["devices"] += req.get("devices") or []
+        stage["groups"] += req.get("groups") or []
         stage["network_devices"] += len(req.get("network_devices") or [])
         rows = [
             {

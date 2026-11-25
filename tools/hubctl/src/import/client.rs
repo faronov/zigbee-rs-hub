@@ -32,8 +32,8 @@ pub struct Options {
 }
 
 /// The requests of a document: the first one with `document` (its header,
-/// the network part without its devices, the groups), then batches of
-/// `network_devices` and `devices`; `more` on all but the last.
+/// the network part without its devices), then batches of
+/// `network_devices`, `devices` and `groups`; `more` on all but the last.
 pub fn requests(doc: &J, ty: &str, o: &Options) -> Vec<J> {
     let mut head = doc.clone();
     let mut net_devices = Vec::new();
@@ -47,6 +47,11 @@ pub fn requests(doc: &J, ty: &str, o: &Options) -> Vec<J> {
     let devices = head
         .as_object_mut()
         .and_then(|h| h.remove("devices"))
+        .and_then(|d| d.as_array().cloned())
+        .unwrap_or_default();
+    let groups = head
+        .as_object_mut()
+        .and_then(|h| h.remove("groups"))
         .and_then(|d| d.as_array().cloned())
         .unwrap_or_default();
     let mut first = json!({"type": ty, "document": head});
@@ -68,7 +73,11 @@ pub fn requests(doc: &J, ty: &str, o: &Options) -> Vec<J> {
         first["reconfigure"] = r.clone().into();
     }
     let mut out = vec![first];
-    for (key, list) in [("network_devices", net_devices), ("devices", devices)] {
+    for (key, list) in [
+        ("network_devices", net_devices),
+        ("devices", devices),
+        ("groups", groups),
+    ] {
         let mut batch: Vec<J> = Vec::new();
         let mut size = 0;
         for e in list {
@@ -277,8 +286,9 @@ mod tests {
     fn a_document_goes_in_small_requests() {
         let dev = |i: u32| json!({"ieee": format!("{i:016x}"), "nwk": i, "name": "x".repeat(200)});
         let ocb = |i: u32| json!({"ieee_address": format!("{i:016x}"), "nwk_address": "0001"});
+        let group = |i: u32| json!({"id": i, "name": "Room", "members": (0..10).map(|m| json!({"ieee": format!("{m:016x}"), "ep": 1})).collect::<Vec<_>>()});
         let doc = json!({"format": "zigbee-rs-hub/import", "version": 1, "network": {"pan_id": "1a62", "devices": (0..300).map(ocb).collect::<Vec<_>>()},
-            "devices": (0..100).map(dev).collect::<Vec<_>>(), "groups": [{"id": 1}]});
+            "devices": (0..100).map(dev).collect::<Vec<_>>(), "groups": (0..60).map(group).collect::<Vec<_>>()});
         let o = Options {
             force: true,
             keep_ieee: true,
@@ -287,7 +297,7 @@ mod tests {
         let r = requests(&doc, "network/import", &o);
         assert!(r.len() > 3, "{}", r.len());
         assert_eq!(r[0]["document"]["network"]["devices"], json!([]));
-        assert_eq!(r[0]["document"]["groups"][0]["id"], 1);
+        assert!(r[0]["document"].get("groups").is_none());
         assert!(r[0]["document"].get("devices").is_none());
         assert_eq!(
             (r[0]["force"].as_bool(), r[0]["allow_ieee_change"].as_bool()),
@@ -299,7 +309,10 @@ mod tests {
                 .map(Vec::len)
                 .sum::<usize>()
         };
-        assert_eq!((count("network_devices"), count("devices")), (300, 100));
+        assert_eq!(
+            (count("network_devices"), count("devices"), count("groups")),
+            (300, 100, 60)
+        );
         for x in &r[1..] {
             assert!(x.to_string().len() < BATCH + 512, "{}", x.to_string().len());
             assert!(x.get("force").is_none(), "options only on the first");

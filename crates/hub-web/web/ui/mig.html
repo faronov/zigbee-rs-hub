@@ -36,8 +36,8 @@ async function mgRead(files){const n={d:{},g:{}},dev=[],grp=[];let net=null,doc=
   else if(e.type!="Coordinator"){const d=mgDev(e,n);d?dev.push(d):bad++}}
  return{format:"zigbee-rs-hub/import",version:1,source:{kind:"z2m",name:"Zigbee2MQTT ("+((net&&net.metadata.source)||"web UI")+")"},network:net,devices:dev,groups:grp}}
 // The document in requests of a few kilobytes.
-async function mgSend(type,q){const d=mgDoc,h=Object.assign({},d,{devices:[]}),nd=(d.network&&d.network.devices)||[];if(d.network)h.network=Object.assign({},d.network,{devices:[]});
- const parts=[];for(const[k,l]of[["network_devices",nd],["devices",d.devices||[]]]){let b=[],s=0;for(const e of l){const z=JSON.stringify(e).length;if(b.length&&s+z>6000){parts.push({[k]:b});b=[];s=0}b.push(e);s+=z}if(b.length)parts.push({[k]:b})}
+async function mgSend(type,q){const d=mgDoc,h=Object.assign({},d,{devices:[],groups:[]}),nd=(d.network&&d.network.devices)||[];if(d.network)h.network=Object.assign({},d.network,{devices:[]});
+ const parts=[];for(const[k,l]of[["network_devices",nd],["devices",d.devices||[]],["groups",d.groups||[]]]){let b=[],s=0;for(const e of l){const z=JSON.stringify(e).length;if(b.length&&s+z>6000){parts.push({[k]:b});b=[];s=0}b.push(e);s+=z}if(b.length)parts.push({[k]:b})}
  const rs=[{document:h,...q},...parts];let r,rows=[],net;
  for(let i=0;i<rs.length;i++){r=await call(type,{...rs[i],more:i<rs.length-1});if(Array.isArray(r.devices))rows=rows.concat(r.devices);net=net||r.network}
  r.network=r.network||net;return[r,rows]}
