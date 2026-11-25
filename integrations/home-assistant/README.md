@@ -49,6 +49,14 @@ has, and the integration maps them 1:1 onto HA platforms.
 - Services: `zigbee_rs_hub.permit_join` (duration, Green Power window, a
   router to join through), `zigbee_rs_hub.reinterview_device`,
   `zigbee_rs_hub.reconfigure_device`, `zigbee_rs_hub.update_catalog`.
+- Option **Sync the hub time zone from Home Assistant** (on for entries
+  made since it exists, off for older ones; Configure on the entry): on
+  every connection, when HA's time zone changes and when the option is
+  turned on, the integration reads HA's zone (`Europe/Kyiv`), takes the
+  POSIX TZ string from the last line of its TZif file (`zoneinfo`'s TZPATH,
+  then the `tzdata` package) and sends `hub/time/set {tz, tz_name}` when
+  the hub's differ. The hub's clock (SNTP) is not touched; hubs without
+  `hub/time` are left alone.
 - Definitions catalog (hubs with the `catalog/*` API): the hub downloads
   nothing itself, so the integration fetches the signed release files from
   the mirror set on the hub (`catalog/config` `base_url`, default
