@@ -200,7 +200,11 @@ impl NcpNvRecords {
     /// backend's session.
     fn open_traffic(&self, epoch: Option<u32>) {
         let Some(e) = epoch else { return };
-        if self.traffic.compare_exchange(closed(e), closed(e) | 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        // Already open for this session (a later report of it, e.g. after
+        // a channel change): nothing to say.
+        if let Err(now) = self.traffic.compare_exchange(closed(e), closed(e) | 1, Ordering::SeqCst, Ordering::SeqCst)
+            && now != closed(e) | 1
+        {
             info!("hub: the NCP's session {e} is over: its network decides nothing");
         }
     }
