@@ -569,6 +569,9 @@ impl Ota {
                         d.reading = Some(ep);
                     }
                 }
+                // Zigbee2MQTT reads SWBuildID and DateCode after an upgrade: the
+                // definition or white label may change with them.
+                Action::Upgraded { device } => engine.refresh_identity(&device, true, now),
                 Action::Changed { device, persist, structural } => {
                     if persist {
                         self.dirty.insert(device.clone());

@@ -379,6 +379,9 @@ pub struct Device {
     pub fp_hash: Option<String>,
     /// Next periodic Tuya query.
     pub tuya_query_at: Option<Millis>,
+    /// Last read of Basic DateCode and SWBuildID (interview or identity
+    /// refresh); not persisted.
+    pub identity_read_at: Option<Millis>,
     /// Reporting configurations the device answered (`entities/reporting`
     /// with `read`) by `(ep, cluster, attr)`; not persisted.
     pub reporting: VecMap<(u8, u16, u16), crate::reporting::Applied>,
@@ -423,6 +426,7 @@ impl Device {
             schema: SchemaState::default(),
             fp_hash: None,
             tuya_query_at: None,
+            identity_read_at: None,
             reporting: VecMap::new(),
             report_overrides: VecMap::new(),
         }
