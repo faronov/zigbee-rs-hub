@@ -272,6 +272,12 @@ fn manual_policy_offers_only_after_start_and_confirms_the_new_version() {
     assert_eq!(n.srv.block_cap(), 48, "the default cap");
     // After the "reboot" the client queried with the new version: done.
     assert_eq!(n.job_state(0), Some("done"));
+    let upgraded: Vec<_> = n
+        .log
+        .iter()
+        .filter(|a| matches!(a, Action::Upgraded { device } if *device == d.id))
+        .collect();
+    assert_eq!(upgraded.len(), 1, "the engine reads the identity again");
     assert_eq!(n.record(0)["current_version"], 0x0001_0100);
     assert!(n.record(0)["available"].is_null());
     // The Upgrade End Response said "now".

@@ -563,6 +563,13 @@ pub enum Action {
         /// Endpoint.
         ep: u8,
     },
+    /// A job ended with the device running its target image: what else
+    /// identifies the firmware (Basic SWBuildID, DateCode) may have
+    /// changed too.
+    Upgraded {
+        /// Device.
+        device: String,
+    },
     /// The device's OTA record changed: publish it; `persist` when the
     /// stored form changed too; `structural` when more than progress.
     Changed {
@@ -844,7 +851,13 @@ impl Server {
         out
     }
 
-    fn record_query(&mut self, dev: &Device, c: &Command<'_>, now: Millis) -> Option<Ident> {
+    fn record_query(
+        &mut self,
+        dev: &Device,
+        c: &Command<'_>,
+        now: Millis,
+        out: &mut Vec<Action>,
+    ) -> Option<Ident> {
         let p = c.payload;
         let fc = *p.first()?;
         let ident = (u16_at(p, 1)?, u16_at(p, 3)?, u32_at(p, 5)?);
@@ -862,6 +875,9 @@ impl Server {
             if (t.0, t.1) == (ident.0, ident.1) && ident.2 == t.2 {
                 j.state = JobState::Done;
                 j.updated = now;
+                out.push(Action::Upgraded {
+                    device: dev.id.clone(),
+                });
             } else if now.saturating_sub(j.installing_since) > 120_000 {
                 j.state = JobState::Failed;
                 j.error = Some(format!("the device still runs {}", hex32(ident.2)));
@@ -901,7 +917,7 @@ impl Server {
         now: Millis,
         out: &mut Vec<Action>,
     ) {
-        if self.record_query(dev, c, now).is_none() {
+        if self.record_query(dev, c, now, out).is_none() {
             if c.default_rsp {
                 out.push(default_rsp(dev, c, status::MALFORMED_COMMAND));
             }
@@ -1517,6 +1533,9 @@ impl Server {
             j.state = JobState::Done;
             j.updated = now;
             persist = true;
+            out.push(Action::Upgraded {
+                device: id.to_string(),
+            });
         }
         if persist {
             self.changed(&mut out, id, true);

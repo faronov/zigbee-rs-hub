@@ -825,3 +825,61 @@ fn generic_cover_lock_thermostat_and_polling() {
     );
     assert_eq!(state(&hub, &format!("{id}:4:temperature")), json!(19.0));
 }
+
+/// New firmware shows in Basic SWBuildID: read again after an OTA upgrade
+/// (`force`) and on a rejoin (at most hourly), it re-selects the white
+/// label, as zigbee-herdsman-converters does after Zigbee2MQTT's re-read.
+#[test]
+fn the_identity_is_read_again_after_an_upgrade_and_on_rejoin() {
+    let id = "zb:00158d0001a2b3c4";
+    let src = "zdef: 1\nid: acme/th-1\nrevision: 1\nvendor: ACME\nmodel: TH-1\nmatch: [{model: TH-1}]\nwhite_label: [{vendor: ACME, model: TH-1 v2, model_id: [TH-1], sw_build: ['2.0']}]\n";
+    let cbor = zdefc::compile_str(src, zdefc::Format::Yaml, &zdefc::Options::default())
+        .unwrap()
+        .cbor;
+    let mut cat = MemoryCatalog::default();
+    cat.insert(crate::zdef_adapter::load_cbor(&cbor, crate::model::LayerSource::Catalog).unwrap());
+    let mut hub = Hub::new(
+        MockTransport::default(),
+        HubConfig::default(),
+        Box::new(cat),
+    );
+    let sw = |v: &str| TypedValue::new(ZclType::CHAR_STR, ZclValue::String(v.into()));
+    let mut sim = Sim::default();
+    sim.devices
+        .push(sensor().attr(1, 0x0000, 0x4000, sw("1.0")));
+    sim.join(&mut hub, SENSOR, T0);
+    let model = |h: &Hub<MockTransport>| h.device(id).unwrap().resolution.model.clone();
+    assert_eq!(model(&hub).as_deref(), Some("TH-1"));
+
+    // The upgrade: read at once.
+    sim.devices[0]
+        .attrs
+        .insert((1, 0, 0x4000, None), sw("2.0\0"));
+    let _ = hub.drain_events();
+    hub.refresh_identity(id, true, T0 + 1000);
+    sim.run(&mut hub, T0 + 1000);
+    assert_eq!(
+        hub.device(id).unwrap().fp.sw_build_id.as_deref(),
+        Some("2.0")
+    );
+    assert_eq!(model(&hub).as_deref(), Some("TH-1 v2"));
+    assert!(
+        hub.drain_events()
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == id)),
+        "stored again"
+    );
+
+    // A rejoin within the hour reads nothing; one later does.
+    let basic_reads = |sim: &Sim| sim.aps().iter().filter(|a| a.cluster == 0x0000).count();
+    sim.devices[0].attrs.insert((1, 0, 0x4000, None), sw("1.0"));
+    sim.log.clear();
+    hub.on_device_joined(SENSOR, 0x1234, T0 + 60_000);
+    sim.run(&mut hub, T0 + 60_000);
+    assert_eq!(basic_reads(&sim), 0);
+    let later = T0 + 1000 + 3_600_000;
+    hub.on_device_joined(SENSOR, 0x1234, later);
+    sim.run(&mut hub, later);
+    assert_eq!(basic_reads(&sim), 1);
+    assert_eq!(model(&hub).as_deref(), Some("TH-1"));
+}

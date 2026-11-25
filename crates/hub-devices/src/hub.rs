@@ -250,6 +250,8 @@ pub enum Purpose {
     },
     /// A groups, scenes or bindings request (14.9).
     Group(zgroups::ZgOp),
+    /// Basic DateCode and SWBuildID read again ([`Hub::refresh_identity`]).
+    Identity,
     /// A frame of the application ([`Hub::send_app_zcl`]): no answer
     /// tracked, its outcome goes to [`Hub::take_app_outcomes`].
     App,
@@ -400,6 +402,8 @@ const APP_OUTCOME_MS: Millis = 10 * 60_000;
 const TX_TIMEOUT_SLEEPY_MS: Millis = 20_000;
 const AWAKE_AFTER_RX_MS: Millis = 5_000;
 const AWAKE_AFTER_JOIN_MS: Millis = 30_000;
+/// A rejoin reads Basic DateCode and SWBuildID again at most this often.
+const IDENTITY_REREAD_MS: Millis = 3_600_000;
 const MAINS_SILENCE_MS: Millis = 10 * 60_000;
 const DEDUP_MS: Millis = 2_000;
 const HOUR_S: u64 = 3600;
@@ -1049,6 +1053,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         if tuya_announce {
             self.tuya_query(id, now);
         }
+        // New firmware (an OTA upgrade, a reflash) shows in these first.
+        self.refresh_identity(id, false, now);
         if let Some(ep) = schema_ep {
             self.read_attrs(
                 id,
@@ -1636,6 +1642,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                         self.configure_done(id, &key, true, "SUCCESS".into(), now)
                     }
                     Some(Purpose::GpProbe(nwk)) => self.gp_probe_result(nwk, &recs, now),
+                    Some(Purpose::Identity) => self.identity_read(id, &recs, now),
                     _ => {}
                 }
                 self.dispatch_attrs(id, ep, ind.cluster, h.mfr, &values, now);
@@ -1900,12 +1907,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if let Some(d) = self.devices.get_mut(id) {
                     for r in recs {
                         let Some(v) = &r.value else { continue };
-                        let s = || match &v.value {
-                            ZclValue::String(s) => {
-                                Some(s.trim_end_matches(['\0', ' ']).to_string())
-                            }
-                            _ => None,
-                        };
+                        let s = || basic_text(&v.value);
                         let n = v.value.as_i64().map(|x| x as u32);
                         match r.attr {
                             0x0004 => d.fp.manufacturer_name = s(),
@@ -1920,12 +1922,75 @@ impl<T: ZigbeeTransport> Hub<T> {
                             _ => {}
                         }
                     }
+                    d.identity_read_at = Some(now);
                 }
                 self.interview_step(id, InterviewStep::Basic(i + 1), now);
             }
             InterviewStep::SchemaHeader => self.schema_header(id, recs, now),
             InterviewStep::SchemaChunk(i) => self.schema_chunk(id, i, recs, now),
             _ => {}
+        }
+    }
+
+    /// Reads Basic DateCode and SWBuildID again and re-resolves the device
+    /// when they changed (zigbee-herdsman-converters selects definitions
+    /// and white labels by them; Zigbee2MQTT reads them after an OTA
+    /// upgrade). `force`: after an upgrade; otherwise (a rejoin) at most
+    /// once an hour. Interviewed Zigbee devices with Basic only.
+    pub fn refresh_identity(&mut self, id: &str, force: bool, now: Millis) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        if !matches!(d.kind, DeviceKind::Zigbee { .. })
+            || !matches!(d.interview, InterviewStep::Done | InterviewStep::Configure)
+            || (!force
+                && d.identity_read_at
+                    .is_some_and(|t| now.saturating_sub(t) < IDENTITY_REREAD_MS))
+        {
+            return;
+        }
+        let Some(ep) =
+            d.fp.endpoints
+                .iter()
+                .find(|e| e.in_clusters.contains(&cl::BASIC))
+                .map(|e| e.ep)
+        else {
+            return;
+        };
+        d.identity_read_at = Some(now);
+        self.read_attrs(
+            id,
+            ep,
+            cl::BASIC,
+            None,
+            &[0x0006, 0x4000],
+            Purpose::Identity,
+            now,
+        );
+    }
+
+    fn identity_read(&mut self, id: &str, recs: &[zf::ReadRecord], now: Millis) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let mut changed = false;
+        for r in recs {
+            let Some(v) = r.value.as_ref().and_then(|v| basic_text(&v.value)) else {
+                continue;
+            };
+            let slot = match r.attr {
+                0x0006 => &mut d.fp.date_code,
+                0x4000 => &mut d.fp.sw_build_id,
+                _ => continue,
+            };
+            if slot.as_deref() != Some(v.as_str()) {
+                *slot = Some(v);
+                changed = true;
+            }
+        }
+        if changed {
+            self.reresolve(Some(&[id.to_string()]), now);
+            self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
     }
 
@@ -2994,6 +3059,15 @@ fn schema_endpoint(d: &Device) -> Option<u8> {
 }
 
 /// Attributes whose value changes the generic entity set or capabilities.
+/// A Basic character string as the fingerprint keeps it (trailing NULs and
+/// spaces stripped).
+fn basic_text(v: &ZclValue) -> Option<String> {
+    match v {
+        ZclValue::String(s) => Some(s.trim_end_matches(['\0', ' ']).to_string()),
+        _ => None,
+    }
+}
+
 fn is_structural(cluster: u16, attr: u16) -> bool {
     matches!(
         (cluster, attr),

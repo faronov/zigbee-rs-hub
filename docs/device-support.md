@@ -199,6 +199,13 @@ A device whose interview cannot complete gets tier-a entities from what is
 known (for example only the Node descriptor and Simple descriptors) and a
 `interview: partial` flag; resolution reruns when more is learned.
 
+New firmware changes Basic 0x0006 DateCode and 0x4000 SWBuildID, which
+definitions and white labels may match (`date_code`, `sw_build`). After an
+OTA upgrade (the OTA server sees the device run its target image, 14.11)
+and on a rejoin (Device_annce; at most once an hour after the last read)
+the hub reads both again, like Zigbee2MQTT after an upgrade; when they
+changed it stores the fingerprint and re-resolves the device (3.4).
+
 ### 3.2 Fingerprint
 
 The fingerprint is the canonical, hashable record of the interview:
