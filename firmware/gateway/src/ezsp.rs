@@ -23,8 +23,8 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use hub_ezsp::ezsp::{Callback, Command, NetworkInitBitmask, NetworkStatus, Response, StatusKind, ValueId};
-use hub_ezsp::{EzspHost, HostConfig, HostEvent, SystemClock, Transport, VersionPolicy};
+use hub_ezsp::ezsp::{Callback, Command, ConfigId, NetworkInitBitmask, NetworkStatus, Response, StatusKind, ValueId};
+use hub_ezsp::{EzspHost, HostConfig, HostEvent, LineErrors, SystemClock, Transport, VersionPolicy};
 
 use crate::{lines, uart};
 
@@ -48,6 +48,15 @@ impl Transport for Port {
         uart::flush_input();
         Ok(())
     }
+    fn line_errors(&self) -> LineErrors {
+        line_errors()
+    }
+}
+
+/// The UART driver's receive errors since boot.
+fn line_errors() -> LineErrors {
+    use std::sync::atomic::Ordering::Relaxed;
+    LineErrors { overruns: uart::OVERRUNS.load(Relaxed), errors: uart::LINE_ERRORS.load(Relaxed) }
 }
 
 /// The NCP UART as the hub's EZSP backend's transport: the UART is the
@@ -72,6 +81,9 @@ impl Transport for BackendPort {
     }
     fn discard_input(&mut self) -> io::Result<()> {
         Port.discard_input()
+    }
+    fn line_errors(&self) -> LineErrors {
+        line_errors()
     }
 }
 
@@ -114,8 +126,9 @@ fn probe(init: bool) -> String {
         }
     };
     let ezsp = info.ezsp_version;
+    let st = host.start_times();
     out += &format!(
-        "ASH v{} (RSTACK {:?}) at {} Bd; {}{} after {} version exchange(s), stack type {}, stack version {}; {} ms\r\n",
+        "ASH v{} (RSTACK {:?}) at {} Bd; {}{} after {} version exchange(s), stack type {}, stack version {}; {} ms (reset {}, version {})\r\n",
         info.ash_version,
         info.reset_code,
         uart::baud(),
@@ -124,7 +137,9 @@ fn probe(init: bool) -> String {
         info.version_exchanges,
         info.stack_type,
         info.stack_version,
-        t0.elapsed().as_millis()
+        t0.elapsed().as_millis(),
+        st.reset_ms,
+        st.version_ms
     );
     // VERSION_INFO: build (u16), major, minor, patch, special, type (UG100 successor §5).
     match host.call(&Command::GetValue { id: ValueId::VERSION_INFO }) {
@@ -209,26 +224,99 @@ fn probe(init: bool) -> String {
         }
         Err(e) => out += &format!("networkState: {e}\r\n"),
     }
-    let s = host.stats();
-    let a = host.ash().stats();
-    out += &format!(
-        "host: {} commands, {} callbacks; ASH tx {} retx {} rx {} nak {}/{} bad crc {} ack timeouts {}; UART overruns {} errors {}\r\n",
-        s.commands,
-        s.callbacks,
-        a.tx_data,
-        a.tx_retransmit,
-        a.rx_data,
-        a.tx_nak,
-        a.rx_nak,
-        a.rx_bad_crc,
-        a.ack_timeouts,
-        uart::OVERRUNS.load(std::sync::atomic::Ordering::Relaxed),
-        uart::LINE_ERRORS.load(std::sync::atomic::Ordering::Relaxed),
-    );
+    out += &format!("host: {}; {} ms in all\r\n", host.counters(), t0.elapsed().as_millis());
     if init {
         drop(host);
         lines::reset_to_app();
         out += "MG24 reset (the resumed network does not keep running without a host)\r\n";
     }
+    out
+}
+
+/// The configuration values `mg24 ezsp config` reads.
+const CONFIG_IDS: &[ConfigId] = &[
+    ConfigId::PACKET_BUFFER_COUNT,
+    ConfigId::NEIGHBOR_TABLE_SIZE,
+    ConfigId::APS_UNICAST_MESSAGE_COUNT,
+    ConfigId::BINDING_TABLE_SIZE,
+    ConfigId::ADDRESS_TABLE_SIZE,
+    ConfigId::MULTICAST_TABLE_SIZE,
+    ConfigId::ROUTE_TABLE_SIZE,
+    ConfigId::DISCOVERY_TABLE_SIZE,
+    ConfigId::STACK_PROFILE,
+    ConfigId::SECURITY_LEVEL,
+    ConfigId::MAX_HOPS,
+    ConfigId::MAX_END_DEVICE_CHILDREN,
+    ConfigId::INDIRECT_TRANSMISSION_TIMEOUT,
+    ConfigId::END_DEVICE_POLL_TIMEOUT,
+    ConfigId::TRUST_CENTER_ADDRESS_CACHE_SIZE,
+    ConfigId::SOURCE_ROUTE_TABLE_SIZE,
+    ConfigId::FRAGMENT_WINDOW_SIZE,
+    ConfigId::FRAGMENT_DELAY_MS,
+    ConfigId::KEY_TABLE_SIZE,
+    ConfigId::APS_ACK_TIMEOUT,
+    ConfigId::APPLICATION_ZDO_FLAGS,
+    ConfigId::BROADCAST_TABLE_SIZE,
+    ConfigId::SUPPORTED_NETWORKS,
+    ConfigId::TRANSIENT_KEY_TIMEOUT_S,
+    ConfigId::GP_PROXY_TABLE_SIZE,
+    ConfigId::GP_SINK_TABLE_SIZE,
+];
+
+/// `mg24 ezsp config [ID=value ...]` (bring-up boot): ASH reset, then the
+/// given configuration values set in order (the NCP's RAM only, IDs in hex
+/// or decimal), then every value the NCP reports. An ASH reset ends it, so
+/// nothing stays set.
+pub fn config(sets: &[&str]) -> String {
+    let mut pairs = Vec::new();
+    for a in sets {
+        let parsed = a.split_once('=').and_then(|(k, v)| {
+            let k = k.strip_prefix("0x").map_or_else(|| k.parse::<u8>().ok(), |h| u8::from_str_radix(h, 16).ok());
+            Some((ConfigId(k?), v.parse::<u16>().ok()?))
+        });
+        match parsed {
+            Some(p) => pairs.push(p),
+            None => return format!("bad `{a}`: ID=value, e.g. 0x06=16\r\n"),
+        }
+    }
+    let run = std::thread::Builder::new().name("ezsp-probe".into()).stack_size(12 * 1024).spawn(move || config_run(pairs));
+    match run.map(|h| h.join()) {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => "probe thread panicked\r\n".into(),
+        Err(e) => format!("probe thread: {e}\r\n"),
+    }
+}
+
+fn config_run(pairs: Vec<(ConfigId, u16)>) -> String {
+    let _claim = match uart::claim(uart::User::Console) {
+        Ok(c) => c,
+        Err(u) => return format!("MG24 UART busy ({u:?})\r\n"),
+    };
+    let cfg = HostConfig { policy: VersionPolicy { accept_unverified: true }, ..HostConfig::default() };
+    let (mut host, _events) = match EzspHost::new(Port, SystemClock::default(), cfg) {
+        Ok(h) => h,
+        Err(e) => return format!("EZSP host: {e}\r\n"),
+    };
+    let t0 = Instant::now();
+    if let Err(e) = host.start() {
+        return format!("EZSP start failed: {e}\r\n");
+    }
+    let mut out = format!("started in {} ms\r\n", t0.elapsed().as_millis());
+    for (id, v) in pairs {
+        let t = Instant::now();
+        let r = host.set_configuration_value(id, v);
+        let after = host.get_configuration_value(id);
+        out += &format!("set {id:?} = {v}: {r:?} ({} ms), now {after:?}\r\n", t.elapsed().as_millis());
+    }
+    for id in CONFIG_IDS {
+        match host.get_configuration_value(*id) {
+            Ok(v) => out += &format!("{id:?} = {v}\r\n"),
+            Err(e) => out += &format!("{id:?}: {e}\r\n"),
+        }
+    }
+    out += &format!("host: {}; {} ms in all\r\n", host.counters(), t0.elapsed().as_millis());
+    drop(host);
+    lines::reset_to_app();
+    out += "MG24 reset\r\n";
     out
 }

@@ -43,6 +43,9 @@ zigbee-rs-hub gateway console:\r
   mg24 ezsp info [init] ASH reset + EZSP version, stack, EUI-64, mfg tokens,\r
                        network state; `init` resumes a stored network (bring-up\r
                        boot)\r
+  mg24 ezsp config [ID=v ...] ASH reset, set the given configuration\r
+                       values (NCP RAM only), read every value, reset the\r
+                       MG24 (bring-up boot)\r
   mg24 baud <rate>     MG24 UART rate until the next boot (bring-up boot)\r
   stock                SONOFF's application in ota_0, and how to return to it\r
   stock confirm        give SONOFF's files back (if claimed), select ota_0 and\r
@@ -195,6 +198,7 @@ fn command(words: &[&str]) -> String {
         ["mg24", "bootloader"] => gecko::banner(board()),
         ["mg24", "ezsp", "info"] => ezsp::info(false),
         ["mg24", "ezsp", "info", "init"] => ezsp::info(true),
+        ["mg24", "ezsp", "config", sets @ ..] => ezsp::config(sets),
         ["mg24", "baud", rate] => match rate.parse::<u32>() {
             Ok(b) if (9_600..=3_000_000).contains(&b) => match uart::claim(uart::User::Console) {
                 Ok(_c) => {
