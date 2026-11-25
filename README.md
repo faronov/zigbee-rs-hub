@@ -68,21 +68,33 @@ details in the zigbee-rs book, "Web Flasher").
   so far).
 
 **Making a release:** set the version in `firmware/hub/Cargo.toml` and
-`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`), update
-`Cargo.lock` (`cargo update -p tbr-hub`), commit, then
-`git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`. `hub-release.yml`
-checks the versions (also the one in the built app), builds with pinned
-tools and attaches per layout the full flash image (`…-merged.bin`, offset
-0, padded to the flash size), bootloader, partition table, blank `otadata`
-(8 MB), app, plus the `tbr-bridge` app, `release-manifest.json` and
-`SHA256SUMS`; the release notes list the esptool commands. Both flash sizes
-carry the MQTT bridge; the 8 MB images also enable the advanced console and
-the Zigbee OTA image store (`features` per board in the manifest;
-`tools/build-hub-firmware.sh`). A suffix
-(`hub-v0.2.0-rc.1`) makes a pre-release. The flasher picks the release up
-within six hours, or at once when this repository has the secret
-`FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
-faronov/zigbee-rs).
+`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`), and the same
+version in `firmware/donglem` (`zrh-donglem`: the hub images of one release
+share its version), update `Cargo.lock` (`cargo update -p tbr-hub -p
+zrh-donglem`), add the release's section to [CHANGELOG.md](CHANGELOG.md),
+commit, then `git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`.
+`hub-release.yml` checks the versions (also the ones in the built apps) and
+the changelog section, builds with pinned tools and attaches per layout the
+full flash image (`…-merged.bin`, offset 0, padded to the flash size),
+bootloader, partition table, blank `otadata` (8 MB), app, plus the
+`tbr-bridge` app; for the SONOFF Dongle Max (experimental) the app for
+`ota_1` (`zrh-donglem-X.Y.Z-app.bin`, also the file for SONOFF's web
+console) and the `otadata` sector that selects it
+(`zrh-donglem-X.Y.Z-otadata-ota1.bin`, at 0x5D000); `release-manifest.json`
+and `SHA256SUMS`. The release notes are the changelog section, then the
+esptool commands. Both flash sizes carry the MQTT bridge; the 8 MB images
+also enable the advanced console and the Zigbee OTA image store
+(`features` per board in the manifest; `tools/build-hub-firmware.sh`). A
+suffix (`hub-v0.2.0-rc.1`) makes a pre-release. The repository variable
+`HUB_RELEASE_DONGLEM=false` leaves the Dongle Max assets out. A pull
+request that touches the release files, or `gh workflow run
+hub-release.yml --ref <branch>`, runs the same workflow as a dry run
+(nothing published; `dist/` and the notes are the run's `hub-release`
+artifact). The flasher picks the release up within six hours, or at once
+when this repository has the secret `FLASHER_DISPATCH_TOKEN` (fine-grained
+token, *Contents: read and write* on faronov/zigbee-rs). It lists the
+Dongle Max without an install button (`"web_install": false`: ESP Web
+Tools' erase would wipe SONOFF's firmware).
 
 ### Image variants and memory (after release 0.2.0)
 

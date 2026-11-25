@@ -63,5 +63,57 @@ class BuildCheckTests(unittest.TestCase):
                 release_images.check_build(spec, features, psram)
 
 
+def esp_image(chip_id=0, mode=2, size_freq=0x40, min_rev=300, hash_appended=1, version=b"zrh-donglem-0.3.0"):
+    """A synthetic app image: header, extended header, first segment header, esp_app_desc_t."""
+    header = bytes([0xE9, 1, mode, size_freq]) + b"\0" * 4 + b"\xee" * 4 + chip_id.to_bytes(2, "little") + b"\0" \
+        + min_rev.to_bytes(2, "little") + (399).to_bytes(2, "little") + b"\0" * 4 + bytes([hash_appended])
+    desc = release_images.APP_DESC_MAGIC.to_bytes(4, "little") + b"\0" * 12 + version.ljust(32, b"\0")
+    return header + b"\0" * 8 + desc + b"\0" * 64
+
+
+class DongleImageTests(unittest.TestCase):
+    def test_sonoff_bootloader_settings_pass(self):
+        release_images.check_dongle_app(esp_image(), "0.3.0")
+        self.assertEqual(release_images.image_header(esp_image())["flash_size"], "16MB")
+
+    def test_wrong_version_chip_or_flash_settings_are_refused(self):
+        for image, why in [
+            (esp_image(version=b"zrh-donglem-0.2.0"), "reports"),
+            (esp_image(version=b"tbr-hub-0.3.0"), "reports"),
+            (esp_image(chip_id=9), "header"),            # an S3 image
+            (esp_image(size_freq=0x4F), "header"),       # 80 MHz: SONOFF's bootloader runs 40 MHz
+            (esp_image(size_freq=0x30), "header"),       # 8 MB
+            (esp_image(mode=0), "header"),               # QIO
+            (esp_image(min_rev=0), "header"),            # without CONFIG_ESP32_REV_MIN_3
+            (esp_image(hash_appended=0), "header"),      # SONOFF's OTA checks the appended SHA-256
+            (esp_image() + b"tbr-hub-build:features=mqtt;psram=quad;", "marker"),
+        ]:
+            with self.subTest(why=why, image=image[:24].hex()), self.assertRaisesRegex(release_images.ReleaseError, why):
+                release_images.check_dongle_app(image, "0.3.0")
+
+    def test_otadata_sector_selects_ota_1_over_sonoff_entry(self):
+        sector = release_images.dongle_otadata()
+        self.assertEqual(len(sector), release_images.OTADATA_SECTOR)
+        self.assertEqual(int.from_bytes(sector[:4], "little"), 2)
+
+    def test_board_entry_writes_only_ota_1_and_otadata_sector_1(self):
+        parts = release_images.partitions(release_images.ROOT / release_images.DONGLE["csv"])
+        app = {"name": "zrh-donglem-0.3.0-app.bin", "size": 2_960_000, "sha256": "0" * 64, "offset": parts["ota_1"][0]}
+        otadata = {"name": "zrh-donglem-0.3.0-otadata-ota1.bin", "size": 0x1000, "sha256": "1" * 64,
+                   "offset": parts["otadata"][0] + release_images.OTADATA_SECTOR}
+        board = release_images.dongle_entry("0.3.0", parts, app, otadata)
+        self.assertIs(board["web_install"], False)
+        self.assertTrue(board["experimental"])
+        self.assertEqual(board["flash"], ["app", "otadata_ota1"])
+        self.assertEqual((board["files"]["app"]["offset"], board["files"]["otadata_ota1"]["offset"]), (0x660000, 0x5D000))
+        self.assertEqual([p["name"] for p in board["preserved"]],
+                         ["bootloader", "partition_table", "nvs", "otadata sector 0", "phy_init", "ota_0", "files"])
+        for role in board["flash"]:
+            f = board["files"][role]
+            for kept in board["preserved"]:
+                with self.subTest(role=role, kept=kept["name"]):
+                    self.assertTrue(f["offset"] + f["size"] <= kept["offset"] or kept["offset"] + kept["size"] <= f["offset"])
+        self.assertLessEqual(app["size"], parts["ota_1"][1])
+
 if __name__ == "__main__":
     unittest.main()

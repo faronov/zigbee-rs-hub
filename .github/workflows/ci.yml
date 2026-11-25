@@ -61,7 +61,7 @@ jobs:
       - name: S3 flashing helpers (partition offsets from the device's table)
         run: python3 -m unittest discover -s tools/flow -p 'test_*.py'
       - name: Firmware build selection, release image checks, size accounting
-        run: python3 -m unittest tools/test_hub_build.py tools/test_release_images.py tools/test_size_report.py tools/test_make_otadata.py
+        run: python3 -m unittest tools/test_hub_build.py tools/test_release_images.py tools/test_release_notes.py tools/test_size_report.py tools/test_make_otadata.py
 
   home-assistant:
     name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)
@@ -285,7 +285,7 @@ jobs:
       - name: Release images (dry run of hub-release.yml's assembly and version checks)
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' firmware/hub/Cargo.toml | head -1)
-          python3 tools/release-images.py --version "$version" --tag "hub-v$version" --commit "$GITHUB_SHA" --out target/release-dryrun
+          python3 tools/release-images.py --version "$version" --tag "hub-v$version" --commit "$GITHUB_SHA" --boards tbr --out target/release-dryrun
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
@@ -368,6 +368,10 @@ jobs:
           tools/make-partition-table.sh firmware/donglem/partitions.csv target/partitions-donglem.bin 16MB
           echo "639d27a0418b260e0242fa6d4c93514bf5273c2ffd22f6229066ebac21f3ca66  target/partitions-donglem.bin" | sha256sum -c
           python3 tools/make-otadata.py --seq 2 -o target/otadata-donglem-ota1.bin
+      - name: Release images (dry run of hub-release.yml's Dongle Max assets and version checks)
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' firmware/hub/Cargo.toml | head -1)
+          python3 tools/release-images.py --version "$version" --tag "hub-v$version" --commit "$GITHUB_SHA" --boards donglem --out target/release-dryrun
       - name: Static RAM (internal DRAM/IRAM)
         run: |
           size="$(find .embuild/espressif/tools -name xtensa-esp32-elf-size -type f | head -1)"
@@ -379,4 +383,5 @@ jobs:
             target/zrh-donglem-app.bin
             target/partitions-donglem.bin
             target/otadata-donglem-ota1.bin
+            target/release-dryrun/
             target/xtensa-esp32-espidf/release/zrh-donglem

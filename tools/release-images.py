@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""Release images of the S3 hub firmware (tbr-hub) for both flash layouts.
+"""Release images of the hub firmware: tbr-hub (ESP32-S3 of the Thread
+Border Router board) for both flash layouts and zrh-donglem (SONOFF Dongle
+Max, classic ESP32).
 
 Used by .github/workflows/hub-release.yml after `cargo build --release` of
-firmware/bridge and firmware/hub. Writes, for each board, the bootloader
-(the ESP-IDF build's, with the board's flash size in its header), the
-partition table, a blank otadata (8 MB A/B layout only), the app and a full
-flash image padded to the flash size, then `release-manifest.json` and
-`SHA256SUMS` for the GitHub release. The manifest format is the web
-flasher's input, shared with zigbee-rs (book: Getting Started / Web
-Flasher).
+firmware/bridge, firmware/hub and firmware/donglem. Writes, for each S3
+board, the bootloader (the ESP-IDF build's, with the board's flash size in
+its header), the partition table, a blank otadata (8 MB A/B layout only),
+the app and a full flash image padded to the flash size. For the Dongle Max
+(SONOFF's partition table and bootloader are never written) only the app
+for `ota_1` (also the file for SONOFF's web console) and the `otadata`
+sector 1 that selects it. Then `release-manifest.json` and `SHA256SUMS`
+for the GitHub release. The manifest format is the web flasher's input,
+shared with zigbee-rs (book: Getting Started / Web Flasher); a board with
+`"web_install": false` is listed by the flasher, never installed with ESP
+Web Tools (whose erase option would wipe the dongle's stock firmware).
 
     tools/release-images.py --version 0.1.0 --commit SHA --tag hub-v0.1.0 --out dist
+    tools/release-images.py ... --boards tbr      # S3 images and tbr-bridge only
+    tools/release-images.py ... --boards donglem  # Dongle Max only
 """
 
 from __future__ import annotations
@@ -19,6 +27,7 @@ import argparse
 import datetime
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -95,6 +104,63 @@ PRESERVED = {
     "nvs": "Wi-Fi credentials, boot mode, API token",
     "hubdata": "device registry, settings, ZRHP host store (network backup)",
 }
+
+
+# SONOFF Dongle Max (docs/dongle-max.md): the hub in `ota_1` of SONOFF's
+# unchanged partition table, booted by SONOFF's bootloader.
+DONGLE_STOCK_TABLE_SHA256 = "639d27a0418b260e0242fa6d4c93514bf5273c2ffd22f6229066ebac21f3ca66"
+DONGLE_TABLE_SIZE = 0xC00
+DONGLE = {
+    "id": "sonoff-dongle-max",
+    "title": "SONOFF Dongle Max (Dongle-M, MG24): zigbee-rs hub on SONOFF's EmberZNet NCP (experimental)",
+    "csv": "firmware/donglem/partitions.csv",
+    "app_partition": "ota_1",
+    "flash_size": "16MB",
+    "flash_freq": "40m",
+    # CONFIG_ESP32_REV_MIN_3: chip v3.0 up to ESP-IDF's maximum (v3.99).
+    "min_rev_full": 300,
+    "layout": "sonoff-dongle-m-stock",
+    "psram": "quad",
+    # firmware/gateway/Cargo.toml (no marker in the image): `ota-store` implies `ota`.
+    "features": ["ezsp", "mqtt", "advanced", "ota", "ota-store"],
+    "hardware_status": "bring-up tested; full hub HIL pending",
+    "note": "Experimental: the hub application on SONOFF's stock EmberZNet NCP (EZSP backend), with "
+    "SONOFF's partition table, bootloader and application (ota_0) kept. Bring-up tested on one unit; "
+    "the hub image has not completed its hardware checklist yet. No network backup/restore through "
+    "EZSP yet, no Green Power, no MG24 firmware update. Not installable through the web flasher: "
+    "ESP Web Tools could erase the whole chip, which destroys SONOFF's firmware and factory data.",
+    "connect": "Plug the dongle into USB (CP2102N, \"SONOFF Dongle Max MG24\"); its DTR/RTS reset the ESP32 "
+    "into the ROM loader, as esptool expects.",
+    # Shown instead of an install button (the flasher renders the esptool lines from `files`).
+    "install_steps": [
+        "Recommended: SONOFF's web console of the dongle (http://<dongle address>/), Firmware > "
+        "ESP32-D0WDR2-V3 > Upload & Flash Firmware, with the app file. SONOFF's firmware writes it into "
+        "ota_1 and selects it (not yet verified on hardware).",
+        "Or over USB with esptool (below), on a dongle that runs SONOFF's firmware or a hub installed "
+        "this way: write the app first, then the otadata sector. Never erase the chip and never write "
+        "a merged image: SONOFF's bootloader, partition table, nvs and files must stay.",
+        "Back up the whole flash first (esptool read-flash 0 ALL; it holds the dongle's credentials, "
+        "keep it private). SONOFF's firmware comes back with the console command stock confirm, or by "
+        "writing the backup's otadata sector 1 (0x5D000, 4 KiB) back.",
+        "After stock confirm or a hub self-update the USB parts do not switch slots (the newer otadata "
+        "entry wins): update through Settings > Hub firmware in the hub's web UI instead.",
+        "First boot: console on the same port at 115200 8N1 (token prints the API token); the web UI "
+        "is at http://<address>/ once Ethernet (DHCP) or Wi-Fi (wifi set <ssid> <password>) is up.",
+    ],
+}
+# What the Dongle Max install leaves alone: (name, partition or (offset, size), what).
+PRESERVED_DONGLE = [
+    ("bootloader", (0x1000, 0x7000), "SONOFF's ESP-IDF v5.2.1 second-stage bootloader"),
+    ("partition_table", (0x8000, 0x1000), "SONOFF's stock table, unchanged"),
+    ("nvs", "nvs", "SONOFF's settings and credentials; the hub adds its own namespace zrh"),
+    ("otadata sector 0", "otadata", "SONOFF's entry selecting ota_0"),
+    ("phy_init", "phy_init", "RF calibration data"),
+    ("ota_0", "ota_0", "SONOFF's application, kept until the hub's first self-update"),
+    ("files", "files", "SONOFF's LittleFS (config, device info, MG24 factory data); at its first boot "
+     "the hub copies SONOFF's blocks into a reserved area of it and keeps its own data there "
+     "(stock confirm writes them back)"),
+]
+OTADATA_SECTOR = 0x1000
 
 
 class ReleaseError(Exception):
@@ -250,6 +316,119 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
     }
 
 
+# esptool's image header fields (esp_image_header_t).
+FLASH_MODES = {0: "qio", 1: "qout", 2: "dio", 3: "dout"}
+FLASH_SIZES = {0: "1MB", 1: "2MB", 2: "4MB", 3: "8MB", 4: "16MB", 5: "32MB", 6: "64MB", 7: "128MB"}
+FLASH_FREQS = {0: "40m", 1: "26m", 2: "20m", 0xF: "80m"}
+CHIP_IDS = {0: "esp32", 9: "esp32s3"}
+
+
+def image_header(image: bytes) -> dict:
+    """Chip, flash parameters and revision range in an ESP app image header."""
+    if len(image) < 24 or image[0] != 0xE9:
+        raise ReleaseError("not an ESP app image")
+    return {
+        "chip": CHIP_IDS.get(int.from_bytes(image[12:14], "little"), f"id {int.from_bytes(image[12:14], 'little')}"),
+        "flash_mode": FLASH_MODES.get(image[2], f"mode {image[2]}"),
+        "flash_size": FLASH_SIZES.get(image[3] >> 4, f"size {image[3] >> 4}"),
+        "flash_freq": FLASH_FREQS.get(image[3] & 0xF, f"freq {image[3] & 0xF}"),
+        "min_rev_full": int.from_bytes(image[15:17], "little"),
+        "hash_appended": image[23] == 1,
+    }
+
+
+def check_dongle_app(image: bytes, version: str) -> None:
+    """What SONOFF's bootloader and its web console upload need (docs/dongle-max.md)."""
+    reported = app_version(image)
+    if reported != f"zrh-donglem-{version}":
+        raise ReleaseError(f"zrh-donglem reports {reported!r}, the release is {version}")
+    if BUILD_MARKER.search(image):
+        raise ReleaseError("the Dongle Max image carries a tbr-hub build marker")
+    header = image_header(image)
+    want = {"chip": "esp32", "flash_mode": "dio", "flash_size": DONGLE["flash_size"],
+            "flash_freq": DONGLE["flash_freq"], "min_rev_full": DONGLE["min_rev_full"], "hash_appended": True}
+    if header != want:
+        raise ReleaseError(f"zrh-donglem image header {header}, SONOFF's bootloader needs {want}")
+
+
+def dongle_otadata() -> bytes:
+    """The otadata sector 1 entry that selects ota_1 over SONOFF's seq 1 in sector 0 (tools/make-otadata.py)."""
+    spec = importlib.util.spec_from_file_location("make_otadata", ROOT / "tools/make-otadata.py")
+    otadata = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(otadata)
+    if otadata.slot(2) != 1 or otadata.slot(1) != 0:
+        raise ReleaseError("otadata seq 2 must select ota_1")
+    return otadata.sector(2)
+
+
+def build_dongle(version: str, out: Path) -> dict:
+    spec = DONGLE
+    if cargo_version("firmware/donglem/Cargo.toml") != version:
+        raise ReleaseError(f"firmware/donglem/Cargo.toml is at {cargo_version('firmware/donglem/Cargo.toml')}, "
+                           f"the release is {version} (the hub images of one release share its version)")
+    parts = partitions(ROOT / spec["csv"])
+    app_off, slot = parts[spec["app_partition"]]
+    otadata_off, otadata_size = parts["otadata"]
+    if otadata_size != 2 * OTADATA_SECTOR:
+        raise ReleaseError(f"Dongle Max otadata is {otadata_size} B, expected two sectors")
+    table = ROOT / "target/partitions-donglem.bin"
+    table.parent.mkdir(parents=True, exist_ok=True)
+    run("tools/make-partition-table.sh", spec["csv"], str(table), spec["flash_size"])
+    if sha256(table) != DONGLE_STOCK_TABLE_SHA256 or table.stat().st_size != DONGLE_TABLE_SIZE:
+        raise ReleaseError(f"{spec['csv']} no longer generates SONOFF's stock partition table")
+    stem = f"zrh-donglem-{version}"
+    app = out / f"{stem}-app.bin"
+    run("tools/make-app-image.sh", "release", str(app), "zrh-donglem",
+        env={"CHIP": "esp32", "FLASH_SIZE": spec["flash_size"], "FLASH_FREQ": spec["flash_freq"],
+             "MIN_REV_FULL": str(spec["min_rev_full"]), "MAX_APP_BYTES": str(slot)})
+    check_dongle_app(app.read_bytes(), version)
+    otadata = out / f"{stem}-otadata-ota1.bin"
+    otadata.write_bytes(dongle_otadata())
+    return dongle_entry(version, parts, file_entry(app, app_off), file_entry(otadata, otadata_off + OTADATA_SECTOR))
+
+
+def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, otadata: dict) -> dict:
+    spec = DONGLE
+    preserved = []
+    for name, where, what in PRESERVED_DONGLE:
+        offset, size = where if isinstance(where, tuple) else parts[where]
+        if name.startswith("otadata"):
+            size = OTADATA_SECTOR
+        preserved.append({"name": name, "offset": offset, "size": size, "what": what})
+    return {
+        "id": spec["id"],
+        "title": spec["title"],
+        "product": "zigbee-rs-hub",
+        "firmware": "zrh-donglem",
+        "chip": "esp32",
+        "chip_family": "ESP32",
+        "flash_size": spec["flash_size"],
+        "layout": spec["layout"],
+        "psram": spec["psram"],
+        "features": spec["features"],
+        "experimental": True,
+        "hardware_status": spec["hardware_status"],
+        # Never through ESP Web Tools: its "Erase device" (and the erase manifest) wipes the
+        # whole chip, SONOFF's bootloader, table, nvs and factory data with it.
+        "web_install": False,
+        "note": spec["note"],
+        "connect": spec["connect"],
+        "install_steps": spec["install_steps"],
+        "app_version": f"zrh-donglem-{version}",
+        "files": {
+            "app": {**app, "partition": spec["app_partition"],
+                    "use": "SONOFF's web console (Upload & Flash Firmware) or USB"},
+            "otadata_ota1": {**otadata, "partition": "otadata",
+                             "use": "USB only: otadata sector 1, seq 2, selects ota_1"},
+        },
+        # USB write order: the app first, so a failed write leaves SONOFF's application selected.
+        "flash": ["app", "otadata_ota1"],
+        "stock_partition_table": {"offset": 0x8000, "size": DONGLE_TABLE_SIZE, "sha256": DONGLE_STOCK_TABLE_SHA256},
+        "preserved": preserved,
+        "fw_update": None,
+    }
+
+
 def zigbee_rs_rev() -> str:
     lock = (ROOT / "Cargo.lock").read_text()
     m = re.search(r'name = "zigbee-zrhp"\nversion = "[^"]+"\nsource = "git\+[^#]+#([0-9a-f]{40})"', lock)
@@ -277,19 +456,30 @@ def main() -> None:
     parser.add_argument("--date")
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", "faronov/zigbee-rs-hub"))
     parser.add_argument("--toolchain", default="{}")
+    parser.add_argument("--boards", choices=["all", "tbr", "donglem"], default="all",
+                        help="tbr: the S3 images and tbr-bridge; donglem: the SONOFF Dongle Max (default: all)")
     args = parser.parse_args()
+    tbr = args.boards in ("all", "tbr")
+    donglem = args.boards in ("all", "donglem")
     try:
         if cargo_version("firmware/hub/Cargo.toml") != args.version:
             raise ReleaseError("firmware/hub/Cargo.toml version differs from the tag")
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
-        boot_src = idf_bootloader()
-        boards = [build_board(spec, args.version, out, boot_src) for spec in BOARDS]
-        bridge_version = cargo_version("firmware/bridge/Cargo.toml")
-        bridge = out / f"tbr-bridge-{bridge_version}-app.bin"
-        run("tools/make-app-image.sh", "release", str(bridge), "tbr-bridge", env={"FLASH_SIZE": "4MB"})
-        if app_version(bridge.read_bytes()) != f"tbr-bridge-{bridge_version}":
-            raise ReleaseError(f"tbr-bridge reports {app_version(bridge.read_bytes())!r}, Cargo.toml {bridge_version}")
+        boards, components, extra_files = [], {}, []
+        if tbr:
+            boot_src = idf_bootloader()
+            boards += [build_board(spec, args.version, out, boot_src) for spec in BOARDS]
+            bridge_version = cargo_version("firmware/bridge/Cargo.toml")
+            bridge = out / f"tbr-bridge-{bridge_version}-app.bin"
+            run("tools/make-app-image.sh", "release", str(bridge), "tbr-bridge", env={"FLASH_SIZE": "4MB"})
+            if app_version(bridge.read_bytes()) != f"tbr-bridge-{bridge_version}":
+                raise ReleaseError(f"tbr-bridge reports {app_version(bridge.read_bytes())!r}, Cargo.toml {bridge_version}")
+            components["tbr-bridge (bridge mode)"] = bridge_version
+            extra_files.append({"role": "tbr-bridge app (stock Espressif layout, ota_0 at 0x20000)",
+                                **file_entry(bridge, None)})
+        if donglem:
+            boards.append(build_dongle(args.version, out))
         rev = zigbee_rs_rev()
         protocol = zrhp_protocol(rev)
         manifest = {
@@ -304,10 +494,9 @@ def main() -> None:
             "build_id": args.commit[:16],
             "date": args.date or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "zrhp": {"protocol": protocol} if protocol else None,
-            "components": {"tbr-bridge (bridge mode)": bridge_version, "zigbee-rs": rev[:12], "ESP-IDF": "v5.5.1"},
+            "components": {**components, "zigbee-rs": rev[:12], "ESP-IDF": "v5.5.1"},
             "toolchain": json.loads(args.toolchain),
-            "extra_files": [{"role": "tbr-bridge app (stock Espressif layout, ota_0 at 0x20000)",
-                             **file_entry(bridge, None)}],
+            "extra_files": extra_files,
             "boards": boards,
         }
         (out / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

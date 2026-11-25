@@ -58,20 +58,32 @@ ZRHP остаётся протоколом для USB/UART (сетевого т�
   на 4 MB).
 
 **Как выпустить релиз:** выставить версию в `firmware/hub/Cargo.toml` и
-`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`), обновить
-`Cargo.lock` (`cargo update -p tbr-hub`), закоммитить, затем
+`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`) и ту же версию
+в `firmware/donglem` (`zrh-donglem`: образы хаба одного релиза имеют его
+версию), обновить `Cargo.lock` (`cargo update -p tbr-hub -p zrh-donglem`),
+добавить раздел релиза в [CHANGELOG.md](CHANGELOG.md), закоммитить, затем
 `git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`. `hub-release.yml`
-проверяет версии (и ту, что в собранном приложении), собирает
-закреплёнными версиями инструментов и прикладывает для каждой разметки
-полный образ флеша (`…-merged.bin`, смещение 0, дополнен до размера флеша),
-загрузчик, таблицу разделов, пустой `otadata` (8 MB), приложение, а также
-приложение `tbr-bridge`, `release-manifest.json` и `SHA256SUMS`; в описании
-релиза — команды esptool. Обе разметки содержат MQTT; образы 8 МБ также
-включают расширенную консоль и хранилище образов Zigbee OTA (`features` у
-каждой платы в манифесте; `tools/build-hub-firmware.sh`). Суффикс (`hub-v0.2.0-rc.1`) делает пре-релиз.
-Прошивальщик подхватывает релиз в течение шести часов, или сразу, если в
-этом репозитории есть секрет `FLASHER_DISPATCH_TOKEN` (fine-grained token,
-*Contents: read and write* на faronov/zigbee-rs).
+проверяет версии (и те, что в собранных приложениях) и раздел журнала
+изменений, собирает закреплёнными версиями инструментов и прикладывает для
+каждой разметки полный образ флеша (`…-merged.bin`, смещение 0, дополнен до
+размера флеша), загрузчик, таблицу разделов, пустой `otadata` (8 MB),
+приложение, а также приложение `tbr-bridge`; для SONOFF Dongle Max
+(экспериментально) — приложение для `ota_1` (`zrh-donglem-X.Y.Z-app.bin`,
+он же файл для веб-консоли SONOFF) и сектор `otadata`, который его выбирает
+(`zrh-donglem-X.Y.Z-otadata-ota1.bin`, по 0x5D000); `release-manifest.json`
+и `SHA256SUMS`. Описание релиза — раздел журнала изменений, затем команды
+esptool. Обе разметки содержат MQTT; образы 8 МБ также включают расширенную
+консоль и хранилище образов Zigbee OTA (`features` у каждой платы в
+манифесте; `tools/build-hub-firmware.sh`). Суффикс (`hub-v0.2.0-rc.1`)
+делает пре-релиз. Переменная репозитория `HUB_RELEASE_DONGLEM=false`
+исключает файлы Dongle Max. Pull request, затрагивающий файлы релиза, или
+`gh workflow run hub-release.yml --ref <ветка>` запускают тот же workflow
+вхолостую (ничего не публикуется; `dist/` и описание — артефакт
+`hub-release`). Прошивальщик подхватывает релиз в течение шести часов, или
+сразу, если в этом репозитории есть секрет `FLASHER_DISPATCH_TOKEN`
+(fine-grained token, *Contents: read and write* на faronov/zigbee-rs).
+Dongle Max он показывает без кнопки установки (`"web_install": false`:
+стирание ESP Web Tools уничтожило бы прошивку SONOFF).
 
 ### Варианты образов и память (после релиза 0.2.0)
 
