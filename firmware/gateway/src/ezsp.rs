@@ -1,5 +1,6 @@
-//! Read-only EZSP probe of the NCP (`mg24 ezsp info`), with the host core
-//! of `hub-ezsp` over the NCP UART: ASH reset (the NCP restarts), EZSP
+//! The NCP UART as the EZSP backend's transport ([`BackendPort`]), and the
+//! read-only EZSP probe of the NCP (`mg24 ezsp info`, in a bring-up boot
+//! without the hub), with the host core of `hub-ezsp` over the NCP UART: ASH reset (the NCP restarts), EZSP
 //! version negotiation, then queries only, nothing written:
 //!
 //! | Step | EZSP frame |
@@ -46,6 +47,31 @@ impl Transport for Port {
         std::thread::sleep(Duration::from_millis(20));
         uart::flush_input();
         Ok(())
+    }
+}
+
+/// The NCP UART as the hub's EZSP backend's transport: the UART is the
+/// backend's while this lives (the whole boot).
+pub struct BackendPort {
+    _claim: uart::Claim,
+}
+
+impl BackendPort {
+    /// Takes the UART, or says who has it.
+    pub fn take() -> Result<Self, uart::User> {
+        Ok(Self { _claim: uart::claim(uart::User::Backend)? })
+    }
+}
+
+impl Transport for BackendPort {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        Port.write_all(data)
+    }
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        Port.read(buf, timeout)
+    }
+    fn discard_input(&mut self) -> io::Result<()> {
+        Port.discard_input()
     }
 }
 

@@ -2,8 +2,8 @@
 //! low RX FIFO threshold and timeout so the ISR drains the FIFO early. No
 //! flow control (the Dongle-M has no RTS/CTS between the chips).
 //!
-//! One user at a time ([`claim`]): today the console probes; the
-//! coordinator backend will be the other user.
+//! One user at a time ([`claim`]): the hub's EZSP backend for the whole
+//! boot, or (in a bring-up boot without the hub) the console's probes.
 
 use std::io;
 use std::sync::Mutex;
@@ -31,6 +31,8 @@ pub static LINE_ERRORS: AtomicU32 = AtomicU32::new(0);
 pub enum User {
     /// A console command (probe, bootloader banner).
     Console,
+    /// The hub's EZSP backend.
+    Backend,
 }
 
 static OWNER: Mutex<Option<User>> = Mutex::new(None);

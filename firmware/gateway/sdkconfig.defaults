@@ -2,7 +2,7 @@
 # sdkconfig.defaults is applied after this file. Set for the product
 # feature set (docs/dongle-max.md): hub application, web UI + WebSocket API,
 # MQTT, Zigbee device OTA, self-update, Ethernet + Wi-Fi, all on SONOFF's
-# stock partition table; the bring-up image already builds with it.
+# stock partition table.
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=6144
@@ -29,6 +29,14 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Internal RAM (docs/dongle-max.md, RAM budget): the Wi-Fi station runs
+# only without Ethernet; its static RX buffers (DMA, internal, 1.6 KB
+# each) 10 -> 6. Its dynamic buffers and lwIP's go to PSRAM (above).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+# Sockets: the HTTP server's 7 (`hub_core::resources`) + its 3, the MQTT
+# client, SNTP and DNS.
+CONFIG_LWIP_MAX_SOCKETS=13
 
 # No core dump: the stock table has no `coredump` partition. The panic
 # recorder keeps the last panic in RTC memory (`info`).
