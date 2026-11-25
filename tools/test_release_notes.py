@@ -39,7 +39,8 @@ MANIFEST = {
          "files": {"merged": entry("tbr-hub-0.3.0-8mb-merged.bin", 0), "app": entry("tbr-hub-0.3.0-8mb-app.bin", 0x20000)}},
         {"id": "sonoff-dongle-max", "title": "SONOFF Dongle Max", "layout": "sonoff-dongle-m-stock",
          "web_install": False, "hardware_status": "bring-up tested; full hub HIL pending",
-         "precheck": ["esptool --chip esp32 --port <PORT> read-flash 0x5C000 0x2000 otadata.bin", "python3 -c CHECK"],
+         "precheck": ["esptool --chip esp32 --port <PORT> read-flash 0x5C000 0x2000 otadata.bin",
+                      "esptool --chip esp32 --port <PORT> read-flash 0x660000 0x100 ota1.bin", "python3 -c CHECK"],
          "files": {"app": entry("zrh-donglem-0.3.0-app.bin", 0x660000),
                    "otadata_ota1": entry("zrh-donglem-0.3.0-otadata-ota1.bin", 0x5D000)}},
     ],
@@ -71,7 +72,8 @@ class NotesTests(unittest.TestCase):
         app = text.index("write-flash 0x660000 zrh-donglem-0.3.0-app.bin")
         self.assertLess(app, text.index("write-flash 0x5D000 zrh-donglem-0.3.0-otadata-ota1.bin"))
         # The otadata check comes before both routes (the web console's and USB's writes).
-        check = text.index("read-flash 0x5C000 0x2000 otadata.bin\npython3 -c CHECK")
+        check = text.index("read-flash 0x5C000 0x2000 otadata.bin\n"
+                           "esptool --chip esp32 --port <PORT> read-flash 0x660000 0x100 ota1.bin\npython3 -c CHECK")
         self.assertLess(check, text.index("**SONOFF's web console**"))
         self.assertLess(check, app)
         self.assertIn("experimental: bring-up tested; full hub HIL pending", text)

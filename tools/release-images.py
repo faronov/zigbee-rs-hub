@@ -172,17 +172,27 @@ DONGLE = {
 }
 
 
-def dongle_precheck(otadata_off: int, otadata_size: int, ota1_file: str) -> list[str]:
-    """Commands that check the dongle's otadata before either install route: sector 0 must hold
-    SONOFF's seq 1 (its application in ota_0) and sector 1 be blank, or hold this release's sector
-    (a hub installed with the USB parts). SONOFF's own updater (its application in ota_1), stock
-    confirm or a hub self-update (seq 3 and up) leave other entries: the parts would overwrite the
-    running application or not be booted."""
+# esp_app_desc_t.version in an app image: after the 24-byte image header and the first segment's
+# 8-byte header (the app description is the first segment's start), at offset 16 of the description.
+APP_DESC_VERSION = 0x30
+
+
+def dongle_precheck(otadata_off: int, otadata_size: int, ota1_off: int, ota1_file: str) -> list[str]:
+    """Commands that check the dongle before either install route. Sector 0 of otadata must hold
+    SONOFF's seq 1 (its application in ota_0), and sector 1 be blank, or hold this release's
+    sector with a zrh-donglem image in ota_1 (a hub installed with the USB parts). SONOFF's own
+    updater puts its application into ota_1 with seq 2: once that application confirmed itself
+    the entry is byte-identical to ours, so the app version at the start of ota_1 tells them
+    apart. Stock confirm or a hub self-update (seq 3 and up) leave other entries. In those states
+    the parts would overwrite the running application or not be booted."""
     return [
         f"esptool --chip esp32 --port <PORT> read-flash 0x{otadata_off:X} 0x{otadata_size:X} otadata.bin",
+        f"esptool --chip esp32 --port <PORT> read-flash 0x{ota1_off:X} 0x100 ota1.bin",
         "python3 -c \"d=open('otadata.bin','rb').read(); s=open('" + ota1_file + "','rb').read(); "
-        "print('OK' if d[:4]==bytes([1,0,0,0]) and d[4096:] in (bytes([255])*4096, s) "
-        "else 'STOP: not the stock otadata, see docs/dongle-max.md')\"",
+        "a=open('ota1.bin','rb').read(); "
+        "print('OK' if d[:4]==bytes([1,0,0,0]) and (d[4096:]==bytes([255])*4096 or "
+        f"(d[4096:]==s and a[{APP_DESC_VERSION:#x}:{APP_DESC_VERSION + 12:#x}]==b'zrh-donglem-')) "
+        "else 'STOP: not the stock otadata or no hub in ota_1, see docs/dongle-max.md')\"",
     ]
 
 
@@ -190,10 +200,12 @@ def dongle_install_steps(precheck: list[str]) -> list[str]:
     """Shown by the web flasher instead of an install button (it renders the esptool writes from `flash`)."""
     return [
         "First, for either route, over USB: back up the whole flash (esptool read-flash 0 ALL; it holds "
-        "the dongle's credentials, keep it private) and check otadata: " + "; then ".join(precheck) + ". "
+        "the dongle's credentials, keep it private) and check otadata and the start of ota_1: "
+        + "; then ".join(precheck) + ". "
         "Continue only on OK (sector 0: SONOFF's seq 1, its application in ota_0; sector 1 blank, or this "
-        "release's otadata sector after a USB install). Anything else (SONOFF's own updater moved its "
-        "application to ota_1, stock confirm, a hub self-update): stop, see docs/dongle-max.md.",
+        "release's otadata sector with a zrh-donglem image in ota_1 after a USB install). Anything else "
+        "(SONOFF's own updater moved its application to ota_1, stock confirm, a hub self-update): stop, "
+        "see docs/dongle-max.md.",
         "Recommended: SONOFF's web console of the dongle (http://<dongle address>/), Firmware > "
         "ESP32-D0WDR2-V3 > Upload & Flash Firmware, with the app file. SONOFF's firmware writes it into "
         "the other slot, ota_1, and selects it (not yet verified on hardware).",
@@ -466,7 +478,7 @@ def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, ota
         preserved.append({"name": name, "offset": offset, "size": size, "what": what})
     edition = {"edition": "devtools"} if devtools else {}
     otadata_off, otadata_size = parts["otadata"]
-    precheck = dongle_precheck(otadata_off, otadata_size, otadata["name"])
+    precheck = dongle_precheck(otadata_off, otadata_size, parts[spec["app_partition"]][0], otadata["name"])
     return {
         "id": spec["id"] + ("-devtools" if devtools else ""),
         "title": spec["title"].replace(" (experimental)", ", Developer edition (devtools) (experimental)")

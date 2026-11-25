@@ -87,9 +87,10 @@ def install_notes(m: dict) -> list[str]:
                    "by the web flasher** (its erase option would wipe SONOFF's firmware and factory data).\n")
         doc = f"https://github.com/{m['repository']}/blob/{m['tag']}/docs/dongle-max.md"
         precheck = "\n".join(b.get("precheck", []))
-        out.append("- **First, for either route** (over USB): back up the whole flash and check `otadata`. "
-                   "Continue only if the check prints `OK`: sector 0 holds SONOFF's seq 1 (its application in "
-                   "`ota_0`) and sector 1 is blank, or holds this release's otadata sector after a USB install. "
+        out.append("- **First, for either route** (over USB): back up the whole flash and check `otadata` and the "
+                   "start of `ota_1`. Continue only if the check prints `OK`: sector 0 holds SONOFF's seq 1 (its "
+                   "application in `ota_0`) and sector 1 is blank, or holds this release's otadata sector with a "
+                   "`zrh-donglem` image in `ota_1` after a USB install. "
                    "Anything else (SONOFF's own updater moved its application to `ota_1`, `stock confirm`, a hub "
                    f"self-update): stop, see [docs/dongle-max.md]({doc}).")
         out.append("```\n"

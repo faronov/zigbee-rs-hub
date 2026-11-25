@@ -158,10 +158,15 @@ SONOFF's bootloader, table, `nvs` and factory data.
 
 **Both routes assume the stock `otadata`**: sector 0 holds SONOFF's seq 1
 (its application in `ota_0`) and sector 1 is blank, or holds the release's
-`otadata-ota1` sector after a USB install of the hub. The release notes
-(and the manifest's `precheck`) read `otadata` over USB first
-(`esptool --chip esp32 read-flash 0x5C000 0x2000 otadata.bin`) and go on
-only if a one-line check prints `OK` (the lab unit's backup does). In any
+`otadata-ota1` sector with a `zrh-donglem` image in `ota_1` after a USB
+install of the hub. The release notes (and the manifest's `precheck`) read
+`otadata` and the start of `ota_1` over USB first
+(`esptool --chip esp32 read-flash 0x5C000 0x2000 otadata.bin`,
+`read-flash 0x660000 0x100 ota1.bin`) and go on only if a one-line check
+prints `OK` (the lab unit's backup does). The app version in `ota_1`
+(`esp_app_desc_t.version` at offset 0x30) matters because SONOFF's own
+updater also writes seq 2 into sector 1: once its new application has
+confirmed itself the entry is byte-identical to the release's. In any
 other state the parts do the wrong thing: after SONOFF's own updater put
 its application into `ota_1`, a USB write at 0x660000 overwrites the
 running application and the web console writes `ota_0`; after `stock

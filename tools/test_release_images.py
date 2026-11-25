@@ -1,5 +1,8 @@
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -146,11 +149,12 @@ class DongleImageTests(unittest.TestCase):
         self.assertIn("Developer edition", dev["title"])
         self.assertNotIn("edition", board)
         self.assertIs(board["web_install"], False)
-        # Both routes start with the otadata check, on this board's otadata and this release's sector file.
-        self.assertEqual(board["precheck"][0], "esptool --chip esp32 --port <PORT> read-flash 0x5C000 0x2000 otadata.bin")
-        self.assertIn("zrh-donglem-0.3.0-otadata-ota1.bin", board["precheck"][1])
+        # Both routes start with the check of otadata and of ota_1's start, against this release's sector file.
+        self.assertEqual(board["precheck"][:2], ["esptool --chip esp32 --port <PORT> read-flash 0x5C000 0x2000 otadata.bin",
+                                                 "esptool --chip esp32 --port <PORT> read-flash 0x660000 0x100 ota1.bin"])
+        self.assertIn("zrh-donglem-0.3.0-otadata-ota1.bin", board["precheck"][2])
         self.assertTrue(board["install_steps"][0].startswith("First, for either route"))
-        self.assertIn(board["precheck"][1], board["install_steps"][0])
+        self.assertIn(board["precheck"][2], board["install_steps"][0])
         self.assertTrue(board["experimental"])
         self.assertEqual(board["flash"], ["app", "otadata_ota1"])
         self.assertEqual((board["files"]["app"]["offset"], board["files"]["otadata_ota1"]["offset"]), (0x660000, 0x5D000))
@@ -162,6 +166,36 @@ class DongleImageTests(unittest.TestCase):
                 with self.subTest(role=role, kept=kept["name"]):
                     self.assertTrue(f["offset"] + f["size"] <= kept["offset"] or kept["offset"] + kept["size"] <= f["offset"])
         self.assertLessEqual(app["size"], parts["ota_1"][1])
+
+    def test_precheck_goes_on_only_for_stock_slots_or_a_usb_installed_hub(self):
+        board = release_images.dongle_entry(
+            "0.3.0", release_images.partitions(release_images.ROOT / release_images.DONGLE["csv"]),
+            {"name": "zrh-donglem-0.3.0-app.bin", "size": 1, "sha256": "0" * 64, "offset": 0x660000},
+            {"name": "zrh-donglem-0.3.0-otadata-ota1.bin", "size": 4096, "sha256": "1" * 64, "offset": 0x5D000})
+        code = board["precheck"][2].removeprefix('python3 -c "').removesuffix('"')
+        spec = importlib.util.spec_from_file_location("make_otadata", Path(__file__).resolve().parent / "make-otadata.py")
+        otadata = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(otadata)
+        ours, blank = release_images.dongle_otadata(), b"\xff" * 4096
+        hub, sonoff, erased = esp_image(version=b"zrh-donglem-0.3.0"), esp_image(version=b"1.0.8"), b"\xff" * 0x100
+        cases = [
+            ("stock", otadata.sector(1) + blank, erased, "OK"),
+            ("hub installed with the USB parts", otadata.sector(1) + ours, hub, "OK"),
+            # SONOFF's updater into ota_1, its application confirmed (VALID): the sector equals ours.
+            ("SONOFF self-update, confirmed", otadata.sector(1) + ours, sonoff, "STOP"),
+            ("SONOFF self-update, unconfirmed", otadata.sector(1) + otadata.sector(2, otadata.STATES["undefined"]), sonoff, "STOP"),
+            ("stock confirm after a hub", otadata.sector(3, otadata.STATES["undefined"]) + ours, hub, "STOP"),
+            ("erased chip", blank + blank, erased, "STOP"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "zrh-donglem-0.3.0-otadata-ota1.bin").write_bytes(ours)
+            for name, data, ota1, want in cases:
+                Path(tmp, "otadata.bin").write_bytes(data)
+                Path(tmp, "ota1.bin").write_bytes(ota1[:0x100].ljust(0x100, b"\xff"))
+                out = subprocess.run([sys.executable, "-c", code], cwd=tmp, capture_output=True, text=True, check=True)
+                with self.subTest(case=name):
+                    self.assertTrue(out.stdout.startswith(want), out.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

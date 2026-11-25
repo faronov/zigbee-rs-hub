@@ -1101,6 +1101,13 @@ unlocks, cache and MMU faults). The hub is now built with `-C target-feature=-s3
 (`firmware/hub/.cargo/config.toml`): Rust atomics call ESP-IDF's `__atomic_*`
 functions, which lock for PSRAM addresses (+2.6 KB image, +1 KB IRAM).
 `hub atomics` on the console counts lost updates of adds from both cores.
+Hardware (2026-11-24, lab Thread BR board, ESP32-S3 N4R8 with 8 MB octal
+PSRAM, 4 MB dev layout, image af13d65 with the fix): 1,000 consecutive
+`network/diagnostics` calls over the WebSocket and USB without a crash,
+where the 0.2.0 image crashed after 40–80; `hub atomics` on the same board:
+Rust `AtomicU32` on PSRAM 200,000 of 200,000 increments, a bare S32C1I
+loop on PSRAM lost 15,562 of 200,000 (another run 3,268), on internal RAM
+none.
 Measured on an ESP32-S3 SuperMini (S3FH4R2, 2 MB quad) in hub mode without an
 NCP, Wi-Fi up: 0.1.3 8.4 KB internal free; 0.1.4 120 KB internal free
 (minimum 119 KB while installing the whole catalog), PSRAM 160 KB used. For the next

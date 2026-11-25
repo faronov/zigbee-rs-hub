@@ -15,8 +15,9 @@ install instructions and the list of merged pull requests. A pre-release
   not atomic between the two cores on PSRAM, where the hub keeps its data.
   0.2.0 hubs could crash or reboot under API load (`LoadProhibited`,
   `Cache error`, mutex asserts; on the lab board after 40–80 network
-  diagnostics); with the fix it ran 1000 in a row without a crash.
-  Updating every 0.2.0 hub is recommended.
+  diagnostics); with the fix it ran 1000 in a row without a crash
+  (measurements in the README, `hub atomics`). Updating every 0.2.0 hub
+  is recommended.
 - **Zigbee device OTA** (Upgrade server, cluster 0x0019) in the 8 MB
   images: an Updates tab, `ota/*` API, Home Assistant `update` entities,
   an image store in the inactive app slot, larger images streamed from a
