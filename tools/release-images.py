@@ -159,11 +159,12 @@ DONGLE = {
     "psram": "quad",
     # firmware/gateway/Cargo.toml (no marker in the image): `ota-store` implies `ota`.
     "features": ["ezsp", "mqtt", "advanced", "ota", "ota-store"],
-    "hardware_status": "bring-up tested; full hub HIL pending",
+    "hardware_status": "bring-up tested; the hub runs on one lab unit; full hub HIL pending",
     "note": "Experimental: the hub application on SONOFF's stock EmberZNet NCP (EZSP backend), with "
-    "SONOFF's partition table, bootloader and application (ota_0) kept. Bring-up tested on one unit; "
-    "the hub image has not completed its hardware checklist yet. No network backup/restore through "
-    "EZSP yet, no Green Power, no MG24 firmware update. Not installable through the web flasher: "
+    "SONOFF's partition table, bootloader and application (ota_0) kept. The hub runs on one lab unit "
+    "(network formed, a sleepy device joined, interviewed and reporting); the rest of its hardware "
+    "checklist is pending. No network backup/restore through EZSP yet, no Green Power, no MG24 firmware "
+    "update, at most 8 groups on the hub's endpoint. Not installable through the web flasher: "
     "ESP Web Tools could erase the whole chip, which destroys SONOFF's firmware and factory data.",
     "connect": "Plug the dongle into USB (CP2102N, \"SONOFF Dongle Max MG24\"); its DTR/RTS reset the ESP32 "
     "into the ROM loader, as esptool expects.",

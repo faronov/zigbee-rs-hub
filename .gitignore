@@ -11,6 +11,10 @@ zdef-signing*
 /target-opi
 /target-8mb
 /target-8mb-opi
+# Developer edition builds (tools/build-hub-firmware.sh, hub-release.yml)
+/target-8mb-devtools
+/target-8mb-devtools-opi
+/target-devtools
 
 # Python bytecode of the tools
 __pycache__/

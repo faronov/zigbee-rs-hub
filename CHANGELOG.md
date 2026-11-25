@@ -32,8 +32,9 @@ install instructions and the list of merged pull requests. A pre-release
   ESP-IDF panic and how many boots ago it happened.
 - **SONOFF Dongle Max (experimental):** the hub application on the
   dongle's stock EmberZNet NCP (`zrh-donglem`, EZSP backend), installed
-  into `ota_1` of SONOFF's unchanged partition table. Bring-up tested on one
-  unit; the hub image's hardware checklist is pending
+  into `ota_1` of SONOFF's unchanged partition table. It runs on one lab
+  unit (network formed, a sleepy device joined, interviewed and reporting;
+  EZSP session up in 2.6 s); the rest of its hardware checklist is pending
   (`docs/dongle-max.md`).
 
 ### Other changes
@@ -52,6 +53,7 @@ install instructions and the list of merged pull requests. A pre-release
   installed manifest`: the catalog is updated before shards are fetched.
 - Automations: device-then-entity pickers that tell identical devices
   apart; the network map lays out small networks readably.
+- `network/info` reports the coordinator's table sizes (`capacity`).
 - Hub records are tagged with the network they belong to (`hub/owner`):
   `network/info.registry`, `network/registry/adopt` and
   `network/registry/clear` (both need `"confirm": true`).
@@ -82,10 +84,12 @@ install instructions and the list of merged pull requests. A pre-release
   yet; hardware tests used the 4 MB octal lab board.
 - No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
   from the console or the browser console).
-- SONOFF Dongle Max: experimental, full hub hardware test pending;
-  installation through SONOFF's web console not yet verified on
-  hardware; no network backup/restore through EZSP, no Green Power, no
-  MG24 firmware update; if the first boot cannot claim SONOFF's `files`
+- SONOFF Dongle Max: experimental, full hub hardware test pending
+  (Ethernet, `stock confirm`, self-update not yet run); installation
+  through SONOFF's web console not yet verified on hardware; no network
+  backup/restore through EZSP, no Green Power, no MG24 firmware update; at
+  most 8 groups on the hub's endpoint (the NCP's multicast table); if the
+  first boot cannot claim SONOFF's `files`
   partition the hub keeps its data in RAM only (a banner says so). Not
   offered by the web flasher (its erase option would wipe SONOFF's
   firmware): use SONOFF's web console or esptool with the two USB parts.
