@@ -44,6 +44,7 @@ button:disabled{opacity:.5;cursor:default}
 select,input{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:.25em .4em}
 input[type=range]{padding:0;width:7em}
 input.num{width:6em}
+input{max-width:calc(100vw - 6em)}
 .tg{width:2.6em;height:1.5em;border-radius:1em;padding:0;position:relative;background:var(--line)}
 .tg::after{content:"";position:absolute;top:.15em;left:.15em;width:1.2em;height:1.2em;border-radius:50%;background:#fff;transition:left .15s}
 .tg.on{background:var(--ok)}.tg.on::after{left:1.25em}
@@ -51,7 +52,7 @@ input.num{width:6em}
 #login{max-width:420px;margin:3em auto}
 #login input{width:100%;margin:.5em 0}
 #toast{position:fixed;bottom:1em;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5em 1em;border-radius:8px;display:none;max-width:90vw}
-.row label{display:inline-flex;align-items:center;gap:.3em}
+.row label{display:inline-flex;flex-wrap:wrap;align-items:center;gap:.3em}
 table{border-collapse:collapse;font-size:.9em}td,th{padding:.15em .6em .15em 0;text-align:left;font-variant-numeric:tabular-nums}
 pre{white-space:pre-wrap;font-size:.8em;max-height:24em;overflow:auto;background:var(--bg);padding:.5em;border-radius:7px}
 .rs .v,.rs input,.rs select{opacity:.6;font-style:italic}svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}svg .h{paint-order:stroke;stroke:var(--card);stroke-width:3px}
