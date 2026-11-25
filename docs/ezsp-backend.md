@@ -513,12 +513,13 @@ firmware console: `hub` on the Dongle Max.
   precedence of the restored-EUI64 token over the custom EUI-64; that
   `formNetwork` ignores `nwkUpdateId` (bellows' finding, modelled); and
   that `setChildData` children are kept across the reset.
-- Z2M interop: zigbee-herdsman's ember adapter appears (code reading of
-  `backup()` and `toUnifiedBackup`) to write `extended_pan_id` (and
-  `coordinator_ieee`) in wire order rather than the OCB's big-endian order
-  that zigpy and this hub use; such a backup would be restored with a
-  byte-reversed EPID unless it is a palindrome. Not checked with a real Z2M
-  file; the import follows the OCB specification.
+- Z2M interop: whatever byte order zigbee-herdsman's ember adapter writes
+  `extended_pan_id` and `coordinator_ieee` in, the hub reads Z2M files
+  exactly as zigpy (and so ZHA's backup upload) does: big-endian, no
+  detection or swap (zigpy's Z2M handling is `internal.date`, unpadded
+  NWK addresses, the optional `is_child` and the default TCLK; its own
+  test reads a zigbee-herdsman file so). A Z2M file moves to the hub as it
+  moves to ZHA. Not checked with a real Z2M ember file.
 
 ## Follow-ups
 

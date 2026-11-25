@@ -9,6 +9,14 @@
 //! `internal.date` instead of `creation_time`, no TCLK section (the default
 //! `ZigBeeAlliance09` and an APS margin of 2²⁰, spec 9.4 rule 6).
 //!
+//! Byte order as zigpy reads every OCB file (`zigpy/backups.py`
+//! `_open_coordinator_backup_to_network_backup`, which ZHA's backup upload
+//! uses through `NetworkBackup.from_dict`): Z2M's files are read exactly
+//! like zigpy's, with no byte-order detection or swap; zigpy's only Z2M
+//! handling is `internal.date` (the backup time), the unpadded
+//! `nwk_address`, the optional `is_child` and the default TCLK, as here.
+//! The PAN ID is left-padded too, where zigpy refuses Z2M's unpadded one.
+//!
 //! EmberZNet backups follow bellows (zigpy/ZHA) and zigbee-herdsman's
 //! ember adapter (Z2M): with hashed trust center link keys the TCLK is
 //! `ZigBeeAlliance09` and its root key is `stack_specific.ezsp.hashed_tclk`;
@@ -704,6 +712,65 @@ mod tests {
       "internal":{"date":"2025-01-01T00:00:00.000Z","ezspVersion":13}},"stack_specific":{"ezsp":{"hashed_tclk":"55555555555555555555555555555555"}},
       "coordinator_ieee":"000b57fffeaa0001","pan_id":"1a62","extended_pan_id":"0807060504030201","nwk_update_id":0,"security_level":5,
       "channel":15,"channel_mask":[15],"network_key":{"key":"66666666666666666666666666666666","sequence_number":0,"frame_counter":4096},"devices":[]}"#;
+
+    /// One network (generated values), as zigpy writes it and as
+    /// zigbee-herdsman (Z2M) writes it for Z-Stack and for EmberZNet:
+    /// `internal.date`, unpadded PAN ID and NWK addresses, `is_child` left
+    /// out, no TCLK section, the stack's own `stack_specific`.
+    const SAME_ZIGPY: &str = r#"{"metadata":{"version":1,"format":"zigpy/open-coordinator-backup","source":"zigpy-znp@0.13.0",
+      "internal":{"creation_time":"2025-03-01T10:00:00+00:00","node":{"ieee":"00124b00c0ffee01","nwk":"0000","type":"coordinator"},
+        "network":{"tc_link_key":{"key":"5a6967426565416c6c69616e63653039","frame_counter":0},"tc_address":"00124b00c0ffee01","nwk_manager":"0000"}}},
+      "stack_specific":{"zstack":{"tclk_seed":"77777777777777777777777777777777"}},
+      "coordinator_ieee":"00124b00c0ffee01","pan_id":"0f3a","extended_pan_id":"a1b2c3d4e5f60718","nwk_update_id":4,"security_level":5,
+      "channel":20,"channel_mask":[20],"network_key":{"key":"8899aabbccddeeff0011223344556677","sequence_number":3,"frame_counter":123456},
+      "devices":[{"ieee_address":"00158d0003c4d5e6","nwk_address":"04b2","is_child":true,
+                  "link_key":{"key":"0123456789abcdef0123456789abcdef","tx_counter":12,"rx_counter":34}},
+                 {"ieee_address":"0017880100f1e2d3","nwk_address":"7a10","is_child":false}]}"#;
+
+    const SAME_Z2M_ZSTACK: &str = r#"{"metadata":{"format":"zigpy/open-coordinator-backup","version":1,"source":"zigbee-herdsman@3.2.0",
+      "internal":{"date":"2025-03-01T10:00:00.000Z","znpVersion":2}},"stack_specific":{"zstack":{"tclk_seed":"77777777777777777777777777777777"}},
+      "coordinator_ieee":"00124b00c0ffee01","pan_id":"f3a","extended_pan_id":"a1b2c3d4e5f60718","nwk_update_id":4,"security_level":5,
+      "channel":20,"channel_mask":[20],"network_key":{"key":"8899aabbccddeeff0011223344556677","sequence_number":3,"frame_counter":123456},
+      "devices":[{"nwk_address":"4b2","ieee_address":"00158d0003c4d5e6",
+                  "link_key":{"key":"0123456789abcdef0123456789abcdef","rx_counter":34,"tx_counter":12}},
+                 {"nwk_address":"7a10","ieee_address":"0017880100f1e2d3","is_child":false}]}"#;
+
+    const SAME_Z2M_EMBER: &str = r#"{"metadata":{"format":"zigpy/open-coordinator-backup","version":1,"source":"zigbee-herdsman@3.2.0",
+      "internal":{"date":"2025-03-01T10:00:00.000Z","ezspVersion":13}},"stack_specific":{"ezsp":{"hashed_tclk":"88888888888888888888888888888888"}},
+      "coordinator_ieee":"00124b00c0ffee01","pan_id":"f3a","extended_pan_id":"a1b2c3d4e5f60718","nwk_update_id":4,"security_level":5,
+      "channel":20,"channel_mask":[20],"network_key":{"key":"8899aabbccddeeff0011223344556677","sequence_number":3,"frame_counter":123456},
+      "devices":[{"nwk_address":"4b2","ieee_address":"00158d0003c4d5e6",
+                  "link_key":{"key":"0123456789abcdef0123456789abcdef","rx_counter":34,"tx_counter":12}},
+                 {"nwk_address":"7a10","ieee_address":"0017880100f1e2d3","is_child":false}]}"#;
+
+    /// zigpy reads a Z2M file as its own (its `test_z2m_backup_parsing`):
+    /// the same EPID, IEEEs, addresses, keys and devices, no byte swap.
+    #[test]
+    fn a_network_reads_the_same_from_zigpy_and_z2m_files() {
+        let (zr, zigpy) = import(&serde_json::from_str(SAME_ZIGPY).unwrap()).unwrap();
+        // Big-endian hex, reversed into wire order, in every form.
+        assert_eq!(zr.ext_pan_id, [0x18, 0x07, 0xF6, 0xE5, 0xD4, 0xC3, 0xB2, 0xA1]);
+        assert_eq!(zr.coordinator_ieee, [0x01, 0xEE, 0xFF, 0xC0, 0x00, 0x4B, 0x12, 0x00]);
+        assert_eq!((zr.pan_id, zr.channel), (0x0F3A, 20));
+        assert_eq!(zr.devices, [([0xE6, 0xD5, 0xC4, 0x03, 0x00, 0x8D, 0x15, 0x00], Some(0x04B2)), ([0xD3, 0xE2, 0xF1, 0x00, 0x01, 0x88, 0x17, 0x00], Some(0x7A10))]);
+        // What differs between the forms: the TCLK section (Z2M has none:
+        // the default key, the coordinator as the trust center, counter
+        // unknown) and the stack's seed.
+        let common = |items: &[BackupItem]| -> Vec<BackupItem> {
+            items.iter().filter(|i| !matches!(i, BackupItem::TcLinkKey { .. } | BackupItem::HashedTclkSeed(_))).copied().collect()
+        };
+        for (form, text) in [("zstack", SAME_Z2M_ZSTACK), ("ember", SAME_Z2M_EMBER)] {
+            let (r, z2m) = import(&serde_json::from_str(text).unwrap()).unwrap();
+            assert_eq!((r.ext_pan_id, r.coordinator_ieee, r.pan_id, r.channel), (zr.ext_pan_id, zr.coordinator_ieee, zr.pan_id, zr.channel), "{form}");
+            assert_eq!(r.devices, zr.devices, "{form}");
+            assert_eq!(common(&z2m), common(&zigpy), "{form}");
+            assert!(!r.tclk_counter_known && zr.tclk_counter_known, "{form}");
+            assert!(z2m.contains(&BackupItem::TcLinkKey { key: ZIGBEE_ALLIANCE_09, tc_ieee: zr.coordinator_ieee, tx_counter: 0, hashed: false }), "{form}");
+        }
+        let (_, ember) = import(&serde_json::from_str(SAME_Z2M_EMBER).unwrap()).unwrap();
+        assert!(ember.contains(&BackupItem::HashedTclkSeed([0x88; 16])));
+        assert!(!zigpy.iter().any(|i| matches!(i, BackupItem::HashedTclkSeed(_))), "a Z-Stack seed is not EmberZNet's");
+    }
 
     #[test]
     fn bellows_and_z2m_ember_backups_bring_their_hashed_link_key_root() {
