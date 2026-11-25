@@ -448,8 +448,10 @@ eq(t("America/Santiago"),{tz:"<-04>4<-03>,M9.1.6/24,M4.1.6/24"});
 eq(t("America/Sao_Paulo"),{tz:"<-03>3",fixed:false});
 eq(t("Asia/Kolkata"),{tz:"<+0530>-5:30",fixed:false});
 eq(t("UTC"),{tz:"UTC0",fixed:false});
-// Ramadan changes follow no yearly rule: today's offset, fixed.
-const c=t("Africa/Casablanca");eq(c.fixed,true);if(!["<+01>-1","<+00>0"].includes(c.tz))throw new Error(c.tz);
+// 2026 in Morocco: Ramadan changes (and with tzdata 2026c a move to
+// permanent +00 in September) follow no yearly rule: today's offset,
+// fixed; its value and name depend on this Node's data (<+01>-1, WET0).
+const c=t("Africa/Casablanca");eq(c.fixed,true);if(!/^(<[+-]\d\d>|[A-Z]{3,})-?\d$/i.test(c.tz))throw new Error(c.tz);
 "#;
         use std::io::Write;
         let Ok(node) = std::process::Command::new("node")
