@@ -1228,6 +1228,7 @@ dependencies = [
 name = "hub-store"
 version = "0.1.0"
 dependencies = [
+ "hub-core",
  "zigbee-zrhp",
 ]
 

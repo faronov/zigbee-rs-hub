@@ -10,6 +10,7 @@
 //! tables (`HOST_TABLES`) come later.
 
 pub mod crc;
+pub mod files;
 pub mod flash;
 pub mod journal;
 pub mod kv;

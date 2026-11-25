@@ -9,6 +9,8 @@ description = "zigbee-rs-hub host store: log-structured journal on raw flash (hu
 publish = false
 
 [dependencies]
+# The Dongle-M `files` region layout (`files`); no default features: no ZRHP.
+hub-core = { workspace = true }
 
 [dev-dependencies]
 # Cross-check of the CRC against the ZRHP crate's implementation.
