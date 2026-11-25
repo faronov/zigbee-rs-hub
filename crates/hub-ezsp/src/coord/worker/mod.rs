@@ -146,6 +146,9 @@ pub struct EzspCoordinator {
     events: Arc<EventQueue>,
     next_id: u32,
     confirm_timeout: Duration,
+    /// Control requests wait for the next session too
+    /// ([`EzspOptions::traffic_hold`]).
+    hold_controls: bool,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -176,6 +179,7 @@ impl EzspCoordinator {
         });
         let stack = opts.worker_stack;
         let confirm_timeout = opts.confirm_timeout;
+        let hold_controls = opts.traffic.is_some() && !opts.traffic_hold.is_zero();
         let worker = Worker::new(
             host,
             rx,
@@ -198,6 +202,7 @@ impl EzspCoordinator {
                 events,
                 next_id: 0,
                 confirm_timeout,
+                hold_controls,
                 worker: Some(handle),
             },
             admin,
@@ -261,7 +266,13 @@ impl EzspCoordinator {
                 "Green Power is not supported by the EZSP backend yet",
             ));
         }
-        if state != SessionState::Ready {
+        // Without a session: queued while the application waits for the
+        // next one (bounded by the worker's hold), refused otherwise.
+        let starting = matches!(
+            state,
+            SessionState::Down | SessionState::Negotiating | SessionState::Resuming
+        );
+        if state != SessionState::Ready && !(self.hold_controls && starting) {
             return Err(CoordError::LinkDown);
         }
         Ok(match req {
@@ -408,6 +419,9 @@ struct Worker<T: Transport, C: Clock> {
     state: SessionState,
     epoch: u32,
     retry_at: u64,
+    /// Until then requests queued while the traffic flag is closed wait for
+    /// the application's decision ([`EzspOptions::traffic_hold`]).
+    hold_until: u64,
     backoff_ms: u64,
     version: Option<EzspVersion>,
     info: Option<Arc<NcpInfo>>,
@@ -463,6 +477,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             state: SessionState::Down,
             epoch: 0,
             retry_at: 0,
+            hold_until: 0,
             backoff_ms,
             version: None,
             info: None,
@@ -501,6 +516,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     // ------------------------------------------------------------ loop
 
     fn run(mut self) {
+        self.hold_requests();
         loop {
             if !self.take_inbox() || self.events.is_closed() {
                 break;
@@ -577,6 +593,9 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     fn while_down(&mut self) {
         for job in self.jobs.drain(..) {
             job.fail(CoordError::LinkDown);
+        }
+        if !self.holding() {
+            self.drop_held_requests();
         }
         if self.now() >= self.retry_at {
             self.start_session();
@@ -1395,8 +1414,23 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.scan = None;
         self.refresh_pending = false;
         self.retry_at = self.now();
+        // Queued for this session's network: never sent in the next one.
         self.drop_held_requests();
+        self.hold_requests();
         self.publish();
+    }
+
+    /// Requests queued from now on wait for the decision about the next
+    /// session for at most [`EzspOptions::traffic_hold`].
+    fn hold_requests(&mut self) {
+        self.hold_until = self
+            .now()
+            .saturating_add(self.opts.traffic_hold.as_millis() as u64);
+    }
+
+    /// Requests queued while the traffic flag is closed still wait.
+    pub(super) fn holding(&self) -> bool {
+        self.now() < self.hold_until
     }
 
     /// [`EzspOptions::traffic`] at the end of a session: no epoch, closed.
@@ -1415,7 +1449,8 @@ impl<T: Transport, C: Clock> Worker<T, C> {
 
     /// While [`EzspOptions::traffic`] is closed, queued requests end
     /// `Refused(LinkDown)`: they were meant for a network that may not be
-    /// the one of the next session.
+    /// the one of the next session, or the application decided against
+    /// this session's network (or did not decide within the hold).
     pub(super) fn drop_held_requests(&mut self) {
         if self.traffic_open() {
             return;

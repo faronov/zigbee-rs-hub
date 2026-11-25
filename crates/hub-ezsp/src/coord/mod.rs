@@ -243,9 +243,17 @@ pub struct EzspOptions {
     /// 1)` for the epoch whose network it checked ([`traffic_closed`]), so a
     /// late decision about an earlier session cannot open a later one.
     /// Requests queued while it is closed end `Refused(LinkDown)` instead of
-    /// going out in the next session, which may run another network.
-    /// `None`: queued requests wait for the next session.
+    /// going out in the next session, which may run another network (those
+    /// queued when a session ends at once, others after
+    /// [`traffic_hold`](Self::traffic_hold)). `None`: queued requests wait
+    /// for the next session.
     pub traffic: Option<Arc<AtomicU32>>,
+    /// With [`traffic`](Self::traffic): how long after the worker starts or
+    /// a session ends the requests queued meanwhile wait for the
+    /// application's decision about the next session's network, instead of
+    /// ending `Refused(LinkDown)` at once. They go out only once it opens
+    /// the flag for that session. Zero: no wait.
+    pub traffic_hold: Duration,
 }
 
 impl Default for EzspOptions {
@@ -265,6 +273,7 @@ impl Default for EzspOptions {
             worker_stack: 16 * 1024,
             tx_power: None,
             traffic: None,
+            traffic_hold: Duration::ZERO,
         }
     }
 }

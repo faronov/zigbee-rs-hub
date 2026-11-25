@@ -33,6 +33,10 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             return false;
         }
         if !self.traffic_open() {
+            // The application decides about the new session's network.
+            if self.holding() {
+                return false;
+            }
             self.drop_held_requests();
             return true;
         }
