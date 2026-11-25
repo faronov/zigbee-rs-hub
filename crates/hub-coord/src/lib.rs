@@ -33,7 +33,7 @@ pub use admin::{
     BackupChild, BackupDevice, BackupItem, BackupLinkKey, BackupSink, Beacon, ChannelChange, Child,
     DiagCounter, Diagnostics, EnergyChannel, FormParams, FrameCounters, FwImage, FwPhase, FwSlot,
     FwSource, NcpFirmware, NcpStatus, Neighbor, NetworkAdmin, RestoreBlob, RestoreEncoder,
-    RestoreOptions, RestoreReport, Route, TablesRead,
+    RestoreOptions, RestoreReport, Route, TablesRead, restore_note,
 };
 pub use aps::{ApsDst, ApsIndication, ApsRequest, TxOptions};
 pub use caps::{

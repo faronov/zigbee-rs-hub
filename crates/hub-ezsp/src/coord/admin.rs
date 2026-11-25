@@ -4,17 +4,20 @@
 //! request order). While a job runs, the worker keeps reading the NCP and
 //! passing its events on, but sends no queued request: scans, forming,
 //! leaving and channel changes own the radio. A ZDO request only waits
-//! for its answer, without holding the queue.
+//! for its answer, without holding the queue. A restore also resets the
+//! NCP (a new session) where the stack must read its tokens again.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use hub_coord::{
-    Beacon, ChannelChange, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams,
-    NetworkAdmin, NetworkParams, TablesRead,
+    BackupItem, BackupSink, Beacon, ChannelChange, CoordError, CoordStatus, Diagnostics,
+    EnergyChannel, FormParams, NetworkAdmin, NetworkParams, RestoreBlob, RestoreEncoder,
+    RestoreOptions, RestoreReport, TablesRead,
 };
 
+use super::backup::{BlobEncoder, Plan};
 use super::worker::{Msg, Shared};
 
 /// What an admin job does.
@@ -44,6 +47,11 @@ pub(crate) enum Op {
     Diagnostics {
         reset: bool,
     },
+    Backup {
+        keys: bool,
+    },
+    RestoreCheck(Box<Plan>, RestoreOptions),
+    Restore(Box<Plan>, RestoreOptions),
 }
 
 /// The answer to an [`Op`].
@@ -58,6 +66,8 @@ pub(crate) enum Answer {
     Tables(TablesRead),
     Zdo(Result<Vec<u8>, CoordError>),
     Diagnostics(Diagnostics),
+    Backup(Result<Vec<BackupItem>, CoordError>),
+    Restore(Result<RestoreReport, CoordError>),
 }
 
 /// Where the worker puts an [`Answer`].
@@ -103,7 +113,9 @@ impl Job {
     pub(crate) fn fail(self, e: CoordError) {
         let a = match self.op {
             Op::Form(_) => Answer::Form(Err(e)),
-            Op::LeaveReset => Answer::Unit(Err(e)),
+            Op::LeaveReset | Op::RestoreCheck(..) => Answer::Unit(Err(e)),
+            Op::Backup { .. } => Answer::Backup(Err(e)),
+            Op::Restore(..) => Answer::Restore(Err(e)),
             Op::EnergyScan { .. } => Answer::Energy(Err(e)),
             Op::ActiveScan { .. } => Answer::Beacons(Err(e)),
             Op::ChangeChannel(_) => Answer::Channel(Err(e)),
@@ -123,9 +135,9 @@ impl Job {
     }
 }
 
-/// Network administration of an EZSP NCP (design §2.6). Backup, restore
-/// and NCP firmware update are not offered yet (follow-ups: OCB export
-/// with the security manager's key export, restore, Gecko bootloader).
+/// Network administration of an EZSP NCP (design §2.6), backup and
+/// restore included (`docs/ezsp-backend.md` "Backup and restore"). NCP
+/// firmware update is not offered yet (follow-up: Gecko bootloader).
 #[derive(Clone)]
 pub struct EzspAdmin {
     pub(crate) shared: Arc<Shared>,
@@ -245,6 +257,39 @@ impl NetworkAdmin for EzspAdmin {
                 errors: vec!["EZSP backend stopped".into()],
                 ..Diagnostics::default()
             },
+        }
+    }
+
+    fn backup_export(&self, keys: bool, sink: &mut dyn BackupSink) -> Result<(), CoordError> {
+        match self.run(Op::Backup { keys }) {
+            Some(Answer::Backup(Ok(items))) => items.iter().try_for_each(|i| sink.item(i)),
+            Some(Answer::Backup(Err(e))) => Err(e),
+            _ => stopped(),
+        }
+    }
+
+    fn restore_encoder(&self) -> Result<Box<dyn RestoreEncoder>, CoordError> {
+        Ok(Box::<BlobEncoder>::default())
+    }
+
+    fn restore_check(&self, blob: &RestoreBlob, o: RestoreOptions) -> Result<(), CoordError> {
+        let plan = Plan::decode(&blob.0)?;
+        match self.run(Op::RestoreCheck(Box::new(plan), o)) {
+            Some(Answer::Unit(r)) => r,
+            _ => stopped(),
+        }
+    }
+
+    fn backup_restore(
+        &self,
+        blob: RestoreBlob,
+        o: RestoreOptions,
+    ) -> Result<RestoreReport, CoordError> {
+        let plan = Plan::decode(&blob.0)?;
+        drop(blob);
+        match self.run(Op::Restore(Box::new(plan), o)) {
+            Some(Answer::Restore(r)) => r,
+            _ => stopped(),
         }
     }
 }

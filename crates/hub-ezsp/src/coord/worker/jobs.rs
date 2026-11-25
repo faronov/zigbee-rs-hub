@@ -1,5 +1,6 @@
 //! Admin jobs ([`super::super::EzspAdmin`]): forming, leaving, scans,
-//! channel change, TX power, tables, ZDO requests, diagnostics.
+//! channel change, TX power, tables, ZDO requests, diagnostics; backup and
+//! restore in [`super::backup`].
 
 use super::*;
 
@@ -58,6 +59,9 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 }
             }
             Op::Diagnostics { reset } => Answer::Diagnostics(self.diagnostics(reset)),
+            Op::Backup { keys } => Answer::Backup(self.backup_items(keys)),
+            Op::RestoreCheck(plan, o) => Answer::Unit(self.restore_check(&plan, o).map(|_| ())),
+            Op::Restore(plan, o) => return self.restore_start(plan, o, slot),
         };
         slot.answer(answer);
     }

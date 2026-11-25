@@ -77,12 +77,21 @@
 //!   (counted, not translated yet); [`Request::Gp`] is refused at submit;
 //!   the GP sink and proxy table sizes are configuration values
 //!   (`GP_SINK_TABLE_SIZE`, `GP_PROXY_TABLE_SIZE`).
-//! - Backup and restore: the security manager calls (`exportKey` with a
-//!   [`SecManContext`], `getNetworkKeyInfo`, `importTransientKey`) are in
-//!   place for the network key; the TC link key root (hashed seed), link
-//!   keys by index and restore (`setInitialSecurityState` with
-//!   `NO_FRAME_COUNTER_RESET`, `importLinkKey`, frame counter values) are
-//!   admin jobs of the same shape.
+//! - NCP firmware update (Gecko bootloader): an admin job of the same
+//!   shape as backup and restore.
+//!
+//! # Backup and restore
+//!
+//! [`EzspAdmin::backup_export`](hub_coord::NetworkAdmin::backup_export)
+//! reads the network, its keys and frame counters through the security
+//! manager ([`SecManContext`]: `exportKey`, `getNetworkKeyInfo`, the
+//! hashed TC link key root, `exportLinkKeyByIndex`), `getValue`, the child
+//! table; the restore ([`BlobEncoder`], `restore_check`, `backup_restore`)
+//! writes the coordinator IEEE (a rewritable stack token, or the one-time
+//! custom EUI-64 only when confirmed), the frame counters plus margins,
+//! the initial security state with `NO_FRAME_COUNTER_RESET`, the key and
+//! child tables and forms the network, with NCP resets the worker runs
+//! from its loop (`docs/ezsp-backend.md` "Backup and restore").
 //!
 //! [`Callback::Unknown`]: crate::ezsp::Callback::Unknown
 //! [`SecManContext`]: crate::ezsp::SecManContext
@@ -105,6 +114,7 @@
 //! [`EzspHost::start`]: crate::host::EzspHost::start
 
 mod admin;
+mod backup;
 #[cfg(test)]
 pub(crate) mod contract;
 mod convert;
@@ -120,6 +130,7 @@ use crate::ezsp::types::*;
 use crate::host::{HostConfig, LinkCounters};
 
 pub use admin::EzspAdmin;
+pub use backup::BlobEncoder;
 pub use convert::{COUNTERS, capabilities, energy_of_rssi, ezsp_error, host_error};
 pub use worker::{COMMAND_CAP, EzspCoordinator};
 

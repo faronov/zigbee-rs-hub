@@ -881,3 +881,119 @@ fn an_ncp_that_appends_bytes_to_incoming_messages_still_interviews() {
     assert_eq!(ok(&dev)["model"], "SIM-PLUG");
     rig.finish();
 }
+
+/// The factory IEEE of the dongle a network moves to.
+const NEW_DONGLE: u64 = 0x000B_57FF_FE65_4321;
+
+/// EZSP: a backup of the hub's network (bellows' and Z2M's form) restores
+/// onto a new dongle. The coordinator IEEE goes to the new NCP's one-time
+/// token only with `confirm_ieee_write_once`; refused, nothing changes.
+/// Restored, the frame counters are the backup's plus the margin, the
+/// records are tagged with the restored network and device traffic flows.
+#[test]
+fn ezsp_backup_restores_onto_a_new_dongle() {
+    let mut src = ezsp_sim(true, 0xDD);
+    src.network_key = [0x6E; 16];
+    src.nwk_frame_counter = 50_000;
+    src.network.nwk_update_id = 2;
+    let rig = Rig::ezsp(src, Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    let b = call(&rig.app, sid, &rx, 1, json!({"type": "network/backup"}));
+    let backup = ok(&b).clone();
+    assert_eq!(backup["metadata"]["internal"]["ezspVersion"], 13, "{backup}");
+    assert_eq!(backup["coordinator_ieee"], "000b57fffe123456");
+    assert_eq!(backup["network_key"]["key"], "6e".repeat(16));
+    assert_eq!(backup["network_key"]["frame_counter"], 50_000);
+    assert_eq!(backup["stack_specific"]["ezsp"]["hashed_tclk"], "3c".repeat(16));
+    assert_eq!(backup["metadata"]["internal"]["network"]["tc_link_key"]["key"], "5a6967426565416c6c69616e63653039");
+    rig.finish();
+
+    let mut dst = ezsp_sim(false, 0xDD);
+    dst.eui64 = Eui64::from_u64(NEW_DONGLE);
+    let rig = Rig::ezsp(dst, Store::volatile());
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup}));
+    assert_eq!(r["error"]["code"], "invalid_value", "{r}");
+    let why = r["error"]["message"].as_str().unwrap();
+    assert!(why.contains("confirm_ieee_write_once") && why.contains("only once"), "{why}");
+    assert!(sim.ncp(|n| !n.config().network_formed && n.config().custom_eui64.is_none()), "nothing written");
+    assert_eq!(rig.tag(), None, "the records untouched");
+
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "confirm_ieee_write_once": true}));
+    let rep = ok(&r);
+    assert_eq!((&rep["pan_id"], &rep["channel"]), (&json!(0x1A62), &json!(15)), "{rep}");
+    assert_eq!(rep["nwk_fc_start"], 60_000, "the backup's counter plus 10 000");
+    assert!(rep["notes"].as_array().unwrap().iter().any(|n| n["note"] == "ieee_written_once"), "{rep}");
+    let n = sim.ncp(|n| n.config().clone());
+    assert_eq!(n.custom_eui64, Some(Eui64::from_u64(0x000B_57FF_FE12_3456)));
+    assert_eq!((n.network_key, n.nwk_frame_counter, n.tc_link_key), ([0x6E; 16], 60_000, [0x3C; 16]));
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ownership"] == "owned" && i["registry"]["state"] == "owned"
+    });
+    let t = rig.tag().unwrap();
+    assert_eq!((t.ext_pan_id, t.coordinator_ieee), ([0xDD; 8], 0x000B_57FF_FE12_3456u64.to_le_bytes()), "tag rewritten");
+    assert!(t.key_id.is_some());
+    ok(&call(&rig.app, sid, &rx, 4, json!({"type": "network/permit_join", "duration_s": 30})));
+    wait("joining open", || rig.link.permit_open());
+    rig.finish();
+}
+
+/// EZSP (`NcpNv`): a restore over a network the NCP stores, or over
+/// records of another network, needs `force` (or `confirm`); refused,
+/// neither the NCP nor the records change. Forced, the records are tagged
+/// with the restored network.
+#[test]
+fn ezsp_restore_over_another_network_needs_force() {
+    // The backup of network DD, by a coordinator with the sims' IEEE.
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+
+    // The NCP runs network EE, the records are its.
+    let flash = SharedFlash::new();
+    let rig = Rig::ezsp(ezsp_sim(true, 0xEE), flash.store());
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup}));
+    assert!(r["error"]["message"].as_str().unwrap().contains("force"), "{r}");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xEE; 8]));
+    assert_eq!(sim.ncp(|n| n.config().network.extended_pan_id), [0xEE; 8]);
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "confirm": true}));
+    assert_eq!(ok(&r)["previous_network_backed_up"], true, "{r}");
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        epid_of(&i) == [0xDD; 8] && i["ownership"] == "owned" && i["registry"]["state"] == "owned"
+    });
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    rig.finish();
+
+    // The NCP lost its network, the records are still network EE's.
+    let mut s = flash.store();
+    let ee = NetworkIdentity {
+        ext_pan_id: [0xEE; 8],
+        key_id: None,
+        pan_id: 0x1A62,
+        channel: 15,
+        key_seq: 0,
+        coordinator_ieee: [0; 8],
+    };
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Ezsp, Some(ee)).encode().as_bytes()).unwrap();
+    drop(s);
+    let rig = Rig::ezsp(ezsp_sim(false, 0xEE), flash.store());
+    let (sid, rx) = session(&rig.app);
+    assert_eq!(info(&rig.app, sid, &rx)["ownership"], "no_network");
+    let r = call(&rig.app, sid, &rx, 4, json!({"type": "network/restore", "backup": backup}));
+    let why = r["error"]["message"].as_str().unwrap_or_default();
+    assert!(why.contains("device registry") && why.contains("force"), "{r}");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xEE; 8]), "the tag kept");
+    ok(&call(&rig.app, sid, &rx, 5, json!({"type": "network/restore", "backup": backup, "force": true})));
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    rig.finish();
+}

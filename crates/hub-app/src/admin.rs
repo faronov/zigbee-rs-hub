@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hub_coord::{
-    Beacon, Capabilities, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams, Kind, NetState, NetworkAdmin,
-    NetworkOwnership, RegistryState, RestoreOptions,
+    BackendKind, Beacon, Capabilities, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams, Kind, NetState, NetworkAdmin,
+    NetworkOwnership, OwnershipModel, RegistryState, RestoreOptions,
 };
 use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
@@ -196,6 +196,16 @@ fn ncp_error(what: &str, e: CoordError) -> ApiError {
     if why.is_empty() { ApiError::new(code, format!("{what}: {e}")) } else { ApiError::new(code, format!("{what}: {why}")) }
 }
 
+/// [`ncp_error`] that keeps the backend's own explanation (a restore's
+/// refusal says what to set).
+fn restore_error(e: CoordError) -> ApiError {
+    let mut a = ncp_error("restore", e.clone());
+    if let CoordError::Described(d) = &e {
+        a.message = format!("restore: {}", d.text);
+    }
+    a
+}
+
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError::new("invalid_value", msg)
 }
@@ -313,6 +323,7 @@ struct Staged {
     restore: ocb::Restore,
     groups: Option<Vec<J>>,
     allow_ieee_change: bool,
+    ieee_write_once: bool,
     force: bool,
     skip_backup: bool,
 }
@@ -472,6 +483,10 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
         ncp_fw: ncp.as_ref().map(|n| n.fw.clone()).unwrap_or_default(),
         ncp_chip: ncp.as_ref().map_or(0, |n| n.chip),
         ncp_build_id: ncp.as_ref().map(|n| hex(&n.build_id)).unwrap_or_default(),
+        ezsp_version: ncp
+            .as_ref()
+            .filter(|_| net.status().and_then(|s| s.caps).is_some_and(|c| c.backend == BackendKind::Ezsp))
+            .map(|n| n.protocol.0),
         host_devices: known.iter().map(|k| (k.ieee.to_le_bytes(), k.nwk)).collect(),
         // The hub's groups as stored (device-support 14.9).
         groups: kv::with(kv, |s| {
@@ -1057,7 +1072,11 @@ impl Admin {
     /// `network/restore`: `backup` (OCB, its `devices` optional), then any
     /// number of `devices` batches while `more` is true; the last request
     /// starts the restore. Each request is one small JSON value: a large
-    /// backup never has to be in RAM at once.
+    /// backup never has to be in RAM at once. Replacing a network the NCP
+    /// stores, or records of another network, needs `force` (or
+    /// `confirm`); a coordinator IEEE the NCP can store only once (EZSP),
+    /// `confirm_ieee_write_once`. The backend checks first
+    /// (`restore_check`): a refusal changes nothing.
     fn restore(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, v: &J) -> Vec<String> {
         let fail = |e: ApiError| vec![frame(id, Err(e))];
         let more = match flag(v, "more", false) {
@@ -1065,10 +1084,17 @@ impl Admin {
             Err(e) => return fail(e),
         };
         if let Some(b) = field(v, "backup") {
-            let opts = (flag(v, "allow_ieee_change", true), flag(v, "force", false), flag(v, "skip_backup", false));
-            let (Ok(allow_ieee_change), Ok(force), Ok(skip_backup)) = opts else {
-                return fail(bad("allow_ieee_change, force, skip_backup: true or false"));
+            let opts = (
+                flag(v, "allow_ieee_change", true),
+                flag(v, "force", false),
+                flag(v, "confirm", false),
+                flag(v, "skip_backup", false),
+                flag(v, "confirm_ieee_write_once", false),
+            );
+            let (Ok(allow_ieee_change), Ok(force), Ok(confirm), Ok(skip_backup), Ok(ieee_write_once)) = opts else {
+                return fail(bad("allow_ieee_change, force, confirm, skip_backup, confirm_ieee_write_once: true or false"));
             };
+            let force = force || confirm;
             self.staged = None;
             let groups = b.pointer("/metadata/internal/zigbee_rs/groups").and_then(J::as_array).cloned();
             let encoder = match ctx.net.restore_encoder() {
@@ -1076,7 +1102,7 @@ impl Admin {
                 Err(e) => return fail(ncp_error("restore", e)),
             };
             match ocb::to_restore(b, encoder) {
-                Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }),
+                Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, ieee_write_once, force, skip_backup }),
                 Err(e) => return fail(bad(e)),
             }
         } else if let Some(devices) = field(v, "devices") {
@@ -1098,7 +1124,7 @@ impl Admin {
         if more {
             return vec![frame(id, Ok(json!({"staged_devices": staged})))];
         }
-        let Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }) = self.staged.take() else {
+        let Some(Staged { restore, groups, allow_ieee_change, ieee_write_once, force, skip_backup }) = self.staged.take() else {
             return fail(bad("no restore staged"));
         };
         let records = ctx.records.clone();
@@ -1113,12 +1139,28 @@ impl Admin {
                 "the NCP runs a network (PAN {pan}); set force to replace it (it is backed up first unless skip_backup)"
             )));
         }
+        // NcpNv: the records are another network's, or of unknown origin.
+        if !force && !ctx.records.may_restore(restore.ext_pan_id) {
+            return fail(bad(format!(
+                "the device registry is {} and holds another network than the backup's; set force to restore over it (its records become the restored network's)",
+                ctx.records.registry().as_str()
+            )));
+        }
+        let ncp_nv = st.caps.as_ref().is_some_and(|c| c.ownership == OwnershipModel::NcpNv);
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
-        let opts =
-            RestoreOptions { allow_ieee_change, nwk_margin: 10_000, aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN } };
+        let opts = RestoreOptions {
+            allow_ieee_change,
+            ieee_write_once,
+            nwk_margin: 10_000,
+            aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN },
+        };
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
+            let ocb::Restore { encoder, ext_pan_id, .. } = restore;
+            let blob = encoder.finish();
+            // A refusal (e.g. an IEEE the NCP cannot take) changes nothing.
+            net.restore_check(&blob, opts).map_err(restore_error)?;
             let mut previous = false;
             if network_state(&*net) == NetState::Up && !skip_backup {
                 drop(take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
@@ -1126,13 +1168,29 @@ impl Admin {
                 })?);
                 previous = true;
             }
-            let report = replace(&*net, &*records, || net.backup_restore(restore.encoder.finish(), opts).map_err(|e| ncp_error("restore", e)))?;
+            let report = replace(&*net, &*records, || {
+                // NcpNv: the network the NCP stores goes first, then the
+                // records are tagged with the backup's network (as for
+                // network/reset), so that an interrupted restore leaves
+                // them the restored network's (refusals came before, in
+                // restore_check, and changed nothing).
+                if ncp_nv && network_state(&*net) != NetState::None {
+                    net.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
+                }
+                records.forming(Some(ext_pan_id));
+                net.backup_restore(blob, opts).map_err(restore_error)
+            })?;
             out(JobOut::Reimport);
             if let Some(g) = groups {
                 out(JobOut::Groups(g));
             }
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "restored"})));
-            let note = |n: u8| ["", "host_backed", "child_demoted", "ignored", "floor_raised"].get(usize::from(n)).copied().unwrap_or("unknown");
+            let note = |n: u8| {
+                ["", "host_backed", "child_demoted", "ignored", "floor_raised", "ieee_kept", "ieee_written_once", "ieee_rewritten", "tclk_root_generated", "update_id_not_restored"]
+                    .get(usize::from(n))
+                    .copied()
+                    .unwrap_or("unknown")
+            };
             let mut w = Jw::result(id, 400 + 40 * report.notes.len())?;
             w.obj().key("pan_id").num(restore.pan_id).key("channel").num(restore.channel);
             w.key("coordinator_ieee").str(&be_hex(&restore.coordinator_ieee)).key("devices").num(restore.devices.len());
