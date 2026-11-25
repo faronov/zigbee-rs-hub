@@ -39,6 +39,7 @@ use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
 usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices] [--sim-ota] [--sim-unsupported ID,…]) [--store FILE] [--ota-store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+       hubctl --backend ezsp --sim [--sim-devices] [--store FILE] [--ota-store FILE] [-v|-vv] serve …
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -70,6 +71,11 @@ commands:
                             MQTT over TCP): --mqtt enables it with this
                             broker; settings persist in FILE (default RAM)
                             and can be changed over the API (mqtt/config/set)
+coordinator backend:
+  --backend zrhp|ezsp       zrhp (default): the ZRHP host core; ezsp: the hub app
+                            on the EZSP backend, with --sim its simulated
+                            EmberZNet NCP (EZSP 13, a network already formed);
+                            serve only, --sim-devices as below
 simulated NCP:
   --sim-demo                form on channel 15 and add a small mesh (routers
                             answering Mgmt_Lqi/Mgmt_Rtg) for the network map
@@ -579,62 +585,94 @@ fn run(hub: &Hub, mut args: Args) -> Result<(), String> {
                 .client()
                 .call_empty(ids::SYS_GET_STATUS, CallOpts::default());
         }
-        "serve" => {
-            let addr = args
-                .value("--listen")
-                .unwrap_or_else(|| "127.0.0.1:8099".into());
-            let token = args
-                .value("--token")
-                .or_else(|| std::env::var("HUB_TOKEN").ok())
-                .unwrap_or_else(|| {
-                    let mut b = [0u8; 12];
-                    urandom()(&mut b);
-                    hex(&b).to_lowercase()
-                });
-            let until = args
-                .value("--for")
-                .and_then(|s| s.parse().ok())
-                .map(|s: u64| Instant::now() + Duration::from_secs(s));
-            let wifi_channel = args.value("--wifi-channel").and_then(|c| c.parse().ok());
-            let desktop = platform::Desktop {
-                started: Instant::now(),
-                rng: urandom(),
-                wifi_channel,
-                wifi: Default::default(),
-            };
-            let cfg = hub_app::AppConfig {
-                hub_name: "hubctl".into(),
-                api_token: token.clone(),
-                platform: Some(Arc::new(desktop)),
-                ..Default::default()
-            };
-            let catalog = catalog_setup(&mut args)?;
-            let mqtt_store = mqtt_settings(&mut args)?;
-            let app = hub_app::App::start_with(hub.clone(), hub_app::AppConfig { ota_flash: ota_area(), ..cfg }, Some(catalog));
-            let transport: hub_mqtt::TransportFactory =
-                Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn hub_mqtt::Transport>);
-            let mqtt = hub_mqtt::MqttService::start(&app, mqtt_store, transport, hub_mqtt::ServiceConfig::default());
-            println!("token: {token}");
-            let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
-            mqtt.stop();
-            let st = app.status();
-            app.shutdown();
-            println!(
-                "app: {} devices ({} restored, {} imported from the NCP), registry writes {} errors {}, APS accepted {} busy {} failed {}",
-                st.devices,
-                st.restored,
-                st.imported,
-                st.registry_writes,
-                st.registry_errors,
-                st.aps.accepted,
-                st.aps.busy,
-                st.aps.failed
-            );
-            result?;
-        }
+        "serve" => serve_app(&mut args, hub_app::Backend::zrhp(hub.clone()))?,
         other => return Err(format!("unknown command {other:?}\n{USAGE}")),
     }
     Ok(())
+}
+
+/// `serve`: the hub application on `backend` with its WebSocket API, the
+/// web UI and the MQTT bridge.
+fn serve_app(args: &mut Args, backend: hub_app::Backend) -> Result<(), String> {
+    let addr = args
+        .value("--listen")
+        .unwrap_or_else(|| "127.0.0.1:8099".into());
+    let token = args
+        .value("--token")
+        .or_else(|| std::env::var("HUB_TOKEN").ok())
+        .unwrap_or_else(|| {
+            let mut b = [0u8; 12];
+            urandom()(&mut b);
+            hex(&b).to_lowercase()
+        });
+    let until = args
+        .value("--for")
+        .and_then(|s| s.parse().ok())
+        .map(|s: u64| Instant::now() + Duration::from_secs(s));
+    let wifi_channel = args.value("--wifi-channel").and_then(|c| c.parse().ok());
+    let desktop = platform::Desktop {
+        started: Instant::now(),
+        rng: urandom(),
+        wifi_channel,
+        wifi: Default::default(),
+    };
+    let cfg = hub_app::AppConfig {
+        hub_name: "hubctl".into(),
+        api_token: token.clone(),
+        platform: Some(Arc::new(desktop)),
+        ..Default::default()
+    };
+    let catalog = catalog_setup(args)?;
+    let mqtt_store = mqtt_settings(args)?;
+    let app = hub_app::App::start_backend(backend, hub_app::AppConfig { ota_flash: ota_area(), ..cfg }, Some(catalog));
+    let transport: hub_mqtt::TransportFactory =
+        Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn hub_mqtt::Transport>);
+    let mqtt = hub_mqtt::MqttService::start(&app, mqtt_store, transport, hub_mqtt::ServiceConfig::default());
+    println!("token: {token}");
+    let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
+    mqtt.stop();
+    let st = app.status();
+    app.shutdown();
+    println!(
+        "app: {} devices ({} restored, {} imported from the NCP), registry writes {} errors {}, APS accepted {} busy {} failed {}",
+        st.devices,
+        st.restored,
+        st.imported,
+        st.registry_writes,
+        st.registry_errors,
+        st.aps.accepted,
+        st.aps.busy,
+        st.aps.failed
+    );
+    result
+}
+
+/// `--backend ezsp`: the hub application on the EZSP backend and its
+/// simulated EmberZNet NCP (EZSP 13, EmberZNet 7.4.5 as on the SONOFF
+/// Dongle Max), which runs a network already. Only `serve`.
+fn run_ezsp(store: Store, sim: bool, sim_devices: bool, mut args: Args) -> Result<(), String> {
+    use hub_ezsp::sim::{Faults, Sim, SimConfig};
+    if !sim {
+        return Err("--backend ezsp needs --sim: a serial EmberZNet NCP is not supported by hubctl yet".into());
+    }
+    if args.0.first().map(String::as_str) != Some("serve") {
+        return Err(format!("--backend ezsp: only the serve command\n{USAGE}"));
+    }
+    args.0.remove(0);
+    let cfg = SimConfig {
+        ezsp_version: 13,
+        stack_version: hub_ezsp::ezsp::StackVersion(0x7450),
+        version_info: [0, 0, 7, 4, 5, 0, 0xAA],
+        ..SimConfig::default()
+    };
+    let (sim, transport, clock) = Sim::new(cfg, Faults::none());
+    // Virtual time follows real time (the app's ticks and timeouts are real).
+    sim.set_pace(Some(1));
+    if sim_devices {
+        simdev::start_ezsp(&sim);
+    }
+    let backend = hub_app::Backend::ezsp(transport, clock, hub_ezsp::coord::EzspOptions::default(), store);
+    serve_app(&mut args, backend)
 }
 
 fn main() -> ExitCode {
@@ -852,6 +890,26 @@ fn main() -> ExitCode {
     let sim_z2m_devices = args.flag("--sim-z2m-devices");
     let sim_ota = args.flag("--sim-ota");
     let _ = OTA_STORE.set(args.value("--ota-store"));
+    match args.value("--backend").as_deref() {
+        None | Some("zrhp") => {}
+        Some("ezsp") => {
+            if demo || sim_z2m_devices || sim_ota || args.0.iter().any(|a| a == "--sim-unsupported") {
+                eprintln!("--backend ezsp: --sim-demo, --sim-z2m-devices, --sim-ota and --sim-unsupported are ZRHP simulator options");
+                return ExitCode::from(2);
+            }
+            return match run_ezsp(store, sim, sim_devices, args) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Some(other) => {
+            eprintln!("--backend {other}: zrhp or ezsp");
+            return ExitCode::from(2);
+        }
+    }
     let serial = args.value("--serial");
     let baud = args
         .value("--baud")

@@ -10,10 +10,11 @@
 //!   UART, reset/loader lines, Ethernet, LED, button, console, flash/PSRAM,
 //!   with a wiring check.
 //! - [`resources`]: buffer limits from the PSRAM detected at boot.
-//! - [`zrhp`]: re-export of the `zigbee-zrhp` protocol crate (phase 1).
+//! - `zrhp` (feature `zrhp`): re-export of the `zigbee-zrhp` protocol crate.
 
 #![no_std]
 
+#[cfg(feature = "zrhp")]
 pub use zigbee_zrhp as zrhp;
 
 pub mod board;

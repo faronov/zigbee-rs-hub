@@ -1,6 +1,9 @@
 //! End to end: the hub application with its automations behind
 //! `hubctl --sim --sim-devices serve` (simulated NCP and devices), over
-//! the WebSocket API, across a hard kill and a restart on the same store.
+//! the WebSocket API, across a hard kill and a restart on the same store;
+//! on the ZRHP backend and on the EZSP backend (`--backend ezsp`, whose
+//! NCP keeps the network: the records are the hub's once the NCP's network
+//! matches their ownership tag, also after the restart).
 
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -21,10 +24,10 @@ struct Hub {
 }
 
 impl Hub {
-    fn start(store: &Path) -> Self {
+    fn start(backend: &str, store: &Path) -> Self {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let child = Command::new(env!("CARGO_BIN_EXE_hubctl"))
-            .args(["--sim", "--sim-devices", "--store"])
+            .args(["--backend", backend, "--sim", "--sim-devices", "--store"])
             .arg(store)
             .args(["serve", "--listen", &format!("127.0.0.1:{port}"), "--token", "e2e", "--for", "120"])
             .stdout(Stdio::null())
@@ -129,9 +132,18 @@ fn cmd(uid: &str, c: &str) -> J {
 
 #[test]
 fn automations_end_to_end_and_across_a_restart() {
-    let store = Path::new(env!("CARGO_TARGET_TMPDIR")).join("automations-e2e.store");
+    end_to_end("zrhp");
+}
+
+#[test]
+fn automations_end_to_end_and_across_a_restart_on_ezsp() {
+    end_to_end("ezsp");
+}
+
+fn end_to_end(backend: &str) {
+    let store = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("automations-e2e-{backend}.store"));
     let _ = std::fs::remove_file(&store);
-    let hub = Hub::start(&store);
+    let hub = Hub::start(backend, &store);
     let mut c = Client::connect(hub.port);
     c.wait("the simulated plugs", Duration::from_secs(30), |c| {
         let s = c.call(json!({"type": "entities/states", "uids": [P1, P2]})).unwrap();
@@ -176,7 +188,7 @@ fn automations_end_to_end_and_across_a_restart() {
     // Power cut: no shutdown; the rules were written when they changed.
     drop(c);
     drop(hub);
-    let hub = Hub::start(&store);
+    let hub = Hub::start(backend, &store);
     let mut c = Client::connect(hub.port);
     let list = c.call(json!({"type": "automations/list"})).unwrap();
     let ids: Vec<&str> = list["rules"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
@@ -191,4 +203,6 @@ fn automations_end_to_end_and_across_a_restart() {
     c.wait("plug 2 toggled", Duration::from_secs(10), |c| c.state(P2) != p2);
     c.call(json!({"type": "automations/delete", "automation": "pulse"})).unwrap();
     assert_eq!(c.call(json!({"type": "automations/get", "automation": "pulse"})).unwrap_err()["code"], "not_found");
+    let net = c.call(json!({"type": "network/info"})).unwrap();
+    assert_eq!((&net["ownership"], &net["registry"]["state"]), (&json!("owned"), &json!("owned")), "{net}");
 }

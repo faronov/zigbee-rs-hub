@@ -234,6 +234,66 @@ fn last_values_come_back_marked_restored_until_a_report() {
     );
 }
 
+/// A leave the coordinator reports: the device stays, unavailable with the
+/// reason `left`, until its next frame or rejoin.
+#[test]
+fn a_device_that_left_is_unavailable_until_it_is_heard_again() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(sensor());
+    sim.join(&mut hub, SENSOR, T0);
+    let id = "zb:00158d0001a2b3c4";
+    let uid = format!("{id}:1:temperature");
+    let s = sim.dev(SENSOR).clone();
+    assert_eq!(
+        hub.device(id).unwrap().record().get("unavailable_reason"),
+        None
+    );
+    hub.drain_events();
+
+    hub.on_device_left(SENSOR);
+    let d = hub.device(id).unwrap();
+    assert!(!d.available);
+    assert_eq!(d.record()["unavailable_reason"], "left");
+    let ev = hub.drain_events();
+    assert!(ev.contains(&HubEvent::DeviceUpdated(id.into())), "{ev:?}");
+    assert_eq!(states(&ev, &uid).last().unwrap()["available"], false);
+    hub.on_device_left(SENSOR);
+    assert!(hub.drain_events().is_empty(), "reported once");
+    // No probes while it is gone, whatever the time.
+    hub.tick(T0 + 30 * 3_600_000);
+    assert!(!hub.device(id).unwrap().available);
+
+    // Its next frame: back.
+    hub.on_aps_indication(
+        s.report(1, 0x0402, None, &[(0, TypedValue::int(ZclType::I16, 2205))]),
+        T0 + 31 * 3_600_000,
+    );
+    let d = hub.device(id).unwrap();
+    assert!(d.available);
+    assert_eq!(d.record().get("unavailable_reason"), None);
+    assert!(
+        hub.drain_events()
+            .contains(&HubEvent::DeviceUpdated(id.into()))
+    );
+
+    // Left again, then a rejoin: back as well.
+    hub.on_device_left(SENSOR);
+    hub.drain_events();
+    hub.on_device_joined(SENSOR, 0x1235, T0 + 32 * 3_600_000);
+    let d = hub.device(id).unwrap();
+    assert!(d.available && !d.left);
+    assert_eq!(d.nwk(), Some(0x1235));
+    assert!(
+        hub.drain_events()
+            .contains(&HubEvent::DeviceUpdated(id.into()))
+    );
+
+    // A device the hub does not know.
+    hub.on_device_left(0x0011_2233_4455_6677);
+    assert!(hub.drain_events().is_empty());
+}
+
 #[test]
 fn last_seen_is_published_while_frames_come_more_than_once_a_minute() {
     let mut hub = hub_with(&[]);

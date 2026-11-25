@@ -122,7 +122,7 @@ pub(crate) struct Shared {
     queued: AtomicUsize,
     high_water: AtomicUsize,
     cancels: Mutex<Cancels>,
-    status: Mutex<CoordStatus>,
+    pub(crate) status: Mutex<CoordStatus>,
     pub(crate) tx_power: Mutex<Option<i8>>,
     pub(crate) stopped: AtomicBool,
 }
@@ -171,7 +171,7 @@ impl EzspCoordinator {
             high_water: AtomicUsize::new(0),
             cancels: Mutex::default(),
             status: Mutex::new(initial_status()),
-            tx_power: Mutex::new(None),
+            tx_power: Mutex::new(opts.tx_power),
             stopped: AtomicBool::new(false),
         });
         let stack = opts.worker_stack;
@@ -319,6 +319,10 @@ impl Coordinator for EzspCoordinator {
     fn status(&self) -> CoordStatus {
         self.shared.status.lock().unwrap().clone()
     }
+
+    fn permit_join_s(&self) -> u32 {
+        self.shared.status.lock().unwrap().permit_join_s
+    }
 }
 
 impl Drop for EzspCoordinator {
@@ -446,6 +450,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         events: Arc<EventQueue>,
     ) -> Self {
         let backoff_ms = opts.retry_min.as_millis() as u64;
+        let tx_power = opts.tx_power;
         Self {
             host,
             rx,
@@ -481,7 +486,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             nwk_cache: VecDeque::new(),
             zdo_tsn: 0,
             out: VecDeque::new(),
-            tx_power: None,
+            tx_power,
             scan: None,
             channel_changed: false,
             refresh_pending: false,
@@ -1324,6 +1329,10 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// callbacks that came meanwhile.
     fn announce(&mut self) {
         self.epoch = self.epoch.wrapping_add(1).max(1);
+        // The application decides about this session's network first.
+        if let Some(t) = &self.opts.traffic {
+            t.store(super::traffic_closed(self.epoch), Ordering::SeqCst);
+        }
         self.up = true;
         self.state = SessionState::Ready;
         self.stats.sessions += 1;
@@ -1354,6 +1363,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// The session ended (NCP reset, ERROR, link failure).
     fn lose_session(&mut self) {
         self.lost = false;
+        self.close_traffic();
         let was_up = self.up;
         if was_up {
             // What the NCP sent before the failure goes first.
@@ -1385,7 +1395,39 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.scan = None;
         self.refresh_pending = false;
         self.retry_at = self.now();
+        self.drop_held_requests();
         self.publish();
+    }
+
+    /// [`EzspOptions::traffic`] at the end of a session: no epoch, closed.
+    fn close_traffic(&self) {
+        if let Some(t) = &self.opts.traffic {
+            t.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// Requests may go out ([`EzspOptions::traffic`]).
+    pub(super) fn traffic_open(&self) -> bool {
+        self.opts.traffic.as_ref().is_none_or(|t| {
+            self.up && t.load(Ordering::SeqCst) == super::traffic_closed(self.epoch) | 1
+        })
+    }
+
+    /// While [`EzspOptions::traffic`] is closed, queued requests end
+    /// `Refused(LinkDown)`: they were meant for a network that may not be
+    /// the one of the next session.
+    pub(super) fn drop_held_requests(&mut self) {
+        if self.traffic_open() {
+            return;
+        }
+        for (id, _) in std::mem::take(&mut self.fifo) {
+            self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+            let e = CoordError::described(
+                CoordError::LinkDown,
+                "not sent: the NCP's network is not verified as the application's",
+            );
+            self.done(id, Terminal::Refused(e));
+        }
     }
 
     /// Runs the link until `cond` holds, the deadline passes or the link

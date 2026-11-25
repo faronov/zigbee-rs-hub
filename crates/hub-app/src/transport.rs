@@ -13,12 +13,17 @@
 //!   join) are passed on as soon as the app has them
 //!   ([`CoordTransport::take_control`]).
 //! - The app's own requests (the device inventory) come back to the app.
+//! - Device traffic is refused while the [`Records`] do not vouch for the
+//!   NCP's network (`NcpNv` backends: until the NCP's network of the
+//!   session matches the ownership tag, design §2.7).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin, RegistryState};
 use hub_devices::transport::{CoordError, Outcome, Request, RequestId, Terminal, ZigbeeTransport};
+
+use crate::backend::Records;
 
 /// Outcome counters of APS requests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -98,8 +103,9 @@ pub struct CoordTransport {
     control: VecDeque<(RequestId, Outcome)>,
     /// APS outcome counters.
     pub counters: ApsCounters,
-    /// Whose the hub's network-scoped records are (`network/info.registry`).
-    pub registry: Option<Box<dyn Fn() -> RegistryState + Send + Sync>>,
+    /// The hub's records: whose they are (`network/info.registry`), and
+    /// whether device traffic may go to the NCP.
+    pub records: Option<Arc<dyn Records>>,
 }
 
 impl CoordTransport {
@@ -116,7 +122,7 @@ impl CoordTransport {
             done: Vec::new(),
             control: VecDeque::new(),
             counters: ApsCounters::default(),
-            registry: None,
+            records: None,
         }
     }
 
@@ -125,9 +131,26 @@ impl CoordTransport {
         self.coord.status()
     }
 
+    /// Permit-join seconds left.
+    pub fn permit_join_s(&self) -> u32 {
+        self.coord.permit_join_s()
+    }
+
+    /// Device traffic waits while the NCP's network is not the records'.
+    fn held(&self) -> Result<(), CoordError> {
+        match &self.records {
+            Some(r) if !r.verified() => Err(CoordError::described(
+                CoordError::LinkDown,
+                "the NCP's network is not verified as this hub's (network/info.registry)",
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// A request of the app itself, not the engine's: its outcome comes
     /// back from [`Self::outcome`].
     pub fn submit_own(&mut self, req: Request) -> Result<RequestId, CoordError> {
+        self.held()?;
         let id = self.coord.submit(req, None)?;
         self.own.push(id);
         Ok(id)
@@ -189,6 +212,7 @@ impl ZigbeeTransport for CoordTransport {
             Request::RemoveDevice { ieee, .. } => Request::RemoveDevice { ieee, nwk: self.nwk.get(&ieee).copied() },
             req => req,
         };
+        self.held()?;
         let aps = matches!(req, Request::Aps(_));
         let id = self.coord.submit(req, None)?;
         if aps {
@@ -201,8 +225,13 @@ impl ZigbeeTransport for CoordTransport {
     }
 
     fn network_info(&mut self) -> Option<serde_json::Value> {
-        let registry = self.registry.as_ref().map(|r| r());
-        Some(network_info(&self.coord.status(), self.admin.tx_power_setting(), registry.as_ref()))
+        let mut st = self.coord.status();
+        let registry = self.records.as_ref().map(|r| r.registry());
+        // An NCP-held network as the hub decided it.
+        if let Some(o) = self.records.as_ref().and_then(|r| r.ownership(&st.ownership)) {
+            st.ownership = o;
+        }
+        Some(network_info(&st, self.admin.tx_power_setting(), registry.as_ref()))
     }
 }
 

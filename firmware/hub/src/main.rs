@@ -14,6 +14,12 @@
 //!
 //! USB recovery (`s3 usj`, 1200 bps touch, mount timeout, crash safe mode)
 //! works the same in both modes.
+//!
+//! The coordinator backend is a feature, exactly one: `zrhp` (default; the
+//! board's H2 NCP).
+
+#[cfg(not(feature = "zrhp"))]
+compile_error!("tbr-hub: select exactly one coordinator backend: feature `zrhp` (the Thread BR board's H2 NCP speaks ZRHP)");
 
 mod alloc;
 #[cfg(feature = "app")]
@@ -453,17 +459,19 @@ fn start_app(hub: Hub, verdict: Verdict) {
     #[cfg(not(feature = "ota-store"))]
     let _ = verdict;
     stage(5);
-    let app = cpu::named(c"app", || hub_app::App::start_with(hub.clone(), app_cfg, catalog));
+    let app = cpu::named(c"app", || hub_app::App::start_backend(hub_app::Backend::zrhp(hub), app_cfg, catalog));
     let _ = APP.set(app.clone());
     #[cfg(feature = "mqtt")]
     let _ = MQTT.set(mqtt::start(&app, resources::get()));
     stage(6);
     usbapi::start(app.clone());
     stage(7);
+    // PTA coexistence while the Wi-Fi is up (the backend's radio control).
+    let radio = app.radio().cloned();
     match esp_idf_svc::hal::peripherals::Peripherals::take() {
         Ok(p) => net::start(Some(app), p.modem, move |up| {
             platform::wifi_changed(up);
-            if let Err(e) = hub.set_coex(up) {
+            if let Some(Err(e)) = radio.as_ref().map(|r| r.set_coex(up)) {
                 warn!("coex_enable {up}: {e}");
             }
         }),

@@ -6,8 +6,10 @@ backend for Silicon Labs EmberZNet NCPs: `hub-coord`'s `Coordinator` and
 `docs/coordinator-boundary.md` §2, §3, §5.
 
 **Status: host-tested only**, against the simulated NCP of `hub_ezsp::sim`.
-Not wired into hub-app or the firmware yet (backend selection is PR H), and
-not run against hardware yet (HIL on the SONOFF Dongle Max is a follow-up).
+The hub app runs on it (hub-app feature `ezsp`, `Backend::ezsp`, PR H1;
+"In the hub app" below), on the desktop with `hubctl --backend ezsp --sim`.
+Not in a firmware yet (the Dongle-M: PR H2), and not run against hardware
+yet (HIL on the SONOFF Dongle Max is a follow-up).
 
 ## Target
 
@@ -184,7 +186,9 @@ exhaustion is `Refused(Busy)`; no `messageSentHandler` within the deadline
 (60 s default; checked only after the callbacks received before it) is
 `Unknown(Timeout)`; an NCP reset ends the requests on the
 NCP with `Unknown(DeliveryUnknown)` after `Session::Down` and keeps the
-queued ones for the next session. Control requests are barriers.
+queued ones for the next session (with `EzspOptions::traffic`, as the
+hub app sets it: ends them `Refused(LinkDown)` instead, see "In the hub
+app"). Control requests are barriers.
 `RemoveDevice` only forgets the address: the engine's ZDO Mgmt_Leave_req
 stays the primary removal path, and with hashed link keys the trust center
 keeps no key for the device. An EZSP `removeDevice` to the parent, as an
@@ -223,11 +227,76 @@ Vault), in which case the EPID alone decides (§8.5). It reports `NoNetwork`
 when `networkInit` answers `NOT_JOINED`, and `Unknown` before a session.
 
 hub-app decides: it compares the observed identity with the `hub/owner`
-tag (§2.7) and turns it into owned or foreign. PR I (#71) adds the tag types
-and the read-only registry state (`unverified` for an `NcpNv` network not
-compared yet); the `NcpNv` decision itself, and refusing device traffic
-until the NCP's identity matches the tag, are wired in PR H together with
-the backend selection.
+tag (§2.7) and turns it into owned or foreign ("In the hub app").
+
+## In the hub app
+
+`hub_app::Backend::ezsp(transport, clock, opts, store)` starts this
+backend when the app starts (`App::start_backend`): the coordinator and
+`EzspAdmin` on the app's event queue, with the hub endpoint, and the hub's
+records in `store` (`hub_app::NcpNvRecords`: the hub's own `hubdata`
+journal, not the NCP's). `hubctl --backend ezsp --sim [--sim-devices]
+[--store FILE] serve` runs the whole app on the simulated NCP (EZSP 13,
+EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
+
+**Ownership flow** (design §2.5, §2.7; `NcpNvRecords`):
+
+1. Start: this backend's tag of a formed network makes the records
+   `unverified` (loaded, read-only); its tag naming no formed network
+   (`epid: null`, or a network being formed: channel 0) makes them
+   `owned`; another backend's tag makes them `foreign` (hidden). An
+   untagged store is never taken silently: a ZRHP image's stored network
+   gets the tag ZRHP's migration would write (`{"backend":"zrhp",…}`, so
+   `foreign`); network-scoped records without a stored network stay
+   `unverified` and hidden (closed, no device traffic) until the operator
+   adopts or clears them (or forms or restores a network over them); an
+   empty store is `untagged` until the first network, and the first
+   network-scoped record written meanwhile (a rule, a group) tags it
+   `{"backend":"ezsp","epid":null}`, so a restart knows the records are
+   the hub's.
+2. The session's `Ownership(Observed(identity))` (before `Session::Up`):
+   matching the tag (EPID; the key ID too when both are known, else the
+   EPID alone, design §8.5), or no tag yet → `owned`, the tag written or
+   its informative fields (PAN ID, channel, key sequence, coordinator)
+   rewritten; a key ID already in the tag stays when the NCP does not
+   export its key now. Another network → `foreign`, nothing written.
+   Only reports of the current session count: each with its session's
+   epoch, and only while the backend's status still shows it (not after
+   an NCP restart in between).
+3. Device traffic (APS, groups, permit join, removal, the device
+   inventory) is refused until step 2 matched in the current session; a
+   session loss, `NoNetwork` or `Unknown` stop it again until the next
+   match. The flag is shared with this backend (`EzspOptions::traffic`)
+   and names the session: `(epoch << 1) | open`. The worker stores
+   `epoch << 1` when a session starts (before its ownership report) and 0
+   when it ends, and ends queued requests `Refused(LinkDown)` while it is
+   not open for its session; the records open it with a compare-and-swap
+   for the epoch whose report matched. So nothing queued before a reset,
+   and no late report of an earlier session, reaches a network not
+   decided yet. The hub
+   endpoint's group replay, the import of the NCP's devices and the state
+   refresh wait for it.
+4. `NoNetwork`: `network/info.ownership` `no_network`; `network/form`
+   forms a network (only then, and only over the hub's records of no
+   formed network: no tag, or its tag with `epid: null` or of a network
+   being formed; no `confirm`), or `network/reset` ("RESET"), which also
+   replaces a network the NCP lost. While the operator
+   replaces the network (`network/form`, `network/reset`,
+   `network/restore`), reports decide nothing; just before `formNetwork`
+   the records are tagged with the extended PAN ID it forms (picked by the
+   hub unless the request names one; key ID unknown), so an interrupted
+   job (a timeout, a reboot) still leaves them the new network's;
+   afterwards the tag gets the full identity.
+5. `foreign`: `network/info.ownership` `mismatch` and
+   `network/info.registry` `{"state":"foreign","backend","why"}`;
+   `network/registry/adopt` (the records become the NCP network's) or
+   `network/registry/clear` (deleted, the NCP's devices imported again),
+   both with `"confirm": true`.
+
+The operator's TX power is kept as `ezsp/tx_power` (backend-scoped) and
+applied in every session (`EzspOptions::tx_power`). A device leave
+(`DeviceLeft`) keeps the device: unavailable with `unavailable_reason:
+"left"` until its next frame or rejoin; removal is `devices/remove`.
 
 ## Diagnostics
 
@@ -248,12 +317,10 @@ devices left, route records, GP frames ignored).
 - The XOFF timeout (1 s) and the 10 ms UART slice are choices.
 - Leaves: `trustCenterJoinHandler` DEVICE_LEFT becomes
   `CoordEvent::DeviceLeft` with `rejoin: None` (the trust center's update
-  does not say); hub-app only logs it until PR H decides what a leave does
-  to the registry. The ZRHP adapter does not emit it yet.
+  does not say); the engine keeps the device, unavailable with the reason
+  `left` until it is heard again. The ZRHP adapter does not emit it yet.
 - `TxOptions::extended_timeout` is not applied (EmberZNet sets it per
   destination with `setExtendedTimeout`).
-- The operator's TX power lives in the worker; persisting it (backend key
-  `ezsp/…`) comes with PR H.
 - Beacons of an active scan carry no sender address (0xFFFF).
 - Child table entries have no time since the last poll (0).
 
@@ -278,9 +345,10 @@ devices left, route records, GP frames ignored).
 4. Force removal: `removeDevice(parent short address, parent EUI64, target
    EUI64)` (APS Remove Device to the parent) for unreachable or sleepy
    children, as an explicit fallback behind the engine's Mgmt_Leave_req.
-5. PR H: backend selection in hub-app and the firmware (`ezsp` feature),
-   the UART transport on the ESP32, persistence of the TX power, the
-   `NcpNv` ownership decision.
+5. PR H2: the Dongle-M firmware on this backend (the UART transport on the
+   ESP32, the hub app, the `files`-partition `hubdata`). Done in H1: the
+   hub-app `ezsp` feature, the `NcpNv` ownership decision, the TX power
+   kept across restarts.
 6. HIL on the Dongle Max: session start on the stock "1.0.0" image, XON/XOFF
    on the 115 200 Bd line, key export, permit join with real devices,
    channel change, callback bursts and the capacities the NCP accepts.

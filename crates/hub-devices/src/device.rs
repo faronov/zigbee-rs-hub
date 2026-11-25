@@ -341,6 +341,10 @@ pub struct Device {
     pub rssi: Option<i8>,
     /// Availability.
     pub available: bool,
+    /// The coordinator reported that the device left the network: it is
+    /// unavailable (`unavailable_reason: "left"`) until its next frame or
+    /// rejoin. Not stored.
+    pub left: bool,
     /// Active availability check: tries left and next try.
     pub check: Option<(u8, Millis)>,
     /// Configure.
@@ -401,6 +405,7 @@ impl Device {
             lqi: None,
             rssi: None,
             available: true,
+            left: false,
             check: None,
             configure: ConfigureState::default(),
             queue: VecDeque::new(),
@@ -519,7 +524,7 @@ impl Device {
             PowerKind::Battery => "battery",
             PowerKind::EnergyHarvesting => "energy_harvesting",
         };
-        json!({
+        let mut v = json!({
             "id": self.id,
             "ieee": ieee,
             "nwk": self.nwk(),
@@ -552,7 +557,13 @@ impl Device {
                 }
                 j
             }).collect::<Vec<_>>(),
-        })
+        });
+        // Only while it applies: device records of available devices keep
+        // their fields.
+        if self.left {
+            v["unavailable_reason"] = "left".into();
+        }
+        v
     }
 }
 

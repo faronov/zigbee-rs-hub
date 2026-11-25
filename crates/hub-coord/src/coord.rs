@@ -220,6 +220,12 @@ pub trait Coordinator: Send {
 
     /// Snapshot behind a short lock, no I/O.
     fn status(&self) -> CoordStatus;
+
+    /// Permit-join seconds left ([`CoordStatus::permit_join_s`]) without
+    /// the whole snapshot: the application looks after every input.
+    fn permit_join_s(&self) -> u32 {
+        self.status().permit_join_s
+    }
 }
 
 /// Radio control owned by the firmware, called from Wi-Fi callbacks rather

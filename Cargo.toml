@@ -17,6 +17,7 @@ hub-core = { path = "crates/hub-core" }
 hub-store = { path = "crates/hub-store" }
 hub-coord = { path = "crates/hub-coord" }
 hub-ncp = { path = "crates/hub-ncp" }
+hub-ezsp = { path = "crates/hub-ezsp" }
 hub-devices = { path = "crates/hub-devices" }
 hub-ota = { path = "crates/hub-ota", default-features = false }
 hub-app = { path = "crates/hub-app", default-features = false }

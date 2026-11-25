@@ -11,8 +11,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use hub_coord::{
-    Beacon, ChannelChange, CoordError, Diagnostics, EnergyChannel, FormParams, NetworkAdmin,
-    NetworkParams, TablesRead,
+    Beacon, ChannelChange, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams,
+    NetworkAdmin, NetworkParams, TablesRead,
 };
 
 use super::worker::{Msg, Shared};
@@ -153,6 +153,10 @@ fn stopped<T>() -> Result<T, CoordError> {
 }
 
 impl NetworkAdmin for EzspAdmin {
+    fn status(&self) -> Option<CoordStatus> {
+        Some(self.shared.status.lock().unwrap().clone())
+    }
+
     fn form(&self, p: FormParams) -> Result<NetworkParams, CoordError> {
         match self.run(Op::Form(p)) {
             Some(Answer::Form(r)) => r,

@@ -770,6 +770,67 @@ fn gp_requests_are_refused_and_backup_is_not_offered_yet() {
 
 // ------------------------------------------------------------ session loss
 
+/// With a traffic gate (an application that decides network ownership,
+/// `NcpNv`): the request queued behind the one on the NCP is not sent in
+/// the next session, which may run another network; it ends
+/// `Refused(LinkDown)`. The worker closes the gate for each new session's
+/// epoch; requests go out once the application opens that epoch, and an
+/// opening for an earlier session does not count.
+#[test]
+fn with_a_traffic_gate_queued_requests_do_not_outlive_the_session() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let gate = Arc::new(AtomicU32::new(0));
+    let open = |epoch: u32| {
+        gate.compare_exchange(
+            traffic_closed(epoch),
+            traffic_closed(epoch) | 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    };
+    let mut o = opts();
+    o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 1));
+    o.traffic = Some(gate.clone());
+    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    let first = rig.next_up();
+    assert_eq!(
+        gate.load(Ordering::SeqCst),
+        traffic_closed(first),
+        "closed until the application decides"
+    );
+    assert!(open(first));
+    rig.sim.ncp(|n| n.hold_message_sent(true));
+    let a = rig.submit(unicast(0x1234));
+    let b = rig.submit(unicast(0x5678));
+    rig.sim_until("a sent", |n| n.held_message_sent() == 1);
+    rig.sim.ncp(|n| {
+        n.hold_message_sent(false);
+        n.spontaneous_reset(ResetCode::WATCHDOG);
+    });
+    let b_t = rig.outcome(b);
+    assert!(
+        matches!(&b_t, Terminal::Refused(e) if *e.meaning() == CoordError::LinkDown),
+        "{b_t:?}"
+    );
+    assert!(matches!(rig.outcome(a), Terminal::Unknown(_)));
+    let second = rig.next_up();
+    assert_ne!(second, first);
+    let to = |dst: u16| move |c: &Command| matches!(c, Command::SendUnicast { index_or_destination, .. } if *index_or_destination == dst);
+    // A late decision about the first session opens nothing.
+    assert!(!open(first));
+    gate.store(traffic_closed(first) | 1, Ordering::SeqCst);
+    let c = rig.submit(unicast(0x5678));
+    assert!(matches!(rig.outcome(c), Terminal::Refused(_)));
+    assert!(!rig.sent().iter().any(to(0x5678)), "{:?}", rig.sent());
+    // The decision about this session opens it.
+    gate.store(traffic_closed(second), Ordering::SeqCst);
+    assert!(open(second));
+    let d = rig.submit(unicast(0x5678));
+    assert_eq!(rig.outcome(d), Terminal::Delivered);
+    rig.finish();
+}
+
 /// An NCP reset: `Down`, then the request on the NCP ends
 /// `Unknown(DeliveryUnknown)` (EZSP loses it, design §2.2); the queued one
 /// goes out after the next `Up`, in a new epoch.
@@ -827,6 +888,21 @@ fn a_reset_right_after_the_response_ends_the_request_unknown() {
     let (accepted, _) = progress(&rig.log, id).unwrap();
     let down_at = position(&rig.log, down).unwrap();
     assert!(accepted < down_at && down_at < terminal(&rig.log, id).unwrap().0);
+    rig.finish();
+}
+
+/// The operator's TX power of an earlier run (the hub keeps it) is applied
+/// in the first session already.
+#[test]
+fn a_kept_tx_power_is_applied_from_the_first_session() {
+    let o = EzspOptions {
+        tx_power: Some(-3),
+        ..opts()
+    };
+    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    rig.next_up();
+    assert_eq!(rig.admin.tx_power_setting(), Some(-3));
+    assert_eq!(rig.sim.ncp(|n| n.config().network.radio_tx_power), -3);
     rig.finish();
 }
 

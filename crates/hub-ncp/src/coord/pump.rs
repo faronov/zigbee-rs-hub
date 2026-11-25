@@ -316,6 +316,10 @@ impl Coordinator for ZrhpCoordinator {
     fn status(&self) -> CoordStatus {
         status::status(&self.hub, &self.shared.facts)
     }
+
+    fn permit_join_s(&self) -> u32 {
+        self.hub.permit_join_remaining()
+    }
 }
 
 impl Drop for ZrhpCoordinator {

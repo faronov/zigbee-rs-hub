@@ -1,4 +1,5 @@
-//! Network map: the coordinator's own tables (ZRHP `DIAG_GET_NEIGHBORS`,
+//! Network map: the coordinator's own tables
+//! ([`NetworkAdmin::coordinator_tables`]: ZRHP `DIAG_GET_NEIGHBORS`,
 //! `DIAG_GET_ROUTES`, `DIAG_GET_CHILDREN`, spec 7.4/7.8: the NCP does not
 //! loop ZDO back to itself) and, breadth first over the routers found,
 //! ZDO Mgmt_Lqi_req / Mgmt_Rtg_req over the air (R22 2.4.3.3.2/3).
@@ -11,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use hub_coord::{CoordError, NetworkAdmin};
 use hub_devices::hub::ApiError;
-use hub_ncp::Hub as Ncp;
 
 use crate::jw::Jw;
 
@@ -143,7 +143,6 @@ const ROUTE_STATUS: [&str; 8] = ["active", "discovery_underway", "discovery_fail
 
 struct Zdo<'a> {
     net: &'a dyn NetworkAdmin,
-    ncp: &'a Ncp,
     tsn: u8,
     timeout: Duration,
 }
@@ -155,11 +154,11 @@ impl Zdo<'_> {
         let mut zdp = vec![self.tsn];
         zdp.extend_from_slice(args);
         self.net.zdo_request(nwk, cluster, &zdp, self.timeout).map_err(|e| match e.meaning() {
+            // The status as the backend names it (ZRHP: in the numbering of
+            // the NCP image).
             CoordError::NoAck(c) => {
-                let legacy =
-                    self.ncp.client().session().is_some_and(|s| hub_ncp::coord::legacy_zb_status(&s.negotiated.fw));
                 let st = c.value as u8;
-                match hub_ncp::coord::zb_status_text(st, legacy) {
+                match c.text {
                     Some(t) => format!("not delivered: {t} (zb status 0x{st:02X})"),
                     None => format!("not delivered (zb status 0x{st:02X})"),
                 }
@@ -205,7 +204,7 @@ impl Zdo<'_> {
 }
 
 /// A ZDP status (Mgmt_Lqi_rsp, Mgmt_Rtg_rsp) with its name and meaning;
-/// delivery failures are named by `hub_ncp::coord::zb_status_text`.
+/// delivery failures are named by the backend (`CoordError::NoAck`).
 pub fn status_text(code: u8) -> String {
     let name = match code {
         0x80 => "INV_REQUESTTYPE",
@@ -264,17 +263,16 @@ struct Node {
     error: Option<String>,
 }
 
-/// Scan the network through `net`; `ncp` for the session (the
-/// coordinator's IEEE, the NCP's Zigbee status numbering).
-/// `progress(scanned, queued)` after every router. The map's JSON text
-/// (structs while scanning, no JSON tree: RAM).
-pub fn scan(net: &dyn NetworkAdmin, ncp: &Ncp, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> Result<String, ApiError> {
+/// Scan the network through `net` (its status names the coordinator's
+/// IEEE). `progress(scanned, queued)` after every router. The map's JSON
+/// text (structs while scanning, no JSON tree: RAM).
+pub fn scan(net: &dyn NetworkAdmin, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> Result<String, ApiError> {
     let started = Instant::now();
     let mut nodes: BTreeMap<u16, Node> = BTreeMap::new();
     let mut links: Vec<Link> = Vec::new();
     let mut routes: Vec<RouteRow> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
-    let coord_ieee = ncp.client().session().and_then(|s| s.info.as_ref().map(|i| i.ieee_active));
+    let coord_ieee = net.status().and_then(|s| s.ncp?.ieee);
     nodes.insert(0, Node { ieee: coord_ieee, device_type: Some(0), scanned: true, error: None });
     let mut queue: VecDeque<u16> = VecDeque::new();
     // The coordinator, from the NCP's tables.
@@ -320,7 +318,7 @@ pub fn scan(net: &dyn NetworkAdmin, ncp: &Ncp, known: &[Known], opts: ScanOpts, 
         }
     }
 
-    let mut zdo = Zdo { net, ncp, tsn: 0xA0, timeout: opts.timeout };
+    let mut zdo = Zdo { net, tsn: 0xA0, timeout: opts.timeout };
     let mut asked = 0;
     while let Some(nwk) = queue.pop_front() {
         let cancelled = opts.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));

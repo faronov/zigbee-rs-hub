@@ -1,6 +1,8 @@
 """End to end against the real API server: `hubctl --sim serve`.
 
 Runs when `HUBCTL` names a hubctl binary (CI builds one); skipped otherwise.
+`HUBCTL_BACKEND=ezsp` runs the hub on the EZSP backend's simulated NCP
+(`hubctl --backend ezsp --sim`) instead of the ZRHP one.
 """
 
 from __future__ import annotations
@@ -27,7 +29,12 @@ HUBCTL = os.environ.get("HUBCTL")
 # zdefc builds the test catalog release (next to hubctl by default).
 ZDEFC = os.environ.get("ZDEFC") or (str(Path(HUBCTL).with_name("zdefc")) if HUBCTL else None)
 REPO = Path(__file__).resolve().parents[3]
-SIM_COORDINATOR_IEEE = "020100000000515a"
+BACKEND = os.environ.get("HUBCTL_BACKEND", "zrhp")
+# The simulated NCP's IEEE address and product name, per backend.
+SIM_COORDINATOR_IEEE, SIM_NCP = {
+    "zrhp": ("020100000000515a", "sim-ncp"),
+    "ezsp": ("000b57fffe123456", "hub-ezsp sim"),
+}[BACKEND]
 
 pytestmark = pytest.mark.skipif(not HUBCTL, reason="HUBCTL is not set")
 
@@ -50,6 +57,8 @@ class Hubctl:
         assert HUBCTL
         self.proc = await asyncio.create_subprocess_exec(
             HUBCTL,
+            "--backend",
+            BACKEND,
             "--sim",
             "serve",
             "--listen",
@@ -107,7 +116,7 @@ async def test_hubctl_sim(hass: HomeAssistant, hubctl: Hubctl) -> None:
     assert entry.state is ConfigEntryState.LOADED
 
     hub_dev = find_device(dr.async_get(hass), (DOMAIN, f"hub_{entry.entry_id}"), entry.entry_id)
-    assert hub_dev.model == "sim-ncp"
+    assert hub_dev.model == SIM_NCP
     assert hub_dev.serial_number == SIM_COORDINATOR_IEEE
     connected = er.async_get(hass).async_get_entity_id(
         "binary_sensor", DOMAIN, f"{entry.entry_id}_connected"
