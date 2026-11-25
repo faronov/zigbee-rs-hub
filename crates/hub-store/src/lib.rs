@@ -23,7 +23,7 @@ mod testutil;
 
 use std::io;
 
-pub use flash::{FileFlash, Flash, MemFlash};
+pub use flash::{FileFlash, Flash, Gated, MemFlash, WriteGate};
 pub use journal::{Journal, JournalStats};
 pub use kv::{Gate, Guarded, Kv, KvStore, OWNER_KEY, Scope};
 pub use state::{Change, DeviceRecord, EndpointRecord, FcRecord, FwPending, HostState, Meta, NetworkRecord};
