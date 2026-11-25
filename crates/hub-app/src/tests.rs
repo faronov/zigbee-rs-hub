@@ -1409,8 +1409,10 @@ fn time_zone_and_servers_are_set_kept_and_reported() {
     let t = call(&app, sid, &rx, 1, json!({"type": "hub/time"}));
     let t = ok(&t);
     assert_eq!((t["time_synced"].as_bool(), t["tz"].as_str(), t["servers"][0].as_str()), (Some(true), Some("UTC0"), Some("pool.ntp.org")));
-    let set = call(&app, sid, &rx, 2, json!({"type": "hub/time/set", "tz": "EET-2EEST,M3.5.0/3,M10.5.0/4", "servers": ["time.cloudflare.com", "pool.ntp.org"]}));
+    assert_eq!(t["tz_name"], J::Null);
+    let set = call(&app, sid, &rx, 2, json!({"type": "hub/time/set", "tz": "EET-2EEST,M3.5.0/3,M10.5.0/4", "tz_name": "Europe/Kyiv", "servers": ["time.cloudflare.com", "pool.ntp.org"]}));
     let set = ok(&set).clone();
+    assert_eq!(set["tz_name"], "Europe/Kyiv");
     assert!([7200, 10_800].contains(&set["tz_offset_s"].as_i64().unwrap()), "{set}");
     assert_eq!(set["servers"], json!(["time.cloudflare.com", "pool.ntp.org"]));
     assert!(set["dst"]["start"].as_i64().unwrap() < set["dst"]["end"].as_i64().unwrap());
@@ -1419,9 +1421,26 @@ fn time_zone_and_servers_are_set_kept_and_reported() {
     assert_eq!(err_code(&bad), "invalid_value");
     let bad = call(&app, sid, &rx, 4, json!({"type": "hub/time/set", "servers": []}));
     assert_eq!(err_code(&bad), "invalid_value");
+    // The name is a plain token, set with a zone only; nothing changed.
+    for (i, req) in [
+        json!({"type": "hub/time/set", "tz": "UTC0", "tz_name": "../Kyiv"}),
+        json!({"type": "hub/time/set", "tz": "UTC0", "tz_name": "Europe Kyiv"}),
+        json!({"type": "hub/time/set", "tz": "UTC0", "tz_name": "x".repeat(65)}),
+        json!({"type": "hub/time/set", "tz_name": "Europe/Kyiv"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(err_code(&call(&app, sid, &rx, 20 + i as u64, req)), "invalid_value");
+    }
     // Kept in the host store; network/info carries the wall clock.
-    let kept = r.ncp.with_store(|s| s.kv_get(crate::admin::TZ_KEY).map(<[u8]>::to_vec));
-    assert_eq!(kept.as_deref(), Some(&b"EET-2EEST,M3.5.0/3,M10.5.0/4"[..]));
+    let kept = |k| r.ncp.with_store(|s| s.kv_get(k).map(<[u8]>::to_vec));
+    assert_eq!(kept(crate::admin::TZ_KEY).as_deref(), Some(&b"EET-2EEST,M3.5.0/3,M10.5.0/4"[..]));
+    assert_eq!(kept(crate::admin::TZ_NAME_KEY).as_deref(), Some(&b"Europe/Kyiv"[..]));
+    // A zone without a name drops the old one.
+    let set = call(&app, sid, &rx, 30, json!({"type": "hub/time/set", "tz": "<+0530>-5:30"}));
+    assert_eq!((ok(&set)["tz_offset_s"].as_i64(), &ok(&set)["tz_name"]), (Some(19_800), &J::Null));
+    assert_eq!(kept(crate::admin::TZ_NAME_KEY), None);
     std::thread::sleep(Duration::from_millis(1100));
     let n = call(&app, sid, &rx, 5, json!({"type": "network/info"}));
     let n = ok(&n);
@@ -1477,6 +1496,18 @@ fn developer_mode_is_set_kept_and_shared() {
     assert!(!app.developer_mode());
     assert_eq!(r.ncp.with_store(|s| s.kv_get(crate::admin::DEVELOPER_KEY).map(<[u8]>::to_vec)), None);
     app.shutdown();
+}
+
+#[test]
+fn the_time_zone_name_is_read_back_at_start() {
+    let mut store = Store::volatile();
+    store.kv_put(crate::admin::TZ_KEY, b"GMT0BST,M3.5.0/1,M10.5.0").unwrap();
+    store.kv_put(crate::admin::TZ_NAME_KEY, b"Europe/London").unwrap();
+    let r = rig(store);
+    let app = admin_app(&r, Some(Arc::new(TestPlatform::default())));
+    let (sid, rx) = session(&app);
+    let t = call(&app, sid, &rx, 1, json!({"type": "hub/time"}));
+    assert_eq!((ok(&t)["tz"].as_str(), ok(&t)["tz_name"].as_str()), (Some("GMT0BST,M3.5.0/1,M10.5.0"), Some("Europe/London")), "{t}");
 }
 
 #[test]

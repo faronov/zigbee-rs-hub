@@ -65,6 +65,8 @@ pub const TYPES: &[&str] = &[
 
 /// Host store keys of the time settings.
 pub const TZ_KEY: &str = "cfg/tz";
+/// The IANA name the client made [`TZ_KEY`] from (display only).
+pub const TZ_NAME_KEY: &str = "cfg/tz_name";
 /// SNTP servers, comma separated.
 pub const NTP_KEY: &str = "cfg/ntp";
 /// Host store key of the developer mode (present: on).
@@ -148,6 +150,7 @@ pub struct Ctx<'a> {
 struct ClockState {
     tz: clock::Tz,
     tz_text: String,
+    tz_name: Option<String>,
     servers: Vec<String>,
     source: Option<&'static str>,
     /// Engine ms → Unix ms.
@@ -161,12 +164,18 @@ impl Default for ClockState {
         ClockState {
             tz: clock::Tz::default(),
             tz_text: clock::DEFAULT_TZ.into(),
+            tz_name: None,
             servers: vec![clock::DEFAULT_SERVER.into()],
             source: None,
             offset_ms: 0,
             last_set: None,
         }
     }
+}
+
+/// A time zone's display name: an IANA-like token, never interpreted.
+fn zone_name(n: &str) -> bool {
+    (1..=64).contains(&n.len()) && n.as_bytes()[0].is_ascii_alphabetic() && n.bytes().all(|c| c.is_ascii_alphanumeric() || b"/_+-".contains(&c))
 }
 
 fn wall_s() -> i64 {
@@ -790,13 +799,14 @@ impl Admin {
     /// Time settings from the host store; hands them to the platform.
     #[inline(never)]
     pub fn load_clock(&mut self, kv: &dyn KvStore) {
-        let (tz, ntp) = kv::with(kv, |s| {
+        let (tz, name, ntp) = kv::with(kv, |s| {
             let get = |k| s.get(k).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string);
-            (get(TZ_KEY), get(NTP_KEY))
+            (get(TZ_KEY), get(TZ_NAME_KEY), get(NTP_KEY))
         });
         if let Some(t) = tz.as_deref().and_then(clock::parse) {
             self.clock.tz = t;
             self.clock.tz_text = tz.unwrap_or_default();
+            self.clock.tz_name = name.filter(|n| zone_name(n));
         }
         if let Some(n) = ntp {
             self.clock.servers = n.split(',').map(str::to_string).collect();
@@ -863,7 +873,12 @@ impl Admin {
             };
             w.key("local");
             if synced { w.str(&clock::civil(t, off)) } else { w.null() };
-            w.key("tz").str(&c.tz_text).key("tz_offset_s").num(off).key("dst");
+            w.key("tz").str(&c.tz_text).key("tz_name");
+            match &c.tz_name {
+                Some(n) => w.str(n),
+                None => w.null(),
+            };
+            w.key("tz_offset_s").num(off).key("dst");
             match c.tz.dst_utc(clock::civil_from_days(t.div_euclid(86_400)).0) {
                 Some((s, e, shift)) => w.obj().key("start").num(s).key("end").num(e).key("shift_s").num(shift).key("active").num(in_dst).end_obj(),
                 None => w.null(),
@@ -908,11 +923,25 @@ impl Admin {
 
     #[inline(never)]
     fn set_time(&mut self, kv: &dyn KvStore, v: &J) -> Result<(), ApiError> {
+        let name = text(v, "tz_name")?.map(str::trim).filter(|n| !n.is_empty());
         if let Some(tz) = text(v, "tz")? {
             let t = clock::parse(tz).ok_or_else(|| bad("tz: a POSIX TZ string such as EET-2EEST,M3.5.0/3,M10.5.0/4"))?;
-            kv::with(kv, |s| s.put(TZ_KEY, tz.trim().as_bytes())).map_err(|e| ApiError::new("failed", e.to_string()))?;
+            if name.is_some_and(|n| !zone_name(n)) {
+                return Err(bad("tz_name: an IANA zone name such as Europe/Kyiv (1–64 of A–Z a–z 0–9 / _ + -)"));
+            }
+            kv::with(kv, |s| {
+                s.put(TZ_KEY, tz.trim().as_bytes())?;
+                match name {
+                    Some(n) => s.put(TZ_NAME_KEY, n.as_bytes()),
+                    None => s.delete(TZ_NAME_KEY),
+                }
+            })
+            .map_err(|e| ApiError::new("failed", e.to_string()))?;
             self.clock.tz = t;
             self.clock.tz_text = tz.trim().to_string();
+            self.clock.tz_name = name.map(str::to_string);
+        } else if name.is_some() {
+            return Err(bad("tz_name: only with tz"));
         }
         if let Some(list) = field(v, "servers") {
             let servers: Vec<String> = list
@@ -926,7 +955,7 @@ impl Admin {
         if let Some(p) = &self.platform {
             p.set_time(&self.clock.servers).map_err(|e| ApiError::new("failed", e))?;
         }
-        info!("time: zone {}, servers {}", self.clock.tz_text, self.clock.servers.join(","));
+        info!("time: zone {} ({}), servers {}", self.clock.tz_text, self.clock.tz_name.as_deref().unwrap_or("-"), self.clock.servers.join(","));
         Ok(())
     }
 

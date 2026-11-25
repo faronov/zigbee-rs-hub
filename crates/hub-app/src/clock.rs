@@ -251,6 +251,26 @@ mod tests {
     }
 
     #[test]
+    fn forms_the_web_page_writes() {
+        // A half-hour shift (Lord Howe), minutes in offsets and times
+        // (Chatham), a time before midnight (Nuuk) and past 24 h (Jerusalem,
+        // Santiago): (zone, standard offset, shift, 2026 start, end).
+        let cases = [
+            ("<+1030>-10:30<+11>-11,M10.1.0,M4.1.0", 37_800, 1800, unix(2026, 10, 3, 15, 30), unix(2026, 4, 4, 15, 0)),
+            ("<+1245>-12:45<+1345>,M9.5.0/2:45,M4.1.0/3:45", 45_900, 3600, unix(2026, 9, 26, 14, 0), unix(2026, 4, 4, 14, 0)),
+            ("<-02>2<-01>,M3.5.0/-1,M10.5.0/0", -7200, 3600, unix(2026, 3, 29, 1, 0), unix(2026, 10, 25, 1, 0)),
+            ("<+02>-2<+03>,M3.4.4/26,M10.5.0", 7200, 3600, unix(2026, 3, 27, 0, 0), unix(2026, 10, 24, 23, 0)),
+            ("<-04>4<-03>,M9.1.6/24,M4.1.6/24", -14_400, 3600, unix(2026, 9, 6, 4, 0), unix(2026, 4, 5, 3, 0)),
+        ];
+        for (s, std_s, shift, start, end) in cases {
+            let tz = parse(s).unwrap_or_else(|| panic!("{s}"));
+            assert_eq!((tz.std_s, tz.dst_utc(2026)), (std_s, Some((start, end, shift))), "{s}");
+        }
+        // Jerusalem 2028: the Friday before the last Sunday, not the last Friday.
+        assert_eq!(parse("<+02>-2<+03>,M3.4.4/26,M10.5.0").unwrap().dst_utc(2028).unwrap().0, unix(2028, 3, 24, 0, 0));
+    }
+
+    #[test]
     fn zcl_clock_counts_from_2000() {
         let tz = parse("EET-2EEST,M3.5.0/3,M10.5.0/4").unwrap();
         let c = zcl_clock(&tz, unix(2026, 11, 22, 0, 0), true, Some(unix(2026, 11, 22, 0, 0)));
