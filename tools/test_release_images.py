@@ -1,6 +1,10 @@
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "release_images", Path(__file__).resolve().parent / "release-images.py"
@@ -56,11 +60,141 @@ class BuildCheckTests(unittest.TestCase):
             with self.subTest(board=board_id), self.assertRaises(release_images.ReleaseError):
                 release_images.check_build(spec, ["advanced", "mqtt", "ota"], spec["psram"])
 
+    def test_developer_edition_is_its_own_group_and_marker(self):
+        dev = [b for b in release_images.BOARDS if b.get("edition") == "devtools"]
+        self.assertEqual([b["id"] for b in dev], ["thread-br-s3-hub-8mb-devtools", "thread-br-s3-hub-8mb-devtools-opi"])
+        std = self.board("thread-br-s3-hub-8mb")
+        for spec in dev:
+            # Its own web flasher entry (never offered instead of the standard image), the 8 MB layout.
+            self.assertEqual(spec["size_group"], "thread-br-s3-hub-devtools")
+            self.assertIn("Developer edition", spec["size_group_title"])
+            self.assertEqual((spec["layout"], spec["csv"]), (std["layout"], std["csv"]))
+            with self.subTest(board=spec["id"]), self.assertRaises(release_images.ReleaseError):
+                # A standard 8 MB image left in the devtools target directory.
+                release_images.check_build(spec, list(std["features"]), spec["psram"])
+        with self.assertRaises(release_images.ReleaseError):
+            release_images.check_build(std, list(dev[0]["features"]), std["psram"])
+        self.assertNotIn("size_group", std)
+
+    def test_developer_edition_only_with_the_feature(self):
+        with mock.patch.object(release_images, "has_feature", return_value=False):
+            self.assertFalse(any(b.get("edition") for b in release_images.s3_boards()))
+            self.assertEqual(len(release_images.s3_boards()), 4)
+        with mock.patch.object(release_images, "has_feature", return_value=True):
+            self.assertEqual(len(release_images.s3_boards()), 6)
+
+    def test_every_released_hub_elf_is_listed_for_the_atomics_scan(self):
+        with mock.patch.object(release_images, "has_feature", return_value=True):
+            listed = [(chip, str(elf.relative_to(release_images.ROOT))) for chip, elf in release_images.hub_elfs(True, True)]
+            # Every target directory a released S3 board reads its ELF from.
+            targets = {b["target"] for b in release_images.s3_boards()}
+        self.assertEqual({p.split("/")[0] for c, p in listed if c == "esp32s3"}, targets)
+        self.assertEqual(len(targets), 6)
+        self.assertIn(("esp32", "target-devtools/xtensa-esp32-espidf/release/zrh-donglem"), listed)
+        self.assertIn(("esp32", "target/xtensa-esp32-espidf/release/zrh-donglem"), listed)
+        self.assertFalse(any("bridge" in p for _, p in listed))
+        with mock.patch.object(release_images, "has_feature", return_value=False):
+            self.assertEqual(len(release_images.hub_elfs(True, True)), 5)
+            self.assertEqual(release_images.hub_elfs(False, True), [("esp32", release_images.ROOT / "target/xtensa-esp32-espidf/release/zrh-donglem")])
+
     def test_other_features_and_psram_mode_must_match(self):
         spec = self.board("thread-br-s3-hub-4mb-dev")
         for features, psram in [(["mqtt", "advanced"], "quad"), ([], "quad"), (["mqtt"], "octal")]:
             with self.subTest(features=features, psram=psram), self.assertRaises(release_images.ReleaseError):
                 release_images.check_build(spec, features, psram)
+
+
+def esp_image(chip_id=0, mode=2, size_freq=0x40, min_rev=300, hash_appended=1, version=b"zrh-donglem-0.3.0"):
+    """A synthetic app image: header, extended header, first segment header, esp_app_desc_t."""
+    header = bytes([0xE9, 1, mode, size_freq]) + b"\0" * 4 + b"\xee" * 4 + chip_id.to_bytes(2, "little") + b"\0" \
+        + min_rev.to_bytes(2, "little") + (399).to_bytes(2, "little") + b"\0" * 4 + bytes([hash_appended])
+    desc = release_images.APP_DESC_MAGIC.to_bytes(4, "little") + b"\0" * 12 + version.ljust(32, b"\0")
+    return header + b"\0" * 8 + desc + b"\0" * 64
+
+
+class DongleImageTests(unittest.TestCase):
+    def test_sonoff_bootloader_settings_pass(self):
+        release_images.check_dongle_app(esp_image(), "0.3.0")
+        self.assertEqual(release_images.image_header(esp_image())["flash_size"], "16MB")
+
+    def test_wrong_version_chip_or_flash_settings_are_refused(self):
+        for image, why in [
+            (esp_image(version=b"zrh-donglem-0.2.0"), "reports"),
+            (esp_image(version=b"tbr-hub-0.3.0"), "reports"),
+            (esp_image(chip_id=9), "header"),            # an S3 image
+            (esp_image(size_freq=0x4F), "header"),       # 80 MHz: SONOFF's bootloader runs 40 MHz
+            (esp_image(size_freq=0x30), "header"),       # 8 MB
+            (esp_image(mode=0), "header"),               # QIO
+            (esp_image(min_rev=0), "header"),            # without CONFIG_ESP32_REV_MIN_3
+            (esp_image(hash_appended=0), "header"),      # SONOFF's OTA checks the appended SHA-256
+            (esp_image() + b"tbr-hub-build:features=mqtt;psram=quad;", "marker"),
+        ]:
+            with self.subTest(why=why, image=image[:24].hex()), self.assertRaisesRegex(release_images.ReleaseError, why):
+                release_images.check_dongle_app(image, "0.3.0")
+
+    def test_otadata_sector_selects_ota_1_over_sonoff_entry(self):
+        sector = release_images.dongle_otadata()
+        self.assertEqual(len(sector), release_images.OTADATA_SECTOR)
+        self.assertEqual(int.from_bytes(sector[:4], "little"), 2)
+
+    def test_board_entry_writes_only_ota_1_and_otadata_sector_1(self):
+        parts = release_images.partitions(release_images.ROOT / release_images.DONGLE["csv"])
+        app = {"name": "zrh-donglem-0.3.0-app.bin", "size": 2_960_000, "sha256": "0" * 64, "offset": parts["ota_1"][0]}
+        otadata = {"name": "zrh-donglem-0.3.0-otadata-ota1.bin", "size": 0x1000, "sha256": "1" * 64,
+                   "offset": parts["otadata"][0] + release_images.OTADATA_SECTOR}
+        board = release_images.dongle_entry("0.3.0", parts, app, otadata)
+        dev = release_images.dongle_entry("0.3.0", parts, {**app, "name": "zrh-donglem-0.3.0-devtools-app.bin"}, otadata, True)
+        self.assertEqual((dev["id"], dev["edition"]), ("sonoff-dongle-max-devtools", "devtools"))
+        self.assertIn("dev", dev["features"])
+        self.assertIn("Developer edition", dev["title"])
+        self.assertNotIn("edition", board)
+        self.assertIs(board["web_install"], False)
+        # Both routes start with the check of otadata and of ota_1's start, against this release's sector file.
+        self.assertEqual(board["precheck"][:2], ["esptool --chip esp32 --port <PORT> read-flash 0x5C000 0x2000 otadata.bin",
+                                                 "esptool --chip esp32 --port <PORT> read-flash 0x660000 0x100 ota1.bin"])
+        self.assertIn("zrh-donglem-0.3.0-otadata-ota1.bin", board["precheck"][2])
+        self.assertTrue(board["install_steps"][0].startswith("First, for either route"))
+        self.assertIn(board["precheck"][2], board["install_steps"][0])
+        self.assertTrue(board["experimental"])
+        self.assertEqual(board["flash"], ["app", "otadata_ota1"])
+        self.assertEqual((board["files"]["app"]["offset"], board["files"]["otadata_ota1"]["offset"]), (0x660000, 0x5D000))
+        self.assertEqual([p["name"] for p in board["preserved"]],
+                         ["bootloader", "partition_table", "nvs", "otadata sector 0", "phy_init", "ota_0", "files"])
+        for role in board["flash"]:
+            f = board["files"][role]
+            for kept in board["preserved"]:
+                with self.subTest(role=role, kept=kept["name"]):
+                    self.assertTrue(f["offset"] + f["size"] <= kept["offset"] or kept["offset"] + kept["size"] <= f["offset"])
+        self.assertLessEqual(app["size"], parts["ota_1"][1])
+
+    def test_precheck_goes_on_only_for_stock_slots_or_a_usb_installed_hub(self):
+        board = release_images.dongle_entry(
+            "0.3.0", release_images.partitions(release_images.ROOT / release_images.DONGLE["csv"]),
+            {"name": "zrh-donglem-0.3.0-app.bin", "size": 1, "sha256": "0" * 64, "offset": 0x660000},
+            {"name": "zrh-donglem-0.3.0-otadata-ota1.bin", "size": 4096, "sha256": "1" * 64, "offset": 0x5D000})
+        code = board["precheck"][2].removeprefix('python3 -c "').removesuffix('"')
+        spec = importlib.util.spec_from_file_location("make_otadata", Path(__file__).resolve().parent / "make-otadata.py")
+        otadata = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(otadata)
+        ours, blank = release_images.dongle_otadata(), b"\xff" * 4096
+        hub, sonoff, erased = esp_image(version=b"zrh-donglem-0.3.0"), esp_image(version=b"1.0.8"), b"\xff" * 0x100
+        cases = [
+            ("stock", otadata.sector(1) + blank, erased, "OK"),
+            ("hub installed with the USB parts", otadata.sector(1) + ours, hub, "OK"),
+            # SONOFF's updater into ota_1, its application confirmed (VALID): the sector equals ours.
+            ("SONOFF self-update, confirmed", otadata.sector(1) + ours, sonoff, "STOP"),
+            ("SONOFF self-update, unconfirmed", otadata.sector(1) + otadata.sector(2, otadata.STATES["undefined"]), sonoff, "STOP"),
+            ("stock confirm after a hub", otadata.sector(3, otadata.STATES["undefined"]) + ours, hub, "STOP"),
+            ("erased chip", blank + blank, erased, "STOP"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "zrh-donglem-0.3.0-otadata-ota1.bin").write_bytes(ours)
+            for name, data, ota1, want in cases:
+                Path(tmp, "otadata.bin").write_bytes(data)
+                Path(tmp, "ota1.bin").write_bytes(ota1[:0x100].ljust(0x100, b"\xff"))
+                out = subprocess.run([sys.executable, "-c", code], cwd=tmp, capture_output=True, text=True, check=True)
+                with self.subTest(case=name):
+                    self.assertTrue(out.stdout.startswith(want), out.stdout)
 
 
 if __name__ == "__main__":

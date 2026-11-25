@@ -3,13 +3,35 @@ name: Hub release
 # Tagged hub release: `git tag hub-v0.1.0 && git push origin hub-v0.1.0`.
 #
 # The tag must match firmware/hub/Cargo.toml (and its Cargo.lock entry) and
-# CONFIG_APP_PROJECT_VER ("tbr-hub-<version>") in firmware/hub/sdkconfig.defaults;
-# tools/release-images.py also reads the version back from the built app.
+# CONFIG_APP_PROJECT_VER ("tbr-hub-<version>") in firmware/hub/sdkconfig.defaults,
+# and, with the Dongle Max, firmware/donglem the same way ("zrh-donglem-<version>");
+# tools/release-images.py also reads the versions back from the built apps.
+# CHANGELOG.md needs a `## <version>` section: it opens the release notes.
 # A tag with a suffix (hub-v0.2.0-rc.1) makes a pre-release. The release
 # carries, for the Thread Border Router board's S3 with 8 MB (production A/B
 # layout) and 4 MB (dev layout): full flash image, bootloader, partition
-# table, blank otadata (8 MB), app, plus the tbr-bridge app,
-# release-manifest.json (the web flasher's input) and SHA256SUMS.
+# table, blank otadata (8 MB), app, the same set for the 8 MB developer
+# edition ("devtools", tbr-hub feature dev, once firmware/hub has it: its
+# own web flasher entry), plus the tbr-bridge app; for the SONOFF
+# Dongle Max (experimental): the app for ota_1 (also the file for SONOFF's
+# web console) and the otadata sector that selects it; release-manifest.json
+# (the web flasher's input) and SHA256SUMS.
+#
+# Dongle Max assets: on by default; the repository variable
+# HUB_RELEASE_DONGLEM=false leaves them out of a tagged release (the
+# workflow_dispatch input `donglem` does the same for a dry run). A tagged
+# release with them first checks that the *live* web flasher knows
+# `web_install: false` (the revision in its status.json: tools/flasher_site.py
+# there and the deployed page): an older one would offer ESP Web Tools'
+# install, whose erase wipes the dongle's stock firmware. Tag only once the
+# live revision includes faronov/zigbee-rs#15.
+#
+# Dry run (no tag, nothing published): pull requests that touch the release
+# files, and workflow_dispatch on any branch (`gh workflow run hub-release.yml
+# --ref <branch>`). It runs every step up to the release notes with the
+# version from firmware/hub/Cargo.toml; dist/ and notes.md are the run's
+# artifact `hub-release` (a tagged run publishes that artifact in its
+# second job, the only one with write access).
 #
 # Pinned: Xtensa Rust 1.90.0.0, ESP-IDF v5.5.1 (embuild), esptool, --locked;
 # no Cargo build cache, SOURCE_DATE_EPOCH from the commit.
@@ -23,13 +45,36 @@ name: Hub release
 on:
     push:
         tags: ['hub-v*']
+    pull_request:
+        paths:
+            - .github/workflows/hub-release.yml
+            - CHANGELOG.md
+            - tools/release-images.py
+            - tools/release-notes.py
+            - tools/test_release_*.py
+            - tools/build-hub-firmware.sh
+            - tools/make-app-image.sh
+            - tools/make-otadata.py
+            - tools/make-partition-table.sh
+            - firmware/*/Cargo.toml
+            - firmware/*/.cargo/config.toml
+            - firmware/*/sdkconfig.defaults
+            - firmware/*/partitions*.csv
+            - tools/check-s32c1i.sh
+            - tools/s32c1i-control/**
+    workflow_dispatch:
+        inputs:
+            donglem:
+                description: Include the SONOFF Dongle Max (zrh-donglem) assets
+                type: boolean
+                default: true
 
 permissions:
     contents: read
 
 concurrency:
     group: hub-release-${{ github.ref }}
-    cancel-in-progress: false
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
     CARGO_TERM_COLOR: always
@@ -38,31 +83,81 @@ env:
 
 jobs:
     build:
-        name: Build and publish
+        name: Build${{ github.event_name != 'push' && ' (dry run)' || '' }}
         runs-on: ubuntu-latest
-        permissions:
-            contents: write
+        outputs:
+            version: ${{ steps.meta.outputs.version }}
+            dry_run: ${{ steps.meta.outputs.dry_run }}
+            prerelease: ${{ steps.meta.outputs.prerelease }}
+            prev: ${{ steps.notes.outputs.prev }}
         steps:
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
             - name: Tag and version
               id: meta
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  DONGLEM_VAR: ${{ vars.HUB_RELEASE_DONGLEM }}
+                  DONGLEM_INPUT: ${{ inputs.donglem }}
               run: |
                   set -euo pipefail
-                  version="${GITHUB_REF_NAME#hub-v}"
-                  if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-                    echo "::error::tag $GITHUB_REF_NAME is not hub-vMAJOR.MINOR.PATCH[-PRE]"; exit 1
+                  cargo_version() { sed -n 's/^version = "\(.*\)"$/\1/p' "$1" | head -1; }
+                  if [ "$GITHUB_EVENT_NAME" = push ]; then
+                    tag="$GITHUB_REF_NAME" dry_run=false
+                    version="${tag#hub-v}"
+                    donglem=$([ "${DONGLEM_VAR:-true}" = false ] && echo false || echo true)
+                  else
+                    version=$(cargo_version firmware/hub/Cargo.toml)
+                    tag="hub-v$version" dry_run=true
+                    donglem=$([ "${DONGLEM_INPUT:-true}" = false ] && echo false || echo true)
+                    echo "::notice::dry run of $tag (Dongle Max: $donglem): nothing is published"
+                    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                      echo "::warning::$tag exists already: bump firmware/hub (and firmware/donglem) before the next release"
+                    fi
                   fi
-                  cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' firmware/hub/Cargo.toml | head -1)
-                  [ "$cargo_version" = "$version" ] \
-                    || { echo "::error::tag $GITHUB_REF_NAME but firmware/hub/Cargo.toml has $cargo_version"; exit 1; }
-                  awk '/^name = "tbr-hub"$/{getline; print}' Cargo.lock | grep -qx "version = \"$version\"" \
-                    || { echo "::error::Cargo.lock is not at tbr-hub $version"; exit 1; }
-                  grep -qx "CONFIG_APP_PROJECT_VER=\"tbr-hub-$version\"" firmware/hub/sdkconfig.defaults \
-                    || { echo "::error::firmware/hub/sdkconfig.defaults CONFIG_APP_PROJECT_VER is not tbr-hub-$version"; exit 1; }
+                  fail() { if [ "$dry_run" = true ]; then echo "::warning::$1"; else echo "::error::$1"; exit 1; fi; }
+                  if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+                    echo "::error::tag $tag is not hub-vMAJOR.MINOR.PATCH[-PRE]"; exit 1
+                  fi
+                  check_app() {  # firmware dir, package, app-version prefix
+                    [ "$(cargo_version "firmware/$1/Cargo.toml")" = "$version" ] \
+                      || { echo "::error::$tag but firmware/$1/Cargo.toml has $(cargo_version "firmware/$1/Cargo.toml")"; exit 1; }
+                    awk -v n="name = \"$2\"" '$0 == n {getline; print}' Cargo.lock | grep -qx "version = \"$version\"" \
+                      || { echo "::error::Cargo.lock is not at $2 $version"; exit 1; }
+                    grep -qx "CONFIG_APP_PROJECT_VER=\"$3-$version\"" "firmware/$1/sdkconfig.defaults" \
+                      || { echo "::error::firmware/$1/sdkconfig.defaults CONFIG_APP_PROJECT_VER is not $3-$version"; exit 1; }
+                  }
+                  check_app hub tbr-hub tbr-hub
+                  if [ "$donglem" = true ]; then check_app donglem zrh-donglem zrh-donglem; fi
+                  python3 tools/release-notes.py --check "$version" || fail "CHANGELOG.md has no section for $version"
+                  if [ "$donglem" = true ]; then
+                    # The live site, not master: a refresh builds the release set on the revision the live
+                    # site has (status.json, as tools/flasher_site.py resolve reads it), and only a master CI
+                    # deploy moves that revision. Its flasher_site.py and its page must know web_install.
+                    site=https://faronov.github.io/zigbee-rs
+                    rev=""
+                    for rel in flasher/sensor/status.json flasher/status.json; do
+                      rev=$(curl -fsSL --retry 3 "$site/$rel?t=$(date +%s)" 2>/dev/null | jq -r '.revision // empty' 2>/dev/null || true)
+                      [ -n "$rev" ] && break
+                    done
+                    live=false
+                    if [[ "$rev" =~ ^[0-9a-f]{40}$ ]]; then
+                      flasher=$(gh api -H "Accept: application/vnd.github.raw" \
+                        "repos/faronov/zigbee-rs/contents/tools/flasher_site.py?ref=$rev" 2>/dev/null || true)
+                      page=$(curl -fsSL --retry 3 "$site/flasher/?t=$(date +%s)" 2>/dev/null || true)
+                      if grep -q '"web_install"' <<<"$flasher" && grep -q 'web_install' <<<"$page"; then live=true; fi
+                    fi
+                    echo "live web flasher revision: ${rev:-unknown}, web_install support: $live"
+                    [ "$live" = true ] \
+                      || fail "the live web flasher ($site/flasher/, revision ${rev:-unknown}) does not handle web_install: tag only once the live status.json revision includes faronov/zigbee-rs#15 (its master CI deploy), or set the repository variable HUB_RELEASE_DONGLEM=false"
+                  fi
                   {
                     echo "version=$version"
+                    echo "tag=$tag"
+                    echo "dry_run=$dry_run"
+                    echo "donglem=$donglem"
+                    echo "boards=$([ "$donglem" = true ] && echo all || echo tbr)"
                     echo "prerelease=$([[ "$version" == *-* ]] && echo true || echo false)"
                     echo "epoch=$(git log -1 --format=%ct)"
                     echo "date=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
@@ -72,7 +167,7 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               with:
                   default: true
-                  buildtargets: esp32s3
+                  buildtargets: esp32,esp32s3
                   ldproxy: true
                   version: ${{ env.XTENSA_RUST }}
             # ESP-IDF (pinned v5.5.1) and crate sources, as saved by ci.yml on
@@ -92,54 +187,104 @@ jobs:
               run: |
                   set -euo pipefail
                   (cd firmware/bridge && cargo build --release --locked)
-                  # Both sizes include MQTT; only 8 MB enables advanced and the OTA image store. Quad and
-                  # octal PSRAM (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
+                  # Both sizes include MQTT; only 8 MB enables advanced and the OTA image store; the 8 MB
+                  # developer edition (devtools) once tbr-hub has the feature dev. Quad and octal PSRAM
+                  # (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
                   tools/build-hub-firmware.sh --locked
+            - name: Build zrh-donglem (SONOFF Dongle Max, classic ESP32)
+              if: steps.meta.outputs.donglem == 'true'
+              env:
+                  SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.epoch }}
+              run: |
+                  set -euo pipefail
+                  elf=xtensa-esp32-espidf/release/zrh-donglem
+                  if grep -Eq '^dev[[:space:]]*=' firmware/donglem/Cargo.toml; then
+                    # The developer edition first, kept in target-devtools/ (release-images.py reads it there).
+                    (cd firmware/donglem && cargo build --release --locked --features dev)
+                    mkdir -p "target-devtools/$(dirname "$elf")"
+                    cp "target/$elf" "target-devtools/$elf"
+                  fi
+                  (cd firmware/donglem && cargo build --release --locked)
+            - name: No S32C1I compare-and-set in the released hub images' Rust code
+              env:
+                  BOARDS: ${{ steps.meta.outputs.boards }}
+              run: |
+                  set -euo pipefail
+                  # Every tbr-hub and zrh-donglem ELF the release packages (release-images.py --list-elfs):
+                  # their Rust heap is in PSRAM, where S32C1I is not atomic between the cores (the 0.2.0
+                  # crashes). Fails closed: a missing ELF or objdump fails the run. Then, per chip, the
+                  # positive control of ci.yml: Rust atomics built with S32C1I must fail the check, each
+                  # of the control's six found.
+                  python3 tools/release-images.py --list-elfs --boards "$BOARDS" >target/hub-elfs.txt
+                  cat target/hub-elfs.txt
+                  [ -s target/hub-elfs.txt ]
+                  find_od() { find .embuild/espressif/tools -name "xtensa-$1-elf-objdump" -type f | head -1; }
+                  chips=""
+                  while read -r chip elf; do
+                    od=$(find_od "$chip")
+                    [ -n "$od" ] || { echo "::error::no xtensa-$chip-elf-objdump"; exit 1; }
+                    [ -f "$elf" ] || { echo "::error::$elf missing"; exit 1; }
+                    echo "$elf:"
+                    tools/check-s32c1i.sh "$od" "$elf"
+                    case " $chips " in *" $chip "*) ;; *) chips="$chips $chip" ;; esac
+                  done <target/hub-elfs.txt
+                  for chip in $chips; do
+                    cargo +esp rustc -q --release -Zbuild-std=core --target "xtensa-$chip-none-elf" --manifest-path tools/s32c1i-control/Cargo.toml --target-dir target/s32c1i-control -- --emit=obj -Zfunction-sections=no
+                    out=$(tools/check-s32c1i.sh "$(find_od "$chip")" target/s32c1i-control/xtensa-"$chip"-none-elf/release/deps/s32c1i_control-*.o) && rc=0 || rc=$?
+                    echo "$out"
+                    test "$rc" -eq 1
+                    test "$(grep -c '^S32C1I compare-and-set in Rust' <<<"$out")" -eq 6
+                  done
             - name: Release images
               run: |
                   set -euo pipefail
                   pip install --quiet "esptool==${ESPTOOL_VERSION}"
                   toolchain=$(jq -cn --arg rust "esp $XTENSA_RUST" --arg esptool "$ESPTOOL_VERSION" '{"xtensa-rust": $rust, esptool: $esptool, "esp-idf": "v5.5.1"}')
-                  python3 tools/release-images.py --version "${{ steps.meta.outputs.version }}" --tag "$GITHUB_REF_NAME" \
-                    --commit "$GITHUB_SHA" --date "${{ steps.meta.outputs.date }}" --toolchain "$toolchain" --out dist
+                  python3 tools/release-images.py --version "${{ steps.meta.outputs.version }}" --tag "${{ steps.meta.outputs.tag }}" \
+                    --commit "$GITHUB_SHA" --date "${{ steps.meta.outputs.date }}" --toolchain "$toolchain" \
+                    --boards "${{ steps.meta.outputs.boards }}" --out dist
                   ls -l dist
             - name: Release notes
+              id: notes
+              env:
+                  DRY_RUN: ${{ steps.meta.outputs.dry_run }}
+                  TAG: ${{ steps.meta.outputs.tag }}
               run: |
                   set -euo pipefail
-                  python3 - <<'EOF' >notes.md
-                  import json
-                  m = json.load(open("dist/release-manifest.json"))
-                  zrhp = f", ZRHP {m['zrhp']['protocol']}" if m.get("zrhp") else ""
-                  print(f"zigbee-rs hub {m['version']}{zrhp}, commit `{m['commit'][:12]}`; "
-                        + ", ".join(f"{k} {v}" for k, v in m["components"].items()) + ".\n")
-                  print("**Web flasher:** https://faronov.github.io/zigbee-rs/flasher/ (Chrome or Edge; updates keep Wi-Fi settings and `hubdata` unless you choose to erase).\n")
-                  print("| Board | Layout | Full flash image (offset 0x0, erases everything) | App |")
-                  print("|---|---|---|---|")
-                  for b in m["boards"]:
-                      app = b["files"]["app"]
-                      print(f"| {b['title']} | `{b['layout']}` | `{b['files']['merged']['name']}` | `{app['name']}` at 0x{app['offset']:X} |")
-                  print("\nBoth flash sizes include the Zigbee2MQTT-compatible MQTT bridge. The 8 MB images also include the advanced ZCL/Tuya console.")
-                  print("\nWith esptool, a first install (erases the S3):")
-                  print("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 tbr-hub-<v>-<8mb|4mb-dev>[-opi]-merged.bin\n```")
-                  print("`-opi` images: modules with octal PSRAM (`esptool chip-id` shows \"Embedded PSRAM 8MB\" or 16MB: WROOM-1 N4R8/N8R8/N16R8); "
-                        "the others: quad PSRAM (\"Embedded PSRAM 2MB\"/4MB: N4R2/N8R2, S3FH4R2) or none. A wrong choice boots without PSRAM.")
-                  print("Update keeping `nvs` and `hubdata` (8 MB layout; the 4 MB dev layout has no otadata and its app is at 0x10000):")
-                  print("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 <...-bootloader.bin> 0x8000 <...-partition-table.bin> 0xF000 <...-otadata-blank.bin> 0x20000 <...-app.bin>\n```")
-                  for f in m.get("extra_files", []):
-                      print(f"\n`{f['name']}`: {f['role']}.")
-                  print("\nVerify downloads with `SHA256SUMS`; `release-manifest.json` describes every image.")
-                  EOF
+                  args=(--manifest dist/release-manifest.json)
+                  [ "$DRY_RUN" = true ] || args+=(--require-changelog)
+                  python3 tools/release-notes.py "${args[@]}" >notes.md
                   cat notes.md
-                  prev=$(git tag --list 'hub-v*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -1 || true)
-                  echo "prev=$prev" >>"$GITHUB_ENV"
+                  prev=$(git tag --list 'hub-v*' --sort=-v:refname | grep -vx "$TAG" | head -1 || true)
+                  echo "prev=$prev" >>"$GITHUB_OUTPUT"
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: hub-release
+                  path: |
+                      dist/
+                      notes.md
+                  if-no-files-found: error
+
+    publish:
+        name: Publish
+        needs: build
+        if: github.event_name == 'push' && needs.build.outputs.dry_run == 'false'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: hub-release
             - name: Publish
               env:
                   GH_TOKEN: ${{ github.token }}
-                  PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+                  PRERELEASE: ${{ needs.build.outputs.prerelease }}
+                  PREV: ${{ needs.build.outputs.prev }}
               run: |
                   set -euo pipefail
-                  args=(--verify-tag --title "zigbee-rs hub ${{ steps.meta.outputs.version }}" --notes-file notes.md --generate-notes)
-                  [ -n "$prev" ] && args+=(--notes-start-tag "$prev")
+                  args=(-R "$GITHUB_REPOSITORY" --verify-tag --title "zigbee-rs hub ${{ needs.build.outputs.version }}" --notes-file notes.md --generate-notes)
+                  [ -n "$PREV" ] && args+=(--notes-start-tag "$PREV")
                   [ "$PRERELEASE" = true ] && args+=(--prerelease)
                   gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*
             - name: Ask the web flasher to rebuild

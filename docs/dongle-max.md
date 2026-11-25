@@ -1,7 +1,8 @@
 # SONOFF Dongle Max (Dongle-M)
 
-**Status: the hub image (`zrh-donglem` 0.2.0) runs on one lab unit**
-(results below; the rest of the HIL checklist at the end). It runs the hub
+**Status: the hub image (`zrh-donglem` 0.2.0; 0.3.0 is the first one
+published, as an experimental asset of hub release 0.3.0) runs on one lab
+unit** (results below; the rest of the HIL checklist at the end). It runs the hub
 application on SONOFF's stock EmberZNet NCP through
 the EZSP backend (`docs/ezsp-backend.md`), with its data on SONOFF's
 `files` partition once claimed, on SONOFF's unchanged partition table.
@@ -56,7 +57,7 @@ flashed over USB with hwlab esprom, SONOFF's bootloader and `ota_0` kept):
 
 ## Features
 
-Decided 2026-11-24; `zrh-donglem` 0.2.0:
+Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 
 | Feature | In the image |
 |---|---|
@@ -66,7 +67,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0:
 | Zigbee device OTA | yes: the 1 MiB image store in the claimed `files` region (`ota_store`), larger images streamed from a client; streamed only until the claim |
 | ESP32 self-update | yes: `firmware/*` requests, Settings › Hub firmware; into the other app slot (the first one replaces SONOFF's application, after a confirmation) |
 | Ethernet (also PoE-powered) and Wi-Fi | yes: Ethernet first, the Wi-Fi station after 10 s without an Ethernet address |
-| Network backup/restore (Open Coordinator Backup) | the requests exist; the EZSP backend answers `unsupported` until key export lands (`docs/ezsp-backend.md`, follow-ups) |
+| Network backup/restore (Open Coordinator Backup) | yes: `network/backup` and `network/restore` on the EZSP backend, in the format zigpy/ZHA and Zigbee2MQTT use (`docs/ezsp-backend.md`, "Backup and restore"); host-tested against the simulated NCP (EZSP 13–18), not yet run on a Dongle Max |
 | Green Power through EZSP | later |
 | MG24 firmware update through the Gecko bootloader | later; the `radio` area is reserved, no code |
 | Installation through SONOFF's web console | yes: **SONOFF's partition table and bootloader never change** |
@@ -132,7 +133,9 @@ its SHA-256):
 ### Installation
 
 **Product: SONOFF's web console**, Firmware → ESP32-D0WDR2-V3 → Upload &
-Flash Firmware, with `zrh-donglem-app.bin` (CI artifact `donglem-firmware`).
+Flash Firmware, with `zrh-donglem-<version>-app.bin` of a hub release
+(`hub-v*`, since 0.3.0; or `zrh-donglem-app.bin` of the CI artifact
+`donglem-firmware`).
 SONOFF's application writes it into `ota_1` with ESP-IDF's OTA functions
 and selects it. What the stock handler checks, from its strings: the
 image magic, the image length against the partition, the chip revision
@@ -144,7 +147,33 @@ about 2.96 MB of the 6 MiB slot. Its project name is `libespidf`
 on hardware.**
 
 **Lab: over USB with hwlab esprom** (below), `ota_1` and one `otadata`
-sector.
+sector. A release carries the same two parts for esptool:
+`zrh-donglem-<version>-app.bin` at 0x660000 and
+`zrh-donglem-<version>-otadata-ota1.bin` at 0x5D000 (written in that order,
+two `write-flash` commands, never an erase; the release notes list them).
+The web flasher lists the release's Dongle Max entry (`sonoff-dongle-max`,
+`"web_install": false` in `release-manifest.json`) without an install
+button: ESP Web Tools always offers to erase the chip, which would remove
+SONOFF's bootloader, table, `nvs` and factory data.
+
+**Both routes assume the stock `otadata`**: sector 0 holds SONOFF's seq 1
+(its application in `ota_0`) and sector 1 is blank, or holds the release's
+`otadata-ota1` sector with a `zrh-donglem` image in `ota_1` after a USB
+install of the hub. The release notes (and the manifest's `precheck`) read
+`otadata` and the start of `ota_1` over USB first
+(`esptool --chip esp32 read-flash 0x5C000 0x2000 otadata.bin`,
+`read-flash 0x660000 0x100 ota1.bin`) and go on only if a one-line check
+prints `OK` (the lab unit's backup does). The app version in `ota_1`
+(`esp_app_desc_t.version` at offset 0x30) matters because SONOFF's own
+updater also writes seq 2 into sector 1: once its new application has
+confirmed itself the entry is byte-identical to the release's. In any
+other state the parts do the wrong thing: after SONOFF's own updater put
+its application into `ota_1`, a USB write at 0x660000 overwrites the
+running application and the web console writes `ota_0`; after `stock
+confirm` or a hub self-update (seq 3 and up) the seq 2 sector is never
+booted. Then flash nothing: the way forward is the hub's own update
+(Settings › Hub firmware) or, from SONOFF's firmware, a return to the
+stock slots first (SONOFF Dongle Flasher, or the backup's `otadata`).
 
 The first boot claims SONOFF's `files` partition for the hub's data
 (SONOFF's files are copied into it first; next section) and generates the
@@ -549,8 +578,10 @@ stored network (the hub's backend calls it at every session start).
 
 ## Not in this image, limits
 
-- **Network backup/restore through EZSP** (key export): `network/backup`
-  answers `unsupported` for now.
+- **Network backup/restore through EZSP**: host-tested only (the
+  simulated NCP); not yet run on a Dongle Max, so whether SONOFF's stock
+  NCP image answers every frame it uses (the token interface, the APS frame
+  counter) is open (`docs/ezsp-backend.md`).
 - **Green Power through EZSP**: GP frames are ignored.
 - **MG24 firmware updates** through the Gecko bootloader: the `donglem`
   branch's updater (radio banks in its own `hubdata`, ZRHP-based

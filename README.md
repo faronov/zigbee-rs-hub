@@ -68,21 +68,42 @@ details in the zigbee-rs book, "Web Flasher").
   so far).
 
 **Making a release:** set the version in `firmware/hub/Cargo.toml` and
-`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`), update
-`Cargo.lock` (`cargo update -p tbr-hub`), commit, then
-`git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`. `hub-release.yml`
-checks the versions (also the one in the built app), builds with pinned
-tools and attaches per layout the full flash image (`…-merged.bin`, offset
-0, padded to the flash size), bootloader, partition table, blank `otadata`
-(8 MB), app, plus the `tbr-bridge` app, `release-manifest.json` and
-`SHA256SUMS`; the release notes list the esptool commands. Both flash sizes
-carry the MQTT bridge; the 8 MB images also enable the advanced console and
-the Zigbee OTA image store (`features` per board in the manifest;
-`tools/build-hub-firmware.sh`). A suffix
-(`hub-v0.2.0-rc.1`) makes a pre-release. The flasher picks the release up
-within six hours, or at once when this repository has the secret
-`FLASHER_DISPATCH_TOKEN` (fine-grained token, *Contents: read and write* on
-faronov/zigbee-rs).
+`CONFIG_APP_PROJECT_VER` (`firmware/hub/sdkconfig.defaults`), and the same
+version in `firmware/donglem` (`zrh-donglem`: the hub images of one release
+share its version), update `Cargo.lock` (`cargo update -p tbr-hub -p
+zrh-donglem`), add the release's section to [CHANGELOG.md](CHANGELOG.md),
+commit, then `git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`.
+`hub-release.yml` checks the versions (also the ones in the built apps) and
+the changelog section, builds with pinned tools and attaches per layout the
+full flash image (`…-merged.bin`, offset 0, padded to the flash size),
+bootloader, partition table, blank `otadata` (8 MB), app, the same set
+for the 8 MB **Developer edition** (`…-8mb-devtools[-opi]-…`, tbr-hub
+feature `dev`: the web UI's developer tools always on; built once
+`firmware/hub` has the feature, its own entry in the web flasher), plus the
+`tbr-bridge` app; for the SONOFF Dongle Max (experimental) the app for
+`ota_1` (`zrh-donglem-X.Y.Z-app.bin`, also the file for SONOFF's web
+console; `zrh-donglem-X.Y.Z-devtools-app.bin` for its developer
+edition) and the `otadata` sector that selects it
+(`zrh-donglem-X.Y.Z-otadata-ota1.bin`, at 0x5D000); `release-manifest.json`
+and `SHA256SUMS`. The release notes are the changelog section, then the
+esptool commands. Both flash sizes carry the MQTT bridge; the 8 MB images
+also enable the advanced console and the Zigbee OTA image store
+(`features` per board in the manifest; `tools/build-hub-firmware.sh`). A
+suffix (`hub-v0.2.0-rc.1`) makes a pre-release. The repository variable
+`HUB_RELEASE_DONGLEM=false` leaves the Dongle Max assets out. A pull
+request that touches the release files, or `gh workflow run
+hub-release.yml --ref <branch>`, runs the same workflow as a dry run
+(nothing published; `dist/` and the notes are the run's `hub-release`
+artifact). The flasher picks the release up within six hours, or at once
+when this repository has the secret `FLASHER_DISPATCH_TOKEN` (fine-grained
+token, *Contents: read and write* on faronov/zigbee-rs). It lists the
+Dongle Max without an install button (`"web_install": false`: ESP Web
+Tools' erase would wipe SONOFF's firmware). **Tag only once the live
+flasher knows it**: the `revision` in
+<https://faronov.github.io/zigbee-rs/flasher/sensor/status.json> must
+include faronov/zigbee-rs#15 (a master CI deploy, 10–20 min after the
+merge); a tagged run with the Dongle Max checks that revision's
+`flasher_site.py` and the live page and fails otherwise.
 
 ### Image variants and memory (after release 0.2.0)
 
@@ -614,6 +635,10 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   waits at most 200 ms without progress, then flushes the TX FIFO, counts
   a stall and goes on; a DTR edge (port opened or closed) flushes the FIFO
   too. `info` shows both counters (`stalls`, `DTR flushes`).
+- **0.2.5** (hub release 0.3.0): no change in the bridge's code or in the
+  `hub-core` parts it uses. Rebuilt with the release, its bytes differ
+  from the 0.2.4 asset of hub release 0.2.0 (build metadata, dependency
+  versions), so it gets its own version: one name, one image.
 
 ## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
 
@@ -647,7 +672,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` 0.2.4 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.5) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
 | **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
@@ -1076,6 +1101,13 @@ unlocks, cache and MMU faults). The hub is now built with `-C target-feature=-s3
 (`firmware/hub/.cargo/config.toml`): Rust atomics call ESP-IDF's `__atomic_*`
 functions, which lock for PSRAM addresses (+2.6 KB image, +1 KB IRAM).
 `hub atomics` on the console counts lost updates of adds from both cores.
+Hardware (2026-11-24, lab Thread BR board, ESP32-S3 N4R8 with 8 MB octal
+PSRAM, 4 MB dev layout, image af13d65 with the fix): 1,000 consecutive
+`network/diagnostics` calls over the WebSocket and USB without a crash,
+where the 0.2.0 image crashed after 40–80; `hub atomics` on the same board:
+Rust `AtomicU32` on PSRAM 200,000 of 200,000 increments, a bare S32C1I
+loop on PSRAM lost 15,562 of 200,000 (another run 3,268), on internal RAM
+none.
 Measured on an ESP32-S3 SuperMini (S3FH4R2, 2 MB quad) in hub mode without an
 NCP, Wi-Fi up: 0.1.3 8.4 KB internal free; 0.1.4 120 KB internal free
 (minimum 119 KB while installing the whole catalog), PSRAM 160 KB used. For the next
