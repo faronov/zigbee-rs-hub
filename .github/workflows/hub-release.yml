@@ -172,6 +172,12 @@ jobs:
                   # developer edition (devtools) once tbr-hub has the feature dev. Quad and octal PSRAM
                   # (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
                   tools/build-hub-firmware.sh --locked
+                  # Rust atomics must not use S32C1I (not atomic between the cores on PSRAM: the 0.2.0 crashes).
+                  od="$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)"
+                  for t in target target-opi target-8mb target-8mb-opi target-8mb-devtools target-8mb-devtools-opi; do
+                    elf="$t/xtensa-esp32s3-espidf/release/tbr-hub"
+                    if [ -f "$elf" ]; then tools/check-s32c1i.sh "$od" "$elf"; fi
+                  done
             - name: Build zrh-donglem (SONOFF Dongle Max, classic ESP32)
               if: steps.meta.outputs.donglem == 'true'
               env:
