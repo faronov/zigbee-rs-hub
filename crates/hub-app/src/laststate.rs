@@ -100,9 +100,15 @@ impl LastValues {
         }
     }
 
-    /// Writes the changed devices every [`SAVE_MS`] (`force`: now).
+    /// Writes the changed devices every [`SAVE_MS`] (`force`: now). They
+    /// are network records: nothing is written before the kept values were
+    /// loaded, nor while the gate is not open; what changed stays noted
+    /// until then (no write is attempted, none counts as failed).
     #[inline(never)]
     pub fn flush<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis, force: bool) {
+        if !self.loaded {
+            return;
+        }
         let slow = force || now.saturating_sub(self.last_slow) >= SLOW_MS;
         if !slow && now.saturating_sub(self.last_save) < SAVE_MS {
             return;
@@ -120,13 +126,14 @@ impl LastValues {
         if ids.is_empty() && self.removed.is_empty() {
             return;
         }
-        let puts: Vec<(String, String)> = ids
-            .into_iter()
-            .filter_map(|id| engine.last_values(&id).map(|t| (format!("{KEY}{id}"), t)))
-            .collect();
-        let dels: Vec<String> = std::mem::take(&mut self.removed).into_iter().map(|id| format!("{KEY}{id}")).collect();
+        let puts: Vec<(String, String)> =
+            ids.iter().filter_map(|id| engine.last_values(id).map(|t| (format!("{KEY}{id}"), t))).collect();
+        let dels: Vec<String> = self.removed.iter().map(|id| format!("{KEY}{id}")).collect();
         let (mut w, mut b, mut e) = (0, 0, 0);
-        kv::with(kv, |s| {
+        let open = kv::with(kv, |s| {
+            if s.gate() != Gate::Open {
+                return false;
+            }
             for (k, t) in &puts {
                 if s.get(k) == Some(t.as_bytes()) {
                     continue;
@@ -144,7 +151,14 @@ impl LastValues {
                     e += 1;
                 }
             }
+            true
         });
+        if !open {
+            // Kept for the first flush with the gate open.
+            self.dirty = ids;
+            return;
+        }
+        self.removed.clear();
         self.writes += w;
         self.bytes += b;
         if e > 0 {
@@ -169,9 +183,10 @@ mod tests {
     fn a_device_removed_and_added_again_keeps_its_values() {
         let kv = Mutex::new(Store::volatile());
         kv::with(&kv, |s| s.put("st/zb:1", b"{}")).unwrap();
-        let e = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
+        let mut e = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
         let (removed, added) = (HubEvent::DeviceRemoved("zb:1".into()), HubEvent::DeviceAdded("zb:1".into()));
         let mut lv = LastValues::default();
+        lv.load(&kv, &mut e, 0);
         lv.note(&[removed.clone(), added], &e);
         lv.flush(&kv, &e, 1, true);
         assert!(kv::with(&kv, |s| s.get("st/zb:1").is_some()));

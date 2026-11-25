@@ -654,3 +654,46 @@ fn records_readable_after_the_devices_wait_for_them() {
     r.ncp.shutdown();
     r.sim.stop();
 }
+
+/// Last values are network records too: while the kept ones are not
+/// loaded (hidden right after the devices loaded) none is written and no
+/// write counts as failed; what changed meanwhile stays noted and is
+/// written once they are loaded with the gate open.
+#[test]
+fn last_values_changed_before_they_load_wait_for_them() {
+    use hub_ncp::sim::indication;
+    use zigbee_zrhp::msg::ids;
+
+    let (mem, r, racy, app) = racy_start("dev/", 1, false);
+    let (sid, rx) = session(&app);
+    assert!(racy.foreign());
+    let key = format!("st/{RACE_PLUG}");
+    let stored = kv(&mem)[&key].clone();
+    let switch = |b: &[u8]| serde_json::from_slice::<J>(b).unwrap()["e"]["1:switch"]["v"].clone();
+    assert_eq!(switch(&stored), J::Bool(false), "{}", String::from_utf8_lossy(&stored));
+    let uid = format!("{RACE_PLUG}:1:switch");
+    let state = |id| ok(&call(&app, sid, &rx, id, json!({"type": "entities/states", "uids": [uid]})))[0]["state"].clone();
+
+    // The plug reports On/Off: on.
+    let on = [0x18, 0x01, 0x0A, 0x00, 0x00, 0x10, 0x01];
+    r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(0x5A01, 0x5a52_5300_0000_0001, 1, 1, 0x0104, 0x0006, &on));
+    let t = std::time::Instant::now();
+    while state(1) != J::Bool(true) {
+        assert!(t.elapsed() < T, "{}", state(1));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Written as before a reboot: nothing yet.
+    call(&app, sid, &rx, 2, json!({"type": "hub/reboot"}));
+    assert_eq!(kv(&mem)[&key], stored);
+
+    // Adopted: loaded (the live value stays), written with the next flush.
+    ok(&call(&app, sid, &rx, 3, json!({"type": "network/registry/adopt", "confirm": true})));
+    assert!(app.wait(T, |s| s.last_values.0 > 0), "{:?}", app.status().last_values);
+    call(&app, sid, &rx, 4, json!({"type": "hub/reboot"}));
+    assert_eq!(switch(&kv(&mem)[&key]), J::Bool(true));
+    assert!(app.wait(T, |s| s.last_values.1 > 0), "{:?}", app.status().last_values);
+    assert_eq!(app.status().last_values.3, 0, "no write failed: none was attempted while foreign");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}

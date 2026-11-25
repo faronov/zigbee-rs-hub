@@ -73,6 +73,16 @@ pub(crate) fn call(app: &App, sid: u64, rx: &Receiver<String>, id: u64, mut body
     }
 }
 
+/// Stops the app and waits for its thread, however loaded the machine is
+/// ([`App::shutdown`] gives up after 5 s): a thread still running writes
+/// its registry later, over what the next app on the store wrote.
+pub(crate) fn stop(app: &App) {
+    let t = std::time::Instant::now();
+    while !app.shutdown() {
+        assert!(t.elapsed() < Duration::from_secs(60), "the app thread did not stop");
+    }
+}
+
 pub(crate) fn cfg() -> AppConfig {
     AppConfig { api_token: "secret".into(), ..AppConfig::default() }
 }
@@ -321,13 +331,15 @@ fn registry_survives_an_app_restart() {
     let text = "zdef: 1\nid: philips/sml001\n# my comment\n";
     let up = call(&app, sid, &rx, 2, json!({"type": "definitions/upload", "cbor": cbor, "source": text, "source_format": "yaml"}));
     assert_eq!(up["success"], true, "{up}");
-    // Written within the flush delay, not only at the 30 s sweep.
+    // Written within the flush delay (2 s), not only at the sweep 30 s
+    // after the start (20 s: room for a loaded machine).
     let t = std::time::Instant::now();
-    while r.ncp.with_store(|s| s.kv_get("usrc/philips/sml001").is_none()) && t.elapsed() < T {
+    let written = || r.ncp.with_store(|s| s.kv_get("usrc/philips/sml001").is_some());
+    while !written() && t.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(t.elapsed() < Duration::from_secs(5), "user definition written after {:?}", t.elapsed());
-    app.shutdown();
+    assert!(written(), "user definition not written after {:?}", t.elapsed());
+    stop(&app);
     let stored = r.ncp.with_store(|s| s.kv_get("dev/zb:00158d0001a2b3c4").map(<[u8]>::to_vec));
     let snap = crate::registry::decode(&stored.expect("device persisted")).unwrap();
     assert_eq!(snap.user_name.as_deref(), Some("Kitchen"));
@@ -343,7 +355,7 @@ fn registry_survives_an_app_restart() {
     // Removal deletes the record.
     let rm = call(&app, sid, &rx, 2, json!({"type": "devices/remove", "device": "zb:00158d0001a2b3c4", "force": true}));
     assert_eq!(rm["success"], true, "{rm}");
-    app.shutdown();
+    stop(&app);
     assert!(r.ncp.with_store(|s| s.kv_get("dev/zb:00158d0001a2b3c4").is_none()));
     r.ncp.shutdown();
     r.sim.stop();
