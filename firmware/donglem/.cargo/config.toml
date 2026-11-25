@@ -4,7 +4,7 @@ target = "xtensa-esp32-espidf"
 [target.xtensa-esp32-espidf]
 linker = "ldproxy"
 # `-s32c1i`: as in firmware/hub. The Rust heap is in PSRAM (the shared
-# firmware/hub/src/alloc.rs), and on the classic ESP32 too the S32C1I
+# firmware/espapp/src/alloc.rs), and on the classic ESP32 too the S32C1I
 # compare-and-set is not atomic between the two cores on PSRAM. Without the
 # feature, Rust atomics (std included, built here) call ESP-IDF's
 # `__atomic_*` functions, which take a lock for PSRAM addresses

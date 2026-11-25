@@ -162,7 +162,8 @@ impl HubdataMap {
 /// claim (docs/dongle-max.md): the claim keeps a copy of SONOFF's LittleFS
 /// blocks in [`STOCK_COPY`] for the way back to the stock firmware and
 /// replaces the LittleFS superblock pair (blocks 0 and 1) with
-/// [`CLAIM`]. Until then the region is only read ([`classify`]).
+/// [`CLAIM`]. Until then the region is only read ([`classify`]). The claim
+/// and the way back are `hub_store::files`.
 pub mod dongle_files {
     use super::Area;
 

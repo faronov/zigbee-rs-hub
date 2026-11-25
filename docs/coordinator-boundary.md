@@ -1,8 +1,8 @@
 # Coordinator backend boundary (plan phase 4)
 
-**Status:** PRs A–G, I and H1 (backend selection, §6 "As implemented")
-are implemented; H2 (the Dongle-M firmware on the EZSP backend) and J are
-open. Implements step 2 of `docs/coordinator-profiles.md` §5 against
+**Status:** PRs A–G, I, H1 (backend selection, §6 "As implemented") and
+H2 (the Dongle-M firmware on the EZSP backend, `docs/dongle-max.md`) are
+implemented; J is open. Implements step 2 of `docs/coordinator-profiles.md` §5 against
 §3–§4. The design text is the plan made on `main` 1feaac8 (open PRs #54,
 #55, #56 considered); the "As implemented" notes record what the code
 does where it differs.
@@ -654,7 +654,11 @@ zrhp = ["dep:hub-ncp"]
   is all this firmware has). build.rs does not mark it, so the images'
   feature markers and the release manifest stay as they were. The app
   starts with `App::start_backend(Backend::zrhp(hub))`; coexistence goes
-  through `App::radio()`. The Dongle-M firmware stays on its probe (H2).
+  through `App::radio()`. The Dongle-M firmware (`zrh-donglem`, H2) has
+  no backend feature of its own: it is built with hub-app `ezsp` only
+  (no ZRHP code) and starts `App::start_backend(Backend::ezsp(…))` on the
+  NCP UART, the records in its own store (`files` region once claimed,
+  RAM before).
 - **`NcpNv` in hub-app** (§2.5, §2.7). `NcpNvRecords` keeps the records in
   the hub's own store and decides from the backend's `Ownership` reports:
 
@@ -769,7 +773,7 @@ Merge order: **#54 → #56 → #55**, then this plan.
 | **D** KvStore | registry, laststate, automations, catalog config, admin clock/backup-last, #55 `ota.rs` | golden journal identical; recorded KV call sequence identical |
 | **E** `ZrhpAdmin` | admin, topology and ocb use `NetworkAdmin`; record codec moved | OCB and restore bytes identical; diagnostics/topology JSON identical; `Status`→API table test |
 | **G** ZRHP Coordinator | pump, `CoordTransport`, `RadioControl`, endpoint config | wire golden identical; **sim `stall` of GP_SINK_CONFIG: the app still answers API requests** (today it blocks for 10 s); counter-table test |
-| **H** Features | hub-app `zrhp`, `start_backend`; hub-core gate; hub-ota → hub-store; OTA `max_asdu` from caps; firmware, hubctl, hub-mqtt wiring | `--no-default-features` builds; cargo-tree check; 4 MB size gate (H1 done, §6; H2: the Dongle-M firmware on EZSP) |
+| **H** Features | hub-app `zrhp`, `start_backend`; hub-core gate; hub-ota → hub-store; OTA `max_asdu` from caps; firmware, hubctl, hub-mqtt wiring | `--no-default-features` builds; cargo-tree check; 4 MB size gate (H1 done, §6; H2 done: the Dongle-M firmware on EZSP) |
 | **I** Tagging | `hub/owner`, migration, KV guard, adopt/clear | untagged golden journal → only `hub/owner` added; foreign start + shutdown leaves KV bytes identical; identity matrix (PAN change, key rotation, key unknown) |
 | **J** Surfacing | caps in `hub/info` and `network/info.capabilities` (additive); additive delivery outcome in command results; testkit conformance (Mock + ZRHP sim); docs | goldens updated only additively |
 

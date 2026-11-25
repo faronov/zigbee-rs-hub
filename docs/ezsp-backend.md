@@ -7,9 +7,10 @@ backend for Silicon Labs EmberZNet NCPs: `hub-coord`'s `Coordinator` and
 
 **Status: host-tested only**, against the simulated NCP of `hub_ezsp::sim`.
 The hub app runs on it (hub-app feature `ezsp`, `Backend::ezsp`, PR H1;
-"In the hub app" below), on the desktop with `hubctl --backend ezsp --sim`.
-Not in a firmware yet (the Dongle-M: PR H2), and not run against hardware
-yet (HIL on the SONOFF Dongle Max is a follow-up).
+"In the hub app" below), on the desktop with `hubctl --backend ezsp --sim`,
+and in the SONOFF Dongle Max image `zrh-donglem` (PR H2,
+`docs/dongle-max.md`), not run against hardware yet (HIL on the Dongle Max
+is a follow-up).
 
 ## Target
 
@@ -345,10 +346,11 @@ devices left, route records, GP frames ignored).
 4. Force removal: `removeDevice(parent short address, parent EUI64, target
    EUI64)` (APS Remove Device to the parent) for unreachable or sleepy
    children, as an explicit fallback behind the engine's Mgmt_Leave_req.
-5. PR H2: the Dongle-M firmware on this backend (the UART transport on the
-   ESP32, the hub app, the `files`-partition `hubdata`). Done in H1: the
-   hub-app `ezsp` feature, the `NcpNv` ownership decision, the TX power
-   kept across restarts.
+5. Done in H2: the Dongle-M firmware on this backend (`firmware/gateway`:
+   the UART transport on the ESP32, the hub app, its records in the
+   claimed `files` region; `docs/dongle-max.md`). Done in H1: the hub-app
+   `ezsp` feature, the `NcpNv` ownership decision, the TX power kept
+   across restarts.
 6. HIL on the Dongle Max: session start on the stock "1.0.0" image, XON/XOFF
    on the 115 200 Bd line, key export, permit join with real devices,
    channel change, callback bursts and the capacities the NCP accepts.
