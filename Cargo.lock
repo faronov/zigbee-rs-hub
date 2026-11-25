@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "tbr-hub"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embedded-svc",
  "embuild",
@@ -3254,7 +3254,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zrh-donglem"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embuild",
  "esp-idf-svc",

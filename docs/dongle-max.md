@@ -1,7 +1,8 @@
 # SONOFF Dongle Max (Dongle-M)
 
-**Status: the hub image (`zrh-donglem` 0.2.0) runs on one lab unit**
-(results below; the rest of the HIL checklist at the end). It runs the hub
+**Status: the hub image (`zrh-donglem` 0.2.0; 0.3.0 is the first one
+published, as an experimental asset of hub release 0.3.0) runs on one lab
+unit** (results below; the rest of the HIL checklist at the end). It runs the hub
 application on SONOFF's stock EmberZNet NCP through
 the EZSP backend (`docs/ezsp-backend.md`), with its data on SONOFF's
 `files` partition once claimed, on SONOFF's unchanged partition table.
@@ -56,7 +57,7 @@ flashed over USB with hwlab esprom, SONOFF's bootloader and `ota_0` kept):
 
 ## Features
 
-Decided 2026-11-24; `zrh-donglem` 0.2.0:
+Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 
 | Feature | In the image |
 |---|---|
@@ -132,7 +133,9 @@ its SHA-256):
 ### Installation
 
 **Product: SONOFF's web console**, Firmware → ESP32-D0WDR2-V3 → Upload &
-Flash Firmware, with `zrh-donglem-app.bin` (CI artifact `donglem-firmware`).
+Flash Firmware, with `zrh-donglem-<version>-app.bin` of a hub release
+(`hub-v*`, since 0.3.0; or `zrh-donglem-app.bin` of the CI artifact
+`donglem-firmware`).
 SONOFF's application writes it into `ota_1` with ESP-IDF's OTA functions
 and selects it. What the stock handler checks, from its strings: the
 image magic, the image length against the partition, the chip revision
@@ -144,7 +147,14 @@ about 2.96 MB of the 6 MiB slot. Its project name is `libespidf`
 on hardware.**
 
 **Lab: over USB with hwlab esprom** (below), `ota_1` and one `otadata`
-sector.
+sector. A release carries the same two parts for esptool:
+`zrh-donglem-<version>-app.bin` at 0x660000 and
+`zrh-donglem-<version>-otadata-ota1.bin` at 0x5D000 (written in that order,
+two `write-flash` commands, never an erase; the release notes list them).
+The web flasher lists the release's Dongle Max entry (`sonoff-dongle-max`,
+`"web_install": false` in `release-manifest.json`) without an install
+button: ESP Web Tools always offers to erase the chip, which would remove
+SONOFF's bootloader, table, `nvs` and factory data.
 
 The first boot claims SONOFF's `files` partition for the hub's data
 (SONOFF's files are copied into it first; next section) and generates the
