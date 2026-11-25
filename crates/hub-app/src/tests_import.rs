@@ -371,6 +371,7 @@ fn imports_are_staged_in_batches_and_refused_clearly() {
     );
     assert_eq!(p["network"]["devices"], 1);
     assert_eq!(p["devices"][1]["reason"], "duplicate");
+    assert_eq!(p["devices"][0]["definition"], J::Null, "SIM-PLUG: generic");
     // The staging ended with that request.
     let r = call(
         &rig.app,
@@ -434,6 +435,40 @@ fn imports_are_staged_in_batches_and_refused_clearly() {
         info(&rig.app, sid, &rx)["ext_pan_id"],
         "a1a1a1a1a1a1a1a1",
         "nothing changed"
+    );
+    rig.finish();
+}
+
+/// The preview resolves the definition an interview would have found
+/// (the built-in examples: Philips SML001) from the imported fingerprint.
+#[test]
+fn the_preview_resolves_catalog_definitions() {
+    let rig = Rig::new(Kind::Zrhp, true);
+    let (sid, rx) = session(&rig.app);
+    let mut doc = document(sim_ieee(Kind::Zrhp));
+    doc["devices"] = json!([{"ieee": "0017880103334444", "nwk": 0x6003, "type": "end_device", "power_source": "Battery",
+        "manufacturer": "Signify Netherlands B.V.", "model": "SML001", "manufacturer_code": 0x100B,
+        "endpoints": [{"id": 1, "profile": 0xC05E, "device_id": 0x0850, "in": [0], "out": [6]},
+                      {"id": 2, "profile": 260, "device_id": 0x0107, "in": [0, 1, 0x0406, 0x0400, 0x0402], "out": [25]}]}]);
+    let p = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        1,
+        json!({"type": "network/import/preview", "document": doc}),
+    ))
+    .clone();
+    let row = &p["devices"][0];
+    assert_eq!(
+        row["definition"],
+        json!({"source": "catalog", "id": "philips/sml001"}),
+        "{p}"
+    );
+    assert!(row["entities"].as_u64().unwrap() >= 3, "{row}");
+    assert_eq!(
+        (row["model"].as_str(), row["interview"].as_str()),
+        (Some("9290012607"), Some("imported")),
+        "the definition's model"
     );
     rig.finish();
 }
