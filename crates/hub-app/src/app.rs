@@ -465,13 +465,15 @@ impl App {
         false
     }
 
-    /// Persist and stop.
-    pub fn shutdown(&self) {
+    /// Persist and stop; whether the app thread stopped within 5 s (it
+    /// writes nothing more then).
+    pub fn shutdown(&self) -> bool {
         let _ = self.tx.send(Input::Shutdown);
         let until = Instant::now() + Duration::from_secs(5);
         while !self.stopped.load(Ordering::SeqCst) && Instant::now() < until {
             thread::sleep(Duration::from_millis(5));
         }
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
