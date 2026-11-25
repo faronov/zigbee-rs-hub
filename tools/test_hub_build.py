@@ -15,11 +15,11 @@ release_images = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(release_images)
 
 
-def marked_features(selected: str) -> list[str]:
+def marked_features(selected: str, manifest: Path = ROOT / "firmware/hub/Cargo.toml") -> list[str]:
     """The features firmware/hub/build.rs marks in an image built with
     `--features selected`: those and the tbr-hub features they imply,
     without `default` and `app`."""
-    table = tomllib.loads((ROOT / "firmware/hub/Cargo.toml").read_text())["features"]
+    table = tomllib.loads(manifest.read_text())["features"]
     out, todo = set(), selected.split(",")
     while todo:
         f = todo.pop()
@@ -92,16 +92,47 @@ elf.write_text(" ".join(sys.argv[1:]))
 
     def test_release_board_features_are_what_the_build_selects(self):
         # release-images.py checks each image's marker against its board
-        # entry: the entries must name the features this script builds.
+        # entry: the entries must name the features this script builds
+        # (with this tree's tbr-hub features: the developer edition once it
+        # has `dev`).
+        shutil.copyfile(ROOT / "firmware/hub/Cargo.toml", self.root / "firmware/hub/Cargo.toml")
         calls = self.run_build("--psram", "quad")
-        built = {"target-8mb": marked_features(self.features(calls[0])),
-                 "target": marked_features(self.features(calls[1]))}
-        for spec in release_images.BOARDS:
+        stashes = ["target-8mb"] + (["target-8mb-devtools"] if len(calls) == 3 else []) + ["target"]
+        self.assertEqual(len(calls), len(stashes))
+        built = {d: marked_features(self.features(c)) for d, c in zip(stashes, calls)}
+        boards = release_images.s3_boards()
+        self.assertEqual({b["target"].removesuffix("-opi") for b in boards}, set(stashes))
+        for spec in boards:
             with self.subTest(board=spec["id"]):
                 release_images.check_build(spec, built[spec["target"].removesuffix("-opi")], spec["psram"])
         # Zigbee device OTA in the 8 MB images only.
         self.assertEqual(built["target-8mb"], ["advanced", "mqtt", "ota", "ota-store"])
         self.assertEqual(built["target"], ["mqtt"])
+
+    def test_developer_edition_once_tbr_hub_has_dev(self):
+        manifest = self.root / "firmware/hub/Cargo.toml"
+        manifest.write_text('[features]\nadvanced = []\nmqtt = []\nota = []\nota-store = ["ota"]\n'
+                            'dev = ["advanced", "hub-web/dev"]\n')
+        calls = self.run_build("--locked")
+        self.assertEqual([self.features(c) for c in calls], ["mqtt,advanced,ota-store", "mqtt,dev,ota-store", "mqtt"] * 2)
+        for folder in ["target-8mb-devtools", "target-8mb-devtools-opi"]:
+            elf = self.root / folder / "xtensa-esp32s3-espidf/release/tbr-hub"
+            self.assertIn("mqtt,dev,ota-store", elf.read_text())
+        # The 4 MB build stays last: target[-opi] holds the 4 MB ELF.
+        self.assertEqual((self.root / "target/xtensa-esp32s3-espidf/release/tbr-hub").read_text().split()[-2:],
+                         ["mqtt", "--locked"])
+        spec = next(b for b in release_images.BOARDS if b["id"] == "thread-br-s3-hub-8mb-devtools")
+        release_images.check_build(spec, marked_features("mqtt,dev,ota-store", manifest), "quad")
+        self.log.unlink()
+        calls = self.run_build("--layout", "devtools", "--psram", "octal")
+        self.assertEqual([(self.features(c), Path(c["target"]).name) for c in calls], [("mqtt,dev,ota-store", "target-opi")])
+
+    def test_devtools_layout_needs_the_feature(self):
+        result = subprocess.run(["bash", str(self.script), "--layout", "devtools"], env=self.env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no feature dev", result.stderr)
+        self.assertFalse(self.log.exists())
 
     def test_one_psram_mode_and_extra_features_reach_cargo(self):
         calls = self.run_build("--layout", "4mb", "--psram", "octal", "--", "--features", "advanced")

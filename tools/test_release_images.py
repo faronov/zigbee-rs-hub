@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "release_images", Path(__file__).resolve().parent / "release-images.py"
@@ -56,6 +57,29 @@ class BuildCheckTests(unittest.TestCase):
             with self.subTest(board=board_id), self.assertRaises(release_images.ReleaseError):
                 release_images.check_build(spec, ["advanced", "mqtt", "ota"], spec["psram"])
 
+    def test_developer_edition_is_its_own_group_and_marker(self):
+        dev = [b for b in release_images.BOARDS if b.get("edition") == "devtools"]
+        self.assertEqual([b["id"] for b in dev], ["thread-br-s3-hub-8mb-devtools", "thread-br-s3-hub-8mb-devtools-opi"])
+        std = self.board("thread-br-s3-hub-8mb")
+        for spec in dev:
+            # Its own web flasher entry (never offered instead of the standard image), the 8 MB layout.
+            self.assertEqual(spec["size_group"], "thread-br-s3-hub-devtools")
+            self.assertIn("Developer edition", spec["size_group_title"])
+            self.assertEqual((spec["layout"], spec["csv"]), (std["layout"], std["csv"]))
+            with self.subTest(board=spec["id"]), self.assertRaises(release_images.ReleaseError):
+                # A standard 8 MB image left in the devtools target directory.
+                release_images.check_build(spec, list(std["features"]), spec["psram"])
+        with self.assertRaises(release_images.ReleaseError):
+            release_images.check_build(std, list(dev[0]["features"]), std["psram"])
+        self.assertNotIn("size_group", std)
+
+    def test_developer_edition_only_with_the_feature(self):
+        with mock.patch.object(release_images, "has_feature", return_value=False):
+            self.assertFalse(any(b.get("edition") for b in release_images.s3_boards()))
+            self.assertEqual(len(release_images.s3_boards()), 4)
+        with mock.patch.object(release_images, "has_feature", return_value=True):
+            self.assertEqual(len(release_images.s3_boards()), 6)
+
     def test_other_features_and_psram_mode_must_match(self):
         spec = self.board("thread-br-s3-hub-4mb-dev")
         for features, psram in [(["mqtt", "advanced"], "quad"), ([], "quad"), (["mqtt"], "octal")]:
@@ -102,6 +126,11 @@ class DongleImageTests(unittest.TestCase):
         otadata = {"name": "zrh-donglem-0.3.0-otadata-ota1.bin", "size": 0x1000, "sha256": "1" * 64,
                    "offset": parts["otadata"][0] + release_images.OTADATA_SECTOR}
         board = release_images.dongle_entry("0.3.0", parts, app, otadata)
+        dev = release_images.dongle_entry("0.3.0", parts, {**app, "name": "zrh-donglem-0.3.0-devtools-app.bin"}, otadata, True)
+        self.assertEqual((dev["id"], dev["edition"]), ("sonoff-dongle-max-devtools", "devtools"))
+        self.assertIn("dev", dev["features"])
+        self.assertIn("Developer edition", dev["title"])
+        self.assertNotIn("edition", board)
         self.assertIs(board["web_install"], False)
         self.assertTrue(board["experimental"])
         self.assertEqual(board["flash"], ["app", "otadata_ota1"])

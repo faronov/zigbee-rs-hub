@@ -76,7 +76,10 @@ commit, then `git tag hub-vX.Y.Z && git push origin hub-vX.Y.Z`.
 `hub-release.yml` checks the versions (also the ones in the built apps) and
 the changelog section, builds with pinned tools and attaches per layout the
 full flash image (`…-merged.bin`, offset 0, padded to the flash size),
-bootloader, partition table, blank `otadata` (8 MB), app, plus the
+bootloader, partition table, blank `otadata` (8 MB), app, the same set
+for the 8 MB **Developer edition** (`…-8mb-devtools[-opi]-…`, tbr-hub
+feature `dev`: the web UI's developer tools always on; built once
+`firmware/hub` has the feature, its own entry in the web flasher), plus the
 `tbr-bridge` app; for the SONOFF Dongle Max (experimental) the app for
 `ota_1` (`zrh-donglem-X.Y.Z-app.bin`, also the file for SONOFF's web
 console) and the `otadata` sector that selects it

@@ -73,6 +73,17 @@ class NotesTests(unittest.TestCase):
         self.assertNotIn("erase-flash", text)
         self.assertIn("`tbr-bridge-0.2.4-app.bin`: tbr-bridge app.", text)
 
+    def test_developer_edition_rows_and_note(self):
+        dev = {"id": "thread-br-s3-hub-8mb-devtools", "title": "TBR S3 (8 MB), Developer edition (devtools)",
+               "layout": "partitions-8mb", "edition": "devtools",
+               "files": {"merged": entry("tbr-hub-0.3.0-8mb-devtools-merged.bin", 0),
+                         "app": entry("tbr-hub-0.3.0-8mb-devtools-app.bin", 0x20000)}}
+        text = release_notes.notes({**MANIFEST, "boards": MANIFEST["boards"] + [dev]}, CHANGELOG, require=True)
+        self.assertIn("| TBR S3 (8 MB), Developer edition (devtools) | `partitions-8mb` | "
+                      "`tbr-hub-0.3.0-8mb-devtools-merged.bin` |", text)
+        self.assertIn("**Developer edition** (`-8mb-devtools` files", text)
+        self.assertNotIn("Developer edition", release_notes.notes(MANIFEST, CHANGELOG, require=True))
+
     def test_release_without_the_dongle(self):
         m = {**MANIFEST, "boards": MANIFEST["boards"][:1]}
         self.assertNotIn("Dongle Max", release_notes.notes(m, CHANGELOG, require=True))

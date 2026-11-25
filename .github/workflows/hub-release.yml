@@ -10,7 +10,9 @@ name: Hub release
 # A tag with a suffix (hub-v0.2.0-rc.1) makes a pre-release. The release
 # carries, for the Thread Border Router board's S3 with 8 MB (production A/B
 # layout) and 4 MB (dev layout): full flash image, bootloader, partition
-# table, blank otadata (8 MB), app, plus the tbr-bridge app; for the SONOFF
+# table, blank otadata (8 MB), app, the same set for the 8 MB developer
+# edition ("devtools", tbr-hub feature dev, once firmware/hub has it: its
+# own web flasher entry), plus the tbr-bridge app; for the SONOFF
 # Dongle Max (experimental): the app for ota_1 (also the file for SONOFF's
 # web console) and the otadata sector that selects it; release-manifest.json
 # (the web flasher's input) and SHA256SUMS.
@@ -166,8 +168,9 @@ jobs:
               run: |
                   set -euo pipefail
                   (cd firmware/bridge && cargo build --release --locked)
-                  # Both sizes include MQTT; only 8 MB enables advanced and the OTA image store. Quad and
-                  # octal PSRAM (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
+                  # Both sizes include MQTT; only 8 MB enables advanced and the OTA image store; the 8 MB
+                  # developer edition (devtools) once tbr-hub has the feature dev. Quad and octal PSRAM
+                  # (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
                   tools/build-hub-firmware.sh --locked
             - name: Build zrh-donglem (SONOFF Dongle Max, classic ESP32)
               if: steps.meta.outputs.donglem == 'true'
@@ -175,10 +178,19 @@ jobs:
                   SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.epoch }}
               run: |
                   set -euo pipefail
+                  elf=xtensa-esp32-espidf/release/zrh-donglem
+                  if grep -Eq '^dev[[:space:]]*=' firmware/donglem/Cargo.toml; then
+                    # The developer edition first, kept in target-devtools/ (release-images.py reads it there).
+                    (cd firmware/donglem && cargo build --release --locked --features dev)
+                    mkdir -p "target-devtools/$(dirname "$elf")"
+                    cp "target/$elf" "target-devtools/$elf"
+                  fi
                   (cd firmware/donglem && cargo build --release --locked)
                   # Rust atomics must not use S32C1I (not atomic between the cores on PSRAM).
-                  tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" \
-                    target/xtensa-esp32-espidf/release/zrh-donglem
+                  od="$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)"
+                  for t in target target-devtools; do
+                    if [ -f "$t/$elf" ]; then tools/check-s32c1i.sh "$od" "$t/$elf"; fi
+                  done
             - name: Release images
               run: |
                   set -euo pipefail

@@ -52,6 +52,7 @@ def install_notes(m: dict) -> list[str]:
     out = []
     s3 = [b for b in m["boards"] if b.get("web_install", True) and "merged" in b["files"]]
     dongle = [b for b in m["boards"] if b["id"] == "sonoff-dongle-max"]
+    dongle_dev = [b for b in m["boards"] if b["id"] == "sonoff-dongle-max-devtools"]
     if s3:
         out.append("## Install\n")
         out.append("**Web flasher:** https://faronov.github.io/zigbee-rs/flasher/ (Chrome or Edge; updates keep "
@@ -64,6 +65,11 @@ def install_notes(m: dict) -> list[str]:
                        f"`{app['name']}` at 0x{app['offset']:X} |")
         out.append("\nBoth flash sizes include the Zigbee2MQTT-compatible MQTT bridge. The 8 MB images also include "
                    "the advanced ZCL/Tuya console and the Zigbee device OTA server; the 4 MB images have neither.")
+        if any(b.get("edition") == "devtools" for b in s3):
+            out.append("\n**Developer edition** (`-8mb-devtools` files; its own entry in the web flasher): the 8 MB "
+                       "image with the web UI's developer tools always on, without the developer mode switch. Same "
+                       "layout as the 8 MB image: switching between the two keeps `nvs` and `hubdata`. For "
+                       "developers; everyone else takes the standard image.")
         out.append("\nWith esptool, a first install (erases the S3):")
         out.append("```\nesptool --chip esp32s3 --port <PORT> write-flash 0x0 tbr-hub-<v>-<8mb|4mb-dev>[-opi]-merged.bin\n```")
         out.append("`-opi` images: modules with octal PSRAM (`esptool chip-id` shows \"Embedded PSRAM 8MB\" or 16MB: "
@@ -94,6 +100,9 @@ def install_notes(m: dict) -> list[str]:
                    "Back to SONOFF's firmware: console `stock confirm`, or the backup's 4 KiB at "
                    f"0x{otadata['offset']:X} written back. After `stock confirm` or a hub self-update these "
                    "parts no longer switch slots: update through Settings > Hub firmware instead.")
+        for d in dongle_dev:
+            out.append(f"- **Developer edition:** `{d['files']['app']['name']}` instead of `{app['name']}`, the same "
+                       "way (web console, or USB with the same otadata sector).")
         out.append("- First boot: the hub claims SONOFF's `files` partition for its data after copying SONOFF's "
                    "files aside (`stock confirm` writes them back); console at 115200 8N1 on the dongle's USB port "
                    "(`token` prints the API token). Details: "

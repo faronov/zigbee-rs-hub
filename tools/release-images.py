@@ -34,6 +34,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "target/xtensa-esp32s3-espidf/release"
@@ -75,6 +76,29 @@ LAYOUTS = [
         "note": "Development layout: one 2 944 KiB app slot, no hub A/B OTA, 1 MiB hubdata; "
         "esp-mqtt included, advanced console and Zigbee device OTA omitted.",
     },
+    {
+        # The developer edition ("devtools"): the 8 MB image with tbr-hub feature `dev`, built
+        # once firmware/hub has it (tools/build-hub-firmware.sh). Its own entry in the web
+        # flasher (`size_group`), never chosen instead of the standard image.
+        "id": "thread-br-s3-hub-8mb-devtools",
+        "title": "Espressif Thread Border Router board, S3 (8 MB): zigbee-rs hub, Developer edition (devtools)",
+        "flash_size": "8MB",
+        "layout": "partitions-8mb",
+        "csv": "firmware/hub/partitions-8mb.csv",
+        "app_partition": "ota_0",
+        "max_app": 3 * 1024 * 1024,
+        "target": "target-8mb-devtools",
+        "features": ["mqtt", "advanced", "dev", "ota", "ota-store"],
+        "edition": "devtools",
+        "requires_feature": "dev",
+        "size_group": "thread-br-s3-hub-devtools",
+        "size_group_title": "Espressif Thread Border Router board, S3 (8 MB, octal/quad PSRAM, detected): "
+        "zigbee-rs hub, Developer edition (devtools)",
+        "note": "Developer edition of the 8 MB production image, for developers: the web UI's developer "
+        "tools (the ZCL/Tuya console) always on, without the developer mode switch; otherwise the 8 MB "
+        "image (MQTT, Zigbee device OTA with its store). Same layout: switching between the two keeps "
+        "nvs and hubdata.",
+    },
 ]
 # ESP-IDF fixes the PSRAM mode at build time. The web flasher picks the
 # variant by the chip's embedded PSRAM (eFuse PSRAM_CAP, esptool's
@@ -97,6 +121,18 @@ BOARDS = [
     for layout in LAYOUTS
     for v in PSRAM_VARIANTS
 ]
+
+
+def has_feature(manifest: str, feature: str) -> bool:
+    """Whether a firmware's Cargo.toml declares a feature (the developer edition: `dev`)."""
+    return feature in tomllib.loads((ROOT / manifest).read_text()).get("features", {})
+
+
+def s3_boards() -> list[dict]:
+    """The S3 board entries this tree builds: the developer edition once tbr-hub has `dev`."""
+    return [b for b in BOARDS if "requires_feature" not in b or has_feature("firmware/hub/Cargo.toml", b["requires_feature"])]
+
+
 # Zigbee device OTA (tbr-hub feature `ota`; `ota-store` implies it) is in
 # the 8 MB images only.
 ZIGBEE_OTA_LAYOUTS = {"partitions-8mb"}
@@ -303,6 +339,7 @@ def build_board(spec: dict, version: str, out: Path, boot_src: Path) -> dict:
         "layout": spec["layout"],
         "psram": spec["psram"],
         "features": spec["features"],
+        **{k: spec[k] for k in ("edition", "size_group", "size_group_title") if k in spec},
         "match": spec["match"],
         "note": spec["note"],
         "connect": CONNECT,
@@ -361,7 +398,9 @@ def dongle_otadata() -> bytes:
     return otadata.sector(2)
 
 
-def build_dongle(version: str, out: Path) -> dict:
+def build_dongle(version: str, out: Path, devtools: bool = False) -> dict:
+    """The Dongle Max entry; `devtools`: its developer edition (zrh-donglem feature `dev`, built
+    into target-devtools/ by hub-release.yml), sharing the otadata sector."""
     spec = DONGLE
     if cargo_version("firmware/donglem/Cargo.toml") != version:
         raise ReleaseError(f"firmware/donglem/Cargo.toml is at {cargo_version('firmware/donglem/Cargo.toml')}, "
@@ -377,17 +416,24 @@ def build_dongle(version: str, out: Path) -> dict:
     if sha256(table) != DONGLE_STOCK_TABLE_SHA256 or table.stat().st_size != DONGLE_TABLE_SIZE:
         raise ReleaseError(f"{spec['csv']} no longer generates SONOFF's stock partition table")
     stem = f"zrh-donglem-{version}"
-    app = out / f"{stem}-app.bin"
-    run("tools/make-app-image.sh", "release", str(app), "zrh-donglem",
-        env={"CHIP": "esp32", "FLASH_SIZE": spec["flash_size"], "FLASH_FREQ": spec["flash_freq"],
-             "MIN_REV_FULL": str(spec["min_rev_full"]), "MAX_APP_BYTES": str(slot)})
+    app = out / f"{stem}{'-devtools' if devtools else ''}-app.bin"
+    env = {"CHIP": "esp32", "FLASH_SIZE": spec["flash_size"], "FLASH_FREQ": spec["flash_freq"],
+           "MIN_REV_FULL": str(spec["min_rev_full"]), "MAX_APP_BYTES": str(slot)}
+    if devtools:
+        elf = ROOT / "target-devtools/xtensa-esp32-espidf/release/zrh-donglem"
+        if not elf.is_file():
+            raise ReleaseError(f"{elf.relative_to(ROOT)} missing (build zrh-donglem --features dev first, see hub-release.yml)")
+        env["TARGET_DIR"] = str(ROOT / "target-devtools")
+    run("tools/make-app-image.sh", "release", str(app), "zrh-donglem", env=env)
     check_dongle_app(app.read_bytes(), version)
     otadata = out / f"{stem}-otadata-ota1.bin"
     otadata.write_bytes(dongle_otadata())
-    return dongle_entry(version, parts, file_entry(app, app_off), file_entry(otadata, otadata_off + OTADATA_SECTOR))
+    return dongle_entry(version, parts, file_entry(app, app_off), file_entry(otadata, otadata_off + OTADATA_SECTOR),
+                        devtools)
 
 
-def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, otadata: dict) -> dict:
+def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, otadata: dict,
+                 devtools: bool = False) -> dict:
     spec = DONGLE
     preserved = []
     for name, where, what in PRESERVED_DONGLE:
@@ -395,9 +441,11 @@ def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, ota
         if name.startswith("otadata"):
             size = OTADATA_SECTOR
         preserved.append({"name": name, "offset": offset, "size": size, "what": what})
+    edition = {"edition": "devtools"} if devtools else {}
     return {
-        "id": spec["id"],
-        "title": spec["title"],
+        "id": spec["id"] + ("-devtools" if devtools else ""),
+        "title": spec["title"].replace(" (experimental)", ", Developer edition (devtools) (experimental)")
+        if devtools else spec["title"],
         "product": "zigbee-rs-hub",
         "firmware": "zrh-donglem",
         "chip": "esp32",
@@ -405,7 +453,8 @@ def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, ota
         "flash_size": spec["flash_size"],
         "layout": spec["layout"],
         "psram": spec["psram"],
-        "features": spec["features"],
+        "features": sorted(spec["features"] + ["dev"]) if devtools else spec["features"],
+        **edition,
         "experimental": True,
         "hardware_status": spec["hardware_status"],
         # Never through ESP Web Tools: its "Erase device" (and the erase manifest) wipes the
@@ -468,8 +517,9 @@ def main() -> None:
         out.mkdir(parents=True, exist_ok=True)
         boards, components, extra_files = [], {}, []
         if tbr:
+            release_boards = s3_boards()
             boot_src = idf_bootloader()
-            boards += [build_board(spec, args.version, out, boot_src) for spec in BOARDS]
+            boards += [build_board(spec, args.version, out, boot_src) for spec in release_boards]
             bridge_version = cargo_version("firmware/bridge/Cargo.toml")
             bridge = out / f"tbr-bridge-{bridge_version}-app.bin"
             run("tools/make-app-image.sh", "release", str(bridge), "tbr-bridge", env={"FLASH_SIZE": "4MB"})
@@ -480,6 +530,8 @@ def main() -> None:
                                 **file_entry(bridge, None)})
         if donglem:
             boards.append(build_dongle(args.version, out))
+            if has_feature("firmware/donglem/Cargo.toml", "dev"):
+                boards.append(build_dongle(args.version, out, devtools=True))
         rev = zigbee_rs_rev()
         protocol = zrhp_protocol(rev)
         manifest = {
