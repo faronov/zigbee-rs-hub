@@ -31,6 +31,9 @@ impl Backend {
         // Nothing queued goes out to a network the records have not
         // vouched for (the worker closes it when a session ends or starts).
         opts.traffic = Some(records.traffic());
+        // Requests made while the records wait for a new session's network
+        // wait with them (the app refuses new ones once they decided).
+        opts.traffic_hold = records.traffic_hold();
         Backend {
             coordinator: Box::new(move |cfg, events| {
                 let (coord, admin) =

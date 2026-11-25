@@ -15,7 +15,12 @@
 //! - The app's own requests (the device inventory) come back to the app.
 //! - Device traffic is refused while the [`Records`] do not vouch for the
 //!   NCP's network (`NcpNv` backends: until the NCP's network of the
-//!   session matches the ownership tag, design §2.7).
+//!   session matches the ownership tag, design §2.7). While they wait for
+//!   a new session's ownership report ([`Records::deciding`]: a few
+//!   seconds after the start or an NCP restart), the engine's requests
+//!   wait in the backend instead; those still waiting when the records
+//!   decide against them, or do not decide in time, end here
+//!   ([`CoordTransport::expire_waiting`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -77,6 +82,10 @@ pub fn count(c: &mut ApsCounters, t: &Terminal) {
 }
 
 /// Removes `id` from `ids`; `false` when it was not there.
+fn not_verified() -> CoordError {
+    CoordError::described(CoordError::LinkDown, "the NCP's network is not verified as this hub's (network/info.registry)")
+}
+
 fn take(ids: &mut Vec<RequestId>, id: RequestId) -> bool {
     let i = ids.iter().position(|x| *x == id);
     i.map(|i| ids.swap_remove(i)).is_some()
@@ -106,6 +115,10 @@ pub struct CoordTransport {
     /// The hub's records: whose they are (`network/info.registry`), and
     /// whether device traffic may go to the NCP.
     pub records: Option<Arc<dyn Records>>,
+    /// Engine requests submitted while the records were deciding.
+    waiting: Vec<RequestId>,
+    /// Ended by [`Self::expire_waiting`]: the backend's outcome is dropped.
+    ended: Vec<RequestId>,
 }
 
 impl CoordTransport {
@@ -123,6 +136,8 @@ impl CoordTransport {
             control: VecDeque::new(),
             counters: ApsCounters::default(),
             records: None,
+            waiting: Vec::new(),
+            ended: Vec::new(),
         }
     }
 
@@ -136,21 +151,46 @@ impl CoordTransport {
         self.coord.permit_join_s()
     }
 
-    /// Device traffic waits while the NCP's network is not the records'.
-    fn held(&self) -> Result<(), CoordError> {
+    /// Device traffic is refused while the NCP's network is not the
+    /// records'; `Ok(true)`: it waits for their decision.
+    fn held(&self) -> Result<bool, CoordError> {
         match &self.records {
-            Some(r) if !r.verified() => Err(CoordError::described(
-                CoordError::LinkDown,
-                "the NCP's network is not verified as this hub's (network/info.registry)",
-            )),
-            _ => Ok(()),
+            Some(r) if !r.verified() => r.deciding().then_some(true).ok_or_else(not_verified),
+            _ => Ok(false),
+        }
+    }
+
+    /// Ends the engine's requests still waiting for the records' decision
+    /// when they decided against them or did not decide in time: cancelled
+    /// in the backend, refused for the engine. Once a second.
+    pub fn expire_waiting(&mut self) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        match &self.records {
+            Some(r) if !r.verified() && !r.deciding() => {}
+            Some(r) if !r.verified() => return,
+            _ => return self.waiting.clear(),
+        }
+        for id in std::mem::take(&mut self.waiting) {
+            self.coord.cancel(id);
+            self.ended.push(id);
+            let t = Terminal::Refused(not_verified());
+            if take(&mut self.aps, id) {
+                count(&mut self.counters, &t);
+                self.done.push((id, t));
+            } else if take(&mut self.controls, id) {
+                self.control.push_back((id, Outcome::Done(t)));
+            }
         }
     }
 
     /// A request of the app itself, not the engine's: its outcome comes
-    /// back from [`Self::outcome`].
+    /// back from [`Self::outcome`]. Only once the records are verified.
     pub fn submit_own(&mut self, req: Request) -> Result<RequestId, CoordError> {
-        self.held()?;
+        if self.held()? {
+            return Err(not_verified());
+        }
         let id = self.coord.submit(req, None)?;
         self.own.push(id);
         Ok(id)
@@ -160,6 +200,15 @@ impl CoordTransport {
     /// the request is the app's own.
     pub fn outcome(&mut self, id: RequestId, o: Outcome) -> Option<Outcome> {
         let done = matches!(o, Outcome::Done(_));
+        if done {
+            take(&mut self.waiting, id);
+        }
+        if self.ended.contains(&id) {
+            if done {
+                take(&mut self.ended, id);
+            }
+            return None;
+        }
         if self.own.contains(&id) {
             if done {
                 take(&mut self.own, id);
@@ -212,9 +261,12 @@ impl ZigbeeTransport for CoordTransport {
             Request::RemoveDevice { ieee, .. } => Request::RemoveDevice { ieee, nwk: self.nwk.get(&ieee).copied() },
             req => req,
         };
-        self.held()?;
+        let wait = self.held()?;
         let aps = matches!(req, Request::Aps(_));
         let id = self.coord.submit(req, None)?;
+        if wait {
+            self.waiting.push(id);
+        }
         if aps {
             self.aps.push(id);
         } else {

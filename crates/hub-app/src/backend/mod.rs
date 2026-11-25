@@ -67,6 +67,15 @@ pub trait Records: KvStore {
         true
     }
 
+    /// While not [`verified`](Self::verified): whether device traffic waits
+    /// instead of being refused. `NcpNv` records wait a few seconds, after
+    /// the app starts or the NCP's session ends, for the next session's
+    /// ownership report, which may verify them; the backend holds the
+    /// requests meanwhile and sends them only once they are verified.
+    fn deciding(&self) -> bool {
+        false
+    }
+
     /// Whether `network/form` may take the records (it asks no
     /// confirmation): only the hub's own. `NcpNv`: no tag (and not records
     /// of unknown origin), or this backend's tag that names no formed
