@@ -1,0 +1,59 @@
+<p class="mut">Zigbee2MQTT: stop it, pick <b>coordinator_backup.json</b>, <b>database.db</b> and <b>configuration.yaml</b> (or devices.yaml) of its data directory. ZHA: Home Assistant's <i>Import from ZHA</i>, or an import document of <code>hubctl import zha</code>. Never run the old coordinator again.</p>
+<div class="row acts"><input id="mgf" type="file" multiple accept=".json,.db,.yaml,.yml"><button id="mgp">Preview</button><span id="mgi" class="mut"></span></div>
+<dl class="kv" id="mgn"></dl><table id="mgt"></table>
+<div class="row acts hide" id="mga"><label>Configure again <select id="mgc"><option value="auto">if the coordinator IEEE changed</option><option value="always">always</option><option value="never">never</option></select></label><label><input type="checkbox" id="mgr"> Remove the hub's devices not imported</label><button class="d" id="mgx">Import</button></div>
+<script>
+// ---- Migration from Zigbee2MQTT / ZHA (docs/migration.md) ----
+// A module in the page's scope (index.html ui()): Zigbee2MQTT's files as
+// the import document (zigbee-rs-hub/import v1); ZHA's by the HA
+// integration or hubctl.
+let mgDoc,mgRows=[];
+const mgPow=["Unknown","Mains (single phase)","Mains (3 phase)","Battery","DC Source","Emergency mains constantly powered","Emergency mains and transfer switch"];
+const mgIeee=s=>{s=String(s||"").replace(/^0x/i,"").replace(/[:-]/g,"").toLowerCase();return/^[0-9a-f]{16}$/.test(s)?s:null};
+// herdsman names of cached values the hub keeps (consecutive IDs).
+const mgAt={lightingColorCtrl:[768,"colorCapabilities colorTempPhysicalMin colorTempPhysicalMax",16394],seMetering:[1794,"unitOfMeasure multiplier divisor",768]};
+// friendly_name of `devices:`/`groups:` (configuration.yaml) or of a
+// devices.yaml/groups.yaml (`top`).
+function mgYaml(t,top,n){let sec=top,key=null,ind=-1;
+ for(const l of t.split(/\r?\n/)){if(/^\s*(#|$)/.test(l))continue;const i=l.search(/\S/),m=/^\s*['"]?([^'":#]+)['"]?\s*:\s*(.*?)\s*$/.exec(l);if(!m)continue;
+  if(!i&&!top){sec=m[1]=="devices"||m[1]=="groups"?m[1]:null;key=null;ind=-1;continue}
+  if(!sec)continue;if(ind<0||i<=ind){ind=i;key=m[1];continue}
+  if(m[1]=="friendly_name"&&key!=null){const v=m[2].replace(/^['"]|['"]$/g,"");if(sec=="devices"){const k=mgIeee(key);if(k)n.d[k]=v}else n.g[+key]=v}}}
+function mgDev(e,n){const ieee=mgIeee(e.ieeeAddr);if(!ieee)return null;
+ const d={ieee,nwk:e.nwkAddr,name:n.d[ieee],type:{Router:"router",EndDevice:"end_device",Coordinator:"coordinator",GreenPower:"green_power"}[e.type],manufacturer:e.manufName,model:e.modelId,manufacturer_code:e.manufId,power_source:mgPow.indexOf(e.powerSource)<0?void 0:mgPow.indexOf(e.powerSource),app_version:e.appVersion,stack_version:e.stackVersion,hw_version:e.hwVersion,zcl_version:e.zclVersion,date_code:e.dateCode,sw_build_id:e.swBuildId,endpoints:[],attributes:[],source_id:e.id};
+ for(const[k,ep]of Object.entries(e.endpoints||{})){const id=ep.epId!=null?ep.epId:+k;d.endpoints.push({id,profile:ep.profId,device_id:ep.devId,in:ep.inClusterList||[],out:ep.outClusterList||[]});
+  for(const[c,[cid,as,a0]]of Object.entries(mgAt)){const a=((ep.clusters||{})[c]||{}),v=a.attributes||a.attrs||{};as.split(" ").forEach((an,i)=>{if(typeof v[an]=="number")d.attributes.push({ep:id,cluster:cid,attr:a0+i,value:v[an]})})}}
+ d.endpoints.sort((a,b)=>a.id-b.id);return d}
+async function mgRead(files){const n={d:{},g:{}},dev=[],grp=[];let net=null,doc=null,db=null,bad=0;
+ for(const f of files){const t=await f.text(),nm=f.name.toLowerCase();
+  if(/\.ya?ml$/.test(nm))mgYaml(t,nm.startsWith("devices")?"devices":nm.startsWith("groups")?"groups":null,n);
+  else if(nm.endsWith(".json")){const j=JSON.parse(t);if(j.format=="zigbee-rs-hub/import")doc=j;else if(j.metadata&&j.metadata.format=="zigpy/open-coordinator-backup")net=j;else throw Error(f.name+": not a backup or an import document")}
+  else db=t}
+ if(doc)return doc;
+ if(!db)throw Error("pick database.db");
+ for(const l of db.split("\n")){if(!l.trim())continue;let e;try{e=JSON.parse(l)}catch{bad++;continue}
+  if(e.type=="Group")grp.push({id:e.groupID,name:n.g[e.groupID],members:(e.members||[]).map(m=>({ieee:mgIeee(m.deviceIeeeAddr),ep:m.endpointID}))});
+  else if(e.type!="Coordinator"){const d=mgDev(e,n);d?dev.push(d):bad++}}
+ return{format:"zigbee-rs-hub/import",version:1,source:{kind:"z2m",name:"Zigbee2MQTT ("+((net&&net.metadata.source)||"web UI")+")"},network:net,devices:dev,groups:grp}}
+// The document in requests of a few kilobytes.
+async function mgSend(type,q){const d=mgDoc,h=Object.assign({},d,{devices:[]}),nd=(d.network&&d.network.devices)||[];if(d.network)h.network=Object.assign({},d.network,{devices:[]});
+ const parts=[];for(const[k,l]of[["network_devices",nd],["devices",d.devices||[]]]){let b=[],s=0;for(const e of l){const z=JSON.stringify(e).length;if(b.length&&s+z>6000){parts.push({[k]:b});b=[];s=0}b.push(e);s+=z}if(b.length)parts.push({[k]:b})}
+ const rs=[{document:h,...q},...parts];let r,rows=[],net;
+ for(let i=0;i<rs.length;i++){r=await call(type,{...rs[i],more:i<rs.length-1});if(Array.isArray(r.devices))rows=rows.concat(r.devices);net=net||r.network}
+ r.network=r.network||net;return[r,rows]}
+function mgShow(r,rows){const kv=$("#mgn"),n=r.network||{};kv.textContent="";
+ kvAdd(kv,"Network",n.ext_pan_id+" · PAN "+hex(n.pan_id||0,4)+" · channel "+n.channel+(n.action=="same"?" · runs here already":" · replaces "+(n.running?n.running.ext_pan_id:"no network")));
+ kvAdd(kv,"Keys",(n.devices||0)+" devices, "+(n.link_keys||0)+" link keys, frame counter "+n.nwk_frame_counter+(n.hashed_tclk?", hashed TCLK":""));
+ kvAdd(kv,"Coordinator",n.coordinator_ieee+(n.coordinator=="differs"?" (not this radio's: devices are configured again)":""));
+ if(r.summary)kvAdd(kv,"Devices",["new","replace","keep","skip"].map(k=>r.summary[k]+" "+k).join(", ")+(r.not_imported&&r.not_imported.count?" · "+r.not_imported.count+" on the hub not imported":""));
+ if(r.restore_check&&r.restore_check.message)kvAdd(kv,"Restore check",r.restore_check.message);
+ const t=$("#mgt");t.textContent="";t.append(el("tr",{},...["Device","Model","Definition","Status"].map(h=>el("th",{},h))));
+ for(const d of rows)t.append(el("tr",{},el("td",{},(d.name||d.ieee)+(d.name?" · "+d.ieee:"")),el("td",{},d.model||""),el("td",{},d.definition?d.definition.id:d.status=="skip"?"":"generic, "+d.entities+" entities"),el("td",{class:d.status=="skip"?"mut":null},d.status+(d.reason?" ("+d.reason+")":""))))}
+$("#mgp").onclick=e=>busy(e.target,(async()=>{mgDoc=await mgRead([...$("#mgf").files]);$("#mgi").textContent=(mgDoc.devices||[]).length+" devices, "+(mgDoc.groups||[]).length+" groups";
+ const[r,rows]=await mgSend("network/import/preview",{});mgRows=rows;mgShow(r,rows);$("#mga").classList.remove("hide")})()).catch(err=>toast(err.message));
+$("#mgx").onclick=e=>{if(!mgDoc||!confirm("Import "+(mgDoc.devices||[]).length+" devices and their network? The running network is backed up first."))return;
+ const go=q=>mgSend("network/import",q).catch(err=>{const m=err.message,k=["force","confirm","confirm_ieee_write_once"].find(k=>!q[k]&&m.includes("set "+k+" "));if(k&&confirm(m+"\n\nGo on?"))return go({...q,[k]:!0});throw err});
+ $("#mgi").textContent="importing…";
+ busy(e.target,go({reconfigure:$("#mgc").value,remove_missing:$("#mgr").checked}).then(([r])=>{if(r.backup)saveBackup(r.backup);const d=r.devices;
+  $("#mgi").textContent="Imported: "+d.new+" new, "+d.replace+" replaced, "+d.keep+" kept, "+d.skip+" skipped; "+r.groups+" groups"+". Devices are verified when they next talk.";$("#mga").classList.add("hide")})).catch(err=>{$("#mgi").textContent="";toast("import: "+err.message)})};
+</script>

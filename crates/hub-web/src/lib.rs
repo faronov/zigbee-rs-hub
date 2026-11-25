@@ -26,8 +26,9 @@ pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index
 pub const PAGE_BUDGET: usize = 36 * 1024;
 
 /// Budgets of the compressed modules (in any variant): Converters,
-/// Catalog, the ZCL console, Updates.
-pub const MODULE_BUDGETS: [(&str, usize); 4] = [("conv", 3 * 1024), ("catalog", 4 * 1024), ("zcl", 4 * 1024), ("ota", 3 * 1024)];
+/// Catalog, the ZCL console, Updates, the migration wizard.
+pub const MODULE_BUDGETS: [(&str, usize); 5] =
+    [("conv", 3 * 1024), ("catalog", 4 * 1024), ("zcl", 4 * 1024), ("ota", 3 * 1024), ("mig", 4 * 1024)];
 
 /// Budget of the page and all its modules, compressed, in every variant
 /// but the developer edition: what the web UI takes of the firmware image
@@ -75,7 +76,8 @@ pub enum Gate {
 /// first line the build hash and the tab's markup.
 #[derive(Debug)]
 pub struct Module {
-    /// The `data-mod` of its tab: `conv`, `catalog`, `zcl`, `ota`.
+    /// The `data-mod` of its tab: `conv`, `catalog`, `zcl`, `ota`, `mig`
+    /// (the migration wizard in Settings).
     pub name: &'static str,
     /// `/ui/<BUILD>/<name>.js`: of this build only, so a browser's cache
     /// never mixes builds; another build's path is not found (404) and the
@@ -138,6 +140,7 @@ mod tests {
             "ui/catalog.html" => include_str!("../web/ui/catalog.html"),
             "ui/zcl.html" => include_str!("../web/ui/zcl.html"),
             "ui/ota.html" => include_str!("../web/ui/ota.html"),
+            "ui/mig.html" => include_str!("../web/ui/mig.html"),
             _ => panic!("no web/{name}"),
         }
         .to_string()
@@ -371,6 +374,7 @@ for(const order of [S.modules,S.modules.slice().reverse()]){
                     "conv" => "onTab.conv",
                     "catalog" => "onTab.catalog",
                     "zcl" => "zFrame",
+                    "mig" => "mgRead",
                     _ => "otEv",
                 });
             }
@@ -465,6 +469,57 @@ const c=t("Africa/Casablanca");eq(c.fixed,true);if(!/^(<[+-]\d\d>|[A-Z]{3,})-?\d
         let out = node.wait_with_output().unwrap();
         let _ = std::io::stderr().write_all(&out.stderr);
         assert!(out.status.success(), "time zone conversion checks failed");
+    }
+
+    /// The migration wizard's Zigbee2MQTT reader (when Node is installed):
+    /// `database.db` lines (a corrupt one, the coordinator, a group),
+    /// friendly names of `configuration.yaml` and of a `devices.yaml`, the
+    /// backup, into the import document the hub takes.
+    #[test]
+    fn migration_reads_zigbee2mqtt_files() {
+        let src = include_str!("../web/ui/mig.html");
+        let js = &src[src.find("<script>").unwrap() + 8..src.find("</script>").unwrap()];
+        let checks = r#"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+const file=(name,t)=>({name,text:async()=>t});
+const db=[
+ {id:1,type:"Coordinator",ieeeAddr:"0x00124b00c0ffee01",nwkAddr:0,endpoints:{}},
+ {id:2,type:"Router",ieeeAddr:"0x0017880100F1E2D3",nwkAddr:31248,manufId:4107,manufName:"Signify",powerSource:"Mains (single phase)",modelId:"LCT015",
+  endpoints:{"11":{profId:260,epId:11,devId:269,inClusterList:[0,6,768],outClusterList:[25],clusters:{lightingColorCtrl:{attributes:{colorCapabilities:31,currentX:9}}}},
+             "2":{profId:260,epId:2,devId:1,inClusterList:[],outClusterList:[]}},swBuildId:"1.50"},
+ {id:3,type:"EndDevice",ieeeAddr:"0x00158d0003c4d5e6",nwkAddr:1202,powerSource:"Battery",endpoints:{}},
+ {id:4,type:"Group",groupID:4097,members:[{deviceIeeeAddr:"0x0017880100f1e2d3",endpointID:11}]}
+].map(e=>JSON.stringify(e)).join("\n")+"\nnot json\n";
+const conf="homeassistant: true\ndevices:\n  '0x0017880100f1e2d3':\n    friendly_name: Hall light\n    retain: false\ngroups:\n  '4097':\n    friendly_name: Hall\nmqtt:\n  server: mqtt://x\n";
+const devs="'0x00158d0003c4d5e6':\n  friendly_name: 'Kitchen/temperature'\n";
+const ocb={metadata:{format:"zigpy/open-coordinator-backup",version:1,source:"zigbee-herdsman@3.2.0"},extended_pan_id:"a1b2c3d4e5f60718",devices:[]};
+(async()=>{
+ const d=await mgRead([file("database.db",db),file("configuration.yaml",conf),file("devices.yaml",devs),file("coordinator_backup.json",JSON.stringify(ocb))]);
+ eq([d.format,d.version,d.source.kind,d.network.extended_pan_id],["zigbee-rs-hub/import",1,"z2m","a1b2c3d4e5f60718"]);
+ eq(d.devices.length,2);
+ const l=d.devices[0];
+ eq([l.ieee,l.nwk,l.name,l.type,l.power_source,l.sw_build_id],["0017880100f1e2d3",31248,"Hall light","router",1,"1.50"]);
+ eq(l.endpoints.map(e=>e.id),[2,11]);
+ eq(l.endpoints[1],{id:11,profile:260,device_id:269,in:[0,6,768],out:[25]});
+ eq(l.attributes,[{ep:11,cluster:768,attr:16394,value:31}]);
+ eq([d.devices[1].name,d.devices[1].type,d.devices[1].power_source],["Kitchen/temperature","end_device",3]);
+ eq(d.groups,[{id:4097,name:"Hall",members:[{ieee:"0017880100f1e2d3",ep:11}]}]);
+ // An import document passes through.
+ eq((await mgRead([file("doc.json",JSON.stringify({format:"zigbee-rs-hub/import",version:1,devices:[]}))])).devices,[]);
+})().catch(e=>{console.error(e);process.exit(1)});
+"#;
+        use std::io::Write;
+        let Ok(node) = std::process::Command::new("node")
+            .args(["-e", &std::format!("let toast=()=>{{}},onTab={{}},$=()=>({{}});\n{js}\n{checks}")])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let out = node.wait_with_output().unwrap();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        assert!(out.status.success(), "migration reader checks failed");
     }
 
     /// The Hub card with a `tz_name` this Intl does not know (the hub took

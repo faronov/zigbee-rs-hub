@@ -23,13 +23,14 @@ pub const BUILD_PLACEHOLDER: &str = "__UI_BUILD__";
 
 /// Every module source, `web/ui/<name>.html`.
 #[allow(dead_code)]
-pub const SOURCES: [&str; 4] = ["conv", "catalog", "zcl", "ota"];
+pub const SOURCES: [&str; 5] = ["conv", "catalog", "zcl", "ota", "mig"];
 
 /// The modules of a build: name (the `data-mod` of its tab) and whether
 /// the hub's developer mode gates it. The ZCL console: with `advanced`,
-/// always in the developer edition (`dev`); Updates with `ota`.
+/// always in the developer edition (`dev`); Updates with `ota`; the
+/// migration wizard (Settings) always.
 pub fn modules(f: Features) -> Vec<(&'static str, bool)> {
-    let mut m = std::vec![("conv", false), ("catalog", false)];
+    let mut m = std::vec![("conv", false), ("catalog", false), ("mig", false)];
     if f.advanced || f.dev {
         m.push(("zcl", !f.dev));
     }
