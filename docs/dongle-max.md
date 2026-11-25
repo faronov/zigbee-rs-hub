@@ -1,8 +1,8 @@
 # SONOFF Dongle Max (Dongle-M)
 
-**Status: the hub image (`zrh-donglem` 0.2.0) is build-tested and
-host-tested only; it has not run on hardware yet** (HIL checklist at the
-end). It runs the hub application on SONOFF's stock EmberZNet NCP through
+**Status: the hub image (`zrh-donglem` 0.2.0) runs on one lab unit**
+(results below; the rest of the HIL checklist at the end). It runs the hub
+application on SONOFF's stock EmberZNet NCP through
 the EZSP backend (`docs/ezsp-backend.md`), with its data on SONOFF's
 `files` partition once claimed, on SONOFF's unchanged partition table.
 The board bring-up image (0.1.0) ran on one unit. Nothing here is a Zigbee
@@ -25,9 +25,34 @@ flashed over USB with hwlab esprom, SONOFF's bootloader and `ota_0` kept):
   info).
 - Heap at the console: internal 247 KiB free (largest block 92 KiB), PSRAM
   2039 / 2048 KiB.
-- Not yet run: Ethernet link, Wi-Fi station, `stock confirm`, installation
-  through SONOFF's web console; nothing of the hub image (0.2.0) has run on
-  hardware yet (HIL checklist at the end).
+- Not yet run: Ethernet link, `stock confirm`, installation through
+  SONOFF's web console (HIL checklist at the end).
+
+**Hardware results of the hub image** (0.2.0, the same unit, `ota_1`):
+
+- First boot: the automatic claim of `files` (4 blocks of SONOFF's data
+  copied, 2.4 s); the app on the EZSP backend; internal heap 170 KiB free
+  after start (minimum 166), PSRAM 1903 / 2048 KiB; no panic. Wi-Fi station
+  from the stored credentials; the hub formed its network (channel 20) and
+  runs as a second hub in Home Assistant.
+- **EZSP session start: 2.6 s** from the app's start to the session up
+  with the network up (reset 2.2 s: an RST, the NCP's boot RSTACK, the RST
+  again, its answer after the NCP's ~1.1 s reboot; version 10 ms,
+  configuration 0.2 s, the rest 0.1 s). It took ~52 s at first: the UART
+  read waited for 256 bytes or a whole timeout of silence, up to 1 s per
+  command (`uart.rs`). `hub` on the console shows the phases and the link:
+  94 commands, ASH retransmissions, NAKs, CRC errors, ACK timeouts and UART
+  overruns all 0.
+- The NCP's memory holds the multicast table at its own 8 (16 refused:
+  the hub endpoint's groups are limited to 8), the address table at 12 of
+  16 asked, no trust center address cache (`docs/ezsp-backend.md`).
+- A sleepy end device (the lab's ESP32-C6 zigbee-rs sensor) joins with
+  permit join and is interviewed `complete`: Basic, endpoint 1 with
+  temperature and humidity, bindings and reporting; its reports arrive.
+  Before the fix its interview ended `partial` with nothing learned: the
+  NCP appends a byte to the incoming messages of a device that joined in
+  its session, and the backend refused them (`docs/ezsp-backend.md`, "On
+  the Dongle Max").
 
 ## Features
 
@@ -501,7 +526,7 @@ comes first: SONOFF's firmware on a claimed region would format it.
 | Command | What it does |
 |---|---|
 | `info` | firmware, chip, memory mode, partitions and layout verdict, running/boot slot, what `ota_0` holds, what `files` holds, straps, last panics, failed allocations, hub status |
-| `hub` | EZSP session, Zigbee network, permit join, devices, sessions, APS counters, where the data are |
+| `hub` | EZSP session, Zigbee network, permit join, devices, sessions, APS counters, where the data are; the EZSP link: sessions, failed starts, the last start phase by phase, ASH/EZSP/UART counters (retransmissions, NAKs, CRC errors, ACK timeouts, bad frames, callbacks with trailing bytes, overruns), the configuration values the NCP's memory did not hold |
 | `permit [s]` | open joining (default 180 s, 0 closes; the result is logged) |
 | `token` | the API token (generated at the first boot with the hub; `hub/token/rotate` changes it) |
 | `files` | what `files` holds: claimed, interrupted, the copy; where the hub's data are; a running claim |
@@ -511,7 +536,7 @@ comes first: SONOFF's firmware on a claimed region would format it.
 | `net`, `wifi set <ssid> [pw]`, `wifi clear` | Ethernet/Wi-Fi state; station credentials, used at once (the station runs when Ethernet has had no address for 10 s); `clear` from the next boot |
 | `led <0-100>` | LED brightness |
 | `mg24` | line levels, UART rate and errors |
-| `mg24 reset`, `mg24 bootloader`, `mg24 ezsp info [init]`, `mg24 baud <rate>` | the bring-up probes (MG24 reset; Gecko bootloader banner and menu, nothing uploaded; read-only EZSP probe, `init` resumes a stored network then resets the MG24; UART rate): only in a bring-up boot, the hub's backend owns the UART otherwise |
+| `mg24 reset`, `mg24 bootloader`, `mg24 ezsp info [init]`, `mg24 ezsp config [ID=v …]`, `mg24 baud <rate>` | the bring-up probes (MG24 reset; Gecko bootloader banner and menu, nothing uploaded; read-only EZSP probe, `init` resumes a stored network then resets the MG24; every configuration value of the NCP, after setting the given ones in its RAM only (IDs hex or decimal, e.g. `0x06=16`), then an MG24 reset; UART rate): only in a bring-up boot, the hub's backend owns the UART otherwise |
 | `stock` | whether `ota_0` still holds SONOFF's application (project `Dongle-M`), what `stock confirm` does with `files`, or why it cannot |
 | `stock confirm` | SONOFF's `files` data back (if claimed), `ota_0` selected in `otadata` (ESP-IDF verifies the image first), restart into SONOFF's firmware |
 | `cpu [ms]`, `atomics` | CPU use per task; lost atomic updates between the cores (Rust atomics must lose none) |
@@ -543,6 +568,10 @@ stored network (the hub's backend calls it at every session start).
 - The ESP32-S3 SuperMini + MG24 bench profile of the `donglem` branch.
 
 ## HIL checklist (with the user's confirmation, after a fresh backup check)
+
+Done on the lab unit: 1 (4 blocks claimed), 2 (session start 2.6 s), the
+Wi-Fi part of 3, forming and a sleepy end device's join and interview of
+5, `restart bringup` and the MG24 probes of 9.
 
 1. Flash the hub image over USB as above (`ota_1`, `otadata` sector 1);
    boot log: PSRAM 2 MB, `memory mode psram`, stock table `Foreign`,

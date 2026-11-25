@@ -21,7 +21,7 @@ backend ([docs/dongle-max.md](docs/dongle-max.md)).
 |---|---|---|---|---|---|
 | Espressif Thread BR / Zigbee Gateway board, 8 MB S3 | ESP32-S3, PSRAM quad or octal | ESP32-H2, zigbee-rs NCP / ZRHP | `tbr-hub` 8 MB (MQTT, advanced console, Zigbee OTA with the image store) | web flasher | released |
 | same board, 4 MB S3 sample | ESP32-S3, 4 MB flash | same | `tbr-hub` 4 MB dev (MQTT) | web flasher | released |
-| SONOFF Dongle Max (Dongle-M) | ESP32-D0WDR2-V3, 16 MB flash, 2 MB PSRAM, Ethernet (PoE) + Wi-Fi | EFR32MG24, SONOFF's EmberZNet 7.4.5 NCP / EZSP 13 | `zrh-donglem` (MQTT, advanced console, Zigbee OTA with the image store in SONOFF's `files` partition once claimed, self-update) | SONOFF's web console (into `ota_1`; SONOFF's table, bootloader and application stay), or USB | build- and host-tested; hardware run pending |
+| SONOFF Dongle Max (Dongle-M) | ESP32-D0WDR2-V3, 16 MB flash, 2 MB PSRAM, Ethernet (PoE) + Wi-Fi | EFR32MG24, SONOFF's EmberZNet 7.4.5 NCP / EZSP 13 | `zrh-donglem` (MQTT, advanced console, Zigbee OTA with the image store in SONOFF's `files` partition once claimed, self-update) | SONOFF's web console (into `ota_1`; SONOFF's table, bootloader and application stay), or USB | runs on one lab unit (EZSP session in 2.6 s, a sleepy end device joined and interviewed); HIL checklist in `docs/dongle-max.md` |
 
 ## Phases
 
