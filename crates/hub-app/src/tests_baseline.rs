@@ -448,11 +448,12 @@ fn config() -> AppConfig {
 
 /// What follows the clock in the host store's JSON values, zeroed: in
 /// `st/`, every number of at least 10^9 (Unix times in s or ms: `c`, `r`,
-/// `seen`, the `last_seen` entity); in `bkp/last`, `creation_time`.
+/// `seen`, the `last_seen` entity); in `bkp/last` and `bkp/replaced/`,
+/// `creation_time`.
 fn normalize_kv(key: &str, value: &[u8]) -> Vec<u8> {
     if key.starts_with("st/") {
         mask_times(value)
-    } else if key == "bkp/last" {
+    } else if key == "bkp/last" || key.starts_with("bkp/replaced/") {
         mask_json(value, "creation_time")
     } else {
         value.to_vec()

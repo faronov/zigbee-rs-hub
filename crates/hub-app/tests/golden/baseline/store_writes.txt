@@ -45,6 +45,8 @@ kv_put bkp/last 0/1 1055 B
 @ reset: backup, leave, form, NCP device import
 device_del b0c0000000006b6d
 kv_put bkp/last 0/1 895 B
+kv_put bkp/replaced 0/1 16 B
+kv_put bkp/replaced/00124b0001020304 0/1 895 B
 kv_put hub/owner 0/1 150 B
 kv_put hub/owner 0/1 151 B
 network 3c2bddccbbaa004b12000000000002b09f8e7d6d5c4b3a2a1908f7e6d6c5b40000000000

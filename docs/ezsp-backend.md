@@ -10,7 +10,8 @@ backend for Silicon Labs EmberZNet NCPs: `hub-coord`'s `Coordinator` and
 Dongle Max" below). The hub app runs on it (hub-app feature `ezsp`,
 `Backend::ezsp`, PR H1; "In the hub app" below), on the desktop with
 `hubctl --backend ezsp --sim`, and in the SONOFF Dongle Max image
-`zrh-donglem` (PR H2, `docs/dongle-max.md`).
+`zrh-donglem` (PR H2, `docs/dongle-max.md`). Backup and restore ("Backup
+and restore") are host-tested only, not run against hardware yet.
 
 ## Target
 
@@ -108,6 +109,9 @@ and Simplicity SDK 2024.6.0 / 2025.6.3:
 | `importTransientKey` | EUI64, key, flags | EUI64, key |
 | `lookupNodeIdByEui64` response | node ID | status, node ID |
 | `readCounters` | 41 values | 41 (14, 16), 42 (18: `CSL_RX_SCHEDULE_FAILED`) |
+| `exportLinkKeyByIndex` response | EUI64, key, metadata, status | status, context (holds the EUI64), key, metadata |
+| `getCurrentSecurityState`, `setMfgToken`, `get`/`setTokenData`, `setChildData`, `clearKeyTable` | `EmberStatus` (u8) | `sl_status_t` |
+| `importLinkKey` | `sl_status_t` already | `sl_status_t` |
 
 ## Threading
 
@@ -262,8 +266,9 @@ explicit force removal of unreachable or sleepy children, is a follow-up.
 `backend: Ezsp`, `ownership: NcpNv`, `max_in_flight` =
 `APS_UNICAST_MESSAGE_COUNT`, `max_asdu` = `maximumPayloadLength`, table
 sizes from the configuration values the NCP took, group membership,
-energy/active scan, channel change and TX power, diagnostics. No
-fragmentation, Green Power, coexistence, backup or firmware update yet.
+energy/active scan, channel change and TX power, diagnostics, backup (with
+keys) and restore. No fragmentation, Green Power, coexistence or firmware
+update yet.
 
 The application shows the capacities in `network/info` (`capacity`:
 `in_flight`, `asdu`, `hub_groups`, `address_table`, `children`,
@@ -355,9 +360,25 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
    replaces the network (`network/form`, `network/reset`,
    `network/restore`), reports decide nothing; just before `formNetwork`
    the records are tagged with the extended PAN ID it forms (picked by the
-   hub unless the request names one; key ID unknown), so an interrupted
-   job (a timeout, a reboot) still leaves them the new network's;
-   afterwards the tag gets the full identity.
+   hub unless the request names one, the backup's for a restore; key ID
+   unknown), so an interrupted job (a timeout, a reboot) still leaves them
+   the new network's; afterwards the tag gets the full identity.
+   `network/restore` needs `force` over a network the NCP stores and
+   `confirm` over records of another network than the backup's
+   (`Records::may_restore`: another tag, records of unknown origin; they
+   are re-tagged); the backend's `restore_check` runs before anything
+   changes, then the running network is backed up and the backup kept
+   before the network is left (`bkp/replaced/<ext_pan_id>`, the last 3
+   networks, hub-scoped, so also over closed records;
+   `network/backup/replaced` with an API token, and in the error frame of
+   a restore or reset that fails after the leave), the stored network
+   left, the records tagged and the backup restored. A backup without the
+   network key is refused (`backup_incomplete`) unless `skip_backup`; only
+   the NCP running the backup's own network (extended PAN ID and key)
+   already kept as the last backup (a retry after a restore that failed
+   late) is not kept again as a replaced network. Every session's `Up` sets the
+   engine's coordinator IEEE (binds, the IAS CIE address, `hub/info`): a
+   restore may change it.
 5. `foreign`: `network/info.ownership` `mismatch` and
    `network/info.registry` `{"state":"foreign","backend","why"}`;
    `network/registry/adopt` (the records become the NCP network's) or
@@ -368,6 +389,105 @@ The operator's TX power is kept as `ezsp/tx_power` (backend-scoped) and
 applied in every session (`EzspOptions::tx_power`). A device leave
 (`DeviceLeft`) keeps the device: unavailable with `unavailable_reason:
 "left"` until its next frame or rejoin; removal is `devices/remove`.
+
+## Backup and restore
+
+`NetworkAdmin::backup_export`, `restore_encoder`, `restore_check` and
+`backup_restore`; hub-app writes and reads the Open Coordinator Backup
+(OCB, `crates/hub-app/src/ocb.rs`) in the form bellows (zigpy/ZHA) and
+zigbee-herdsman's ember adapter (Z2M) use, so a network moves between Z2M,
+ZHA and the hub. Frames and structs: Gecko SDK 4.4.6 (EZSP 13) and
+Simplicity SDK 2024.6.0, 2024.12.0, 2025.6.0, 2025.6.3 (EZSP 14–18,
+identical there), table "Versions" above.
+
+**Export** (admin job, the network up):
+
+| OCB | EZSP |
+|---|---|
+| `coordinator_ieee` | `getEui64` |
+| `pan_id`, `extended_pan_id`, `channel`, `channel_mask`, `nwk_update_id`, `nwk_manager`, `tx_power` | `getNetworkParameters` (the TX power the operator set, else the NCP's) |
+| `security_level` | `getConfigurationValue(SECURITY_LEVEL)` |
+| `network_key` {`key`, `sequence_number`, `frame_counter`} | `exportKey` (network key context) and `getNetworkKeyInfo` |
+| `stack_specific.ezsp.hashed_tclk` | `exportKey` (TC link key context): the root key the trust center hashes per device, when `getCurrentSecurityState` reports `TRUST_CENTER_USES_HASHED_LINK_KEY` |
+| `metadata.internal.network.tc_link_key` {`key`, `frame_counter`}, `tc_address` | `ZigBeeAlliance09` (hashed link keys, as bellows writes it; else the exported key), `getValue(APS_FRAME_COUNTER)`, the coordinator. Without a readable APS counter the section is left out: a restore then adds 2²⁰ |
+| `metadata.internal.ezspVersion` | the negotiated EZSP version (Z2M's ember adapter loads no EmberZNet backup without it and `stack_specific.ezsp`) |
+| `devices[]` with `is_child` | the child table (`getChildData` up to `MAX_END_DEVICE_CHILDREN`) |
+| `devices[].link_key` {`key`, `tx_counter`, `rx_counter`} | the key table (`exportLinkKeyByIndex` up to `KEY_TABLE_SIZE`; usually empty with hashed link keys); a device's short address from the joins seen or `lookupNodeIdByEui64` |
+
+Without `keys`, or when the security manager does not export the network
+key, the backup has no keys and no key table and is marked incomplete (it
+cannot be restored).
+
+**Restore** (bellows' order; `NetworkAdmin::restore_check` runs the
+checks of step 0 alone, without changing anything):
+
+0. Checks: the backup's coordinator, network (security level 5, channel
+   11–26) and network key; both frame counters plus their margins below
+   2³²; the coordinator IEEE (below). A refusal leaves the NCP as it is.
+1. hub-app tags the records with the backup's extended PAN ID (after
+   leaving the network the NCP stores, as for `network/reset`), then the
+   backend leaves any network left and clears the key table
+   (`clearKeyTable`).
+2. The coordinator IEEE, when it differs and `allow_ieee_change`: the
+   rewritable restored-EUI64 stack token (`setTokenData`
+   `CREATOR_STACK_RESTORED_EUI64` 0xE12A, then the NVM3 key 0x1E12A, as
+   bellows tries them) if the NCP has the token interface; else the custom
+   EUI-64 manufacturing token (`setMfgToken(MFG_CUSTOM_EUI_64)`, 0x0C).
+   That token "is set only if currently unset" (UG100 successor §5): it
+   can be written **once, never again**, so it is written only with
+   `RestoreOptions::ieee_write_once` (API `confirm_ieee_write_once`;
+   bellows' `i_understand_i_can_update_eui64_only_once_and_i_still_want_to_do_it`),
+   and a restore is refused when it already holds another IEEE (keep the
+   NCP's IEEE with `allow_ieee_change: false`: note `ieee_kept`). The NCP
+   is reset (a new session) and must report the backup's IEEE.
+3. `setValue(NWK_FRAME_COUNTER)` and `setValue(APS_FRAME_COUNTER)` (0x23,
+   0x24, u32; without a network) to the backup's counters plus the margins
+   (hub-app: 10 000 each, zigpy's default `counter_increment`; APS 2²⁰
+   without a TCLK counter). Refused → the restore fails (forming with
+   counters from 0 would make the devices drop the coordinator's frames).
+4. `setInitialSecurityState`: as forming (0x1B84: global TC link key,
+   preconfigured and network key, `NO_FRAME_COUNTER_RESET`, encrypted key
+   required, hashed link keys) with the backup's network key and sequence
+   and the hashed TCLK root (a random one for another stack's backup: note
+   `tclk_root_generated`; the devices' own link keys go to the key table);
+   the extended security bitmask as forming.
+5. `importLinkKey` for the devices' link keys, up to `KEY_TABLE_SIZE`
+   (the rest: note `ignored`). Their frame counters cannot be set.
+6. `formNetwork` with the backup's PAN ID, EPID, channel, mask, NWK
+   manager and update ID (TX power: the operator's, the backup's, else
+   8 dBm; a backup's power the NCP refuses, `PHY_INVALID_POWER` /
+   `SL_STATUS_TRANSMIT_INVALID_POWER`, forms again at 8 dBm, as bellows);
+   NETWORK_UP awaited.
+7. The NWK update ID: bellows found that `formNetwork` ignores it; it is
+   written into the network management stack token
+   (`CREATOR_STACK_NETWORK_MANAGEMENT` 0xE125 / 0x1E125, `updateId` at
+   offset 6 of `tokTypeStackNetworkManagement`) when the NCP has the token
+   interface, else note `update_id_not_restored` when the NCP formed with
+   another.
+8. `setChildData` for the backup's children with a short address, up to
+   `MAX_END_DEVICE_CHILDREN` (sleepy unless the capability says receiver
+   on; the rest: note `child_demoted`). bellows found that it leaves the
+   NVM child table entry's flags 0x00 where a working coordinator has
+   0x80: with the token interface the entry (`NVM3KEY_STACK_CHILD_TABLE`
+   0x10580, then `CREATOR_STACK_CHILD_TABLE` 0xFF0D, at the child's index;
+   11 bytes, `tokTypeStackChildTable`: EUI64, node ID, flags) is read back
+   and, when it is exactly this child, written with 0x80.
+9. An NCP reset (a new session, `networkInit`): the restored network must
+   come back with the backup's EPID, PAN ID and key ID.
+
+The NCP resets of steps 2 and 9 end the session and start a new one from
+the worker's loop (`Session::Down`, `Up` with a new epoch); the restore
+waits and goes on there, so the session start does not run on top of the
+job's stack (the worker has 16 KB). hub-app's records decide nothing while
+the network is replaced (`Records::replacing`) and take the restored
+network afterwards (the tag rewritten with its identity, traffic opened
+for the new session).
+
+Keys never reach a log or an error text: responses that carry one
+(`exportKey`, `exportLinkKeyByIndex`) are not formatted
+(`HostError::UnexpectedResponse` shows their frame ID only), the restore
+data's `Debug` leaves the keys out, and a test checks the log lines of an
+export and restore for the keys it used.
 
 ## Diagnostics
 
@@ -402,17 +522,29 @@ firmware console: `hub` on the Dongle Max.
   destination with `setExtendedTimeout`).
 - Beacons of an active scan carry no sender address (0xFFFF).
 - Child table entries have no time since the last poll (0).
+- Backup and restore (simulator only): whether the stock "1.0.0" image has
+  the token interface (`getTokenData`) and which key it takes (creator or
+  NVM3 key); whether `getValue(APS_FRAME_COUNTER)` answers (else backups
+  have no TCLK section); the statuses for a key table index without an
+  entry and for `setMfgToken` over a written token; whether
+  `setValue(NWK_FRAME_COUNTER)` is refused with a network up; the
+  precedence of the restored-EUI64 token over the custom EUI-64; that
+  `formNetwork` ignores `nwkUpdateId` and that `setChildData` leaves the
+  child table flags 0x00 (bellows' findings, modelled); the child table
+  entry's layout (bellows'); the status of a TX power `formNetwork`
+  refuses; and that `setChildData` children are kept across the reset.
+- Z2M interop: whatever byte order zigbee-herdsman's ember adapter writes
+  `extended_pan_id` and `coordinator_ieee` in, the hub reads Z2M files
+  exactly as zigpy (and so ZHA's backup upload) does: big-endian, no
+  detection or swap (zigpy's Z2M handling is `internal.date`, unpadded
+  NWK addresses, the optional `is_child` and the default TCLK; its own
+  test reads a zigbee-herdsman file so). A Z2M file moves to the hub as it
+  moves to ZHA. Not checked with a real Z2M ember file.
 
 ## Follow-ups
 
-1. **Network backup and restore (OCB)**, in product scope: export with the
-   security manager (`exportKey` for the network key and the hashed TC link
-   key root → `BackupItem::HashedTclkSeed`, `exportLinkKeyByIndex`,
-   `getNetworkKeyInfo` frame counter, child table), `RestoreEncoder` and
-   restore (`setInitialSecurityState` with `NO_FRAME_COUNTER_RESET`,
-   `importLinkKey`, NWK/APS frame counter values, `formNetwork`); key
-   export on EZSP 13 goes through the same `exportKey` frame the identity
-   uses now.
+1. Done here: network backup and restore (OCB), "Backup and restore"
+   above; its hardware checks are part of 6.
 2. **Green Power via EZSP**, in product scope: GP endpoint 242,
    `gpepIncomingMessageHandler` → `CoordEvent::Gp` (the callback already
    reaches the worker's GP path), sink table (`gpSinkTable*`,
@@ -430,7 +562,9 @@ firmware console: `hub` on the Dongle Max.
    `ezsp` feature, the `NcpNv` ownership decision, the TX power kept
    across restarts.
 6. HIL on the Dongle Max, still open: XON/XOFF on the 115 200 Bd line, key
-   export, channel change, callback bursts, more devices (done: session
+   export, channel change, callback bursts, more devices; backup and
+   restore (the open points of "Not verified", a Z2M ↔ hub move with real
+   devices, the one-time IEEE token on a spare dongle) (done: session
    start, capacities, permit join, join and interview of a sleepy end
    device).
 
@@ -446,6 +580,14 @@ firmware console: `hub` on the Dongle Max.
   `network-creator-security` and `concentrator` plugins.
 - Simplicity SDK 2024.6.0, 2024.12.0, 2025.6.0, 2025.6.3 (EZSP 14–18): the
   same generated files and `sl_zigbee_types.h`.
+- EmberZNet 7.4.5 API reference, `token-stack.h` (docs.silabs.com): the
+  creator codes and NVM3 keys of `STACK_RESTORED_EUI64` and
+  `STACK_NETWORK_MANAGEMENT`, `tokTypeStackNetworkManagement`.
+- Behaviour, not code: bellows (`zigbee/application.py`
+  `write_network_info`, `ezsp/__init__.py` `write_custom_eui64`,
+  `ezsp/v13`), zigpy (`backups.py`: `counter_increment` 10 000, the OCB
+  conversion), zigbee-herdsman (`adapter/ember/adapter/emberAdapter.ts`,
+  `utils/backup.ts`); GitHub `dev`/`master`, November 2026.
 
 Numeric facts only (IDs, values, field order); no code was taken from the
 SDK or from GPL hosts.

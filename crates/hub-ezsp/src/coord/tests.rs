@@ -14,6 +14,8 @@ use hub_coord::{
     SessionEvent, SessionState, Terminal, TxOptions,
 };
 
+mod backup;
+
 use super::contract::{check, down, position, progress, terminal, up};
 use super::*;
 use crate::ash::ResetCode;
@@ -310,7 +312,8 @@ fn ezsp_13_session_starts_in_order_and_reports_identity_and_capabilities() {
     assert_eq!((caps.max_in_flight, caps.max_asdu), (32, 82));
     assert_eq!(caps.tables.multicast, Some(16));
     assert_eq!(caps.tables.source_routes, Some(200));
-    assert!(!caps.gp.sink && !caps.backup.export && caps.fw_update.is_none());
+    assert!(caps.backup.export && caps.backup.export_keys && caps.backup.restore);
+    assert!(!caps.gp.sink && caps.fw_update.is_none());
     rig.finish();
 }
 
@@ -790,7 +793,7 @@ fn requests_beyond_the_command_cap_are_refused() {
 }
 
 #[test]
-fn gp_requests_are_refused_and_backup_is_not_offered_yet() {
+fn gp_requests_are_refused_and_firmware_update_is_not_offered_yet() {
     let mut rig = Rig::new(sim(13));
     rig.next_up();
     let gp = Request::Gp(hub_coord::GpRequest::SinkConfig {
@@ -804,17 +807,6 @@ fn gp_requests_are_refused_and_backup_is_not_offered_yet() {
     });
     let e = rig.coord().submit(gp, None).unwrap_err();
     assert_eq!(*e.meaning(), CoordError::Unsupported);
-    struct Sink;
-    impl hub_coord::BackupSink for Sink {
-        fn item(&mut self, _: &hub_coord::BackupItem) -> Result<(), CoordError> {
-            Ok(())
-        }
-    }
-    assert_eq!(
-        rig.admin.backup_export(true, &mut Sink),
-        Err(CoordError::Unsupported)
-    );
-    assert!(rig.admin.restore_encoder().is_err());
     assert!(rig.admin.firmware().is_none());
     // A GP frame from the NCP goes to the GP path (counted, no event).
     rig.inject(|_| Callback::Unknown {

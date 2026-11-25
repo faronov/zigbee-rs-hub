@@ -356,6 +356,11 @@ pub struct RestoreBlob(pub Vec<u8>);
 pub struct RestoreOptions {
     /// Let the NCP take the backup's coordinator IEEE.
     pub allow_ieee_change: bool,
+    /// The operator accepts that the NCP takes the backup's coordinator
+    /// IEEE through a token that can be written once only (EZSP
+    /// `MFG_CUSTOM_EUI_64`): irreversible. Without it, a backend that has
+    /// no rewritable IEEE refuses the restore ([`NetworkAdmin::restore_check`]).
+    pub ieee_write_once: bool,
     /// Added to the network-key frame counter.
     pub nwk_margin: u32,
     /// Added to the APS frame counter (2²⁰ when the backup has no TCLK
@@ -367,10 +372,38 @@ impl Default for RestoreOptions {
     fn default() -> Self {
         Self {
             allow_ieee_change: true,
+            ieee_write_once: false,
             nwk_margin: 10_000,
             aps_margin: 10_000,
         }
     }
+}
+
+/// [`RestoreReport::notes`] codes: 1–4 are the ZRHP `BKP_RESTORE_PUT`
+/// notes (spec 9.4), the others are backend notes of the whole restore
+/// (item index 0, the coordinator).
+pub mod restore_note {
+    /// The link key stays with the host (not on the NCP).
+    pub const HOST_BACKED: u8 = 1;
+    /// A child the NCP's child table had no room for (restored as a
+    /// device only).
+    pub const CHILD_DEMOTED: u8 = 2;
+    /// The item was not restored (e.g. no room in the NCP's key table).
+    pub const IGNORED: u8 = 3;
+    /// A frame counter floor was raised.
+    pub const FLOOR_RAISED: u8 = 4;
+    /// The NCP kept its own IEEE (`allow_ieee_change` off): devices know
+    /// the trust center by the backup's.
+    pub const IEEE_KEPT: u8 = 5;
+    /// The backup's IEEE was written to the write-once token.
+    pub const IEEE_WRITTEN_ONCE: u8 = 6;
+    /// The backup's IEEE was written to a rewritable token.
+    pub const IEEE_REWRITTEN: u8 = 7;
+    /// The backup has no trust center link key root (another stack's
+    /// backup): a new random one was generated.
+    pub const TCLK_ROOT_GENERATED: u8 = 8;
+    /// The NWK update ID could not be restored (the NCP formed with 0).
+    pub const UPDATE_ID_NOT_RESTORED: u8 = 9;
 }
 
 /// Outcome of a restore.
@@ -567,6 +600,14 @@ pub trait NetworkAdmin: Send + Sync {
     /// An encoder for [`Self::backup_restore`].
     fn restore_encoder(&self) -> Result<Box<dyn RestoreEncoder>, CoordError> {
         Err(CoordError::Unsupported)
+    }
+
+    /// Checks, without changing anything, that `blob` can be restored with
+    /// `o` (e.g. that the NCP can take the backup's coordinator IEEE): a
+    /// refusal here leaves the NCP's network as it is. Default: no check.
+    fn restore_check(&self, blob: &RestoreBlob, o: RestoreOptions) -> Result<(), CoordError> {
+        let _ = (blob, o);
+        Ok(())
     }
 
     /// Restores a network into the NCP.

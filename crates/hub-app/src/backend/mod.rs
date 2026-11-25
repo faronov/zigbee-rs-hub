@@ -84,6 +84,16 @@ pub trait Records: KvStore {
         matches!(self.registry(), RegistryState::Untagged | RegistryState::Owned)
     }
 
+    /// Whether `network/restore` may take the records for the backup's
+    /// network `ext_pan_id` without `force` (its confirmation): `NcpNv`
+    /// records that are untagged (and not of unknown origin), name no
+    /// formed network, or are already that network's. `HostStore`
+    /// backends decide in the backend (ZRHP rewrites the tag).
+    fn may_restore(&self, ext_pan_id: [u8; 8]) -> bool {
+        let _ = ext_pan_id;
+        true
+    }
+
     /// `network/info.ownership` when the hub decides it (`NcpNv`: owned or
     /// mismatch instead of the backend's `observed`); `None`: as reported.
     fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {

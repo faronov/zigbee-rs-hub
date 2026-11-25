@@ -106,6 +106,7 @@ code_type! {
         NOT_JOINED = 0x93,
         JOIN_FAILED = 0x94,
         MOVE_FAILED = 0x96,
+        PHY_INVALID_POWER = 0x8B,
         CANNOT_JOIN_AS_ROUTER = 0x98,
         CHANNEL_CHANGED = 0x9B,
         NETWORK_OPENED = 0x9C,
@@ -145,6 +146,7 @@ code_type! {
         NOT_FOUND = 0x002D,
         ALREADY_EXISTS = 0x002E,
         MESSAGE_TOO_LONG = 0x0038,
+        TRANSMIT_INVALID_POWER = 0x0056,
         ZIGBEE_DELIVERY_FAILED = 0x0C02,
         ZIGBEE_MAX_MESSAGE_LIMIT_REACHED = 0x0C03,
         ZIGBEE_NODE_ID_CHANGED = 0x0C07,
@@ -401,7 +403,10 @@ code_type! {
 
 code_type! {
     /// `EzspValueId` / `sl_zigbee_ezsp_value_id_t` (u8); the IDs used by
-    /// the core stage (same values in EZSP 13–18).
+    /// the core stage (same values in EZSP 13–18). `NWK_FRAME_COUNTER` and
+    /// `APS_FRAME_COUNTER` (u32) are set only without a network, for a
+    /// restore: "users should not set these unless doing backup and
+    /// restore" (`ezsp-enum.h`).
     ValueId(u8) {
         FREE_BUFFERS = 0x03,
         UART_SYNCH_CALLBACKS = 0x04,
@@ -410,6 +415,8 @@ code_type! {
         STACK_TOKEN_WRITING = 0x07,
         EXTENDED_SECURITY_BITMASK = 0x0A,
         VERSION_INFO = 0x11,
+        NWK_FRAME_COUNTER = 0x23,
+        APS_FRAME_COUNTER = 0x24,
         TRANSIENT_KEY_TIMEOUT_S = 0x3B,
     }
 }
@@ -812,13 +819,46 @@ code_type! {
 }
 
 code_type! {
-    /// `EzspMfgTokenId` (u8); the string tokens.
+    /// `EzspMfgTokenId` (u8): the string tokens and the custom EUI64
+    /// (Gecko SDK 4.4.6 `ezsp-enum.h`; the same in Simplicity SDK
+    /// 2024.6–2025.6). `CUSTOM_EUI_64` is 8 bytes, all 0xFF when not
+    /// written; `setMfgToken` writes a token only while it is erased
+    /// (UG100 successor §5): once.
     MfgTokenId(u8) {
         CUSTOM_VERSION = 0x00,
         STRING = 0x01,
         BOARD_NAME = 0x02,
         MANUF_ID = 0x03,
+        CUSTOM_EUI_64 = 0x0C,
     }
+}
+
+/// Stack tokens of the token interface frames (`getTokenData`,
+/// `setTokenData`), EmberZNet 7.4.5 `token-stack.h`: the creator code, and
+/// the NVM3 key (`NVM3KEY_DOMAIN_ZIGBEE` 0x10000 | creator). Which of the
+/// two an NCP's `getTokenData` takes is not documented; bellows tries the
+/// creator first ("NCP firmware"), then the NVM3 key ("RCP firmware").
+pub mod token {
+    /// `CREATOR_STACK_NETWORK_MANAGEMENT`: `tokTypeStackNetworkManagement`
+    /// (`activeChannels` u32, `managerNodeId` u16, `updateId` u8).
+    pub const CREATOR_STACK_NETWORK_MANAGEMENT: u32 = 0xE125;
+    /// `NVM3KEY_STACK_NETWORK_MANAGEMENT`.
+    pub const NVM3KEY_STACK_NETWORK_MANAGEMENT: u32 = 0x1_E125;
+    /// `CREATOR_STACK_RESTORED_EUI64`: `tokTypeStackRestoredEui64` (8 bytes,
+    /// all 0xFF when unused), rewritable.
+    pub const CREATOR_STACK_RESTORED_EUI64: u32 = 0xE12A;
+    /// `NVM3KEY_STACK_RESTORED_EUI64`.
+    pub const NVM3KEY_STACK_RESTORED_EUI64: u32 = 0x1_E12A;
+    /// Offset of `updateId` in `tokTypeStackNetworkManagement`.
+    pub const NETWORK_MANAGEMENT_UPDATE_ID: usize = 6;
+    /// `NVM3KEY_STACK_CHILD_TABLE` (indexed by the child): 11 bytes
+    /// (`tokTypeStackChildTable`), as bellows reads them: EUI64, node ID,
+    /// flags.
+    pub const NVM3KEY_STACK_CHILD_TABLE: u32 = 0x1_0580;
+    /// `CREATOR_STACK_CHILD_TABLE`.
+    pub const CREATOR_STACK_CHILD_TABLE: u32 = 0xFF0D;
+    /// The flags of a child table entry of a working coordinator (bellows).
+    pub const CHILD_TABLE_FLAGS: u8 = 0x80;
 }
 
 /// `EmberKeyData`: 16 bytes.
@@ -1029,6 +1069,15 @@ impl SecManContext {
         }
     }
 
+    /// The context of the trust center link key: on a trust center with
+    /// hashed link keys, the root key it hashes per device.
+    pub fn tc_link_key() -> SecManContext {
+        SecManContext {
+            core_key_type: key_type::TC_LINK,
+            ..SecManContext::default()
+        }
+    }
+
     pub(crate) fn write(&self, w: &mut Writer) {
         w.u8(self.core_key_type);
         w.u8(self.key_index);
@@ -1048,6 +1097,81 @@ impl SecManContext {
             multi_network_index: r.u8()?,
             flags: r.u8()?,
             psa_key_alg_permission: r.u32()?,
+        })
+    }
+}
+
+/// `EmberCurrentSecurityBitmask` bits (Gecko SDK 4.4.6 `ember-types.h`).
+pub mod current_security_bitmask {
+    pub const TRUST_CENTER_GLOBAL_LINK_KEY: u16 = 0x0004;
+    pub const HAVE_TRUST_CENTER_LINK_KEY: u16 = 0x0010;
+    /// Two bits; both are set when the trust center hashes its link key.
+    pub const TRUST_CENTER_USES_HASHED_LINK_KEY: u16 = 0x0084;
+}
+
+/// `EmberCurrentSecurityState` / `sl_zigbee_current_security_state_t`: 10
+/// bytes, same layout in EZSP 13–18 (`ezsp-frame-utilities`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CurrentSecurityState {
+    /// [`current_security_bitmask`] bits.
+    pub bitmask: u16,
+    /// All zero when not known (distributed trust center).
+    pub trust_center_long_address: Eui64,
+}
+
+impl CurrentSecurityState {
+    /// The trust center derives each device's link key from its root key.
+    pub fn hashed_link_keys(&self) -> bool {
+        let h = current_security_bitmask::TRUST_CENTER_USES_HASHED_LINK_KEY;
+        self.bitmask & h == h
+    }
+
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u16(self.bitmask);
+        w.bytes(&self.trust_center_long_address.0);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<CurrentSecurityState, DecodeError> {
+        Ok(CurrentSecurityState {
+            bitmask: r.u16()?,
+            trust_center_long_address: Eui64(r.array()?),
+        })
+    }
+}
+
+/// `EmberKeyStructBitmask` bits of [`ApsKeyMetadata::bitmask`] (Gecko SDK
+/// 4.4.6 `ember-types.h`).
+pub mod key_bitmask {
+    pub const HAS_OUTGOING_FRAME_COUNTER: u16 = 0x0002;
+    pub const HAS_INCOMING_FRAME_COUNTER: u16 = 0x0004;
+    pub const HAS_PARTNER_EUI64: u16 = 0x0008;
+    pub const IS_AUTHORIZED: u16 = 0x0010;
+}
+
+/// `sl_zb_sec_man_aps_key_metadata_t`: 12 bytes, same layout in EZSP 13–18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ApsKeyMetadata {
+    /// [`key_bitmask`] bits.
+    pub bitmask: u16,
+    pub outgoing_frame_counter: u32,
+    pub incoming_frame_counter: u32,
+    pub ttl_in_seconds: u16,
+}
+
+impl ApsKeyMetadata {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.u16(self.bitmask);
+        w.u32(self.outgoing_frame_counter);
+        w.u32(self.incoming_frame_counter);
+        w.u16(self.ttl_in_seconds);
+    }
+
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<ApsKeyMetadata, DecodeError> {
+        Ok(ApsKeyMetadata {
+            bitmask: r.u16()?,
+            outgoing_frame_counter: r.u32()?,
+            incoming_frame_counter: r.u32()?,
+            ttl_in_seconds: r.u16()?,
         })
     }
 }

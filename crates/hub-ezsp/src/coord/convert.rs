@@ -229,8 +229,10 @@ pub(crate) const CAPS_CONFIG: &[ConfigId] = &[
 ];
 
 /// The [`Capabilities`] of a session from the configuration values the
-/// NCP reported (`config`) and its `maximumPayloadLength`. Green Power,
-/// backup and NCP firmware update stay off until their follow-ups.
+/// NCP reported (`config`) and its `maximumPayloadLength`. Backup and
+/// restore are offered (an NCP that does not export its key gives backups
+/// without keys); Green Power and NCP firmware update stay off until their
+/// follow-ups.
 pub fn capabilities(config: &BTreeMap<u8, u16>, max_payload: Option<u8>) -> Capabilities {
     let get = |id: ConfigId| config.get(&id.0).copied();
     Capabilities {
@@ -262,7 +264,11 @@ pub fn capabilities(config: &BTreeMap<u8, u16>, max_payload: Option<u8>) -> Capa
             channel: true,
             tx_power: true,
         },
-        backup: BackupSupport::default(),
+        backup: BackupSupport {
+            export: true,
+            export_keys: true,
+            restore: true,
+        },
         fw_update: None,
         diagnostics: true,
     }

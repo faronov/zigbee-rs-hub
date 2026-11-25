@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hub_coord::{
-    Beacon, Capabilities, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams, Kind, NetState, NetworkAdmin,
-    NetworkOwnership, RegistryState, RestoreOptions,
+    BackendKind, Beacon, Capabilities, CoordError, CoordStatus, Diagnostics, EnergyChannel, FormParams, Kind, NetState, NetworkAdmin,
+    NetworkOwnership, OwnershipModel, RegistryState, RestoreOptions,
 };
 use hub_devices::api::{ApiServer, ServerMessage, SessionId};
 use hub_devices::hub::ApiError;
@@ -43,6 +43,7 @@ pub const TYPES: &[&str] = &[
     "network/topology",
     "network/backup",
     "network/backup/last",
+    "network/backup/replaced",
     "network/jobs",
     "network/job/result",
     "network/job/cancel",
@@ -71,6 +72,17 @@ pub const DEVELOPER_KEY: &str = "cfg/dev";
 
 /// Host store key of the last complete backup (OCB text).
 pub const LAST_BACKUP_KEY: &str = "bkp/last";
+/// Host store keys of the automatic backups of the networks a
+/// `network/reset` or `network/restore` replaced: `bkp/replaced/<extended
+/// PAN ID, big-endian hex>` (OCB text), the last [`REPLACED_KEPT`]
+/// networks. Hub-scoped, unlike [`LAST_BACKUP_KEY`]: written whatever the
+/// records' gate (another network's closed records), before the network is
+/// left, and a registry clear keeps them.
+pub const REPLACED_BACKUP_PREFIX: &str = "bkp/replaced/";
+/// Their extended PAN IDs, newest first, comma separated (hub-scoped).
+pub const REPLACED_ORDER_KEY: &str = "bkp/replaced";
+/// Replaced networks whose backups are kept; the oldest goes first.
+pub const REPLACED_KEPT: usize = 3;
 /// Devices a staged restore accepts.
 pub const MAX_RESTORE_DEVICES: usize = 2000;
 
@@ -196,6 +208,16 @@ fn ncp_error(what: &str, e: CoordError) -> ApiError {
     if why.is_empty() { ApiError::new(code, format!("{what}: {e}")) } else { ApiError::new(code, format!("{what}: {why}")) }
 }
 
+/// [`ncp_error`] that keeps the backend's own explanation (a restore's
+/// refusal says what to set).
+fn restore_error(e: CoordError) -> ApiError {
+    let mut a = ncp_error("restore", e.clone());
+    if let CoordError::Described(d) = &e {
+        a.message = format!("restore: {}", d.text);
+    }
+    a
+}
+
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError::new("invalid_value", msg)
 }
@@ -313,7 +335,9 @@ struct Staged {
     restore: ocb::Restore,
     groups: Option<Vec<J>>,
     allow_ieee_change: bool,
+    ieee_write_once: bool,
     force: bool,
+    confirm: bool,
     skip_backup: bool,
 }
 
@@ -451,6 +475,14 @@ fn mask_of(channels: &[u8]) -> Result<u32, ApiError> {
 struct Backup {
     frame: String,
     file: std::ops::Range<usize>,
+    /// The network's extended PAN ID (wire order; zero when unknown).
+    ext_pan_id: [u8; 8],
+    /// With the network key ([`ocb::ExportSummary::complete`]).
+    complete: bool,
+    /// Its key ID ([`ocb::ExportSummary::key_id`]).
+    key_id: Option<[u8; 8]>,
+    /// Kept as [`LAST_BACKUP_KEY`] (complete, the records' gate open).
+    stored: bool,
 }
 
 impl Backup {
@@ -459,19 +491,152 @@ impl Backup {
     }
 }
 
+/// Keys leave the hub only through a session of a hub with an API token
+/// (`network/backup` with keys, `network/backup/last`, the automatic
+/// backups in the answers of `network/reset` and `network/restore`).
+fn keys_may_leave(api: &ApiServer) -> bool {
+    !api.token().is_empty()
+}
+
+/// The automatic backup before a network is replaced is made durable
+/// before the network is left (`bkp/replaced/<ext_pan_id>`, one per
+/// network, the last [`REPLACED_KEPT`]): neither a failure after the leave
+/// nor a lost session (a long restore's answer goes to its session only)
+/// loses the network's keys and frame counters, and replacing another
+/// network keeps them. Without the network key nothing is kept, nor
+/// replaced: refused.
+fn keep_replaced(kv: &dyn KvStore, b: &Backup) -> Result<(), ApiError> {
+    if !b.complete {
+        return Err(ApiError::new(
+            "backup_incomplete",
+            "the running network's automatic backup is incomplete (the backend exported no network key); nothing was changed; set skip_backup to go on without it",
+        ));
+    }
+    let epid = be_hex(&b.ext_pan_id);
+    kv::with(kv, |s| {
+        s.put(&format!("{REPLACED_BACKUP_PREFIX}{epid}"), b.file().as_bytes())?;
+        let mut order = replaced_order(&*s);
+        order.retain(|e| *e != epid);
+        order.insert(0, epid);
+        let gone = order.split_off(order.len().min(REPLACED_KEPT));
+        // The backup is kept; a failed order or eviction only costs
+        // the order or flash space.
+        if let Err(e) = s.put(REPLACED_ORDER_KEY, order.join(",").as_bytes()) {
+            warn!("admin: order of the replaced networks' backups not stored: {e}");
+        }
+        for e in gone {
+            if let Err(e) = s.delete(&format!("{REPLACED_BACKUP_PREFIX}{e}")) {
+                warn!("admin: an old replaced network's backup not deleted: {e}");
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e: std::io::Error| {
+        ApiError::new(
+            "failed",
+            format!("the running network's automatic backup could not be kept ({e}); nothing was changed; set skip_backup to go on without it"),
+        )
+    })
+}
+
+/// The extended PAN IDs of the kept replaced networks' backups, newest
+/// first (those missing from the order key, after an interrupted write,
+/// follow the ordered ones).
+fn replaced_order(s: &dyn kv::Kv) -> Vec<String> {
+    let kept: Vec<&str> = s.prefix(REPLACED_BACKUP_PREFIX).map(|(k, _)| &k[REPLACED_BACKUP_PREFIX.len()..]).collect();
+    let order = s.get(REPLACED_ORDER_KEY).and_then(|v| std::str::from_utf8(v).ok()).unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    for e in order.split(',').filter(|e| kept.contains(e)).chain(kept.iter().copied()) {
+        if !out.iter().any(|o| o == e) {
+            out.push(e.to_string());
+        }
+    }
+    out
+}
+
+/// A kept backup's answer: `{"backup": …}` of `key` (null when none). It
+/// holds keys: an API token is needed.
+fn kept_backup(kv: &dyn KvStore, api: &ApiServer, id: u64, key: &str) -> String {
+    if !keys_may_leave(api) {
+        return frame(id, Err(ApiError::new("unauthorized", "backups with keys need an API token")));
+    }
+    let r = kv::with(kv, |s| {
+        let last = s.get(key).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
+        let mut w = Jw::result(id, last.len() + 80)?;
+        w.obj().key("backup").raw(last).end_obj();
+        w.finish()
+    });
+    r.unwrap_or_else(|e| frame(id, Err(e)))
+}
+
+/// `network/backup/replaced`: `{"backup": …, "replaced": [ext_pan_id…]}`,
+/// the backup of the network `ext_pan_id` names (`not_found` if none is
+/// kept), else of the last one replaced (null when none), and the kept
+/// ones' extended PAN IDs, newest first. An API token is needed.
+fn replaced_backup(kv: &dyn KvStore, api: &ApiServer, id: u64, v: &J) -> String {
+    if !keys_may_leave(api) {
+        return frame(id, Err(ApiError::new("unauthorized", "backups with keys need an API token")));
+    }
+    let want = match v.get("ext_pan_id") {
+        None | Some(J::Null) => None,
+        Some(J::String(e)) if e.len() == 16 && e.bytes().all(|c| c.is_ascii_hexdigit()) => Some(e.to_ascii_lowercase()),
+        Some(_) => return frame(id, Err(bad("ext_pan_id: 16 hex digits (big-endian)"))),
+    };
+    let r = kv::with(kv, |s| {
+        let order = replaced_order(&*s);
+        let Some(epid) = want.or_else(|| order.first().cloned()) else {
+            let mut w = Jw::result(id, 80)?;
+            w.obj().key("backup").null().key("replaced").arr().end_arr().end_obj();
+            return w.finish();
+        };
+        let Some(file) = s.get(&format!("{REPLACED_BACKUP_PREFIX}{epid}")).and_then(|b| std::str::from_utf8(b).ok()) else {
+            return Err(ApiError::new("not_found", format!("no backup of network {epid} is kept")));
+        };
+        let mut w = Jw::result(id, file.len() + 100 + 20 * order.len())?;
+        w.obj().key("backup").raw(file).key("replaced").arr();
+        for e in &order {
+            w.str(e);
+        }
+        w.end_arr().end_obj();
+        w.finish()
+    });
+    r.unwrap_or_else(|e| frame(id, Err(e)))
+}
+
+/// The failure of a job that left the network, with the replaced
+/// network's backup in the frame (`backup`, next to `error`; it is also
+/// kept as `bkp/replaced/<ext_pan_id>`).
+fn failed_with_backup(id: u64, e: ApiError, b: Option<&Backup>, keys_out: bool) -> Result<Reply, ApiError> {
+    let Some(b) = b.filter(|_| keys_out) else { return Err(e) };
+    let err = serde_json::to_string(&e).map_err(|_| oom())?;
+    let file = b.file();
+    let mut t = String::new();
+    t.try_reserve(file.len() + err.len() + 96).map_err(|_| oom())?;
+    t.push_str(&format!("{{\"id\":{id},\"type\":\"result\",\"success\":false,\"error\":{err},\"backup\":"));
+    t.push_str(file);
+    t.push('}');
+    Ok(Reply::Frame(t))
+}
+
 /// Export (keys optional) and write the OCB file straight into a result
 /// frame (one buffer, reserved fallibly); complete backups are also kept in
 /// the host store.
 fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
     let mut export = ocb::Export::default();
     net.backup_export(keys, &mut export).map_err(|e| ncp_error("backup export", e))?;
-    let ncp = net.status().and_then(|s| s.ncp);
+    let status = net.status();
+    let ext_pan_id = status.as_ref().and_then(|s| s.network.as_ref()).map_or([0; 8], |n| n.ext_pan_id);
+    let ncp = status.and_then(|s| s.ncp);
     let info = ocb::ExportInfo {
         source: source.to_string(),
         creation_time: ocb::rfc3339(now_s as u64),
         ncp_fw: ncp.as_ref().map(|n| n.fw.clone()).unwrap_or_default(),
         ncp_chip: ncp.as_ref().map_or(0, |n| n.chip),
         ncp_build_id: ncp.as_ref().map(|n| hex(&n.build_id)).unwrap_or_default(),
+        ezsp_version: ncp
+            .as_ref()
+            .filter(|_| net.status().and_then(|s| s.caps).is_some_and(|c| c.backend == BackendKind::Ezsp))
+            .map(|n| n.protocol.0),
         host_devices: known.iter().map(|k| (k.ieee.to_le_bytes(), k.nwk)).collect(),
         // The hub's groups as stored (device-support 14.9).
         groups: kv::with(kv, |s| {
@@ -492,10 +657,10 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
     let end = frame.len();
     frame.try_reserve(1).map_err(|_| oom())?;
     frame.push('}');
-    let b = Backup { frame, file: start..end };
+    let mut b = Backup { frame, file: start..end, ext_pan_id, complete: summary.complete, key_id: summary.key_id, stored: false };
     if summary.complete {
         // A kept backup of another network (registry foreign) stays.
-        kv::with(kv, |s| if s.gate() == hub_store::Gate::Open { s.put(LAST_BACKUP_KEY, b.file().as_bytes()) } else { Ok(()) })
+        b.stored = kv::with(kv, |s| if s.gate() == hub_store::Gate::Open { s.put(LAST_BACKUP_KEY, b.file().as_bytes()).map(|()| true) } else { Ok(false) })
             .map_err(|e| ApiError::new("failed", format!("backup not stored: {e}")))?;
     }
     info!("admin: backup taken ({} devices, {} link keys, complete {})", summary.devices, summary.link_keys, summary.complete);
@@ -566,15 +731,8 @@ impl Admin {
             "hub/token/rotate" => self.rotate_token(ctx.api),
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
             "hub/mode/set" => self.mode(v),
-            "network/backup/last" => {
-                let r = kv::with(&**ctx.records, |s| {
-                    let last = s.get(LAST_BACKUP_KEY).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("null");
-                    let mut w = Jw::result(id, last.len() + 80)?;
-                    w.obj().key("backup").raw(last).end_obj();
-                    w.finish()
-                });
-                return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
-            }
+            "network/backup/last" => return vec![kept_backup(&**ctx.records, ctx.api, id, LAST_BACKUP_KEY)],
+            "network/backup/replaced" => return vec![replaced_backup(&**ctx.records, ctx.api, id, v)],
             "network/topology" => match TopologyReq::from(v) {
                 Ok(q) if !q.refresh => {
                     let b = self.board.lock().unwrap();
@@ -1016,7 +1174,7 @@ impl Admin {
                     Ok(q) => q,
                     Err(e) => return fail(e),
                 };
-                if q.keys && ctx.api.token().is_empty() {
+                if q.keys && !keys_may_leave(ctx.api) {
                     return fail(ApiError::new("unauthorized", "backups with keys need an API token"));
                 }
                 if !ctx.status.caps.as_ref().is_some_and(|c| c.backup.export) {
@@ -1057,7 +1215,11 @@ impl Admin {
     /// `network/restore`: `backup` (OCB, its `devices` optional), then any
     /// number of `devices` batches while `more` is true; the last request
     /// starts the restore. Each request is one small JSON value: a large
-    /// backup never has to be in RAM at once.
+    /// backup never has to be in RAM at once. Replacing a network the NCP
+    /// stores needs `force`; re-tagging records of another network
+    /// (`NcpNv`), `confirm`; a coordinator IEEE the NCP can store only once
+    /// (EZSP), `confirm_ieee_write_once`. The backend checks first
+    /// (`restore_check`): a refusal changes nothing.
     fn restore(&mut self, ctx: Ctx<'_>, sid: SessionId, id: u64, v: &J) -> Vec<String> {
         let fail = |e: ApiError| vec![frame(id, Err(e))];
         let more = match flag(v, "more", false) {
@@ -1065,9 +1227,15 @@ impl Admin {
             Err(e) => return fail(e),
         };
         if let Some(b) = field(v, "backup") {
-            let opts = (flag(v, "allow_ieee_change", true), flag(v, "force", false), flag(v, "skip_backup", false));
-            let (Ok(allow_ieee_change), Ok(force), Ok(skip_backup)) = opts else {
-                return fail(bad("allow_ieee_change, force, skip_backup: true or false"));
+            let opts = (
+                flag(v, "allow_ieee_change", true),
+                flag(v, "force", false),
+                flag(v, "confirm", false),
+                flag(v, "skip_backup", false),
+                flag(v, "confirm_ieee_write_once", false),
+            );
+            let (Ok(allow_ieee_change), Ok(force), Ok(confirm), Ok(skip_backup), Ok(ieee_write_once)) = opts else {
+                return fail(bad("allow_ieee_change, force, confirm, skip_backup, confirm_ieee_write_once: true or false"));
             };
             self.staged = None;
             let groups = b.pointer("/metadata/internal/zigbee_rs/groups").and_then(J::as_array).cloned();
@@ -1076,7 +1244,7 @@ impl Admin {
                 Err(e) => return fail(ncp_error("restore", e)),
             };
             match ocb::to_restore(b, encoder) {
-                Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }),
+                Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, ieee_write_once, force, confirm, skip_backup }),
                 Err(e) => return fail(bad(e)),
             }
         } else if let Some(devices) = field(v, "devices") {
@@ -1098,7 +1266,7 @@ impl Admin {
         if more {
             return vec![frame(id, Ok(json!({"staged_devices": staged})))];
         }
-        let Some(Staged { restore, groups, allow_ieee_change, force, skip_backup }) = self.staged.take() else {
+        let Some(Staged { restore, groups, allow_ieee_change, ieee_write_once, force, confirm, skip_backup }) = self.staged.take() else {
             return fail(bad("no restore staged"));
         };
         let records = ctx.records.clone();
@@ -1113,27 +1281,79 @@ impl Admin {
                 "the NCP runs a network (PAN {pan}); set force to replace it (it is backed up first unless skip_backup)"
             )));
         }
+        // NcpNv: the records are another network's, or of unknown origin.
+        if !confirm && !ctx.records.may_restore(restore.ext_pan_id) {
+            return fail(ApiError::new(
+                "registry_read_only",
+                format!(
+                    "the device registry ({}) holds the records of another network than the backup's: the restore re-tags them as the restored network's; set confirm to do so",
+                    ctx.records.registry().as_str()
+                ),
+            ));
+        }
+        let ncp_nv = st.caps.as_ref().is_some_and(|c| c.ownership == OwnershipModel::NcpNv);
+        let keys_out = keys_may_leave(ctx.api);
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
-        let opts =
-            RestoreOptions { allow_ieee_change, nwk_margin: 10_000, aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN } };
+        let opts = RestoreOptions {
+            allow_ieee_change,
+            ieee_write_once,
+            nwk_margin: 10_000,
+            aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN },
+        };
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
-            let mut previous = false;
+            let ocb::Restore { encoder, ext_pan_id, key_id, .. } = restore;
+            let blob = encoder.finish();
+            // A refusal (e.g. an IEEE the NCP cannot take) changes nothing.
+            net.restore_check(&blob, opts).map_err(restore_error)?;
+            let mut previous = None;
             if network_state(&*net) == NetState::Up && !skip_backup {
-                drop(take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
+                let b = take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
                     ApiError::new(&e.code, format!("automatic backup before the restore failed ({}); set skip_backup to restore anyway", e.message))
-                })?);
-                previous = true;
+                })?;
+                // The NCP runs the backup's own network (extended PAN ID
+                // and key), already kept as the last backup: a retry after
+                // a restore that failed late, not another network to keep
+                // (the kept one it replaced stays). Anything else (another
+                // key, closed records, no key) is kept or refused.
+                if !(b.stored && b.ext_pan_id == ext_pan_id && b.key_id == Some(key_id)) {
+                    keep_replaced(&*records, &b)?;
+                }
+                previous = Some(b);
             }
-            let report = replace(&*net, &*records, || net.backup_restore(restore.encoder.finish(), opts).map_err(|e| ncp_error("restore", e)))?;
+            let replaced = replace(&*net, &*records, || {
+                // NcpNv: the network the NCP stores goes first, then the
+                // records are tagged with the backup's network (as for
+                // network/reset), so that an interrupted restore leaves
+                // them the restored network's (refusals came before, in
+                // restore_check, and changed nothing).
+                if ncp_nv && network_state(&*net) != NetState::None {
+                    net.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
+                }
+                records.forming(Some(ext_pan_id));
+                net.backup_restore(blob, opts).map_err(restore_error)
+            });
+            let report = match replaced {
+                Ok(r) => r,
+                Err(e) => return failed_with_backup(id, e, previous.as_ref(), keys_out),
+            };
             out(JobOut::Reimport);
             if let Some(g) = groups {
                 out(JobOut::Groups(g));
             }
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "restored"})));
-            let note = |n: u8| ["", "host_backed", "child_demoted", "ignored", "floor_raised"].get(usize::from(n)).copied().unwrap_or("unknown");
-            let mut w = Jw::result(id, 400 + 40 * report.notes.len())?;
+            let note = |n: u8| {
+                ["", "host_backed", "child_demoted", "ignored", "floor_raised", "ieee_kept", "ieee_written_once", "ieee_rewritten", "tclk_root_generated", "update_id_not_restored"]
+                    .get(usize::from(n))
+                    .copied()
+                    .unwrap_or("unknown")
+            };
+            // The previous network's backup (kept as bkp/replaced/<epid>
+            // unless it is the backup's network, and as bkp/last unless the
+            // records were another network's), as network/reset answers it.
+            let file = previous.as_ref().filter(|_| keys_out).map_or("null", |b| b.file());
+            let mut w = Jw::result(id, 400 + 40 * report.notes.len() + file.len())?;
             w.obj().key("pan_id").num(restore.pan_id).key("channel").num(restore.channel);
             w.key("coordinator_ieee").str(&be_hex(&restore.coordinator_ieee)).key("devices").num(restore.devices.len());
             w.key("nwk_fc_start").num(report.nwk_fc_start).key("aps_fc_start").num(report.aps_fc_start);
@@ -1142,7 +1362,8 @@ impl Admin {
             for (i, n) in &report.notes {
                 w.obj().key("index").num(i).key("note").str(note(*n)).end_obj();
             }
-            w.end_arr().key("previous_network_backed_up").num(previous).end_obj();
+            w.end_arr().key("previous_network_backed_up").num(previous.is_some()).key("backup").raw(file).end_obj();
+            drop(previous);
             Ok(Reply::Frame(w.finish()?))
         })
     }
@@ -1214,6 +1435,7 @@ impl Admin {
         let now_s = ctx.now_s;
         let skip_backup = q.skip_backup;
         let tx_power = q.tx_power;
+        let keys_out = keys_may_leave(ctx.api);
         self.spawn(if form_only { "form" } else { "network reset" }, ctx.out.clone(), sid, id, move |out| {
             let mut backup = None;
             let state = if form_only { NetState::None } else { network_state(&*net) };
@@ -1221,6 +1443,7 @@ impl Admin {
                 let b = take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
                     ApiError::new(&e.code, format!("automatic backup failed ({}); nothing was changed; set skip_backup to reset anyway", e.message))
                 })?;
+                keep_replaced(&*records, &b)?;
                 backup = Some(b);
             }
             let formed = replace(&*net, &*records, || {
@@ -1235,7 +1458,11 @@ impl Admin {
                     tx_power: tx_power.or(net.tx_power_setting()).unwrap_or(0),
                 };
                 net.form(req).map_err(|e| ncp_error("form", e))
-            })?;
+            });
+            let formed = match formed {
+                Ok(f) => f,
+                Err(e) => return failed_with_backup(id, e, backup.as_ref(), keys_out),
+            };
             if let Some(dbm) = tx_power {
                 match net.set_tx_power(dbm) {
                     Ok(_) => records.tx_power_set(dbm),
@@ -1244,7 +1471,7 @@ impl Admin {
             }
             out(JobOut::Reimport);
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "formed"})));
-            let file = backup.as_ref().map_or("null", |b| b.file());
+            let file = backup.as_ref().filter(|_| keys_out).map_or("null", |b| b.file());
             let mut w = Jw::result(id, file.len() + 160)?;
             w.obj().key("network").obj().key("pan_id").num(formed.pan_id).key("ext_pan_id").str(&be_hex(&formed.ext_pan_id));
             w.key("channel").num(formed.channel).end_obj().key("backup").raw(file).end_obj();

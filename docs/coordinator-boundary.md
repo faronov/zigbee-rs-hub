@@ -247,13 +247,19 @@ pub trait NetworkAdmin: Send + Sync {        // debug_assert!: never on the app 
     fn diagnostics(&self, groups: u8, reset: bool) -> Diagnostics;    // neutral struct; hub-app renders the JSON
     fn backup_export(&self, keys: bool, sink: &mut dyn BackupSink) -> Result<(), CoordError>;
     fn restore_encoder(&self) -> Result<Box<dyn RestoreEncoder>, CoordError>;
+    fn restore_check(&self, blob: &RestoreBlob, o: RestoreOptions) -> Result<(), CoordError>; // default Ok: nothing changed on refusal
     fn backup_restore(&self, blob: RestoreBlob, o: RestoreOptions) -> Result<RestoreReport, CoordError>;
     fn firmware(&self) -> Option<&dyn NcpFirmware>;  // slots, preflight(manifest), update, confirm, pending phase
 }
 ```
 
 The OCB JSON stays in hub-app's `ocb.rs`. ZRHP's `Record` ⇄
-`BackupSink`/`RestoreEncoder` conversion moves into the adapter. The
+`BackupSink`/`RestoreEncoder` conversion moves into the adapter.
+`RestoreOptions::ieee_write_once` is the operator's consent to a
+coordinator IEEE the NCP can store only once (EZSP `MFG_CUSTOM_EUI_64`);
+`restore_check` lets the app refuse a restore before it backs up, leaves
+or retags anything. `restore_note` names the report's notes (1–4 ZRHP,
+5–9 backend notes such as `ieee_written_once`). The
 encoder appends the same TLVs into the same `Vec<u8>`, so RAM use and
 restore bytes are identical.
 
@@ -285,7 +291,7 @@ Keys are classified by exact key:
 | Class | Keys |
 |---|---|
 | network-scoped | `dev/`, `st/`, `grp/`, `bnd/`, `auto/` (rules name device IDs), `ota/d/`, `bkp/last` |
-| hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg` |
+| hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`, `bkp/replaced/<ext_pan_id>` and their order `bkp/replaced` (the backups of the last 3 networks a reset/restore replaced, written whatever the gate) |
 | backend-scoped | `cfg/tx_power`, kept as is; future keys go under `zrhp/`, `ezsp/`, `znp/` |
 
 **Foreign gate.** It is enforced in the KV layer by a prefix guard that makes
@@ -558,7 +564,7 @@ choices: `docs/ezsp-backend.md`.
 | Endpoints | **pinned:** `addEndpoint` 0x0002 before `networkInit` 0x0017, in every session | `AF_REGISTER` after reset (duplicate = success) |
 | Groups | **pinned:** `setMulticastTableEntry` 0x0064; the table is written again in every session (RAM on the NCP; assumed, the replay is harmless either way) | `ZDO_EXT_ADD_GROUP` (NV: duplicates on resync) |
 | Ownership | **pinned:** `NcpNv` (`networkInit`: the NCP resumes its network or answers `NOT_JOINED`); identity = `getNetworkParameters` + `getNetworkKeyInfo` 0x0116 + security manager `exportKey` 0x0114 (key ID; `None` when the key is not exportable: EPID-only match) | `NcpNv` (`ZCD_NV_*`) |
-| Backup | follow-up: `exportKey` 0x0114 (13: `key, status`; 14+: `status, key, context`) for the network key and the hashed TC link key root, `exportLinkKeyByIndex` 0x010F, `getNetworkKeyInfo`, child table; restore through `setInitialSecurityState` + `NO_FRAME_COUNTER_RESET`, `importLinkKey` 0x010E, frame counter values | NV reads of NIB, keys, TCLK table |
+| Backup | `exportKey` 0x0114 (13: `key, status`; 14+: `status, key, context`) for the network key and the hashed TC link key root, `exportLinkKeyByIndex` 0x010F (13: `eui, key, metadata, status`; 14+: `status, context, key, metadata`), `getNetworkKeyInfo`, `getValue(APS_FRAME_COUNTER)`, child table; restore through the custom/restored EUI64 token, `setValue` NWK/APS frame counters, `setInitialSecurityState` + `NO_FRAME_COUNTER_RESET`, `importLinkKey` 0x010E, `formNetwork`, `setChildData`, NCP resets (`docs/ezsp-backend.md`) | NV reads of NIB, keys, TCLK table |
 | Firmware update | follow-up: `launchStandaloneBootloader` 0x008F + XMODEM GBL | TI ROM BSL (reset + backdoor lines) |
 
 **Conclusions:**
@@ -719,8 +725,11 @@ zrhp = ["dep:hub-ncp"]
   adopt/clear with `confirm`, or `network/reset` with "RESET". Records
   the hub makes before its first network (rules, groups) and the tag of a
   form that failed thus stay the hub's own across restarts. A
-  restore on an `NcpNv` backend (none restores yet) will need the backup's
-  extended PAN ID for the same tag. A `DeviceLeft` keeps the device (EZSP does not say
+  restore on an `NcpNv` backend (EZSP) is checked by the backend first
+  (`restore_check`), then the NCP's stored network is left and the records
+  are tagged with the backup's extended PAN ID before the backend restores
+  it; it needs `force` over a stored network and over records of another
+  network (`Records::may_restore`). A `DeviceLeft` keeps the device (EZSP does not say
   whether it rejoins): the engine marks it unavailable with
   `unavailable_reason: "left"` (`device_updated`, its entities' states)
   until its next frame or rejoin; removal stays the operator's

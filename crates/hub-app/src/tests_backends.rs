@@ -881,3 +881,351 @@ fn an_ncp_that_appends_bytes_to_incoming_messages_still_interviews() {
     assert_eq!(ok(&dev)["model"], "SIM-PLUG");
     rig.finish();
 }
+
+/// The factory IEEE of the dongle a network moves to.
+const NEW_DONGLE: u64 = 0x000B_57FF_FE65_4321;
+
+/// EZSP: a backup of the hub's network (bellows' and Z2M's form) restores
+/// onto a new dongle. The coordinator IEEE goes to the new NCP's one-time
+/// token only with `confirm_ieee_write_once`; refused, nothing changes.
+/// Restored, the frame counters are the backup's plus the margin, the
+/// records are tagged with the restored network and device traffic flows.
+#[test]
+fn ezsp_backup_restores_onto_a_new_dongle() {
+    let mut src = ezsp_sim(true, 0xDD);
+    src.network_key = [0x6E; 16];
+    src.nwk_frame_counter = 50_000;
+    src.network.nwk_update_id = 2;
+    let rig = Rig::ezsp(src, Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    let b = call(&rig.app, sid, &rx, 1, json!({"type": "network/backup"}));
+    let backup = ok(&b).clone();
+    assert_eq!(backup["metadata"]["internal"]["ezspVersion"], 13, "{backup}");
+    assert_eq!(backup["coordinator_ieee"], "000b57fffe123456");
+    assert_eq!(backup["network_key"]["key"], "6e".repeat(16));
+    assert_eq!(backup["network_key"]["frame_counter"], 50_000);
+    assert_eq!(backup["stack_specific"]["ezsp"]["hashed_tclk"], "3c".repeat(16));
+    assert_eq!(backup["metadata"]["internal"]["network"]["tc_link_key"]["key"], "5a6967426565416c6c69616e63653039");
+    rig.finish();
+
+    let mut dst = ezsp_sim(false, 0xDD);
+    dst.eui64 = Eui64::from_u64(NEW_DONGLE);
+    let rig = Rig::ezsp(dst, Store::volatile());
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    let coordinator = |rig: &Rig| ok(&call(&rig.app, sid, &rx, 70, json!({"type": "hub/info"})))["coordinator_ieee"].clone();
+    assert_eq!(coordinator(&rig), "000b57fffe654321", "the new dongle's own IEEE");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup}));
+    assert_eq!(r["error"]["code"], "invalid_value", "{r}");
+    let why = r["error"]["message"].as_str().unwrap();
+    assert!(why.contains("confirm_ieee_write_once") && why.contains("only once"), "{why}");
+    assert!(sim.ncp(|n| !n.config().network_formed && n.config().custom_eui64.is_none()), "nothing written");
+    assert_eq!(rig.tag(), None, "the records untouched");
+
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "confirm_ieee_write_once": true}));
+    let rep = ok(&r);
+    assert_eq!((&rep["pan_id"], &rep["channel"]), (&json!(0x1A62), &json!(15)), "{rep}");
+    assert_eq!(rep["nwk_fc_start"], 60_000, "the backup's counter plus 10 000");
+    assert!(rep["notes"].as_array().unwrap().iter().any(|n| n["note"] == "ieee_written_once"), "{rep}");
+    let n = sim.ncp(|n| n.config().clone());
+    assert_eq!(n.custom_eui64, Some(Eui64::from_u64(0x000B_57FF_FE12_3456)));
+    assert_eq!((n.network_key, n.nwk_frame_counter, n.tc_link_key), ([0x6E; 16], 60_000, [0x3C; 16]));
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ownership"] == "owned" && i["registry"]["state"] == "owned"
+    });
+    let t = rig.tag().unwrap();
+    assert_eq!((t.ext_pan_id, t.coordinator_ieee), ([0xDD; 8], 0x000B_57FF_FE12_3456u64.to_le_bytes()), "tag rewritten");
+    // Binds and the IAS CIE address name the coordinator the devices know.
+    assert_eq!(coordinator(&rig), "000b57fffe123456", "the restored IEEE in hub/info");
+    assert!(t.key_id.is_some());
+    ok(&call(&rig.app, sid, &rx, 4, json!({"type": "network/permit_join", "duration_s": 30})));
+    wait("joining open", || rig.link.permit_open());
+    rig.finish();
+}
+
+/// EZSP (`NcpNv`): a restore over a network the NCP stores needs `force`,
+/// over records of another network `confirm` (they are re-tagged);
+/// refused, neither the NCP nor the records change. Confirmed, the records
+/// are tagged with the restored network.
+#[test]
+fn ezsp_restore_over_another_network_needs_force() {
+    // The backup of network DD, by a coordinator with the sims' IEEE.
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+
+    // The NCP runs network EE, the records are its.
+    let flash = SharedFlash::new();
+    let rig = Rig::ezsp(ezsp_sim(true, 0xEE), flash.store());
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup}));
+    assert!(r["error"]["message"].as_str().unwrap().contains("set force "), "{r}");
+    // The NCP's network may go, but the records are network EE's: a
+    // distinct refusal, its own confirmation.
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true}));
+    assert_eq!(r["error"]["code"], "registry_read_only", "{r}");
+    assert!(r["error"]["message"].as_str().unwrap().contains("set confirm "), "{r}");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xEE; 8]));
+    assert_eq!(sim.ncp(|n| n.config().network.extended_pan_id), [0xEE; 8]);
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    assert_eq!(ok(&r)["previous_network_backed_up"], true, "{r}");
+    assert_eq!(r["result"]["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the replaced network's backup");
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        epid_of(&i) == [0xDD; 8] && i["ownership"] == "owned" && i["registry"]["state"] == "owned"
+    });
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    rig.finish();
+
+    // The NCP lost its network, the records are still network EE's.
+    let mut s = flash.store();
+    let ee = NetworkIdentity {
+        ext_pan_id: [0xEE; 8],
+        key_id: None,
+        pan_id: 0x1A62,
+        channel: 15,
+        key_seq: 0,
+        coordinator_ieee: [0; 8],
+    };
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Ezsp, Some(ee)).encode().as_bytes()).unwrap();
+    drop(s);
+    let rig = Rig::ezsp(ezsp_sim(false, 0xEE), flash.store());
+    let (sid, rx) = session(&rig.app);
+    assert_eq!(info(&rig.app, sid, &rx)["ownership"], "no_network");
+    let r = call(&rig.app, sid, &rx, 4, json!({"type": "network/restore", "backup": backup}));
+    let why = r["error"]["message"].as_str().unwrap_or_default();
+    assert_eq!(r["error"]["code"], "registry_read_only", "{r}");
+    assert!(why.contains("re-tags") && why.contains("set confirm ") && !why.contains("force"), "{r}");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xEE; 8]), "the tag kept");
+    ok(&call(&rig.app, sid, &rx, 5, json!({"type": "network/restore", "backup": backup, "confirm": true})));
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    rig.finish();
+}
+
+/// EZSP: the network a restore replaces is backed up first; when the
+/// records are another backend's (foreign, closed) the backup cannot be
+/// kept, so it comes back in the answer, or the restore is refused.
+#[test]
+fn ezsp_restore_over_foreign_records_returns_the_replaced_networks_backup() {
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+
+    let mut s = Store::volatile();
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+    let mut ee = ezsp_sim(true, 0xEE);
+    ee.network_key = [0x5E; 16];
+    let rig = Rig::ezsp(ee, s);
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    let rep = ok(&r);
+    assert_eq!(rep["previous_network_backed_up"], true, "{rep}");
+    assert_eq!(rep["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "returned: it could not be kept");
+    assert_eq!(rep["backup"]["network_key"]["key"], "5e".repeat(16));
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    let last = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/last"}));
+    assert_ne!(ok(&last)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the closed records kept nothing of it");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["backup"], rep["backup"], "kept, whatever the gate");
+    rig.finish();
+}
+
+/// The network of EE over another backend's (foreign, closed) records, and
+/// the backup of network DD (the sims' IEEE).
+fn foreign_ee(max_tx_power: Option<i8>) -> (Rig, J) {
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+    let mut s = Store::volatile();
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+    let mut ee = ezsp_sim(true, 0xEE);
+    ee.network_key = [0x5E; 16];
+    ee.max_tx_power = max_tx_power;
+    let rig = Rig::ezsp(ee, s);
+    (rig, backup)
+}
+
+/// A restore or reset that fails after leaving the network (the NCP forms
+/// at no TX power) over closed records: the replaced network's backup is in
+/// the error frame and kept (`network/backup/replaced`), for another
+/// session too.
+#[test]
+fn ezsp_a_replacement_that_fails_after_the_leave_keeps_the_replaced_network() {
+    for what in ["restore", "reset"] {
+        let (rig, backup) = foreign_ee(Some(-30));
+        let sim = rig.ezsp.clone().unwrap();
+        let (sid, rx) = session(&rig.app);
+        wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+        let req = if what == "restore" {
+            json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true})
+        } else {
+            json!({"type": "network/reset", "confirm": "RESET", "channel": 15})
+        };
+        let r = call(&rig.app, sid, &rx, 2, req);
+        assert_eq!(r["success"], false, "{what}: {r}");
+        assert_eq!(r["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "{what}: in the error frame");
+        assert_eq!(r["backup"]["network_key"]["key"], "5e".repeat(16));
+        assert!(sim.ncp(|n| !n.config().network_formed), "{what}: the network was left");
+        let (sid2, rx2) = session(&rig.app);
+        let kept = call(&rig.app, sid2, &rx2, 3, json!({"type": "network/backup/replaced"}));
+        assert_eq!(ok(&kept)["backup"], r["backup"], "{what}: kept");
+        rig.finish();
+    }
+}
+
+/// The session that started a restore is gone (a page reload) before the
+/// answer: the replaced network's backup is not lost with it.
+#[test]
+fn ezsp_the_replaced_networks_backup_survives_the_requesting_session() {
+    let (rig, backup) = foreign_ee(None);
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let req = json!({"id": 2, "type": "network/restore", "backup": backup, "force": true, "confirm": true});
+    rig.app.text(sid, req.to_string());
+    rig.app.disconnect(sid);
+    drop(rx);
+    let (sid, rx) = session(&rig.app);
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ext_pan_id"] == "dddddddddddddddd" && i["registry"]["state"] == "owned"
+    });
+    let kept = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "{kept}");
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
+    rig.finish();
+}
+
+/// Network DD restored over EE (foreign records), then restored again
+/// while the NCP runs DD (the retry after a restore that failed late, the
+/// NCP back with DD): the half-restored DD is not another network to
+/// keep, and EE's kept backup stays.
+#[test]
+fn ezsp_a_retry_over_the_restored_network_keeps_the_replaced_one() {
+    let (rig, backup) = foreign_ee(None);
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let first = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    assert_eq!(ok(&first)["previous_network_backed_up"], true, "{first}");
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    let again = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true}));
+    assert_eq!(ok(&again)["backup"]["extended_pan_id"], "dddddddddddddddd", "{again}");
+    assert_eq!(ok(&again)["previous_network_backed_up"], true, "as the last backup: {again}");
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["replaced"], json!(["eeeeeeeeeeeeeeee"]), "{kept}");
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
+    rig.finish();
+}
+
+/// An automatic backup without the network key (the NCP's key export
+/// locked) neither replaces a kept one nor lets the network go: refused,
+/// unless `skip_backup`.
+#[test]
+fn ezsp_an_incomplete_automatic_backup_is_refused() {
+    let (rig, backup) = foreign_ee(None);
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    ok(&call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true})));
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    sim.ncp(|n| n.config_mut().key_exportable = false);
+    let reset = json!({"type": "network/reset", "confirm": "RESET", "channel": 15});
+    let r = call(&rig.app, sid, &rx, 3, reset.clone());
+    assert_eq!(r["error"]["code"], "backup_incomplete", "{r}");
+    assert!(sim.ncp(|n| n.config().network_formed && n.config().network.extended_pan_id == [0xDD; 8]), "nothing changed");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["replaced"], json!(["eeeeeeeeeeeeeeee"]), "{kept}");
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
+    let mut skip = reset;
+    skip["skip_backup"] = json!(true);
+    ok(&call(&rig.app, sid, &rx, 5, skip));
+    rig.finish();
+}
+
+/// Every network a reset replaces keeps its backup, the last
+/// REPLACED_KEPT of them, newest first; `ext_pan_id` picks one.
+#[test]
+fn ezsp_replaced_networks_keep_their_backups() {
+    let rig = Rig::ezsp(ezsp_sim(true, 0xEE), Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    for (i, e) in ["11", "22", "33", "44"].into_iter().enumerate() {
+        let r = call(&rig.app, sid, &rx, 2 + i as u64, json!({"type": "network/reset", "confirm": "RESET", "channel": 15, "ext_pan_id": e.repeat(8)}));
+        assert_eq!(ok(&r)["network"]["ext_pan_id"], e.repeat(8), "{r}");
+        wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    }
+    let kept = call(&rig.app, sid, &rx, 10, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["replaced"], json!(["3".repeat(16), "2".repeat(16), "1".repeat(16)]), "EE's went first: {kept}");
+    assert_eq!(ok(&kept)["backup"]["extended_pan_id"], "3".repeat(16));
+    let one = call(&rig.app, sid, &rx, 11, json!({"type": "network/backup/replaced", "ext_pan_id": "1".repeat(16)}));
+    assert_eq!(ok(&one)["backup"]["extended_pan_id"], "1".repeat(16), "{one}");
+    let gone = call(&rig.app, sid, &rx, 12, json!({"type": "network/backup/replaced", "ext_pan_id": "EE".repeat(8)}));
+    assert_eq!(gone["error"]["code"], "not_found", "{gone}");
+    rig.finish();
+}
+
+/// The NCP runs network DD with another key than the backup of DD
+/// (`[0x5E; 16]`), over the hub's own records or another backend's
+/// (closed); `key_exportable` as the NCP's.
+fn dd_rekeyed(foreign: bool, key_exportable: bool) -> (Rig, J) {
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+    let mut s = Store::volatile();
+    if foreign {
+        s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+    }
+    let mut dd = ezsp_sim(true, 0xDD);
+    dd.network_key = [0x5E; 16];
+    dd.key_exportable = key_exportable;
+    (Rig::ezsp(dd, s), backup)
+}
+
+/// A restore of DD over the NCP's network DD with another key: another
+/// network, kept as a replaced one (over closed records, which keep no
+/// last backup, and over the hub's own), not skipped as a retry.
+#[test]
+fn ezsp_the_same_extended_pan_id_with_another_key_is_kept() {
+    for foreign in [true, false] {
+        let (rig, backup) = dd_rekeyed(foreign, true);
+        let (sid, rx) = session(&rig.app);
+        let state = if foreign { "foreign" } else { "owned" };
+        wait(state, || info(&rig.app, sid, &rx)["registry"]["state"] == state);
+        let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+        assert_eq!(ok(&r)["previous_network_backed_up"], true, "{r}");
+        wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+        let kept = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/replaced"}));
+        assert_eq!(ok(&kept)["replaced"], json!(["d".repeat(16)]), "foreign {foreign}: {kept}");
+        assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16), "the replaced key");
+        rig.finish();
+    }
+}
+
+/// The same network DD, its key not exportable, over closed records: the
+/// automatic backup is incomplete and refused, also when the backup to
+/// restore has the same extended PAN ID.
+#[test]
+fn ezsp_an_incomplete_backup_of_the_same_extended_pan_id_is_refused() {
+    let (rig, backup) = dd_rekeyed(true, false);
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    assert_eq!(r["error"]["code"], "backup_incomplete", "{r}");
+    assert!(sim.ncp(|n| n.config().network_formed && n.config().network_key == [0x5E; 16]), "nothing changed");
+    rig.finish();
+}

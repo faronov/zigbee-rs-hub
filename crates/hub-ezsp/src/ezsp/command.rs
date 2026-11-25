@@ -35,6 +35,7 @@ pub mod id {
     pub const CALLBACK: u16 = 0x0006;
     pub const NO_CALLBACKS: u16 = 0x0007;
     pub const GET_MFG_TOKEN: u16 = 0x000B;
+    pub const SET_MFG_TOKEN: u16 = 0x000C;
     pub const SET_CONCENTRATOR: u16 = 0x0010;
     pub const NETWORK_INIT: u16 = 0x0017;
     pub const NETWORK_STATE: u16 = 0x0018;
@@ -73,6 +74,7 @@ pub mod id {
     pub const SET_MULTICAST_TABLE_ENTRY: u16 = 0x0064;
     pub const READ_AND_CLEAR_COUNTERS: u16 = 0x0065;
     pub const SET_INITIAL_SECURITY_STATE: u16 = 0x0068;
+    pub const GET_CURRENT_SECURITY_STATE: u16 = 0x0069;
     pub const CLEAR_TRANSIENT_LINK_KEYS: u16 = 0x006B;
     pub const GET_NEIGHBOR: u16 = 0x0079;
     pub const NEIGHBOR_COUNT: u16 = 0x007A;
@@ -84,16 +86,21 @@ pub mod id {
     pub const ENERGY_SCAN_REQUEST: u16 = 0x009C;
     pub const GET_VALUE: u16 = 0x00AA;
     pub const SET_VALUE: u16 = 0x00AB;
+    pub const SET_CHILD_DATA: u16 = 0x00AC;
+    pub const CLEAR_KEY_TABLE: u16 = 0x00B1;
     pub const INCOMING_NETWORK_STATUS_HANDLER: u16 = 0x00C4;
     pub const READ_COUNTERS: u16 = 0x00F1;
+    pub const GET_TOKEN_DATA: u16 = 0x0102;
+    pub const SET_TOKEN_DATA: u16 = 0x0103;
+    pub const IMPORT_LINK_KEY: u16 = 0x010E;
+    pub const EXPORT_LINK_KEY_BY_INDEX: u16 = 0x010F;
     pub const IMPORT_TRANSIENT_KEY: u16 = 0x0111;
     pub const EXPORT_KEY: u16 = 0x0114;
     pub const GET_NETWORK_KEY_INFO: u16 = 0x0116;
 
-    // Not typed yet (Green Power and backup/restore follow-ups); the IDs
-    // are the same in EZSP 13–18 (`ezsp-enum.h` of Gecko SDK 4.4.6 and
-    // Simplicity SDK 2024.6.0 / 2025.6.3).
-    pub const GET_CURRENT_SECURITY_STATE: u16 = 0x0069;
+    // Not typed yet (Green Power follow-up); the IDs are the same in EZSP
+    // 13–18 (`ezsp-enum.h` of Gecko SDK 4.4.6 and Simplicity SDK 2024.6.0
+    // / 2025.6.3).
     pub const GP_SINK_TABLE_INIT: u16 = 0x0070;
     pub const GPEP_INCOMING_MESSAGE_HANDLER: u16 = 0x00C5;
     pub const D_GP_SEND: u16 = 0x00C6;
@@ -103,8 +110,6 @@ pub mod id {
     pub const GP_SINK_TABLE_SET_ENTRY: u16 = 0x00DF;
     pub const GP_SINK_COMMISSION: u16 = 0x010A;
     pub const GET_APS_KEY_INFO: u16 = 0x010C;
-    pub const IMPORT_LINK_KEY: u16 = 0x010E;
-    pub const EXPORT_LINK_KEY_BY_INDEX: u16 = 0x010F;
 }
 
 /// `EMBER_NULL_NODE_ID` / `SL_ZIGBEE_NULL_NODE_ID`: no alias.
@@ -345,8 +350,42 @@ pub enum Command {
     GetMfgToken {
         token: MfgTokenId,
     },
+    /// `setMfgToken`: only while the token is erased (once).
+    SetMfgToken {
+        token: MfgTokenId,
+        data: Vec<u8>,
+    },
     LookupNodeIdByEui64 {
         eui64: Eui64,
+    },
+    GetCurrentSecurityState,
+    /// `exportLinkKeyByIndex` (EZSP 13) / `secManExportLinkKeyByIndex`
+    /// (EZSP ≥ 14): the key table entry `index`.
+    ExportLinkKeyByIndex {
+        index: u8,
+    },
+    /// `importLinkKey` / `secManImportLinkKey`: same layout in 13–18.
+    ImportLinkKey {
+        index: u8,
+        eui64: Eui64,
+        key: KeyData,
+    },
+    ClearKeyTable,
+    /// `getTokenData` (token interface): `token` is a creator or NVM3 key
+    /// ([`token`]).
+    GetTokenData {
+        token: u32,
+        index: u32,
+    },
+    SetTokenData {
+        token: u32,
+        index: u32,
+        data: Vec<u8>,
+    },
+    /// `setChildData`: writes the child table token entry `index`.
+    SetChildData {
+        index: u8,
+        data: ChildData,
     },
     /// Any other frame; parameters are passed through.
     Raw {
@@ -378,6 +417,22 @@ fn payload(w: &mut Writer, m: &[u8]) -> Result<(), EncodeError> {
     }
     w.len_prefixed(m);
     Ok(())
+}
+
+/// `EmberTokenData` / `sl_zigbee_token_data_t` on the wire: `size` as a u32,
+/// then `size` bytes (the generated code casts it to `uint8_t`).
+fn token_data(w: &mut Writer, d: &[u8]) -> Result<(), EncodeError> {
+    if d.len() > 255 {
+        return Err(EncodeError::TooLong(d.len()));
+    }
+    w.u32(d.len() as u32);
+    w.bytes(d);
+    Ok(())
+}
+
+fn read_token_data(r: &mut Reader<'_>) -> Result<Vec<u8>, DecodeError> {
+    let size = r.u32()? as u8;
+    Ok(r.bytes(usize::from(size))?.to_vec())
 }
 
 impl Command {
@@ -425,6 +480,14 @@ impl Command {
             Command::GetRandomNumber => id::GET_RANDOM_NUMBER,
             Command::GetMfgToken { .. } => id::GET_MFG_TOKEN,
             Command::LookupNodeIdByEui64 { .. } => id::LOOKUP_NODE_ID_BY_EUI64,
+            Command::SetMfgToken { .. } => id::SET_MFG_TOKEN,
+            Command::GetCurrentSecurityState => id::GET_CURRENT_SECURITY_STATE,
+            Command::ExportLinkKeyByIndex { .. } => id::EXPORT_LINK_KEY_BY_INDEX,
+            Command::ImportLinkKey { .. } => id::IMPORT_LINK_KEY,
+            Command::ClearKeyTable => id::CLEAR_KEY_TABLE,
+            Command::GetTokenData { .. } => id::GET_TOKEN_DATA,
+            Command::SetTokenData { .. } => id::SET_TOKEN_DATA,
+            Command::SetChildData { .. } => id::SET_CHILD_DATA,
             Command::Raw { frame_id, .. } => *frame_id,
         }
     }
@@ -472,7 +535,9 @@ impl Command {
             | Command::ReadAndClearCounters
             | Command::GetNetworkKeyInfo
             | Command::ClearTransientLinkKeys
-            | Command::GetRandomNumber => {}
+            | Command::GetRandomNumber
+            | Command::GetCurrentSecurityState
+            | Command::ClearKeyTable => {}
             Command::SetPolicy { policy, decision } => {
                 w.u8(policy.0);
                 w.u8(*decision);
@@ -538,7 +603,30 @@ impl Command {
                 w.u16(*count);
             }
             Command::GetMfgToken { token } => w.u8(token.0),
+            Command::SetMfgToken { token, data } => {
+                w.u8(token.0);
+                payload(&mut w, data)?;
+            }
             Command::LookupNodeIdByEui64 { eui64 } => w.bytes(&eui64.0),
+            Command::ExportLinkKeyByIndex { index } => w.u8(*index),
+            Command::ImportLinkKey { index, eui64, key } => {
+                w.u8(*index);
+                w.bytes(&eui64.0);
+                w.bytes(key);
+            }
+            Command::GetTokenData { token, index } => {
+                w.u32(*token);
+                w.u32(*index);
+            }
+            Command::SetTokenData { token, index, data } => {
+                w.u32(*token);
+                w.u32(*index);
+                token_data(&mut w, data)?;
+            }
+            Command::SetChildData { index, data } => {
+                w.u8(*index);
+                data.write(&mut w);
+            }
             Command::PermitJoining { duration } => w.u8(*duration),
             Command::SendUnicast {
                 kind,
@@ -782,6 +870,31 @@ impl Command {
             id::LOOKUP_NODE_ID_BY_EUI64 => Command::LookupNodeIdByEui64 {
                 eui64: Eui64(r.array()?),
             },
+            id::SET_MFG_TOKEN => Command::SetMfgToken {
+                token: MfgTokenId(r.u8()?),
+                data: r.len_prefixed()?,
+            },
+            id::GET_CURRENT_SECURITY_STATE => Command::GetCurrentSecurityState,
+            id::EXPORT_LINK_KEY_BY_INDEX => Command::ExportLinkKeyByIndex { index: r.u8()? },
+            id::IMPORT_LINK_KEY => Command::ImportLinkKey {
+                index: r.u8()?,
+                eui64: Eui64(r.array()?),
+                key: r.array()?,
+            },
+            id::CLEAR_KEY_TABLE => Command::ClearKeyTable,
+            id::GET_TOKEN_DATA => Command::GetTokenData {
+                token: r.u32()?,
+                index: r.u32()?,
+            },
+            id::SET_TOKEN_DATA => Command::SetTokenData {
+                token: r.u32()?,
+                index: r.u32()?,
+                data: read_token_data(&mut r)?,
+            },
+            id::SET_CHILD_DATA => Command::SetChildData {
+                index: r.u8()?,
+                data: ChildData::read(&mut r)?,
+            },
             _ => return Ok(None),
         };
         r.finish()?;
@@ -937,6 +1050,39 @@ pub enum Response {
         status: Option<Status>,
         node_id: NodeId,
     },
+    SetMfgToken {
+        status: Status,
+    },
+    GetCurrentSecurityState {
+        status: Status,
+        state: CurrentSecurityState,
+    },
+    /// `sl_status_t` in every version. EZSP 13 sends `eui64, key,
+    /// metadata, status`; EZSP ≥ 14 `status, context, key, metadata` (the
+    /// partner's EUI64 is the context's; `context` is `None` for 13).
+    ExportLinkKeyByIndex {
+        status: Status,
+        eui64: Eui64,
+        key: KeyData,
+        metadata: ApsKeyMetadata,
+        context: Option<SecManContext>,
+    },
+    ImportLinkKey {
+        status: Status,
+    },
+    ClearKeyTable {
+        status: Status,
+    },
+    GetTokenData {
+        status: Status,
+        data: Vec<u8>,
+    },
+    SetTokenData {
+        status: Status,
+    },
+    SetChildData {
+        status: Status,
+    },
     /// `invalidCommand` (0x0058): the NCP rejected the command.
     InvalidCommand {
         reason: EzspStatus,
@@ -993,6 +1139,14 @@ impl Response {
             Response::GetRandomNumber { .. } => id::GET_RANDOM_NUMBER,
             Response::GetMfgToken { .. } => id::GET_MFG_TOKEN,
             Response::LookupNodeIdByEui64 { .. } => id::LOOKUP_NODE_ID_BY_EUI64,
+            Response::SetMfgToken { .. } => id::SET_MFG_TOKEN,
+            Response::GetCurrentSecurityState { .. } => id::GET_CURRENT_SECURITY_STATE,
+            Response::ExportLinkKeyByIndex { .. } => id::EXPORT_LINK_KEY_BY_INDEX,
+            Response::ImportLinkKey { .. } => id::IMPORT_LINK_KEY,
+            Response::ClearKeyTable { .. } => id::CLEAR_KEY_TABLE,
+            Response::GetTokenData { .. } => id::GET_TOKEN_DATA,
+            Response::SetTokenData { .. } => id::SET_TOKEN_DATA,
+            Response::SetChildData { .. } => id::SET_CHILD_DATA,
             Response::InvalidCommand { .. } => id::INVALID_COMMAND,
             Response::Raw { frame_id, .. } => *frame_id,
         }
@@ -1029,10 +1183,27 @@ impl Response {
             | Response::ImportTransientKey { status }
             | Response::SetConcentrator { status }
             | Response::EnergyScanRequest { status }
-            | Response::GetRandomNumber { status, .. } => Some(*status),
+            | Response::GetRandomNumber { status, .. }
+            | Response::SetMfgToken { status }
+            | Response::GetCurrentSecurityState { status, .. }
+            | Response::ExportLinkKeyByIndex { status, .. }
+            | Response::ImportLinkKey { status }
+            | Response::ClearKeyTable { status }
+            | Response::GetTokenData { status, .. }
+            | Response::SetTokenData { status }
+            | Response::SetChildData { status } => Some(*status),
             Response::LookupNodeIdByEui64 { status, .. } => *status,
             _ => None,
         }
+    }
+
+    /// The response carries key material (network, trust center or link
+    /// keys): never formatted into logs or errors.
+    pub fn has_secret(&self) -> bool {
+        matches!(
+            self,
+            Response::ExportKey { .. } | Response::ExportLinkKeyByIndex { .. }
+        )
     }
 
     /// Host side: decodes the response with frame ID `frame_id`.
@@ -1191,6 +1362,52 @@ impl Response {
                 },
                 node_id: r.u16()?,
             },
+            id::SET_MFG_TOKEN => Response::SetMfgToken {
+                status: st(&mut r, Ember)?,
+            },
+            id::GET_CURRENT_SECURITY_STATE => Response::GetCurrentSecurityState {
+                status: st(&mut r, Ember)?,
+                state: CurrentSecurityState::read(&mut r)?,
+            },
+            id::EXPORT_LINK_KEY_BY_INDEX if v.simplicity_layout() => {
+                let status = st(&mut r, Sl)?;
+                let context = SecManContext::read(&mut r)?;
+                Response::ExportLinkKeyByIndex {
+                    status,
+                    eui64: context.eui64,
+                    key: r.array()?,
+                    metadata: ApsKeyMetadata::read(&mut r)?,
+                    context: Some(context),
+                }
+            }
+            id::EXPORT_LINK_KEY_BY_INDEX => {
+                let eui64 = Eui64(r.array()?);
+                let key = r.array()?;
+                let metadata = ApsKeyMetadata::read(&mut r)?;
+                Response::ExportLinkKeyByIndex {
+                    status: st(&mut r, Sl)?,
+                    eui64,
+                    key,
+                    metadata,
+                    context: None,
+                }
+            }
+            id::IMPORT_LINK_KEY => Response::ImportLinkKey {
+                status: st(&mut r, Sl)?,
+            },
+            id::CLEAR_KEY_TABLE => Response::ClearKeyTable {
+                status: st(&mut r, Ember)?,
+            },
+            id::GET_TOKEN_DATA => Response::GetTokenData {
+                status: st(&mut r, Ember)?,
+                data: read_token_data(&mut r)?,
+            },
+            id::SET_TOKEN_DATA => Response::SetTokenData {
+                status: st(&mut r, Ember)?,
+            },
+            id::SET_CHILD_DATA => Response::SetChildData {
+                status: st(&mut r, Ember)?,
+            },
             id::INVALID_COMMAND => Response::InvalidCommand {
                 reason: EzspStatus(r.u8()?),
             },
@@ -1325,6 +1542,40 @@ impl Response {
                     _ => return Err(EncodeError::WrongLayout("lookupNodeIdByEui64")),
                 }
                 w.u16(*node_id);
+            }
+            Response::SetMfgToken { status }
+            | Response::ClearKeyTable { status }
+            | Response::SetTokenData { status }
+            | Response::SetChildData { status } => st(&mut w, status, Ember)?,
+            Response::GetCurrentSecurityState { status, state } => {
+                st(&mut w, status, Ember)?;
+                state.write(&mut w);
+            }
+            Response::ExportLinkKeyByIndex {
+                status,
+                eui64,
+                key,
+                metadata,
+                context,
+            } => match (v.simplicity_layout(), context) {
+                (true, Some(context)) => {
+                    st(&mut w, status, Sl)?;
+                    context.write(&mut w);
+                    w.bytes(key);
+                    metadata.write(&mut w);
+                }
+                (false, None) => {
+                    w.bytes(&eui64.0);
+                    w.bytes(key);
+                    metadata.write(&mut w);
+                    st(&mut w, status, Sl)?;
+                }
+                _ => return Err(EncodeError::WrongLayout("exportLinkKeyByIndex")),
+            },
+            Response::ImportLinkKey { status } => st(&mut w, status, Sl)?,
+            Response::GetTokenData { status, data } => {
+                st(&mut w, status, Ember)?;
+                token_data(&mut w, data)?;
             }
             Response::InvalidCommand { reason } => w.u8(reason.0),
             Response::Raw { params, .. } => w.bytes(params),

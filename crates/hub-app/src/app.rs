@@ -1433,17 +1433,23 @@ impl Runner {
         }
     }
 
-    /// Coordinator IEEE, once per process, when the first session is up
-    /// (the backend has registered the hub endpoint by then).
+    /// Every session: the coordinator IEEE (a restore may give the NCP the
+    /// backup's: binds and the IAS CIE address follow it) and the NCP's
+    /// board. Once per process, when the first session is up (the backend
+    /// has registered the hub endpoint by then): the hub endpoint and the
+    /// automations.
     fn register(&mut self, info: &NcpInfo) {
-        if self.registered {
-            return;
-        }
-        if let Some(ieee) = info.ieee {
-            self.engine.cfg.coordinator_ieee = u64::from_le_bytes(ieee);
-            self.api.set_info("coordinator_ieee", format!("{:016x}", self.engine.cfg.coordinator_ieee).into());
+        if let Some(ieee) = info.ieee.map(u64::from_le_bytes) {
+            if self.registered && ieee != self.engine.cfg.coordinator_ieee {
+                info!("app: coordinator now {ieee:016X} (was {:016X})", self.engine.cfg.coordinator_ieee);
+            }
+            self.engine.cfg.coordinator_ieee = ieee;
+            self.api.set_info("coordinator_ieee", format!("{ieee:016x}").into());
             self.api.set_info("ncp_board", info.board.clone().into());
             self.api.set_info("ncp_product", info.product.clone().into());
+        }
+        if self.registered {
+            return;
         }
         self.registered = true;
         self.engine.cfg.hub_endpoint = self.cfg.endpoint.ep;

@@ -271,7 +271,7 @@ function onMsg(m,tok){
   ]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
- if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
+ if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.backup)saveBackup(m.backup);if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
 // ota:start
  if(m.type=="ota/block_needed"){uiDo("ota",()=>otNeed(m));return}
@@ -561,13 +561,13 @@ function asShow(r){asNets=r.networks;$("#ast").textContent="took "+sec(r.duratio
  $("#as").textContent="";$("#as").append(asNets.length?t:el("p",{class:"mut"},"No other Zigbee networks heard."));drawScan()}
 $("#bkb").onclick=e=>busy(e.target,act("network/backup",{}).then(b=>{saveBackup(b);$("#bks").textContent="Backup of PAN "+b.pan_id+": "+b.devices.length+" devices"+(b.network_key?"":" — incomplete (no keys), cannot be restored")})).catch(()=>{});
 $("#bkl").onclick=()=>act("network/backup/last").then(r=>r.backup?saveBackup(r.backup):toast("No backup yet")).catch(()=>{});
-async function upload(b,force){const d=b.devices||[],n=8;let r=await call("network/restore",{backup:Object.assign({},b,{devices:d.slice(0,n)}),force,more:d.length>n});for(let o=n;o<d.length;o+=n)r=await call("network/restore",{devices:d.slice(o,o+n),more:o+n<d.length});return r}
+async function upload(b,q){const d=b.devices||[],n=8;let r=await call("network/restore",{backup:Object.assign({},b,{devices:d.slice(0,n)}),...q,more:d.length>n});for(let o=n;o<d.length;o+=n)r=await call("network/restore",{devices:d.slice(o,o+n),more:o+n<d.length});return r}
 $("#rsf").onchange=async e=>{
  const f=e.target.files[0];e.target.value="";if(!f)return;const t=await f.text();let b;try{b=JSON.parse(t)}catch{return toast("Not a JSON file")}
  if(!confirm("Restore network PAN "+b.pan_id+", channel "+b.channel+" with "+(b.devices||[]).length+" devices onto this hub's radio? Never run the old coordinator at the same time."))return;
  $("#bks").textContent="restoring…";
- try{let r=await upload(b,false).catch(err=>{if(/force/.test(err.message)&&confirm("The radio runs a network now. Replace it? It is backed up first."))return upload(b,true);throw err});
-  if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
+ try{const u=q=>upload(b,q).catch(err=>{const m=err.message,k=["force","confirm","confirm_ieee_write_once"].find(k=>!q[k]&&m.includes("set "+k+" "));if(k&&confirm(m+"\n\nGo on?"))return u({...q,[k]:!0});throw err});let r=await u({});
+  if(r&&r.backup)saveBackup(r.backup);if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
  catch(err){$("#bks").textContent="";toast("restore: "+err.message)}};
 $("#nrb").onclick=e=>{
  if($("#nconf").value!="RESET")return toast("Type RESET to confirm");

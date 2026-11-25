@@ -2,6 +2,7 @@
 //! (module docs of [`super`]): the loop, events and the session here,
 //! requests in [`requests`], admin jobs in [`jobs`].
 
+mod backup;
 mod jobs;
 mod requests;
 
@@ -463,6 +464,8 @@ struct Worker<T: Transport, C: Clock> {
     scan: Option<Scan>,
     channel_changed: bool,
     refresh_pending: bool,
+    /// A restore waiting for the session after its NCP reset.
+    restoring: Option<Box<backup::Restoring>>,
     stats: Stats,
     // Link report.
     /// The current start's phases; the last announced one's.
@@ -580,6 +583,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             scan: None,
             channel_changed: false,
             refresh_pending: false,
+            restoring: None,
             stats: Stats::default(),
             times: SessionTimes::default(),
             start: None,
@@ -623,6 +627,10 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 self.refresh_network();
                 continue;
             }
+            if let Some(r) = self.restoring.take() {
+                self.restore_resume(r);
+                continue;
+            }
             if let Some(job) = self.jobs.pop_front() {
                 self.admin(job);
                 continue;
@@ -663,23 +671,30 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         for w in self.zdo.drain(..) {
             w.slot.answer(Answer::Zdo(Err(CoordError::LinkDown)));
         }
+        self.restore_lost();
         self.state = SessionState::Stopped;
         self.publish();
         debug!("ezsp: worker stopped");
     }
 
-    /// Without a session: admin jobs fail at once, a new session is
-    /// started when due, time passes on the host's clock otherwise.
+    /// Without a session: admin jobs fail at once (except behind a
+    /// restore's NCP reset), a new session is started when due, time
+    /// passes on the host's clock otherwise.
     fn while_down(&mut self) {
         self.report(false);
-        for job in self.jobs.drain(..) {
-            job.fail(CoordError::LinkDown);
+        if self.restoring.is_none() {
+            for job in self.jobs.drain(..) {
+                job.fail(CoordError::LinkDown);
+            }
         }
         if !self.holding() {
             self.drop_held_requests();
         }
         if self.now() >= self.retry_at {
             self.start_session();
+            if !self.up {
+                self.restore_lost();
+            }
         } else {
             if self.host.pump(self.opts.poll).is_err() {
                 // A transport that fails at once (adapter unplugged) must

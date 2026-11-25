@@ -1138,6 +1138,32 @@ fn reset_backs_up_leaves_and_forms_a_new_network() {
     app.shutdown();
 }
 
+/// Keys leave the hub only with an API token: without one the automatic
+/// backup of `network/reset` is kept (the network is not lost) but not
+/// answered, and `network/backup/last` refuses as `network/backup` does.
+#[test]
+fn keyed_backups_need_a_token_also_when_kept() {
+    let r = rig(Store::volatile());
+    let app = App::start(r.ncp.clone(), AppConfig { api_token: String::new(), ..AppConfig::default() });
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    let (tx, rx) = mpsc::channel();
+    let sid = app.connect(Box::new(tx)).unwrap();
+    rx.recv_timeout(T).unwrap();
+    app.text(sid, json!({"type": "auth", "token": ""}).to_string());
+    let hello: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+    assert_eq!(hello["type"], "auth_ok", "{hello}");
+    let reset = |id: u64| call(&app, sid, &rx, id, json!({"type": "network/reset", "confirm": "RESET", "channel": 15}));
+    ok(&reset(1));
+    let again = reset(2);
+    assert_eq!(ok(&again)["backup"], J::Null, "no keys in the answer without a token: {again}");
+    assert!(r.ncp.store_state().kv.contains_key(crate::admin::LAST_BACKUP_KEY), "kept in the host store");
+    assert!(r.ncp.store_state().kv.keys().any(|k| k.starts_with(crate::admin::REPLACED_BACKUP_PREFIX)), "kept as the replaced network's");
+    assert_eq!(err_code(&call(&app, sid, &rx, 3, json!({"type": "network/backup/last"}))), "unauthorized");
+    assert_eq!(err_code(&call(&app, sid, &rx, 5, json!({"type": "network/backup/replaced"}))), "unauthorized");
+    assert_eq!(err_code(&call(&app, sid, &rx, 4, json!({"type": "network/backup"}))), "unauthorized");
+    app.shutdown();
+}
+
 #[test]
 fn hub_settings_through_the_platform() {
     let r = rig(Store::volatile());

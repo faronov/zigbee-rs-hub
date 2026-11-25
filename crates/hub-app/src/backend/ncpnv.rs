@@ -445,6 +445,18 @@ impl Records for NcpNvRecords {
         !st.hold && store.kv_get(OWNER_KEY).is_none_or(|t| names_no_network(t, self.backend))
     }
 
+    fn may_restore(&self, ext_pan_id: [u8; 8]) -> bool {
+        let store = self.store();
+        let st = self.state();
+        !st.hold
+            && store.kv_get(OWNER_KEY).is_none_or(|t| {
+                names_no_network(t, self.backend)
+                    || OwnerTag::decode(t).is_some_and(|t| {
+                        t.backend == self.backend.as_str() && t.identity.is_some_and(|n| n.ext_pan_id == ext_pan_id)
+                    })
+            })
+    }
+
     fn ownership(&self, reported: &NetworkOwnership) -> Option<NetworkOwnership> {
         let NetworkOwnership::Observed(n) = reported else { return None };
         let st = self.state();
