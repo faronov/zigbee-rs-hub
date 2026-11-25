@@ -373,9 +373,10 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
    `network/backup/replaced` with an API token, and in the error frame of
    a restore or reset that fails after the leave), the stored network
    left, the records tagged and the backup restored. A backup without the
-   network key is refused (`backup_incomplete`) unless `skip_backup`; the
-   NCP running the backup's own network (a retry after a restore that
-   failed late) is not kept as a replaced network. Every session's `Up` sets the
+   network key is refused (`backup_incomplete`) unless `skip_backup`; only
+   the NCP running the backup's own network (extended PAN ID and key)
+   already kept as the last backup (a retry after a restore that failed
+   late) is not kept again as a replaced network. Every session's `Up` sets the
    engine's coordinator IEEE (binds, the IAS CIE address, `hub/info`): a
    restore may change it.
 5. `foreign`: `network/info.ownership` `mismatch` and

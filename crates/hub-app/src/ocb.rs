@@ -29,7 +29,7 @@
 
 use std::fmt::Write as _;
 
-use hub_coord::{BackupChild, BackupDevice, BackupItem, BackupLinkKey, BackupSink, CoordError, RestoreEncoder};
+use hub_coord::{BackupChild, BackupDevice, BackupItem, BackupLinkKey, BackupSink, CoordError, NetworkIdentity, RestoreEncoder};
 use serde_json::Value as J;
 
 /// `metadata.format`.
@@ -53,6 +53,8 @@ pub struct Restore {
     /// Extended PAN ID (wire order): the records are tagged with it before
     /// the NCP forms the network (`NcpNv`).
     pub ext_pan_id: [u8; 8],
+    /// [`NetworkIdentity::key_id_for`] of the network key.
+    pub key_id: [u8; 8],
     /// Channel.
     pub channel: u8,
     /// Devices: IEEE (wire order) and NWK address.
@@ -161,7 +163,7 @@ pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>) -> Result<Restore, St
         .get("channel_mask")
         .and_then(J::as_array)
         .map_or(0, |a| a.iter().filter_map(J::as_u64).filter(|c| (11..=26).contains(c)).fold(0u32, |m, c| m | 1 << c));
-    let mut r = Restore { encoder, tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, ext_pan_id: epid, channel, devices: Vec::new() };
+    let mut r = Restore { encoder, tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, ext_pan_id: epid, key_id: NetworkIdentity::key_id_for(&key), channel, devices: Vec::new() };
     push(&mut *r.encoder, BackupItem::Node { ieee, ieee_override: true })?;
     push(
         &mut *r.encoder,
@@ -297,6 +299,8 @@ pub struct ExportSummary {
     pub link_keys: usize,
     /// The NCP exported the keys (else the backup cannot be restored).
     pub complete: bool,
+    /// [`NetworkIdentity::key_id_for`] of the exported network key.
+    pub key_id: Option<[u8; 8]>,
 }
 
 /// Why [`from_export`] failed.
@@ -445,7 +449,11 @@ pub fn from_export(export: Export, info: &ExportInfo, out: &mut String) -> Resul
         _ => *out += "null",
     }
     *out += ",\"devices\":[";
-    let mut summary = ExportSummary { devices: devices.len(), link_keys: 0, complete: nkey.is_some() };
+    let key_id = match &nkey {
+        Some(BackupItem::NetworkKey { key, .. }) => Some(NetworkIdentity::key_id_for(key)),
+        _ => None,
+    };
+    let mut summary = ExportSummary { devices: devices.len(), link_keys: 0, complete: nkey.is_some(), key_id };
     for (i, d) in devices.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -628,7 +636,7 @@ mod tests {
             ezsp_version: None,
         };
         let (summary, text) = export(&a, &info);
-        assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true });
+        assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true, key_id: Some(r.key_id) });
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["metadata"]["internal"]["creation_time"], "2023-11-14T22:13:20+00:00");
         assert_eq!(v["metadata"]["internal"]["zigbee_rs"]["groups"][0]["name"], "Kitchen");

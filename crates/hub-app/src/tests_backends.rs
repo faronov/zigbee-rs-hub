@@ -1175,3 +1175,57 @@ fn ezsp_replaced_networks_keep_their_backups() {
     assert_eq!(gone["error"]["code"], "not_found", "{gone}");
     rig.finish();
 }
+
+/// The NCP runs network DD with another key than the backup of DD
+/// (`[0x5E; 16]`), over the hub's own records or another backend's
+/// (closed); `key_exportable` as the NCP's.
+fn dd_rekeyed(foreign: bool, key_exportable: bool) -> (Rig, J) {
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+    let mut s = Store::volatile();
+    if foreign {
+        s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+    }
+    let mut dd = ezsp_sim(true, 0xDD);
+    dd.network_key = [0x5E; 16];
+    dd.key_exportable = key_exportable;
+    (Rig::ezsp(dd, s), backup)
+}
+
+/// A restore of DD over the NCP's network DD with another key: another
+/// network, kept as a replaced one (over closed records, which keep no
+/// last backup, and over the hub's own), not skipped as a retry.
+#[test]
+fn ezsp_the_same_extended_pan_id_with_another_key_is_kept() {
+    for foreign in [true, false] {
+        let (rig, backup) = dd_rekeyed(foreign, true);
+        let (sid, rx) = session(&rig.app);
+        let state = if foreign { "foreign" } else { "owned" };
+        wait(state, || info(&rig.app, sid, &rx)["registry"]["state"] == state);
+        let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+        assert_eq!(ok(&r)["previous_network_backed_up"], true, "{r}");
+        wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+        let kept = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/replaced"}));
+        assert_eq!(ok(&kept)["replaced"], json!(["d".repeat(16)]), "foreign {foreign}: {kept}");
+        assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16), "the replaced key");
+        rig.finish();
+    }
+}
+
+/// The same network DD, its key not exportable, over closed records: the
+/// automatic backup is incomplete and refused, also when the backup to
+/// restore has the same extended PAN ID.
+#[test]
+fn ezsp_an_incomplete_backup_of_the_same_extended_pan_id_is_refused() {
+    let (rig, backup) = dd_rekeyed(true, false);
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    assert_eq!(r["error"]["code"], "backup_incomplete", "{r}");
+    assert!(sim.ncp(|n| n.config().network_formed && n.config().network_key == [0x5E; 16]), "nothing changed");
+    rig.finish();
+}

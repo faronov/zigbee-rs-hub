@@ -479,6 +479,8 @@ struct Backup {
     ext_pan_id: [u8; 8],
     /// With the network key ([`ocb::ExportSummary::complete`]).
     complete: bool,
+    /// Its key ID ([`ocb::ExportSummary::key_id`]).
+    key_id: Option<[u8; 8]>,
     /// Kept as [`LAST_BACKUP_KEY`] (complete, the records' gate open).
     stored: bool,
 }
@@ -655,7 +657,7 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
     let end = frame.len();
     frame.try_reserve(1).map_err(|_| oom())?;
     frame.push('}');
-    let mut b = Backup { frame, file: start..end, ext_pan_id, complete: summary.complete, stored: false };
+    let mut b = Backup { frame, file: start..end, ext_pan_id, complete: summary.complete, key_id: summary.key_id, stored: false };
     if summary.complete {
         // A kept backup of another network (registry foreign) stays.
         b.stored = kv::with(kv, |s| if s.gate() == hub_store::Gate::Open { s.put(LAST_BACKUP_KEY, b.file().as_bytes()).map(|()| true) } else { Ok(false) })
@@ -1301,24 +1303,22 @@ impl Admin {
             aps_margin: if restore.tclk_counter_known { 10_000 } else { ocb::UNKNOWN_APS_MARGIN },
         };
         self.spawn("restore", ctx.out.clone(), sid, id, move |out| {
-            let ocb::Restore { encoder, ext_pan_id, .. } = restore;
+            let ocb::Restore { encoder, ext_pan_id, key_id, .. } = restore;
             let blob = encoder.finish();
             // A refusal (e.g. an IEEE the NCP cannot take) changes nothing.
             net.restore_check(&blob, opts).map_err(restore_error)?;
             let mut previous = None;
-            let mut backed_up = false;
             if network_state(&*net) == NetState::Up && !skip_backup {
                 let b = take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
                     ApiError::new(&e.code, format!("automatic backup before the restore failed ({}); set skip_backup to restore anyway", e.message))
                 })?;
-                // The NCP runs the backup's network (a retry after a
-                // restore that failed late): not another network to keep,
-                // and the kept one it replaced stays.
-                if b.ext_pan_id == ext_pan_id {
-                    backed_up = b.stored;
-                } else {
+                // The NCP runs the backup's own network (extended PAN ID
+                // and key), already kept as the last backup: a retry after
+                // a restore that failed late, not another network to keep
+                // (the kept one it replaced stays). Anything else (another
+                // key, closed records, no key) is kept or refused.
+                if !(b.stored && b.ext_pan_id == ext_pan_id && b.key_id == Some(key_id)) {
                     keep_replaced(&*records, &b)?;
-                    backed_up = true;
                 }
                 previous = Some(b);
             }
@@ -1362,7 +1362,7 @@ impl Admin {
             for (i, n) in &report.notes {
                 w.obj().key("index").num(i).key("note").str(note(*n)).end_obj();
             }
-            w.end_arr().key("previous_network_backed_up").num(backed_up).key("backup").raw(file).end_obj();
+            w.end_arr().key("previous_network_backed_up").num(previous.is_some()).key("backup").raw(file).end_obj();
             drop(previous);
             Ok(Reply::Frame(w.finish()?))
         })
