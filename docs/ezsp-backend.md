@@ -189,7 +189,9 @@ exhaustion is `Refused(Busy)`; no `messageSentHandler` within the deadline
 NCP with `Unknown(DeliveryUnknown)` after `Session::Down` and keeps the
 queued ones for the next session (with `EzspOptions::traffic`, as the
 hub app sets it: ends them `Refused(LinkDown)` instead, see "In the hub
-app"). Control requests are barriers.
+app"). Without a session, control requests are refused `LinkDown`; APS
+requests, and with `EzspOptions::traffic_hold` control requests too, are
+queued. Control requests are barriers.
 `RemoveDevice` only forgets the address: the engine's ZDO Mgmt_Leave_req
 stays the primary removal path, and with hashed link keys the trust center
 keeps no key for the device. An EZSP `removeDevice` to the parent, as an
@@ -277,6 +279,21 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
    decided yet. The hub
    endpoint's group replay, the import of the NCP's devices and the state
    refresh wait for it.
+   Right after the app starts or a session ends, while the next session's
+   ownership report may still verify the records (untagged, owned, or
+   this backend's tag; not foreign, of unknown origin, or being
+   replaced), the engine's requests wait instead of being refused, for at
+   most `TRAFFIC_HOLD` (3 s): Home Assistant reconnecting to a restarted
+   hub sends `network/permit_join` at once, as it may on ZRHP, whose pump
+   queues requests until its session is up. The worker keeps requests
+   queued meanwhile, control requests included
+   (`EzspOptions::traffic_hold`, set by `Backend::ezsp`), and sends them
+   only once the records open the flag for that session; those queued
+   when a session ends still end at once. When the report decides against
+   them (another network, `NoNetwork`) or none comes within the hold,
+   `CoordTransport` cancels them and they end `Refused(LinkDown)` (the
+   API's `busy`) within about a second; new ones are refused at once
+   again.
 4. `NoNetwork`: `network/info.ownership` `no_network`; `network/form`
    forms a network (only then, and only over the hub's records of no
    formed network: no tag, or its tag with `epid: null` or of a network

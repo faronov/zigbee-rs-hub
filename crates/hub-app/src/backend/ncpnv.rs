@@ -17,7 +17,8 @@
 //! |---|---|---|
 //! | `Observed` matching the tag (EPID, and the key ID when both are known), or no tag yet | `owned`; the tag written or its informative fields updated | allowed |
 //! | `Observed` of another network | `foreign` (nothing written) | refused |
-//! | `NoNetwork`, `Unknown`, session down | unchanged | refused until the next match |
+//! | `NoNetwork`, `Unknown` | unchanged | refused until the next match |
+//! | nothing yet (start), session down | unchanged | waits up to [`TRAFFIC_HOLD`] for the next report ([`Records::deciding`]), then refused |
 //! | anything, while the records' origin is unknown | `unverified`, closed | refused until adopted or cleared |
 //!
 //! Reports count only for the session they were made in: an `Ownership`
@@ -34,6 +35,7 @@
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use hub_coord::{
     BackendKind, CoordStatus, NetworkIdentity, NetworkOwnership, OwnerTag, OwnershipModel,
@@ -60,7 +62,16 @@ struct State {
     /// network): closed, and decided only by the operator (adopt, clear,
     /// or a network formed or restored over them).
     hold: bool,
+    /// Waiting since then for the ownership report of the backend's next
+    /// session (the app started, or the session ended).
+    pending: Option<Instant>,
 }
+
+/// How long device traffic waits, after the app starts or the NCP's
+/// session ends, for the next session's ownership report (instead of being
+/// refused at once): the time an NCP takes to come back, and the app to
+/// decide.
+pub const TRAFFIC_HOLD: Duration = Duration::from_secs(3);
 
 /// [`Records`] of an `NcpNv` backend in the hub's own store.
 pub struct NcpNvRecords {
@@ -71,6 +82,8 @@ pub struct NcpNvRecords {
     /// `(epoch << 1) | open`: device traffic may go out in the backend's
     /// session `epoch` ([`Self::traffic`]).
     traffic: Arc<AtomicU32>,
+    /// [`TRAFFIC_HOLD`].
+    traffic_hold: Duration,
 }
 
 /// The [`NcpNvRecords::traffic`] value of session `epoch`, closed.
@@ -181,8 +194,26 @@ impl NcpNvRecords {
         if let RegistryState::Foreign { backend, why } = registry {
             warn!("hub: network records not ours: {backend}, {why}");
         }
-        let st = State { registry, hold, ..State::default() };
-        Self { backend, store: Mutex::new(store), state: Mutex::new(st), traffic: Arc::default() }
+        let st = State { registry, hold, pending: Some(Instant::now()), ..State::default() };
+        Self {
+            backend,
+            store: Mutex::new(store),
+            state: Mutex::new(st),
+            traffic: Arc::default(),
+            traffic_hold: TRAFFIC_HOLD,
+        }
+    }
+
+    /// How long device traffic waits for a new session's decision
+    /// ([`TRAFFIC_HOLD`]; `EzspOptions::traffic_hold`).
+    pub fn traffic_hold(&self) -> Duration {
+        self.traffic_hold
+    }
+
+    #[cfg(test)]
+    fn with_traffic_hold(mut self, hold: Duration) -> Self {
+        self.traffic_hold = hold;
+        self
     }
 
     /// Whether device traffic may go out, shared with the backend
@@ -342,6 +373,7 @@ impl Records for NcpNvRecords {
         (st.observed, st.epoch) = (network, epoch);
         st.registry = RegistryState::Owned;
         st.hold = false;
+        st.pending = None;
         match network {
             Some(_) => self.open_traffic(epoch),
             None => self.close_traffic(),
@@ -367,6 +399,8 @@ impl Records for NcpNvRecords {
     fn observe(&self, report: Report<'_>) {
         let mut store = self.store();
         let mut st = self.state();
+        // A report decides; the end of a session waits for the next one.
+        st.pending = report.is_none().then(Instant::now);
         match report {
             Some((NetworkOwnership::Observed(n) | NetworkOwnership::Owned(n), e)) if !st.replacing => {
                 self.decide(&mut store, &mut st, *n, Some(e), false)
@@ -395,6 +429,14 @@ impl Records for NcpNvRecords {
 
     fn verified(&self) -> bool {
         self.traffic.load(Ordering::SeqCst) & 1 == 1
+    }
+
+    fn deciding(&self) -> bool {
+        let st = self.state();
+        // Records the next report may verify: not another backend's or
+        // network's, not of unknown origin, not being replaced.
+        let may_match = !st.replacing && !st.hold && !matches!(st.registry, RegistryState::Foreign { .. });
+        may_match && st.pending.is_some_and(|t| t.elapsed() < self.traffic_hold)
     }
 
     fn may_form(&self) -> bool {
@@ -846,6 +888,43 @@ mod tests {
         let mut s = Store::volatile();
         s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
         assert!(!open(s).may_form(), "another backend's");
+    }
+
+    /// After the start or the end of a session, the records wait a few
+    /// seconds for the next session's report (device traffic waits instead
+    /// of being refused); a report, or the hold running out, ends it.
+    #[test]
+    fn traffic_waits_for_the_next_sessions_report_for_a_while() {
+        let tagged = || {
+            let mut s = Store::volatile();
+            s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Ezsp, Some(id(4, Some(1)))).encode().as_bytes()).unwrap();
+            s
+        };
+        for s in [Store::volatile(), tagged()] {
+            let r = open(s);
+            assert!(!r.verified() && r.deciding(), "before the first report");
+        }
+        let r = open(tagged());
+        see(&r, observed(id(4, Some(1))));
+        assert!(r.verified());
+        r.observe(None);
+        assert!(!r.verified() && r.deciding(), "the session ended");
+        see(&r, NetworkOwnership::NoNetwork);
+        assert!(!r.deciding(), "no network: decided");
+        r.observe(None);
+        r.replacing();
+        assert!(!r.deciding(), "the operator replaces the network");
+        r.replaced(None);
+        see(&r, observed(id(5, Some(1))));
+        assert_eq!(r.registry().as_str(), "foreign");
+        r.observe(None);
+        assert!(!r.deciding(), "foreign records do not wait");
+        assert!(!open(zrhp_store(false, &["auto/r1"])).deciding(), "records of unknown origin");
+        assert!(!open(zrhp_store(true, &[])).deciding(), "another backend's");
+        let r = open(tagged()).with_traffic_hold(Duration::from_millis(20));
+        assert!(r.deciding());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(!r.deciding(), "bounded");
     }
 
     #[test]

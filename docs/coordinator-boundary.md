@@ -682,7 +682,13 @@ zrhp = ["dep:hub-ncp"]
   `CoordTransport` refuses the engine's and the app's requests until the
   NCP's network of the session matches (`LinkDown`, "not verified"); the
   hub endpoint's group replay, the NCP device import and the state refresh
-  wait for it too. The flag is shared with the backend
+  wait for it too. For at most 3 s after the app starts or a session ends,
+  while the next session's report may still verify the records
+  (`Records::deciding`), the engine's requests wait in the backend instead
+  of being refused (`EzspOptions::traffic_hold`; ZRHP's pump likewise
+  queues requests until its session is up); they go out only once the
+  flag opens for that session, and end `Refused(LinkDown)` when it does
+  not. The flag is shared with the backend
   (`NcpNvRecords::traffic`, `EzspOptions::traffic`) and carries the
   session: `(epoch << 1) | open`. The EZSP worker stores `epoch << 1` when
   a session starts (before its ownership report) and 0 when it ends, and

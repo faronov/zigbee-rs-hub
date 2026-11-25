@@ -1397,6 +1397,8 @@ impl Runner {
         for ev in self.admin.progress_events() {
             self.engine.network_event(ev);
         }
+        // Requests that waited for the records' decision in vain end.
+        self.engine.transport.expire_waiting();
         // Confirms first: the tick fails undeliverable requests at once.
         for (id, t) in self.engine.transport.take_done() {
             self.engine.on_outcome(id, t.into(), now);

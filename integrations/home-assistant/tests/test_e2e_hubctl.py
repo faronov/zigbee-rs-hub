@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+import itertools
 import os
 from pathlib import Path
 import socket
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -53,7 +55,11 @@ class Hubctl:
         self.extra = extra
         self.proc: asyncio.subprocess.Process | None = None
 
-    async def start(self) -> None:
+    async def start(self, ready: bool = False) -> None:
+        """Until the API accepts connections; `ready`: and the hub knows its
+        coordinator (the first NCP session is up), which the config flow's
+        unique ID needs. The EZSP backend's session comes up after the API
+        listens."""
         assert HUBCTL
         self.proc = await asyncio.create_subprocess_exec(
             HUBCTL,
@@ -78,7 +84,23 @@ class Hubctl:
                     continue
                 writer.close()
                 await writer.wait_closed()
-                return
+                break
+            if ready:
+                await self._coordinator_known()
+
+    async def _coordinator_known(self) -> None:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.ws_connect(f"http://127.0.0.1:{self.port}/api") as ws,
+        ):
+            await ws.send_json({"type": "auth", "token": "e2e"})
+            for i in itertools.count(1):
+                await ws.send_json({"id": i, "type": "hub/info"})
+                while (msg := await ws.receive_json()).get("id") != i:
+                    pass
+                if msg["result"].get("coordinator_ieee"):
+                    return
+                await asyncio.sleep(0.05)
 
     async def stop(self) -> None:
         if self.proc is not None and self.proc.returncode is None:
@@ -90,7 +112,7 @@ class Hubctl:
 @pytest.fixture
 async def hubctl() -> AsyncGenerator[Hubctl]:
     server = Hubctl(_free_port())
-    await server.start()
+    await server.start(ready=True)
     yield server
     await server.stop()
 

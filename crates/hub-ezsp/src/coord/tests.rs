@@ -831,6 +831,100 @@ fn with_a_traffic_gate_queued_requests_do_not_outlive_the_session() {
     rig.finish();
 }
 
+/// With `traffic_hold`: a request queued before the application decides
+/// about a new session waits for the decision and goes out once the flag
+/// opens for that session, for at most the hold; those queued when a
+/// session ends still end at once.
+#[test]
+fn with_a_traffic_hold_requests_wait_for_the_decision_about_a_new_session() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let gate = Arc::new(AtomicU32::new(0));
+    let open = |epoch: u32| {
+        gate.compare_exchange(
+            traffic_closed(epoch),
+            traffic_closed(epoch) | 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    };
+    let to = |dst: u16| move |c: &Command| matches!(c, Command::SendUnicast { index_or_destination, .. } if *index_or_destination == dst);
+    let refused =
+        |t: &Terminal| matches!(t, Terminal::Refused(e) if *e.meaning() == CoordError::LinkDown);
+    let mut o = opts();
+    o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 1));
+    o.traffic = Some(gate.clone());
+    o.traffic_hold = Duration::from_secs(5);
+    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    // Queued before the first session: held until the decision.
+    let a = rig.submit(unicast(0x1234));
+    let first = rig.next_up();
+    thread::sleep(Duration::from_millis(50));
+    rig.drain();
+    assert!(terminal(&rig.log, a).is_none(), "held: {:#?}", rig.log);
+    assert!(
+        !rig.sent().iter().any(to(0x1234)),
+        "nothing sent before the decision"
+    );
+    assert!(open(first));
+    assert_eq!(rig.outcome(a), Terminal::Delivered);
+    // Queued when the session ends: ended at once.
+    rig.sim.ncp(|n| n.hold_message_sent(true));
+    let b = rig.submit(unicast(0x1234));
+    let c = rig.submit(unicast(0x5678));
+    rig.sim_until("b sent", |n| n.held_message_sent() == 1);
+    rig.sim.ncp(|n| {
+        n.hold_message_sent(false);
+        n.spontaneous_reset(ResetCode::WATCHDOG);
+    });
+    let c_t = rig.outcome(c);
+    assert!(refused(&c_t), "{c_t:?}");
+    assert!(matches!(rig.outcome(b), Terminal::Unknown(_)));
+    rig.next_up();
+    // No decision within the hold: refused, never sent.
+    let d = rig.submit(unicast(0x5678));
+    let d_t = rig.outcome(d);
+    assert!(refused(&d_t), "{d_t:?}");
+    assert!(!rig.sent().iter().any(to(0x5678)), "{:?}", rig.sent());
+    rig.finish();
+}
+
+/// Requests the application cancels while they wait for an absent NCP (a
+/// traffic hold, the worker resetting it) end `Cancelled` when the hold
+/// ends, and leave no cancellation behind, episode after episode.
+#[test]
+fn cancellations_of_requests_ended_unsent_are_forgotten() {
+    let mut cfg = sim(13);
+    cfg.boot_ms = 3_600_000;
+    let mut o = opts();
+    o.host.ash.rstack_timeout_ms = 300;
+    o.host.ash.reset_retries = 0;
+    o.traffic = Some(Arc::new(std::sync::atomic::AtomicU32::new(0)));
+    o.traffic_hold = Duration::from_secs(2);
+    let mut rig = Rig::with(cfg, o, Faults::none(), EVENT_SLOTS);
+    // Cancelled within the hold.
+    let ids: Vec<RequestId> = (0..5).map(|_| rig.submit(unicast(0x1234))).collect();
+    for id in &ids {
+        rig.coord().cancel(*id);
+    }
+    for id in ids {
+        assert_eq!(rig.outcome(id), Terminal::Cancelled);
+    }
+    assert_eq!(rig.coord().cancels_kept(), 0);
+    // After it: ended at once, or cancelled first.
+    for _ in 0..5 {
+        let id = rig.submit(unicast(0x1234));
+        rig.coord().cancel(id);
+        let t = rig.outcome(id);
+        assert!(
+            matches!(t, Terminal::Cancelled | Terminal::Refused(_)),
+            "{t:?}"
+        );
+        assert_eq!(rig.coord().cancels_kept(), 0);
+    }
+    rig.finish();
+}
+
 /// An NCP reset: `Down`, then the request on the NCP ends
 /// `Unknown(DeliveryUnknown)` (EZSP loses it, design §2.2); the queued one
 /// goes out after the next `Up`, in a new epoch.

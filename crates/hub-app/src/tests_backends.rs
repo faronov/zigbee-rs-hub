@@ -749,6 +749,49 @@ fn first_setup_survives_restarts() {
     rig.finish();
 }
 
+/// EZSP: right after the app starts (a hub restart, Home Assistant
+/// reconnecting at once), device traffic waits for the first session's
+/// ownership decision instead of being refused, for a few seconds; when
+/// the NCP does not come up within them the request is refused, not left
+/// hanging.
+#[test]
+fn device_traffic_waits_for_the_first_sessions_decision() {
+    let flash = SharedFlash::new();
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    rig.finish();
+    let start = |boot_ms| {
+        let mut c = ezsp_sim(true, 0xDD);
+        c.boot_ms = boot_ms;
+        let (sim, transport, clock) = hub_ezsp::sim::Sim::new(c, hub_ezsp::sim::Faults::none());
+        sim.set_pace(Some(1));
+        let backend = Backend::ezsp(transport, clock, hub_ezsp::coord::EzspOptions::default(), flash.store());
+        (App::start_backend(backend, cfg(), None), Ezsp { sim, seen: Mutex::new(0) })
+    };
+    let permit_join = json!({"type": "network/permit_join", "duration_s": 30});
+
+    // The NCP boots for a second: the request waits for the decision.
+    let (app, ncp) = start(1000);
+    let (sid, rx) = session(&app);
+    let i = info(&app, sid, &rx);
+    assert_ne!(i["session"], "ready", "before the first session: {i}");
+    ok(&call(&app, sid, &rx, 1, permit_join.clone()));
+    assert_eq!(info(&app, sid, &rx)["registry"]["state"], "owned");
+    assert!(ncp.permit_open(), "sent once the network was the hub's");
+    app.shutdown();
+
+    // No NCP session within the hold: refused.
+    let (app, ncp) = start(60_000);
+    let (sid, rx) = session(&app);
+    let t = Instant::now();
+    let r = call(&app, sid, &rx, 2, permit_join);
+    assert_eq!(r["error"]["code"], "busy", "{r}");
+    assert!(t.elapsed() >= Duration::from_secs(2), "held first: {:?}", t.elapsed());
+    assert!(!ncp.permit_open());
+    app.shutdown();
+}
+
 /// EZSP: a request queued behind a control request on the NCP does not go
 /// out after an NCP reset into another network (whose ownership is decided
 /// first; here it is foreign): the backend shares the records' traffic
