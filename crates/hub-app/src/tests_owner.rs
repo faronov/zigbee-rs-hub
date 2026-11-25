@@ -714,11 +714,13 @@ fn last_values_changed_before_they_load_wait_for_them() {
 /// State triggers compare with the devices' restored last values, not
 /// with an unknown one: rules readable before their devices (the order of
 /// [`records_readable_after_the_devices_wait_for_them`]) wait for them and
-/// their last values, and the restored devices' first (unknown) states do
-/// not replace the values the rules read; also when the records load on
-/// adopt. The plug was off (its stored last values): a first report of off
-/// fires no `equals false` (a change from unknown would), one of on fires
-/// `changed` (from unknown it would not).
+/// their last values, and the restored devices' first states (never
+/// reported, unknown) do not replace the values the rules read; also when
+/// the records load on adopt. The plug was off (its stored last values): a
+/// first report of off fires no `equals false` (a change from unknown
+/// would), one of on fires `changed` (from unknown it would not). A
+/// reported unknown (an invalid value) is the previous value as before:
+/// off after it fires `equals false` again, and no `changed`.
 #[test]
 fn state_triggers_compare_with_the_restored_values() {
     use hub_ncp::sim::indication;
@@ -747,20 +749,30 @@ fn state_triggers_compare_with_the_restored_values() {
         assert!(!racy.foreign());
         assert!(app.wait(T, |s| s.last_values.0 > 0), "{:?}", app.status().last_values);
         ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["entities"]})));
-        let report = [0x18, 0x01, 0x0A, 0x00, 0x00, 0x10, u8::from(first)];
-        r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(0x5A01, 0x5a52_5300_0000_0001, 1, 1, 0x0104, 0x0006, &report));
-        // The rules saw it before its subscribers did.
-        loop {
-            let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
-            if f["event"]["topic"] == "entity_state" && f["event"]["uid"] == uid.as_str() {
-                assert_eq!(f["event"]["state"], J::Bool(first), "{f}");
-                break;
+        // On/Off from the plug (0xFF: invalid), seen by the rules before
+        // their subscribers.
+        let report = |v: u8, tsn: u8| {
+            let zcl = [0x18, tsn, 0x0A, 0x00, 0x00, 0x10, v];
+            r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(0x5A01, 0x5a52_5300_0000_0001, 1, 1, 0x0104, 0x0006, &zcl));
+            loop {
+                let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+                if f["event"]["topic"] == "entity_state" && f["event"]["uid"] == uid.as_str() {
+                    assert!(!f["event"]["last_reported"].is_null(), "{f}");
+                    return f["event"]["state"].clone();
+                }
             }
-        }
-        let list = ok(&call(&app, sid, &rx, 2, json!({"type": "automations/list"}))).clone();
-        let runs = |id: &str| list["rules"].as_array().unwrap().iter().find(|r| r["id"] == id).map(|r| r["runs"].clone());
-        let want = if first { (0, 1) } else { (0, 0) };
-        assert_eq!((runs("off"), runs("chg")), (Some(want.0.into()), Some(want.1.into())), "adopt {adopt}, first report {first}: {list}");
+        };
+        let runs = |id: u64| {
+            let list = ok(&call(&app, sid, &rx, id, json!({"type": "automations/list"}))).clone();
+            let n = |r: &str| list["rules"].as_array().unwrap().iter().find(|x| x["id"] == r).map(|x| x["runs"].clone());
+            (n("off"), n("chg"))
+        };
+        let want = |off: u64, chg: u64| (Some(J::from(off)), Some(J::from(chg)));
+        assert_eq!(report(u8::from(first), 1), J::Bool(first));
+        assert_eq!(runs(2), want(0, u64::from(first)), "adopt {adopt}, first report {first}");
+        assert_eq!(report(0xFF, 2), J::Null);
+        assert_eq!(report(0, 3), J::Bool(false));
+        assert_eq!(runs(4), want(1, u64::from(first)), "adopt {adopt}, first {first}: unknown, then off");
         app.shutdown();
         r.ncp.shutdown();
         r.sim.stop();

@@ -384,9 +384,10 @@ impl Automations {
                     }
                     hit = Some(h);
                 }
-                // An unknown value (an entity restored or made again: its
-                // state follows) keeps the last known one.
-                if !new.is_null() {
+                // An entity never reported (restored or made again: its
+                // value follows) keeps the last known value; a reported
+                // unknown (invalid, unmapped) is the previous value then.
+                if !new.is_null() || msg.get("last_reported").is_some_and(|t| !t.is_null()) {
                     seen.push((k, new));
                 }
             }
