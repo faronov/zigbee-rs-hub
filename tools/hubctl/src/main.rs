@@ -82,10 +82,11 @@ simulated NCP:
   --sim-devices             two On/Off plugs and a temperature sensor that
                             answer the hub (interview, reads, commands; the
                             sensor reports every 15 s), e.g. for automations
-  --sim-z2m-devices         instead: form on channel 15 and join three simulated
-                            devices (sensor, light, plug) that answer the
-                            interview and commands and report (Zigbee2MQTT
-                            names, for the MQTT bridge)
+  --sim-z2m-devices         instead: form on channel 15 and join four simulated
+                            devices (sensor, light, plug, remote) that answer
+                            the interview and commands and report; the remote
+                            presses a button every 10 s (Zigbee2MQTT names,
+                            for the MQTT bridge)
   --sim-ota                 a device with an OTA client (0x6D6B/0x0102,
                             version 0x00010000) joins and queries
   --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.

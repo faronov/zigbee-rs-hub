@@ -431,6 +431,9 @@ pub struct LayerRef {
     /// Index of the match clause that scored (`match[n]` of the definition).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clause: Option<u16>,
+    /// A partially translated catalog definition ([`Definition::partial`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// The merged result for one device.
@@ -687,6 +690,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         content_hash: None,
         score: None,
         clause: None,
+        partial: false,
     });
     let disable = layers.iter().any(|(d, _)| d.generic.disable);
     // Boxed values: the Xtensa LLVM backend (Rust 1.90.0.0) fails
@@ -756,6 +760,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             content_hash: d.content_hash.clone(),
             score: *s,
             clause: s.and_then(|_| best_clause(d, fp)),
+            partial: d.partial(),
         });
         for e in &d.entities {
             if let Some(p) = &e.present_if {

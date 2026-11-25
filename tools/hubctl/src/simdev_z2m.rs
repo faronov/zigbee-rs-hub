@@ -1,17 +1,18 @@
-//! `--sim-z2m-devices`: three simulated Zigbee devices behind the simulated
+//! `--sim-z2m-devices`: four simulated Zigbee devices behind the simulated
 //! NCP (a temperature/humidity sensor, a colour-temperature light, a
-//! plug), answering the hub's interview, reads, writes and commands
-//! (`hub_devices::sim_device`) and reporting like real devices: the sensor
-//! every 10 s, the light and the plug after every command. For end-to-end
-//! tests of the API clients (web UI, Home Assistant, the MQTT bridge)
-//! without hardware.
+//! plug, an IKEA STYRBAR remote), answering the hub's interview, reads,
+//! writes and commands (`hub_devices::sim_device`) and reporting like real
+//! devices: the sensor every 10 s, the light and the plug after every
+//! command; the remote sends a button command every 10 s (its `action`
+//! event entity). For end-to-end tests of the API clients (web UI, Home
+//! Assistant, the MQTT bridge) without hardware.
 
 use std::thread;
 use std::time::{Duration, Instant};
 
 use hub_devices::sim_device::SimDevice;
 use hub_devices::transport::{ApsDst, ApsIndication, ApsRequest, TxOptions};
-use hub_devices::zcl::{TypedValue, ZclType, ZclValue};
+use hub_devices::zcl::{Direction, FrameType, TypedValue, ZclFrame, ZclHeader, ZclType, ZclValue};
 use hub_devices::zdo::LogicalType;
 use hub_ncp::lifecycle::{FormRequest, Hub};
 use hub_ncp::sim::SimNcp;
@@ -27,6 +28,12 @@ pub const SENSOR: u64 = 0x00158d0001000001;
 pub const LIGHT: u64 = 0x00158d0001000002;
 /// The plug.
 pub const PLUG: u64 = 0x00158d0001000003;
+/// The remote (IKEA E2001/E2002, STYRBAR).
+pub const REMOTE: u64 = 0x00158d0001000004;
+
+/// What the remote sends, in turn: On/Off toggle, on, Level step up
+/// (with on/off), off.
+const PRESSES: [(u16, u8, &[u8]); 4] = [(0x0006, 0x02, &[]), (0x0006, 0x01, &[]), (0x0008, 0x06, &[0, 43, 5, 0]), (0x0006, 0x00, &[])];
 
 fn devices() -> Vec<SimDevice> {
     let u16v = |v: u64| TypedValue::uint(ZclType::U16, v);
@@ -51,7 +58,12 @@ fn devices() -> Vec<SimDevice> {
         .endpoint(1, 0x0104, 0x010A, &[0x0000, 0x0003, 0x0004, 0x0005, 0x0006], &[])
         .basic("innr", "SP 120", 1)
         .attr(1, 0x0006, 0x0000, TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(false))));
-    vec![sensor, light, plug]
+    let remote = SimDevice::new(REMOTE, 0x1004, LogicalType::EndDevice, false, 0x117C)
+        .endpoint(1, 0x0104, 0x0820, &[0x0000, 0x0001, 0x0003, 0x1000], &[0x0003, 0x0004, 0x0006, 0x0008, 0x1000])
+        .basic("IKEA of Sweden", "Remote Control N2", 3)
+        .attr(1, 0x0001, 0x0020, TypedValue::uint(ZclType::U8, 30))
+        .attr(1, 0x0001, 0x0021, TypedValue::uint(ZclType::U8, 174));
+    vec![sensor, light, plug, remote]
 }
 
 fn inject(sim: &SimNcp, i: &ApsIndication) {
@@ -158,6 +170,7 @@ fn run(sim: SimNcp) {
     log::info!("sim-devices: {} devices joined", devs.len());
     let mut next_report = Instant::now() + Duration::from_secs(10);
     let mut temp = 2137i64;
+    let mut press = 0usize;
     loop {
         thread::sleep(Duration::from_millis(20));
         let new: Vec<Vec<u8>> = sim.with(|s| {
@@ -186,6 +199,17 @@ fn run(sim: SimNcp) {
             s.attrs.insert((1, 0x0402, 0, None), TypedValue::int(ZclType::I16, temp));
             let i = s.report(1, 0x0402, None, &[(0x0000, TypedValue::int(ZclType::I16, temp))]);
             inject(&sim, &i);
+            let (cluster, cmd, payload) = PRESSES[press % PRESSES.len()];
+            let header = ZclHeader {
+                frame_type: FrameType::Cluster,
+                mfr: None,
+                direction: Direction::ClientToServer,
+                disable_default_response: true,
+                tsn: press as u8,
+                cmd,
+            };
+            inject(&sim, &devs[3].ind(1, 0x0104, cluster, ZclFrame { header, payload: payload.to_vec() }.encode()));
+            press += 1;
         }
     }
 }

@@ -1221,6 +1221,15 @@ impl Definition {
         }
     }
 
+    /// The generator's "partially translated" marker (`x-partial: true`,
+    /// top-level extension key 64, 17.2): what it could not translate is
+    /// left out, the generic layer gives the rest.
+    pub fn partial(&self) -> bool {
+        self.zdef
+            .as_ref()
+            .is_some_and(|z| z.ext.iter().any(|(k, v)| *k == 64 && v[..] == [0xF5]))
+    }
+
     /// Features this definition uses (what `zdefc` would compute for
     /// `requires`, 8.5), merged with the declared ones.
     pub fn used_features(&self) -> Vec<String> {

@@ -550,9 +550,13 @@ impl Device {
                 _ => "in_progress",
             },
             "disabled": self.disabled,
-            "definition": self.resolution.layers.iter().map(|l| json!({
-                "source": l.source, "id": l.id, "revision": l.revision, "content_hash": l.content_hash,
-            })).collect::<Vec<_>>(),
+            "definition": self.resolution.layers.iter().map(|l| {
+                let mut j = json!({"source": l.source, "id": l.id, "revision": l.revision, "content_hash": l.content_hash});
+                if l.partial {
+                    j["partial"] = true.into();
+                }
+                j
+            }).collect::<Vec<_>>(),
         });
         // Only while it applies: device records of available devices keep
         // their fields.
