@@ -132,6 +132,11 @@ class DongleImageTests(unittest.TestCase):
         self.assertIn("Developer edition", dev["title"])
         self.assertNotIn("edition", board)
         self.assertIs(board["web_install"], False)
+        # Both routes start with the otadata check, on this board's otadata and this release's sector file.
+        self.assertEqual(board["precheck"][0], "esptool --chip esp32 --port <PORT> read-flash 0x5C000 0x2000 otadata.bin")
+        self.assertIn("zrh-donglem-0.3.0-otadata-ota1.bin", board["precheck"][1])
+        self.assertTrue(board["install_steps"][0].startswith("First, for either route"))
+        self.assertIn(board["precheck"][1], board["install_steps"][0])
         self.assertTrue(board["experimental"])
         self.assertEqual(board["flash"], ["app", "otadata_ota1"])
         self.assertEqual((board["files"]["app"]["offset"], board["files"]["otadata_ota1"]["offset"]), (0x660000, 0x5D000))

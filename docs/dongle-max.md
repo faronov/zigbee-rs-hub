@@ -156,6 +156,20 @@ The web flasher lists the release's Dongle Max entry (`sonoff-dongle-max`,
 button: ESP Web Tools always offers to erase the chip, which would remove
 SONOFF's bootloader, table, `nvs` and factory data.
 
+**Both routes assume the stock `otadata`**: sector 0 holds SONOFF's seq 1
+(its application in `ota_0`) and sector 1 is blank, or holds the release's
+`otadata-ota1` sector after a USB install of the hub. The release notes
+(and the manifest's `precheck`) read `otadata` over USB first
+(`esptool --chip esp32 read-flash 0x5C000 0x2000 otadata.bin`) and go on
+only if a one-line check prints `OK` (the lab unit's backup does). In any
+other state the parts do the wrong thing: after SONOFF's own updater put
+its application into `ota_1`, a USB write at 0x660000 overwrites the
+running application and the web console writes `ota_0`; after `stock
+confirm` or a hub self-update (seq 3 and up) the seq 2 sector is never
+booted. Then flash nothing: the way forward is the hub's own update
+(Settings › Hub firmware) or, from SONOFF's firmware, a return to the
+stock slots first (SONOFF Dongle Flasher, or the backup's `otadata`).
+
 The first boot claims SONOFF's `files` partition for the hub's data
 (SONOFF's files are copied into it first; next section) and generates the
 API token. The console (CP2102N, 115 200 8N1) prints the token (`token`);

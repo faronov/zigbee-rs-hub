@@ -97,7 +97,12 @@ artifact). The flasher picks the release up within six hours, or at once
 when this repository has the secret `FLASHER_DISPATCH_TOKEN` (fine-grained
 token, *Contents: read and write* on faronov/zigbee-rs). It lists the
 Dongle Max without an install button (`"web_install": false`: ESP Web
-Tools' erase would wipe SONOFF's firmware).
+Tools' erase would wipe SONOFF's firmware). **Tag only once the live
+flasher knows it**: the `revision` in
+<https://faronov.github.io/zigbee-rs/flasher/sensor/status.json> must
+include faronov/zigbee-rs#15 (a master CI deploy, 10–20 min after the
+merge); a tagged run with the Dongle Max checks that revision's
+`flasher_site.py` and the live page and fails otherwise.
 
 ### Image variants and memory (after release 0.2.0)
 

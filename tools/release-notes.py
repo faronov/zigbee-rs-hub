@@ -85,28 +85,37 @@ def install_notes(m: dict) -> list[str]:
         out.append("The hub application on SONOFF's stock EmberZNet NCP, in `ota_1` of SONOFF's unchanged "
                    "partition table; SONOFF's bootloader, `nvs` and application (`ota_0`) stay. **Not offered "
                    "by the web flasher** (its erase option would wipe SONOFF's firmware and factory data).\n")
-        out.append(f"- **SONOFF's web console** (recommended): Firmware > ESP32-D0WDR2-V3 > Upload & Flash "
-                   f"Firmware with `{app['name']}` (a plain ESP32 app image, like ESPHome's `.ota.bin`; "
-                   "not yet verified on hardware).")
-        out.append("- **USB with esptool**, on a dongle that runs SONOFF's firmware (or a hub installed this way); "
-                   "back up first, write the app first, never erase the chip or write a merged image:")
+        doc = f"https://github.com/{m['repository']}/blob/{m['tag']}/docs/dongle-max.md"
+        precheck = "\n".join(b.get("precheck", []))
+        out.append("- **First, for either route** (over USB): back up the whole flash and check `otadata`. "
+                   "Continue only if the check prints `OK`: sector 0 holds SONOFF's seq 1 (its application in "
+                   "`ota_0`) and sector 1 is blank, or holds this release's otadata sector after a USB install. "
+                   "Anything else (SONOFF's own updater moved its application to `ota_1`, `stock confirm`, a hub "
+                   f"self-update): stop, see [docs/dongle-max.md]({doc}).")
         out.append("```\n"
                    "esptool --chip esp32 --port <PORT> read-flash 0 ALL dongle-max-backup.bin   # keep it private\n"
+                   f"{precheck}\n"
+                   "```")
+        out.append(f"- **SONOFF's web console** (recommended): Firmware > ESP32-D0WDR2-V3 > Upload & Flash "
+                   f"Firmware with `{app['name']}` (a plain ESP32 app image, like ESPHome's `.ota.bin`; SONOFF's "
+                   "firmware writes it into the other slot, `ota_1`; not yet verified on hardware).")
+        out.append("- **Or USB with esptool**: the app first, then the otadata sector; never erase the chip or "
+                   "write a merged image:")
+        out.append("```\n"
                    f"esptool --chip esp32 --port <PORT> write-flash 0x{app['offset']:X} {app['name']}\n"
                    f"esptool --chip esp32 --port <PORT> write-flash 0x{otadata['offset']:X} {otadata['name']}\n"
                    "```")
         out.append(f"  `{app['name']}` goes into `ota_1` (0x{app['offset']:X}); `{otadata['name']}` is `otadata` "
                    f"sector 1 (0x{otadata['offset']:X}, seq 2), which makes SONOFF's bootloader boot `ota_1`. "
                    "Back to SONOFF's firmware: console `stock confirm`, or the backup's 4 KiB at "
-                   f"0x{otadata['offset']:X} written back. After `stock confirm` or a hub self-update these "
-                   "parts no longer switch slots: update through Settings > Hub firmware instead.")
+                   f"0x{otadata['offset']:X} written back. A hub already running is updated through Settings > "
+                   "Hub firmware.")
         for d in dongle_dev:
             out.append(f"- **Developer edition:** `{d['files']['app']['name']}` instead of `{app['name']}`, the same "
                        "way (web console, or USB with the same otadata sector).")
         out.append("- First boot: the hub claims SONOFF's `files` partition for its data after copying SONOFF's "
                    "files aside (`stock confirm` writes them back); console at 115200 8N1 on the dongle's USB port "
-                   "(`token` prints the API token). Details: "
-                   f"https://github.com/{m['repository']}/blob/{m['tag']}/docs/dongle-max.md")
+                   f"(`token` prints the API token). Details: {doc}")
     for f in m.get("extra_files", []):
         out.append(f"\n`{f['name']}`: {f['role']}.")
     out.append("\nVerify downloads with `SHA256SUMS`; `release-manifest.json` describes every image.")

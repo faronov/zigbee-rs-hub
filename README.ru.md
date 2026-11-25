@@ -87,7 +87,12 @@ esptool. Обе разметки содержат MQTT; образы 8 МБ та
 сразу, если в этом репозитории есть секрет `FLASHER_DISPATCH_TOKEN`
 (fine-grained token, *Contents: read and write* на faronov/zigbee-rs).
 Dongle Max он показывает без кнопки установки (`"web_install": false`:
-стирание ESP Web Tools уничтожило бы прошивку SONOFF).
+стирание ESP Web Tools уничтожило бы прошивку SONOFF). **Ставить тег только
+когда живой прошивальщик это умеет**: `revision` в
+<https://faronov.github.io/zigbee-rs/flasher/sensor/status.json> должна
+включать faronov/zigbee-rs#15 (деплой CI master, 10–20 мин после слияния);
+запуск по тегу с Dongle Max проверяет `flasher_site.py` этой ревизии и
+живую страницу и иначе падает.
 
 ### Варианты образов и память (после релиза 0.2.0)
 

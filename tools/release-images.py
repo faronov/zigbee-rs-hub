@@ -168,23 +168,44 @@ DONGLE = {
     "ESP Web Tools could erase the whole chip, which destroys SONOFF's firmware and factory data.",
     "connect": "Plug the dongle into USB (CP2102N, \"SONOFF Dongle Max MG24\"); its DTR/RTS reset the ESP32 "
     "into the ROM loader, as esptool expects.",
-    # Shown instead of an install button (the flasher renders the esptool lines from `files`).
-    "install_steps": [
+}
+
+
+def dongle_precheck(otadata_off: int, otadata_size: int, ota1_file: str) -> list[str]:
+    """Commands that check the dongle's otadata before either install route: sector 0 must hold
+    SONOFF's seq 1 (its application in ota_0) and sector 1 be blank, or hold this release's sector
+    (a hub installed with the USB parts). SONOFF's own updater (its application in ota_1), stock
+    confirm or a hub self-update (seq 3 and up) leave other entries: the parts would overwrite the
+    running application or not be booted."""
+    return [
+        f"esptool --chip esp32 --port <PORT> read-flash 0x{otadata_off:X} 0x{otadata_size:X} otadata.bin",
+        "python3 -c \"d=open('otadata.bin','rb').read(); s=open('" + ota1_file + "','rb').read(); "
+        "print('OK' if d[:4]==bytes([1,0,0,0]) and d[4096:] in (bytes([255])*4096, s) "
+        "else 'STOP: not the stock otadata, see docs/dongle-max.md')\"",
+    ]
+
+
+def dongle_install_steps(precheck: list[str]) -> list[str]:
+    """Shown by the web flasher instead of an install button (it renders the esptool writes from `flash`)."""
+    return [
+        "First, for either route, over USB: back up the whole flash (esptool read-flash 0 ALL; it holds "
+        "the dongle's credentials, keep it private) and check otadata: " + "; then ".join(precheck) + ". "
+        "Continue only on OK (sector 0: SONOFF's seq 1, its application in ota_0; sector 1 blank, or this "
+        "release's otadata sector after a USB install). Anything else (SONOFF's own updater moved its "
+        "application to ota_1, stock confirm, a hub self-update): stop, see docs/dongle-max.md.",
         "Recommended: SONOFF's web console of the dongle (http://<dongle address>/), Firmware > "
         "ESP32-D0WDR2-V3 > Upload & Flash Firmware, with the app file. SONOFF's firmware writes it into "
-        "ota_1 and selects it (not yet verified on hardware).",
-        "Or over USB with esptool (below), on a dongle that runs SONOFF's firmware or a hub installed "
-        "this way: write the app first, then the otadata sector. Never erase the chip and never write "
-        "a merged image: SONOFF's bootloader, partition table, nvs and files must stay.",
-        "Back up the whole flash first (esptool read-flash 0 ALL; it holds the dongle's credentials, "
-        "keep it private). SONOFF's firmware comes back with the console command stock confirm, or by "
-        "writing the backup's otadata sector 1 (0x5D000, 4 KiB) back.",
-        "After stock confirm or a hub self-update the USB parts do not switch slots (the newer otadata "
-        "entry wins): update through Settings > Hub firmware in the hub's web UI instead.",
+        "the other slot, ota_1, and selects it (not yet verified on hardware).",
+        "Or over USB with esptool (below): write the app first, then the otadata sector. Never erase the "
+        "chip and never write a merged image: SONOFF's bootloader, partition table, nvs and files must stay.",
+        "SONOFF's firmware comes back with the console command stock confirm, or by writing the backup's "
+        "otadata sector 1 (0x5D000, 4 KiB) back. A hub already running is updated through Settings > Hub "
+        "firmware in its web UI.",
         "First boot: console on the same port at 115200 8N1 (token prints the API token); the web UI "
         "is at http://<address>/ once Ethernet (DHCP) or Wi-Fi (wifi set <ssid> <password>) is up.",
-    ],
-}
+    ]
+
+
 # What the Dongle Max install leaves alone: (name, partition or (offset, size), what).
 PRESERVED_DONGLE = [
     ("bootloader", (0x1000, 0x7000), "SONOFF's ESP-IDF v5.2.1 second-stage bootloader"),
@@ -443,6 +464,8 @@ def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, ota
             size = OTADATA_SECTOR
         preserved.append({"name": name, "offset": offset, "size": size, "what": what})
     edition = {"edition": "devtools"} if devtools else {}
+    otadata_off, otadata_size = parts["otadata"]
+    precheck = dongle_precheck(otadata_off, otadata_size, otadata["name"])
     return {
         "id": spec["id"] + ("-devtools" if devtools else ""),
         "title": spec["title"].replace(" (experimental)", ", Developer edition (devtools) (experimental)")
@@ -463,7 +486,9 @@ def dongle_entry(version: str, parts: dict[str, tuple[int, int]], app: dict, ota
         "web_install": False,
         "note": spec["note"],
         "connect": spec["connect"],
-        "install_steps": spec["install_steps"],
+        "install_steps": dongle_install_steps(precheck),
+        # Before either route: read otadata and go on only on OK (dongle_precheck).
+        "precheck": precheck,
         "app_version": f"zrh-donglem-{version}",
         "files": {
             "app": {**app, "partition": spec["app_partition"],

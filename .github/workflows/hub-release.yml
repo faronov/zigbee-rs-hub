@@ -20,10 +20,11 @@ name: Hub release
 # Dongle Max assets: on by default; the repository variable
 # HUB_RELEASE_DONGLEM=false leaves them out of a tagged release (the
 # workflow_dispatch input `donglem` does the same for a dry run). A tagged
-# release with them first checks that the web flasher (faronov/zigbee-rs
-# master, tools/flasher_site.py) knows `web_install: false`: an older one
-# would offer ESP Web Tools' install, whose erase wipes the dongle's stock
-# firmware.
+# release with them first checks that the *live* web flasher knows
+# `web_install: false` (the revision in its status.json: tools/flasher_site.py
+# there and the deployed page): an older one would offer ESP Web Tools'
+# install, whose erase wipes the dongle's stock firmware. Tag only once the
+# live revision includes faronov/zigbee-rs#15.
 #
 # Dry run (no tag, nothing published): pull requests that touch the release
 # files, and workflow_dispatch on any branch (`gh workflow run hub-release.yml
@@ -56,8 +57,10 @@ on:
             - tools/make-otadata.py
             - tools/make-partition-table.sh
             - firmware/*/Cargo.toml
+            - firmware/*/.cargo/config.toml
             - firmware/*/sdkconfig.defaults
             - firmware/*/partitions*.csv
+            - tools/check-s32c1i.sh
     workflow_dispatch:
         inputs:
             donglem:
@@ -128,10 +131,25 @@ jobs:
                   if [ "$donglem" = true ]; then check_app donglem zrh-donglem zrh-donglem; fi
                   python3 tools/release-notes.py --check "$version" || fail "CHANGELOG.md has no section for $version"
                   if [ "$donglem" = true ]; then
-                    flasher=$(gh api -H "Accept: application/vnd.github.raw" \
-                      "repos/faronov/zigbee-rs/contents/tools/flasher_site.py?ref=master" 2>/dev/null || true)
-                    grep -q '"web_install"' <<<"$flasher" \
-                      || fail "the web flasher (faronov/zigbee-rs master) does not handle web_install yet: merge its Dongle Max support first, or set the repository variable HUB_RELEASE_DONGLEM=false"
+                    # The live site, not master: a refresh builds the release set on the revision the live
+                    # site has (status.json, as tools/flasher_site.py resolve reads it), and only a master CI
+                    # deploy moves that revision. Its flasher_site.py and its page must know web_install.
+                    site=https://faronov.github.io/zigbee-rs
+                    rev=""
+                    for rel in flasher/sensor/status.json flasher/status.json; do
+                      rev=$(curl -fsSL --retry 3 "$site/$rel?t=$(date +%s)" 2>/dev/null | jq -r '.revision // empty' 2>/dev/null || true)
+                      [ -n "$rev" ] && break
+                    done
+                    live=false
+                    if [[ "$rev" =~ ^[0-9a-f]{40}$ ]]; then
+                      flasher=$(gh api -H "Accept: application/vnd.github.raw" \
+                        "repos/faronov/zigbee-rs/contents/tools/flasher_site.py?ref=$rev" 2>/dev/null || true)
+                      page=$(curl -fsSL --retry 3 "$site/flasher/?t=$(date +%s)" 2>/dev/null || true)
+                      if grep -q '"web_install"' <<<"$flasher" && grep -q 'web_install' <<<"$page"; then live=true; fi
+                    fi
+                    echo "live web flasher revision: ${rev:-unknown}, web_install support: $live"
+                    [ "$live" = true ] \
+                      || fail "the live web flasher ($site/flasher/, revision ${rev:-unknown}) does not handle web_install: tag only once the live status.json revision includes faronov/zigbee-rs#15 (its master CI deploy), or set the repository variable HUB_RELEASE_DONGLEM=false"
                   fi
                   {
                     echo "version=$version"
