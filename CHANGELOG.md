@@ -75,8 +75,12 @@ install instructions and the list of merged pull requests. A pre-release
 - **4 MB boards:** no Zigbee OTA (no Updates tab, `ota/*` answers
   `unsupported`) and no advanced console any more; MQTT is new there.
   **8 MB boards:** OTA, the advanced console and MQTT.
-- **Home Assistant:** install the integration from this release's source
-  for the firmware `update` entities (8 MB hubs).
+- **Home Assistant:** integration **0.5.0**, from this release's source
+  (`integrations/home-assistant`): it adds the firmware `update` entities
+  of the Zigbee OTA server (8 MB hubs).
+- **tbr-bridge 0.2.5** (the S3 app for bridge mode on Espressif's stock
+  layout): no functional change; a new version because the rebuilt image
+  differs from the 0.2.4 file of release 0.2.0.
 
 ### Known limitations
 

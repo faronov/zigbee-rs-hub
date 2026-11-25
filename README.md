@@ -629,6 +629,10 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   waits at most 200 ms without progress, then flushes the TX FIFO, counts
   a stall and goes on; a DTR edge (port opened or closed) flushes the FIFO
   too. `info` shows both counters (`stalls`, `DTR flushes`).
+- **0.2.5** (hub release 0.3.0): no change in the bridge's code or in the
+  `hub-core` parts it uses. Rebuilt with the release, its bytes differ
+  from the 0.2.4 asset of hub release 0.2.0 (build metadata, dependency
+  versions), so it gets its own version: one name, one image.
 
 ## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
 
@@ -662,7 +666,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` 0.2.4 unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.5) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
 | **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
