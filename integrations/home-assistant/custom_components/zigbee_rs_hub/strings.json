@@ -215,6 +215,9 @@
     },
     "no_catalog": {
       "message": "No loaded zigbee-rs hub has a definitions catalog."
+    },
+    "one_hub": {
+      "message": "More than one zigbee-rs hub is loaded: pick one."
     }
   },
   "services": {
@@ -275,6 +278,70 @@
         "base_url": {
           "name": "Mirror URL",
           "description": "The catalog mirror for this run instead of the one set on the hub (base URL of a release, e.g. …/latest)."
+        }
+      }
+    },
+    "import_from_zha": {
+      "name": "Import from ZHA",
+      "description": "Moves ZHA's network and devices to the hub without pairing them again: reads ZHA's zigbee.db, its newest network backup and the names and areas of its devices. Without apply it only previews. Applying needs the ZHA integration disabled first (two coordinators must never run one network).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Hub",
+          "description": "The hub (needed with more than one)."
+        },
+        "apply": {
+          "name": "Apply",
+          "description": "Import; otherwise preview only."
+        },
+        "database": {
+          "name": "Database",
+          "description": "ZHA's database file; zigbee.db in the configuration directory when empty."
+        },
+        "backup": {
+          "name": "Backup file",
+          "description": "A ZHA network backup (Configure → Download backup) instead of the newest one in the database."
+        },
+        "force": {
+          "name": "Replace the running network",
+          "description": "The hub's radio runs another network: replace it (it is backed up first)."
+        },
+        "confirm": {
+          "name": "Re-tag records",
+          "description": "The hub's device registry holds another network's records: re-tag them as the imported network's."
+        },
+        "confirm_ieee_write_once": {
+          "name": "Write the coordinator IEEE once",
+          "description": "EmberZNet radios: write ZHA's coordinator IEEE to the one-time token (irreversible)."
+        },
+        "keep_ieee": {
+          "name": "Keep this radio's IEEE",
+          "description": "Do not take ZHA's coordinator IEEE: the devices are configured again."
+        },
+        "skip_backup": {
+          "name": "Skip the backup",
+          "description": "Do not back up the network the import replaces."
+        },
+        "remove_missing": {
+          "name": "Remove other devices",
+          "description": "Remove the hub's devices that are not in ZHA."
+        },
+        "reconfigure": {
+          "name": "Configure again",
+          "description": "auto: when the coordinator IEEE changed; always; never."
+        }
+      }
+    },
+    "copy_names_areas": {
+      "name": "Copy names and areas",
+      "description": "Gives the hub's devices the names you set and the areas of the same devices in ZHA or Zigbee2MQTT (after an import from the web UI or hubctl).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Hub",
+          "description": "The hub (needed with more than one)."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Also where the hub's device has a name or an area already."
         }
       }
     }

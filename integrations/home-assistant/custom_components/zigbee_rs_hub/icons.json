@@ -34,6 +34,12 @@
     },
     "update_catalog": {
       "service": "mdi:book-sync"
+    },
+    "import_from_zha": {
+      "service": "mdi:database-import"
+    },
+    "copy_names_areas": {
+      "service": "mdi:rename"
     }
   }
 }
