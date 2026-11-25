@@ -566,8 +566,8 @@ $("#rsf").onchange=async e=>{
  const f=e.target.files[0];e.target.value="";if(!f)return;const t=await f.text();let b;try{b=JSON.parse(t)}catch{return toast("Not a JSON file")}
  if(!confirm("Restore network PAN "+b.pan_id+", channel "+b.channel+" with "+(b.devices||[]).length+" devices onto this hub's radio? Never run the old coordinator at the same time."))return;
  $("#bks").textContent="restoring…";
- try{const u=q=>upload(b,q).catch(err=>{const m=err.message;if(!q.force&&/force/.test(m)&&confirm("The radio runs a network now. Replace it? It is backed up first."))return u({...q,force:!0});if(!q.confirm_ieee_write_once&&/write_once/.test(m)&&confirm("The radio can store the backup's IEEE address only once, for good. Write it?"))return u({...q,confirm_ieee_write_once:!0});throw err});let r=await u({});
-  if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
+ try{const u=q=>upload(b,q).catch(err=>{const m=err.message,k=["force","confirm","confirm_ieee_write_once"].find(k=>!q[k]&&m.includes("set "+k+" "));if(k&&confirm(m+"\n\nGo on?"))return u({...q,[k]:!0});throw err});let r=await u({});
+  if(r&&r.backup)saveBackup(r.backup);if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
  catch(err){$("#bks").textContent="";toast("restore: "+err.message)}};
 $("#nrb").onclick=e=>{
  if($("#nconf").value!="RESET")return toast("Type RESET to confirm");

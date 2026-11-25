@@ -106,6 +106,7 @@ code_type! {
         NOT_JOINED = 0x93,
         JOIN_FAILED = 0x94,
         MOVE_FAILED = 0x96,
+        PHY_INVALID_POWER = 0x8B,
         CANNOT_JOIN_AS_ROUTER = 0x98,
         CHANNEL_CHANGED = 0x9B,
         NETWORK_OPENED = 0x9C,
@@ -145,6 +146,7 @@ code_type! {
         NOT_FOUND = 0x002D,
         ALREADY_EXISTS = 0x002E,
         MESSAGE_TOO_LONG = 0x0038,
+        TRANSMIT_INVALID_POWER = 0x0056,
         ZIGBEE_DELIVERY_FAILED = 0x0C02,
         ZIGBEE_MAX_MESSAGE_LIMIT_REACHED = 0x0C03,
         ZIGBEE_NODE_ID_CHANGED = 0x0C07,
@@ -849,6 +851,14 @@ pub mod token {
     pub const NVM3KEY_STACK_RESTORED_EUI64: u32 = 0x1_E12A;
     /// Offset of `updateId` in `tokTypeStackNetworkManagement`.
     pub const NETWORK_MANAGEMENT_UPDATE_ID: usize = 6;
+    /// `NVM3KEY_STACK_CHILD_TABLE` (indexed by the child): 11 bytes
+    /// (`tokTypeStackChildTable`), as bellows reads them: EUI64, node ID,
+    /// flags.
+    pub const NVM3KEY_STACK_CHILD_TABLE: u32 = 0x1_0580;
+    /// `CREATOR_STACK_CHILD_TABLE`.
+    pub const CREATOR_STACK_CHILD_TABLE: u32 = 0xFF0D;
+    /// The flags of a child table entry of a working coordinator (bellows).
+    pub const CHILD_TABLE_FLAGS: u8 = 0x80;
 }
 
 /// `EmberKeyData`: 16 bytes.

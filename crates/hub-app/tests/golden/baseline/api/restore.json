@@ -1,5 +1,6 @@
 {
   "aps_fc_start": 12048,
+  "backup": null,
   "channel": 15,
   "children": 0,
   "coordinator_ieee": "020100000000515a",

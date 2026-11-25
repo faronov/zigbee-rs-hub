@@ -279,6 +279,9 @@ fn a_backup_restores_onto_another_ncp_in_every_verified_version() {
                 .collect::<Vec<_>>(),
             [(Eui64::from_u64(CHILD), 0x4D32)]
         );
+        // setChildData left the entry's flags 0x00 (the SDK bug bellows
+        // works around): rewritten with 0x80 through the token interface.
+        assert_eq!(n.child_table_flags, [0x80], "EZSP {version}");
         let sec = b.sim.ncp(|n| n.security_state()).unwrap();
         assert_eq!(
             sec.bitmask, 0x1B84,
@@ -488,4 +491,38 @@ fn another_stacks_backup_gets_a_new_link_key_root_and_the_large_aps_margin() {
         "the device's own key"
     );
     b.finish();
+}
+
+#[test]
+fn a_tx_power_the_ncp_refuses_forms_at_the_default() {
+    let mut a = Rig::new(source(13));
+    a.next_up();
+    let mut items = export(&mut a, true);
+    a.finish();
+    for i in &mut items {
+        if let BackupItem::Network { tx_power, .. } = i {
+            *tx_power = Some(20);
+        }
+    }
+    for version in [13, 18] {
+        let mut b = Rig::new(SimConfig {
+            max_tx_power: Some(8),
+            ..target(version)
+        });
+        b.next_up();
+        let keep = RestoreOptions {
+            allow_ieee_change: false,
+            ..margins(0)
+        };
+        b.admin.backup_restore(blob(&items), keep).unwrap();
+        let forms = b
+            .commands()
+            .iter()
+            .filter(|c| **c == id::FORM_NETWORK)
+            .count();
+        assert_eq!(forms, 2, "EZSP {version}: refused at 20 dBm, then 8");
+        assert_eq!(b.sim.ncp(|n| n.config().network.radio_tx_power), 8);
+        assert!(b.sim.ncp(|n| n.network_up()));
+        b.finish();
+    }
 }

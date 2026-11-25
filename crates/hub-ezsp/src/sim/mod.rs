@@ -23,8 +23,10 @@
 //! `setChildData`, the custom EUI64 manufacturing token (written once,
 //! applied at the next reset) and, with [`SimConfig::token_interface`],
 //! the token frames for the restored EUI64 (rewritable, ahead of the
-//! custom one) and the network management token (`updateId`). As bellows
-//! reports for real NCPs, `formNetwork` ignores `nwkUpdateId` (0).
+//! custom one), the network management token (`updateId`) and the child
+//! table token. As bellows reports for real NCPs, `formNetwork` ignores
+//! `nwkUpdateId` (0) and `setChildData` leaves the child table entry's
+//! flags 0x00; [`SimConfig::max_tx_power`] refuses a TX power.
 //! Faults beyond the
 //! UART: `messageSentHandler`s held back ([`SimNcp::hold_message_sent`]),
 //! an APS unicast limit (`APS_UNICAST_MESSAGE_COUNT` held messages, then
@@ -148,6 +150,13 @@ pub struct SimConfig {
     pub token_interface: bool,
     /// The restored EUI64 stack token (`None`: all 0xFF).
     pub restored_eui64: Option<Eui64>,
+    /// The highest TX power `formNetwork` takes (higher: `PHY_INVALID_POWER`
+    /// / `TRANSMIT_INVALID_POWER`); `None`: any.
+    pub max_tx_power: Option<i8>,
+    /// The flags byte of each child's NVM child table entry (missing:
+    /// 0x80). `setChildData` leaves it 0x00, the SDK bug bellows works
+    /// around.
+    pub child_table_flags: Vec<u8>,
 }
 
 /// Bytes per entry of the tables the simulated NCP sizes from
@@ -225,6 +234,8 @@ impl Default for SimConfig {
             custom_eui64: None,
             token_interface: false,
             restored_eui64: None,
+            max_tx_power: None,
+            child_table_flags: Vec::new(),
         }
     }
 }
@@ -912,6 +923,7 @@ impl SimNcp {
                 EmberStatus::NOT_JOINED => SlStatus::NOT_JOINED,
                 EmberStatus::INDEX_OUT_OF_RANGE => SlStatus::INVALID_INDEX,
                 EmberStatus::NETWORK_DOWN => SlStatus::NETWORK_DOWN,
+                EmberStatus::PHY_INVALID_POWER => SlStatus::TRANSMIT_INVALID_POWER,
                 _ => SlStatus::FAIL,
             })
         } else {
@@ -946,6 +958,10 @@ impl SimNcp {
                     Response::FormNetwork {
                         status: Self::ember(v, E::INVALID_CALL),
                     }
+                } else if self.cfg.max_tx_power.is_some_and(|m| p.radio_tx_power > m) {
+                    Response::FormNetwork {
+                        status: Self::ember(v, E::PHY_INVALID_POWER),
+                    }
                 } else {
                     self.cfg.network = p;
                     self.cfg.network.nwk_manager_id = 0;
@@ -978,6 +994,7 @@ impl SimNcp {
                     self.network_up = false;
                     self.cfg.network_formed = false;
                     self.cfg.children.clear();
+                    self.cfg.child_table_flags.clear();
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, StatusFamily::Ember, StatusKind::NetworkDown),
                     });
@@ -1274,6 +1291,22 @@ impl SimNcp {
                 data.extend_from_slice(&[n.nwk_update_id, 0]);
                 Response::GetTokenData { status: ok, data }
             }
+            Command::GetTokenData { token: t, index }
+                if is_child_table(t) && (index as usize) < self.cfg.children.len() =>
+            {
+                let i = index as usize;
+                let c = self.cfg.children[i];
+                let mut data = c.eui64.0.to_vec();
+                data.extend_from_slice(&c.id.to_le_bytes());
+                data.push(
+                    self.cfg
+                        .child_table_flags
+                        .get(i)
+                        .copied()
+                        .unwrap_or(token::CHILD_TABLE_FLAGS),
+                );
+                Response::GetTokenData { status: ok, data }
+            }
             Command::GetTokenData { .. } => Response::GetTokenData {
                 status: Self::ember(v, E::NOT_FOUND),
                 data: vec![],
@@ -1298,6 +1331,24 @@ impl SimNcp {
                 n.nwk_update_id = data[token::NETWORK_MANAGEMENT_UPDATE_ID];
                 Response::SetTokenData { status: ok }
             }
+            Command::SetTokenData {
+                token: t,
+                index,
+                data,
+            } if is_child_table(t)
+                && data.len() == 11
+                && self.cfg.children.get(index as usize).is_some_and(|c| {
+                    data[..8] == c.eui64.0 && data[8..10] == c.id.to_le_bytes()
+                }) =>
+            {
+                let i = index as usize;
+                let flags = &mut self.cfg.child_table_flags;
+                if flags.len() <= i {
+                    flags.resize(i + 1, token::CHILD_TABLE_FLAGS);
+                }
+                flags[i] = data[10];
+                Response::SetTokenData { status: ok }
+            }
             Command::SetTokenData { .. } => Response::SetTokenData {
                 status: Self::ember(v, E::NOT_FOUND),
             },
@@ -1314,6 +1365,11 @@ impl SimNcp {
                     } else {
                         self.cfg.children[i] = data;
                     }
+                    let flags = &mut self.cfg.child_table_flags;
+                    if flags.len() <= i {
+                        flags.resize(i + 1, token::CHILD_TABLE_FLAGS);
+                    }
+                    flags[i] = 0x00;
                     ok
                 };
                 Response::SetChildData { status }
@@ -1530,6 +1586,11 @@ impl SimNcp {
 /// key.
 fn is_token(t: u32, creator: u32) -> bool {
     t == creator || t == creator | 0x1_0000
+}
+
+/// `t` names the child table token (its NVM3 key is not the creator's).
+fn is_child_table(t: u32) -> bool {
+    t == token::NVM3KEY_STACK_CHILD_TABLE || t == token::CREATOR_STACK_CHILD_TABLE
 }
 
 #[derive(Debug)]

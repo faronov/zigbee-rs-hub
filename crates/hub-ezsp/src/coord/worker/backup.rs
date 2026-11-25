@@ -654,7 +654,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     }
 
     fn restore_form(&mut self, plan: &Plan) -> Result<(), CoordError> {
-        let params = NetworkParameters {
+        let mut params = NetworkParameters {
             extended_pan_id: plan.ext_pan_id,
             pan_id: plan.pan_id,
             radio_tx_power: self.tx_power.or(plan.tx_power).unwrap_or(RESTORE_TX_POWER),
@@ -664,11 +664,25 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             nwk_update_id: plan.nwk_update_id,
             channels: plan.channel_mask,
         };
-        let status = match self.host.call(&Command::FormNetwork(params)) {
-            Ok(Response::FormNetwork { status }) => status,
-            Ok(other) => return Err(host_error(&HostError::UnexpectedResponse(other))),
-            Err(e) => return Err(self.admin_error(e)),
-        };
+        let mut status = self.form_network(params)?;
+        // The backup's TX power is the radio's that made it: an NCP that
+        // does not have it forms at the default (bellows does the same).
+        let from_backup = self.tx_power.is_none() && plan.tx_power.is_some();
+        if from_backup
+            && params.radio_tx_power != RESTORE_TX_POWER
+            && matches!(
+                status,
+                Status::Ember(EmberStatus::PHY_INVALID_POWER)
+                    | Status::Sl(SlStatus::TRANSMIT_INVALID_POWER)
+            )
+        {
+            warn!(
+                "ezsp: the NCP refuses the backup's TX power {} dBm; forming at {RESTORE_TX_POWER} dBm",
+                params.radio_tx_power
+            );
+            params.radio_tx_power = RESTORE_TX_POWER;
+            status = self.form_network(params)?;
+        }
         if !status.is_success() {
             return Err(ezsp_error(id::FORM_NETWORK, status));
         }
@@ -683,6 +697,14 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         }
         self.refresh_network();
         Ok(())
+    }
+
+    fn form_network(&mut self, params: NetworkParameters) -> Result<Status, CoordError> {
+        match self.host.call(&Command::FormNetwork(params)) {
+            Ok(Response::FormNetwork { status }) => Ok(status),
+            Ok(other) => Err(host_error(&HostError::UnexpectedResponse(other))),
+            Err(e) => Err(self.admin_error(e)),
+        }
     }
 
     /// The NWK update ID through the network management stack token
@@ -765,6 +787,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 data,
             }) {
                 Ok(()) => {
+                    self.fix_child_flags(index as u8, data.eui64, nwk)?;
                     index += 1;
                     report.children += 1;
                 }
@@ -774,6 +797,48 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                     report.notes.push((*i, restore_note::CHILD_DEMOTED));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// bellows' workaround (EZSP ≥ 10): `setChildData` leaves a flags byte
+    /// of the NVM child table entry 0x00 where a working coordinator has
+    /// 0x80. With the token interface, the entry is read back; if it is
+    /// exactly this child (EUI64, node ID) with other flags, it is written
+    /// with 0x80. Best effort: another layout or no token interface leaves
+    /// it.
+    fn fix_child_flags(&mut self, index: u8, eui64: Eui64, id: NodeId) -> Result<(), HostError> {
+        let mut entry = eui64.0.to_vec();
+        entry.extend_from_slice(&id.to_le_bytes());
+        entry.push(token::CHILD_TABLE_FLAGS);
+        for key in [
+            token::NVM3KEY_STACK_CHILD_TABLE,
+            token::CREATOR_STACK_CHILD_TABLE,
+        ] {
+            let data = match self.try_call(&Command::GetTokenData {
+                token: key,
+                index: u32::from(index),
+            })? {
+                None => return Ok(()),
+                Some(Response::GetTokenData { status, data }) if status.is_success() => data,
+                Some(_) => continue,
+            };
+            if data.len() != entry.len() || data[..10] != entry[..10] {
+                warn!("ezsp: child table entry {index} not as expected: left as it is");
+            } else if data[10] != token::CHILD_TABLE_FLAGS {
+                let r = self.try_call(&Command::SetTokenData {
+                    token: key,
+                    index: u32::from(index),
+                    data: entry,
+                })?;
+                if r.as_ref()
+                    .and_then(Response::status)
+                    .is_none_or(|s| !s.is_success())
+                {
+                    warn!("ezsp: child table entry {index}: flags not written");
+                }
+            }
+            return Ok(());
         }
         Ok(())
     }

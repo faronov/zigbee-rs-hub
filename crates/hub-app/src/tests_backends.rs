@@ -914,6 +914,8 @@ fn ezsp_backup_restores_onto_a_new_dongle() {
     let rig = Rig::ezsp(dst, Store::volatile());
     let sim = rig.ezsp.clone().unwrap();
     let (sid, rx) = session(&rig.app);
+    let coordinator = |rig: &Rig| ok(&call(&rig.app, sid, &rx, 70, json!({"type": "hub/info"})))["coordinator_ieee"].clone();
+    assert_eq!(coordinator(&rig), "000b57fffe654321", "the new dongle's own IEEE");
     let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup}));
     assert_eq!(r["error"]["code"], "invalid_value", "{r}");
     let why = r["error"]["message"].as_str().unwrap();
@@ -935,16 +937,18 @@ fn ezsp_backup_restores_onto_a_new_dongle() {
     });
     let t = rig.tag().unwrap();
     assert_eq!((t.ext_pan_id, t.coordinator_ieee), ([0xDD; 8], 0x000B_57FF_FE12_3456u64.to_le_bytes()), "tag rewritten");
+    // Binds and the IAS CIE address name the coordinator the devices know.
+    assert_eq!(coordinator(&rig), "000b57fffe123456", "the restored IEEE in hub/info");
     assert!(t.key_id.is_some());
     ok(&call(&rig.app, sid, &rx, 4, json!({"type": "network/permit_join", "duration_s": 30})));
     wait("joining open", || rig.link.permit_open());
     rig.finish();
 }
 
-/// EZSP (`NcpNv`): a restore over a network the NCP stores, or over
-/// records of another network, needs `force` (or `confirm`); refused,
-/// neither the NCP nor the records change. Forced, the records are tagged
-/// with the restored network.
+/// EZSP (`NcpNv`): a restore over a network the NCP stores needs `force`,
+/// over records of another network `confirm` (they are re-tagged);
+/// refused, neither the NCP nor the records change. Confirmed, the records
+/// are tagged with the restored network.
 #[test]
 fn ezsp_restore_over_another_network_needs_force() {
     // The backup of network DD, by a coordinator with the sims' IEEE.
@@ -961,11 +965,17 @@ fn ezsp_restore_over_another_network_needs_force() {
     let (sid, rx) = session(&rig.app);
     wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
     let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup}));
-    assert!(r["error"]["message"].as_str().unwrap().contains("force"), "{r}");
+    assert!(r["error"]["message"].as_str().unwrap().contains("set force "), "{r}");
+    // The NCP's network may go, but the records are network EE's: a
+    // distinct refusal, its own confirmation.
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true}));
+    assert_eq!(r["error"]["code"], "registry_read_only", "{r}");
+    assert!(r["error"]["message"].as_str().unwrap().contains("set confirm "), "{r}");
     assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xEE; 8]));
     assert_eq!(sim.ncp(|n| n.config().network.extended_pan_id), [0xEE; 8]);
-    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "confirm": true}));
+    let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
     assert_eq!(ok(&r)["previous_network_backed_up"], true, "{r}");
+    assert_eq!(r["result"]["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the replaced network's backup");
     wait("the restored network owned", || {
         let i = info(&rig.app, sid, &rx);
         epid_of(&i) == [0xDD; 8] && i["ownership"] == "owned" && i["registry"]["state"] == "owned"
@@ -990,10 +1000,40 @@ fn ezsp_restore_over_another_network_needs_force() {
     assert_eq!(info(&rig.app, sid, &rx)["ownership"], "no_network");
     let r = call(&rig.app, sid, &rx, 4, json!({"type": "network/restore", "backup": backup}));
     let why = r["error"]["message"].as_str().unwrap_or_default();
-    assert!(why.contains("device registry") && why.contains("force"), "{r}");
+    assert_eq!(r["error"]["code"], "registry_read_only", "{r}");
+    assert!(why.contains("re-tags") && why.contains("set confirm ") && !why.contains("force"), "{r}");
     assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xEE; 8]), "the tag kept");
-    ok(&call(&rig.app, sid, &rx, 5, json!({"type": "network/restore", "backup": backup, "force": true})));
+    ok(&call(&rig.app, sid, &rx, 5, json!({"type": "network/restore", "backup": backup, "confirm": true})));
     wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
     assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    rig.finish();
+}
+
+/// EZSP: the network a restore replaces is backed up first; when the
+/// records are another backend's (foreign, closed) the backup cannot be
+/// kept, so it comes back in the answer, or the restore is refused.
+#[test]
+fn ezsp_restore_over_foreign_records_returns_the_replaced_networks_backup() {
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+
+    let mut s = Store::volatile();
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+    let mut ee = ezsp_sim(true, 0xEE);
+    ee.network_key = [0x5E; 16];
+    let rig = Rig::ezsp(ee, s);
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    let rep = ok(&r);
+    assert_eq!(rep["previous_network_backed_up"], true, "{rep}");
+    assert_eq!(rep["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "returned: it could not be kept");
+    assert_eq!(rep["backup"]["network_key"]["key"], "5e".repeat(16));
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    let last = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/last"}));
+    assert_ne!(ok(&last)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the closed records kept nothing of it");
     rig.finish();
 }

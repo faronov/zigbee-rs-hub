@@ -363,11 +363,15 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
    hub unless the request names one, the backup's for a restore; key ID
    unknown), so an interrupted job (a timeout, a reboot) still leaves them
    the new network's; afterwards the tag gets the full identity.
-   `network/restore` needs `force` (or `confirm`) over a network the NCP
-   stores and over records of another network than the backup's
-   (`Records::may_restore`: another tag, records of unknown origin); the
-   backend's `restore_check` runs before anything changes, then the stored
-   network is left, the records tagged and the backup restored.
+   `network/restore` needs `force` over a network the NCP stores and
+   `confirm` over records of another network than the backup's
+   (`Records::may_restore`: another tag, records of unknown origin; they
+   are re-tagged); the backend's `restore_check` runs before anything
+   changes, then the running network is backed up (kept, or returned in
+   the answer when the records are closed), the stored network left, the
+   records tagged and the backup restored. Every session's `Up` sets the
+   engine's coordinator IEEE (binds, the IAS CIE address, `hub/info`): a
+   restore may change it.
 5. `foreign`: `network/info.ownership` `mismatch` and
    `network/info.registry` `{"state":"foreign","backend","why"}`;
    `network/registry/adopt` (the records become the NCP network's) or
@@ -444,7 +448,9 @@ checks of step 0 alone, without changing anything):
    (the rest: note `ignored`). Their frame counters cannot be set.
 6. `formNetwork` with the backup's PAN ID, EPID, channel, mask, NWK
    manager and update ID (TX power: the operator's, the backup's, else
-   8 dBm); NETWORK_UP awaited.
+   8 dBm; a backup's power the NCP refuses, `PHY_INVALID_POWER` /
+   `SL_STATUS_TRANSMIT_INVALID_POWER`, forms again at 8 dBm, as bellows);
+   NETWORK_UP awaited.
 7. The NWK update ID: bellows found that `formNetwork` ignores it; it is
    written into the network management stack token
    (`CREATOR_STACK_NETWORK_MANAGEMENT` 0xE125 / 0x1E125, `updateId` at
@@ -453,7 +459,12 @@ checks of step 0 alone, without changing anything):
    another.
 8. `setChildData` for the backup's children with a short address, up to
    `MAX_END_DEVICE_CHILDREN` (sleepy unless the capability says receiver
-   on; the rest: note `child_demoted`).
+   on; the rest: note `child_demoted`). bellows found that it leaves the
+   NVM child table entry's flags 0x00 where a working coordinator has
+   0x80: with the token interface the entry (`NVM3KEY_STACK_CHILD_TABLE`
+   0x10580, then `CREATOR_STACK_CHILD_TABLE` 0xFF0D, at the child's index;
+   11 bytes, `tokTypeStackChildTable`: EUI64, node ID, flags) is read back
+   and, when it is exactly this child, written with 0x80.
 9. An NCP reset (a new session, `networkInit`): the restored network must
    come back with the backup's EPID, PAN ID and key ID.
 
@@ -511,8 +522,10 @@ firmware console: `hub` on the Dongle Max.
   entry and for `setMfgToken` over a written token; whether
   `setValue(NWK_FRAME_COUNTER)` is refused with a network up; the
   precedence of the restored-EUI64 token over the custom EUI-64; that
-  `formNetwork` ignores `nwkUpdateId` (bellows' finding, modelled); and
-  that `setChildData` children are kept across the reset.
+  `formNetwork` ignores `nwkUpdateId` and that `setChildData` leaves the
+  child table flags 0x00 (bellows' findings, modelled); the child table
+  entry's layout (bellows'); the status of a TX power `formNetwork`
+  refuses; and that `setChildData` children are kept across the reset.
 - Z2M interop: whatever byte order zigbee-herdsman's ember adapter writes
   `extended_pan_id` and `coordinator_ieee` in, the hub reads Z2M files
   exactly as zigpy (and so ZHA's backup upload) does: big-endian, no
