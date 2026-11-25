@@ -100,6 +100,7 @@ does not mean implemented.
 | Built-in NCP firmware updater | Existing H2 path | **Required in first stage** | **Required in first stage**; blocked on wiring |
 | Backup restore within the same backend | Existing | Later, after the core stage | Later, after the core stage |
 | Migration of an existing network between different stacks | No general claim | Separate project | Separate project |
+| Import of a Zigbee2MQTT or ZHA network with its device records (`network/import`, [migration.md](migration.md)) | Existing (host-tested; IEEE override by the NCP) | Existing (host-tested; IEEE through the token rules of the restore) | — |
 | Green Power sink/proxy operations | Existing ZRHP capabilities | Later / capability-gated | Later / capability-gated |
 | Vendor-specific tables, diagnostics and tuning | Existing where exposed | Capability-gated | Capability-gated |
 
