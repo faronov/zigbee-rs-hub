@@ -1,4 +1,5 @@
-//! The last ESP-IDF panic (exception, watchdog, abort) in RTC memory.
+//! The last ESP-IDF panic (exception, watchdog, abort), the last Rust
+//! panic message and failed heap allocations, in RTC memory.
 //!
 //! Hub-mode logs go to UART0, which the lab host cannot see, and a panic
 //! can leave the coredump partition empty. `esp_panic_handler` is wrapped
@@ -7,6 +8,11 @@
 //! text, then runs ESP-IDF's handler (print, coredump, reboot). `info`
 //! shows it with the number of boots since, so a safe-mode boot in between
 //! does not hide it.
+//!
+//! [`record_panics`] keeps a Rust panic's message (Rust panics abort, so
+//! ESP-IDF only sees `abort()`); [`record_alloc_failures`] counts failed
+//! heap allocations (an `abort()` from Rust's allocation error handler
+//! leaves no panic message).
 
 use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -170,4 +176,83 @@ pub fn last() -> Option<String> {
         r.excvaddr,
         if r.cache_vaddr != 0 || r.cache_size != 0 { format!(" cache address 0x{:08x} size {}", r.cache_vaddr, r.cache_size) } else { String::new() }
     ))
+}
+
+/// The last Rust panic message, kept in RTC memory across the panic reset.
+#[unsafe(link_section = ".rtc_noinit")]
+static mut PANIC_MSG: [u8; 256] = [0; 256];
+const PANIC_MAGIC: &[u8; 4] = b"PNC1";
+
+/// Records the message of a Rust panic before the default hook runs; call
+/// once at start-up, after [`last_panic`] has read the previous one.
+pub fn record_panics() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = format!("{info}");
+        let n = text.len().min(250);
+        let p = &raw mut PANIC_MSG;
+        // SAFETY: written once by the panicking thread right before the reset.
+        let buf = unsafe { &mut *p };
+        buf[..4].copy_from_slice(PANIC_MAGIC);
+        buf[4] = n as u8;
+        buf[5..5 + n].copy_from_slice(&text.as_bytes()[..n]);
+        prev(info);
+    }));
+}
+
+/// The previous boot's Rust panic message (read once, then cleared).
+pub fn last_panic() -> Option<String> {
+    static LAST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| {
+        let p = &raw mut PANIC_MSG;
+        // SAFETY: read and cleared once at the first use, before any panic of this boot.
+        let buf = unsafe { &*p };
+        if &buf[..4] != PANIC_MAGIC {
+            return None;
+        }
+        let n = (buf[4] as usize).min(250);
+        let text = String::from_utf8_lossy(&buf[5..5 + n]).into_owned();
+        // Reported for the boot after the panic only.
+        unsafe { (&mut *p)[..4].fill(0) };
+        Some(text)
+    })
+    .clone()
+}
+
+/// Failed heap allocations (also ones the caller survives) in RTC memory:
+/// magic, count, last size, last caps, time (ms) of the last one.
+#[unsafe(link_section = ".rtc_noinit")]
+static mut ALLOC_FAIL: [u32; 5] = [0; 5];
+const ALLOC_MAGIC: u32 = 0x414C_4331;
+static PREV_ALLOC_FAIL: std::sync::OnceLock<[u32; 5]> = std::sync::OnceLock::new();
+
+unsafe extern "C" fn alloc_failed(size: usize, caps: u32, _function: *const c_char) {
+    // SAFETY: plain word stores; a lost update between threads only miscounts.
+    let a = unsafe { &mut *(&raw mut ALLOC_FAIL) };
+    a[1] = a[1].wrapping_add(1);
+    a[2] = size as u32;
+    a[3] = caps;
+    a[4] = (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000) as u32;
+}
+
+/// Keeps the previous boot's count and counts this boot's failures; call
+/// once at start-up.
+pub fn record_alloc_failures() {
+    let a = unsafe { &mut *(&raw mut ALLOC_FAIL) };
+    let _ = PREV_ALLOC_FAIL.set(if a[0] == ALLOC_MAGIC { *a } else { [0; 5] });
+    *a = [ALLOC_MAGIC, 0, 0, 0, 0];
+    unsafe { esp_idf_svc::sys::heap_caps_register_failed_alloc_callback(Some(alloc_failed)) };
+}
+
+/// Failed allocations of the previous boot and of this one (console lines).
+pub fn alloc_failures() -> String {
+    let line = |what: &str, a: [u32; 5]| {
+        if a[1] == 0 {
+            String::new()
+        } else {
+            format!("{what}: {} failed allocations, last {} bytes (caps 0x{:x}) at t={}ms\r\n", a[1], a[2], a[3], a[4])
+        }
+    };
+    let now = unsafe { (&raw const ALLOC_FAIL).read_volatile() };
+    line("previous boot", PREV_ALLOC_FAIL.get().copied().unwrap_or_default()) + &line("this boot", now)
 }

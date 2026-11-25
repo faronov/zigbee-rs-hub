@@ -136,6 +136,11 @@ impl Board {
         self.running.iter_mut().find(|r| r.job == job)
     }
 
+    /// Jobs running.
+    pub fn running(&self) -> usize {
+        self.running.len()
+    }
+
     /// The job ended.
     pub fn finish(&mut self, job: u64) {
         self.running.retain(|r| r.job != job);

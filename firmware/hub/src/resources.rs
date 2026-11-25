@@ -1,9 +1,7 @@
-//! The [`Resources`] of this boot and what the image was built with.
+//! The `Resources` of this boot (`zrh_espapp::resources`) and what the
+//! image was built with.
 
-use std::sync::OnceLock;
-
-use esp_idf_svc::sys;
-use hub_core::resources::Resources;
+pub use zrh_espapp::resources::{app_allowed, get};
 
 /// Cargo features and PSRAM interface of the image, also as a marker in the
 /// binary that tools/release-images.py checks against the board entry.
@@ -29,24 +27,9 @@ pub fn psram_mode() -> &'static str {
     build_field("psram")
 }
 
-pub fn get() -> &'static Resources {
-    static RESOURCES: OnceLock<Resources> = OnceLock::new();
-    RESOURCES.get_or_init(|| {
-        let psram = unsafe { sys::heap_caps_get_total_size(sys::MALLOC_CAP_SPIRAM) };
-        Resources::for_psram(psram)
-    })
-}
-
 /// The other PSRAM interface's image, for the wrong-image message.
 pub fn other_psram_mode() -> &'static str {
     if psram_mode() == "octal" { "quad" } else { "octal" }
-}
-
-/// Without PSRAM the app is not started (it needs about 100 KB more
-/// internal RAM than the module has left): the hub core keeps the Zigbee
-/// network, the console and a web page say which image to flash.
-pub fn app_allowed() -> bool {
-    !get().internal_fallback()
 }
 
 /// The wrong-image message (console, log, web page).

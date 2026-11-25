@@ -1,53 +1,55 @@
 //! zigbee-rs-hub gateway firmware for host boards described by a
 //! [`BoardProfile`]: the SONOFF Dongle Max (Dongle-M: classic ESP32 +
-//! EFR32MG24, Ethernet). The Thread BR board keeps its own firmware
-//! (`firmware/hub`).
+//! EFR32MG24 with SONOFF's EmberZNet NCP, Ethernet). The Thread BR board
+//! keeps its own firmware (`firmware/hub`); what both need from ESP-IDF
+//! for the hub application is shared (`firmware/espapp`).
 //!
-//! **Board bring-up stage.** No coordinator backend and no hub application
-//! run yet (the EZSP backend and the backend selection come later). What
-//! runs, in boot order ([`run`]):
+//! Boot order ([`run`]):
 //!
 //! 1. the NCP lines released ([`lines::init`]): on the Dongle-M GPIO12
 //!    (MG24 bootloader entry, the ESP32's MTDI flash-voltage strap) low and
 //!    GPIO15 (MG24 nRESET) high, before anything else;
-//! 2. the Rust heap in PSRAM and the panic recorder (the sources of
-//!    `firmware/hub/src/alloc.rs` and `cpanic.rs`, shared), console,
-//!    settings ([`settings`], own NVS namespace, never erased), boot report:
-//!    chip, memory, partitions, straps, last panic ([`esp`]);
+//! 2. the Rust heap in PSRAM, the panic recorders, the logger with the log
+//!    ring, console, settings ([`settings`], own NVS namespace, never
+//!    erased), boot report: chip, memory, partitions, `files`, straps, last
+//!    panic ([`esp`]);
 //! 3. the NCP UART at the profile's rate ([`uart`]) and an MG24 reset into
 //!    its application;
-//! 4. network: Ethernet, Wi-Fi station as the fallback ([`net`]);
-//! 5. LED and button ([`led`]), then the console on the calling thread
-//!    ([`console`]): MG24 reset, Gecko bootloader banner ([`gecko`]), the
-//!    read-only EZSP probe ([`ezsp`]) and the way back to SONOFF's
-//!    application in `ota_0` ([`slots`]).
+//! 4. the hub ([`hub`]): the application on the EZSP backend over the NCP
+//!    UART, its data on SONOFF's `files` partition, claimed at the first
+//!    boot ([`files`]; RAM only if that is refused), the API token from an
+//!    entropy source ([`entropy`]), the `storage/*` and `firmware/*`
+//!    requests ([`update`]: self-update into the other app slot), MQTT;
+//! 5. network: Ethernet, Wi-Fi station as the fallback ([`net`]); the
+//!    HTTP server (web UI, WebSocket API) once an interface has an address;
+//! 6. LED and button ([`led`]: short press = permit join), then the
+//!    console on the calling thread ([`console`]), with the way back to
+//!    SONOFF's application in `ota_0` ([`slots`]).
 //!
-//! The stock partition table stays; SONOFF's `files` partition (the hub's
-//! future data region, `hub_core::layout::dongle_files`) is only read.
+//! `restart bringup` boots once without the hub: the bring-up console
+//! with the MG24 probes ([`ezsp`], [`gecko`]). Without PSRAM the hub does
+//! not start either (a page says why).
 //!
-//! No Bluetooth (off in sdkconfig, its RAM stays with the heap) and no
-//! network access to the MG24 UART.
+//! The stock partition table stays. No Bluetooth (off in sdkconfig, its
+//! RAM stays with the heap) and no network access to the MG24 UART.
 
-#[path = "../../hub/src/alloc.rs"]
-mod alloc;
 pub mod console;
-#[path = "../../hub/src/cpanic.rs"]
-mod cpanic;
-// `report` and `atomics` are used; `named` and `bench` belong to firmware/hub.
-#[allow(dead_code)]
-#[path = "../../hub/src/cpu.rs"]
-mod cpu;
+pub mod entropy;
 pub mod esp;
 #[cfg(esp32)]
 pub mod eth;
 pub mod ezsp;
+pub mod files;
 pub mod gecko;
+pub mod hub;
 pub mod led;
 pub mod lines;
 pub mod net;
+pub mod platform;
 pub mod settings;
 pub mod slots;
 pub mod uart;
+pub mod update;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -55,6 +57,7 @@ use std::time::Duration;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use hub_core::profile::BoardProfile;
 use log::{error, info, warn};
+use zrh_espapp::{alloc, cpanic};
 
 #[global_allocator]
 static HEAP: alloc::PreferPsram = alloc::PreferPsram;
@@ -73,6 +76,24 @@ pub fn restart() -> ! {
     unsafe { esp_idf_svc::sys::esp_restart() }
 }
 
+const BRINGUP_ONCE: u32 = u32::from_le_bytes(*b"BRU1");
+/// `restart bringup`: survives `esp_restart` (random after power-on),
+/// cleared on use.
+#[unsafe(link_section = ".rtc_noinit")]
+static mut ONE_SHOT: u32 = 0;
+static BRINGUP: OnceLock<bool> = OnceLock::new();
+
+/// This boot runs without the hub (`restart bringup`).
+pub fn bringup() -> bool {
+    BRINGUP.get().copied().unwrap_or(false)
+}
+
+/// Restart once without the hub.
+pub fn restart_bringup() -> ! {
+    unsafe { (&raw mut ONE_SHOT).write_volatile(BRINGUP_ONCE) };
+    restart()
+}
+
 /// The firmware's `main`.
 pub fn run(profile: &'static BoardProfile) -> ! {
     esp_idf_svc::sys::link_patches();
@@ -80,10 +101,14 @@ pub fn run(profile: &'static BoardProfile) -> ! {
     let early = lines::init(profile);
     console::route(profile.console);
     alloc::init();
+    let _ = cpanic::last_panic();
+    cpanic::record_panics();
     cpanic::count_boot();
-    esp_idf_svc::log::EspLogger::initialize_default();
+    cpanic::record_alloc_failures();
+    zrh_espapp::logs::init_logger();
     console::init(profile.console);
-    info!("zrh-gateway {} on {}", env!("CARGO_PKG_VERSION"), profile.name);
+    let _ = BRINGUP.set(unsafe { (&raw mut ONE_SHOT).replace(0) } == BRINGUP_ONCE);
+    info!("zrh-gateway {} on {}{}", env!("CARGO_PKG_VERSION"), profile.name, if bringup() { " (bring-up boot)" } else { "" });
     if let Err(e) = early {
         error!("NCP control lines: {e}");
     }
@@ -112,7 +137,10 @@ pub fn run(profile: &'static BoardProfile) -> ! {
         info!("{line}");
     }
     if let Some(p) = cpanic::last() {
-        warn!("last panic: {p}");
+        warn!("last ESP-IDF panic: {p}");
+    }
+    if let Some(p) = cpanic::last_panic() {
+        warn!("previous boot panicked: {p}");
     }
 
     match uart::init(&board.uart, board.uart.line.baud) {
@@ -123,25 +151,77 @@ pub fn run(profile: &'static BoardProfile) -> ! {
     // application (also leaves a bootloader entered before a host restart).
     lines::reset_to_app();
 
+    // The hub before the network: the HTTP server starts with the first
+    // address.
+    let app_allowed = zrh_espapp::resources::app_allowed();
+    if bringup() {
+        info!("bring-up boot: the hub does not start (`restart` boots it again)");
+    } else if !app_allowed {
+        error!("{}", no_psram());
+    } else {
+        hub::start(&board);
+    }
+    info!("{}", esp::memory_report());
+
     match Peripherals::take() {
-        Ok(p) => net::start(net::NetParts {
-            modem: p.modem,
-            #[cfg(esp32)]
-            eth: eth::EthParts::from_profile(
-                &board.ethernet,
-                p.mac,
-                (p.pins.gpio19, p.pins.gpio21, p.pins.gpio22, p.pins.gpio25, p.pins.gpio26, p.pins.gpio27),
-                p.pins.gpio0,
-            ),
-        }),
+        Ok(p) => net::start(
+            net::NetParts {
+                modem: p.modem,
+                #[cfg(esp32)]
+                eth: eth::EthParts::from_profile(
+                    &board.ethernet,
+                    p.mac,
+                    (p.pins.gpio19, p.pins.gpio21, p.pins.gpio22, p.pins.gpio25, p.pins.gpio26, p.pins.gpio27),
+                    p.pins.gpio0,
+                ),
+            },
+            move |up| on_network(up, app_allowed),
+        ),
         Err(e) => error!("peripherals: {e}"),
     }
     led::start(&board);
-    info!("{}", esp::memory_report());
     // Only a bootloader with app rollback puts an image on trial
     // (PENDING_VERIFY); then this confirms it once the core runs. Anything
     // else is left as is (SONOFF's bootloader very likely has no rollback:
     // docs/dongle-max.md).
     unsafe { esp_idf_svc::sys::esp_ota_mark_app_valid_cancel_rollback() };
     console::run()
+}
+
+fn no_psram() -> String {
+    "PSRAM not detected: the hub application (web UI, API, MQTT) is not started; the console still runs".into()
+}
+
+/// The network came up (an interface has an address) or went down: SNTP,
+/// and the HTTP server at the first time up (it listens on every
+/// interface for the rest of the boot). Runs on a short-lived thread: the
+/// caller is the Ethernet or Wi-Fi thread, whose stacks are small.
+fn on_network(up: bool, app_allowed: bool) {
+    let spawned = std::thread::Builder::new().name("net-up".into()).stack_size(8192).spawn(move || network_changed(up, app_allowed));
+    if let Err(e) = spawned {
+        warn!("network: {e}");
+    }
+}
+
+fn network_changed(up: bool, app_allowed: bool) {
+    static SERVER: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    zrh_espapp::logs::network_changed(up);
+    let mut started = SERVER.lock().unwrap();
+    if !up || *started {
+        return;
+    }
+    let server = match (hub::APP.get().cloned(), app_allowed) {
+        (Some(app), _) => zrh_espapp::http::api_server(app),
+        (None, false) => zrh_espapp::http::wrong_image_server("psram_missing", no_psram()),
+        (None, true) => return,
+    };
+    match server {
+        Ok(s) => {
+            // Runs for the rest of the boot.
+            std::mem::forget(s);
+            *started = true;
+            info!("api: http://<address>/ (web UI), ws://<address>/api");
+        }
+        Err(e) => warn!("api server: {e}"),
+    }
 }

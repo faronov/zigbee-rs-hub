@@ -65,8 +65,8 @@ fn power_on(o: &Output) {
 }
 
 /// Start the EMAC and a thread that reports the link state: `report(text,
-/// up)`, `up` once the interface has an address.
-pub fn start(parts: EthParts, sys_loop: EspSystemEventLoop, report: impl Fn(String, bool) + Send + 'static) {
+/// up, ip)`, `up` once the interface has an address.
+pub fn start(parts: EthParts, sys_loop: EspSystemEventLoop, report: impl Fn(String, bool, String) + Send + 'static) {
     if let Some(p) = &parts.power {
         power_on(p);
     }
@@ -97,26 +97,24 @@ pub fn start(parts: EthParts, sys_loop: EspSystemEventLoop, report: impl Fn(Stri
         Ok(e) => e,
         Err(e) => {
             warn!("ethernet: {e}");
-            report(format!("error: {e}"), false);
+            report(format!("error: {e}"), false, String::new());
             return;
         }
     };
-    report("down (no link)".into(), false);
+    report("down (no link)".into(), false, String::new());
     let spawned = std::thread::Builder::new().name("eth".into()).stack_size(4096).spawn(move || {
         let mut last = String::new();
         loop {
             let up = eth.is_up().unwrap_or(false);
+            let ip = if up { eth.eth().netif().get_ip_info().map(|i| i.ip.to_string()).unwrap_or_default() } else { String::new() };
             let text = match (eth.is_connected().unwrap_or(false), up) {
-                (_, true) => {
-                    let ip = eth.eth().netif().get_ip_info().map(|i| i.ip.to_string()).unwrap_or_default();
-                    format!("up {ip}")
-                }
+                (_, true) => format!("up {ip}"),
                 (true, false) => "link up, waiting for DHCP".into(),
                 (false, _) => "down (no link)".into(),
             };
             if text != last {
                 info!("ethernet: {text}");
-                report(text.clone(), up);
+                report(text.clone(), up, ip);
                 last = text;
             }
             std::thread::sleep(Duration::from_secs(1));

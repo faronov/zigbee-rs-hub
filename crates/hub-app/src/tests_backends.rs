@@ -417,6 +417,11 @@ fn groups_and_permit_join() {
     for kind in BOTH {
         let rig = Rig::new(kind, true);
         let (sid, rx) = session(&rig.app);
+        // What a status LED shows.
+        wait(&format!("{kind:?}: session and network up in the app status"), || {
+            let s = rig.app.status();
+            s.session_up && s.network_up && s.permit_join_s == 0
+        });
         let g = call(&rig.app, sid, &rx, 1, json!({"type": "groups/create", "name": "Kitchen"}));
         let group = ok(&g)["id"].as_u64().unwrap() as u16;
         wait(&format!("{kind:?}: the hub endpoint in group {group}"), || rig.link.groups().contains(&group));
@@ -426,8 +431,10 @@ fn groups_and_permit_join() {
         ok(&call(&rig.app, sid, &rx, 3, json!({"type": "network/permit_join", "duration_s": 60})));
         wait(&format!("{kind:?}: joining open on the NCP"), || rig.link.permit_open());
         wait(&format!("{kind:?}: joining open in network/info"), || info(&rig.app, sid, &rx)["permit_join_s"].as_u64() > Some(0));
+        wait(&format!("{kind:?}: joining open in the app status"), || rig.app.status().permit_join_s > 0);
         ok(&call(&rig.app, sid, &rx, 4, json!({"type": "network/permit_join", "duration_s": 0})));
         wait(&format!("{kind:?}: joining closed"), || !rig.link.permit_open());
+        wait(&format!("{kind:?}: joining closed in the app status"), || rig.app.status().permit_join_s == 0);
         rig.finish();
     }
 }

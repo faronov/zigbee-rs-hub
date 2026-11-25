@@ -1,11 +1,11 @@
 [package]
 name = "zrh-gateway"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "zigbee-rs-hub gateway firmware library for boards described by a hub-core board profile (SONOFF Dongle-M): NCP lines and UART, EZSP and Gecko bootloader probes, TCP bridge, Ethernet/Wi-Fi, LED, button, console"
+description = "zigbee-rs-hub gateway firmware library for boards described by a hub-core board profile (SONOFF Dongle-M): the hub application on the EZSP backend over the NCP UART, data on SONOFF's files partition after a claim, Ethernet/Wi-Fi, web UI and WebSocket API, MQTT, Zigbee device OTA, self-update, LED, button, console"
 publish = false
 
 [lib]
@@ -18,8 +18,24 @@ doctest = false
 esp-idf-svc = "0.53"
 embedded-svc = "0.29"
 hub-core = { workspace = true }
-hub-ezsp = { path = "../../crates/hub-ezsp" }
+hub-store = { workspace = true }
+hub-ezsp = { workspace = true }
+hub-devices = { workspace = true }
+# The application on the EZSP backend, with the advanced console and the
+# Zigbee OTA server with its image store (in the files region).
+hub-app = { workspace = true, features = ["ezsp", "advanced", "ota-store"] }
+hub-web = { workspace = true, features = ["advanced", "ota-store", "gateway"] }
+hub-mqtt = { workspace = true }
+zrh-espapp = { path = "../espapp", features = ["app", "mqtt"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
 log = "0.4"
+
+[features]
+# The MQTT bridge on its own MQTT 3.1.1 client instead of esp-mqtt (as
+# firmware/hub; in no image).
+mqtt-lite = ["zrh-espapp/mqtt-lite"]
 
 [build-dependencies]
 embuild = "0.33"

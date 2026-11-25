@@ -52,24 +52,34 @@ mod tests {
     }
 
     /// Every combination of the page's features: `advanced`, `ota`,
-    /// `ota-store` (which implies `ota`).
-    fn variants() -> std::vec::Vec<(bool, bool, bool)> {
+    /// `ota-store` (which implies `ota`), `gateway`.
+    fn variants() -> std::vec::Vec<(bool, bool, bool, bool)> {
         let mut v = std::vec::Vec::new();
-        for advanced in [false, true] {
-            for (ota, store) in [(false, false), (true, false), (true, true)] {
-                v.push((advanced, ota, store));
+        for gateway in [false, true] {
+            for advanced in [false, true] {
+                for (ota, store) in [(false, false), (true, false), (true, true)] {
+                    v.push((advanced, ota, store, gateway));
+                }
             }
         }
         v
     }
 
     fn select(advanced: bool, ota: bool, ota_store: bool) -> String {
-        super::variant::select(include_str!("../web/index.html"), &super::variant::enabled(advanced, ota, ota_store)).unwrap()
+        select_with(advanced, ota, ota_store, false)
     }
+
+    fn select_with(advanced: bool, ota: bool, ota_store: bool, gateway: bool) -> String {
+        let on = super::variant::enabled_with(advanced, ota, ota_store, gateway);
+        super::variant::select(include_str!("../web/index.html"), &on).unwrap()
+    }
+
+    const BUILT: (bool, bool, bool, bool) =
+        (cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store"), cfg!(feature = "gateway"));
 
     #[test]
     fn embedded_page_is_the_minified_source_and_small() {
-        let selected = select(cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store"));
+        let selected = select_with(BUILT.0, BUILT.1, BUILT.2, BUILT.3);
         assert_eq!(page(), super::minify::minify(&selected).unwrap().into_bytes());
         assert!(INDEX_HTML_GZ.len() <= PAGE_BUDGET, "{} B compressed", INDEX_HTML_GZ.len());
     }
@@ -78,11 +88,11 @@ mod tests {
     /// budget, compressed as `build.rs` does.
     #[test]
     fn every_variant_fits_the_budget() {
-        for (advanced, ota, store) in variants() {
-            let html = super::minify::minify(&select(advanced, ota, store)).unwrap();
+        for (advanced, ota, store, gateway) in variants() {
+            let html = super::minify::minify(&select_with(advanced, ota, store, gateway)).unwrap();
             let gz = 18 + miniz_oxide::deflate::compress_to_vec(html.as_bytes(), 10).len();
-            assert!(gz <= PAGE_BUDGET, "advanced {advanced}, ota {ota}, ota-store {store}: {gz} B compressed");
-            if (advanced, ota, store) == (cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store")) {
+            assert!(gz <= PAGE_BUDGET, "advanced {advanced}, ota {ota}, ota-store {store}, gateway {gateway}: {gz} B compressed");
+            if (advanced, ota, store, gateway) == BUILT {
                 assert_eq!(gz, INDEX_HTML_GZ.len());
             }
         }
@@ -96,8 +106,8 @@ mod tests {
             html[a..a + html[a..].find("</script>").unwrap()].to_string()
         };
         let mut scripts = std::vec::Vec::new();
-        for (advanced, ota, store) in variants() {
-            let html = select(advanced, ota, store);
+        for (advanced, ota, store, gateway) in variants() {
+            let html = select_with(advanced, ota, store, gateway);
             scripts.push(script(&super::minify::minify(&html).unwrap()));
             scripts.push(script(&html));
         }
@@ -314,6 +324,19 @@ const DIFF="shard 44: SHA-256 differs from the installed manifest",BANK=["get ba
                 assert!(!page.contains(item), "{item} in the page without OTA (advanced {advanced})");
             }
             assert!(select(advanced, true, false).contains("\"ota\""), "the OTA pages subscribe to the ota topic");
+        }
+    }
+
+    /// The gateway's cards (storage claim, the hub's own firmware,
+    /// Ethernet) only in the gateway's page.
+    #[test]
+    fn gateway_cards_only_in_the_gateway_page() {
+        let items = ["\"storage/claim\"", "\"firmware/begin\"", "\"firmware/chunk\"", "replace_stock", "s.ethernet", "id=\"gsb\"", "id=\"gsban\"", "gwBan("];
+        for (advanced, ota, store, gateway) in variants() {
+            let page = select_with(advanced, ota, store, gateway);
+            for item in items {
+                assert_eq!(page.contains(item), gateway, "{item}: advanced {advanced}, ota {ota}, ota-store {store}, gateway {gateway}");
+            }
         }
     }
 

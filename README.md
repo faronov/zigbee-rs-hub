@@ -11,6 +11,18 @@ talks to it with **ZRHP v1** (zigbee-rs host protocol, spec:
 ZRHP stays a USB/UART protocol (no network transport). The hub's own external
 interface will be a WebSocket JSON API.
 
+The same hub application also runs on the **SONOFF Dongle Max** (classic
+ESP32 + EFR32MG24 with SONOFF's stock EmberZNet NCP) through the EZSP
+backend ([docs/dongle-max.md](docs/dongle-max.md)).
+
+## Hardware
+
+| Hardware | Host | Radio / backend | Image | Install | State |
+|---|---|---|---|---|---|
+| Espressif Thread BR / Zigbee Gateway board, 8 MB S3 | ESP32-S3, PSRAM quad or octal | ESP32-H2, zigbee-rs NCP / ZRHP | `tbr-hub` 8 MB (MQTT, advanced console, Zigbee OTA with the image store) | web flasher | released |
+| same board, 4 MB S3 sample | ESP32-S3, 4 MB flash | same | `tbr-hub` 4 MB dev (MQTT) | web flasher | released |
+| SONOFF Dongle Max (Dongle-M) | ESP32-D0WDR2-V3, 16 MB flash, 2 MB PSRAM, Ethernet (PoE) + Wi-Fi | EFR32MG24, SONOFF's EmberZNet 7.4.5 NCP / EZSP 13 | `zrh-donglem` (MQTT, advanced console, Zigbee OTA with the image store in SONOFF's `files` partition once claimed, self-update) | SONOFF's web console (into `ota_1`; SONOFF's table, bootloader and application stay), or USB | build- and host-tested; hardware run pending |
+
 ## Phases
 
 | Phase | Content | Status |
@@ -133,7 +145,7 @@ The application runs on a coordinator backend chosen at build time
 | `hub-app` | `zrhp` (default), `ezsp`, both, or none | `App::start_backend(Backend::zrhp(hub) / Backend::ezsp(…))`; `App::start`/`start_with` need `zrhp` |
 | `hub-mqtt`, `hub-ota` | none | link no hub-ncp or zigbee-zrhp (CI checks the tree) |
 | `hubctl` | `zrhp` + `ezsp` | `--sim` / `--serial` (ZRHP); `--backend ezsp --sim` (the EZSP simulated NCP, `serve`) |
-| `zrh-donglem` (Dongle Max) | — | board bring-up and EZSP probe; the hub app on EZSP is PR H2 |
+| `zrh-donglem` (Dongle Max) | `ezsp` (hub-app `ezsp`, `advanced`, `ota-store`) | the hub app on SONOFF's stock EmberZNet NCP (`docs/dongle-max.md`); no ZRHP code |
 
 ```sh
 cargo test -p hub-app                                         # ZRHP, OTA store (defaults)
@@ -218,7 +230,8 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `tools/hubctl` | Phase 1: `hub-ncp` on a desktop: the real NCP through the bridge, or `--sim`; the hub app on the EZSP simulated NCP (`--backend ezsp --sim`) |
 | `firmware/bridge` | Phase-0 S3 firmware (`tbr-bridge`, esp-idf-svc + esp_tinyusb); also a library, the default mode of `tbr-hub` |
 | `firmware/hub` | Phase-1 S3 firmware (`tbr-hub`): bridge mode (default) and hub mode; 4 MB / 8 MB partition tables for provisioning |
-| `firmware/gateway`, `firmware/donglem` | SONOFF Dongle Max (classic ESP32 + EFR32MG24) firmware, board bring-up stage: Ethernet/Wi-Fi, LED, button, MG24 lines, read-only EZSP probe, return to SONOFF's firmware; runs on SONOFF's unchanged partition table (`docs/dongle-max.md`) |
+| `firmware/espapp` | ESP-IDF glue shared by the hub firmwares (`zrh-espapp`): PSRAM heap, panic recorders, flash windows, HTTP server, WebSocket API, log ring and SNTP, catalog flash, MQTT transport |
+| `firmware/gateway`, `firmware/donglem` | SONOFF Dongle Max (classic ESP32 + EFR32MG24) firmware: the hub app on the EZSP backend, its data on SONOFF's `files` partition after a claim, Ethernet/Wi-Fi, self-update, LED, button (permit join), MG24 lines and probes, return to SONOFF's firmware; runs on SONOFF's unchanged partition table (`docs/dongle-max.md`) |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF; `CHIP=esp32` for the Dongle-M), optional size limit |
 | `tools/make-otadata.py` | One `otadata` sector selecting an OTA slot (the Dongle-M's first flash) |
 | `tools/check-s32c1i.sh` | Fails if Rust code in a firmware ELF uses the S32C1I compare-and-set (disassembly attributed through the line table) |
@@ -1018,7 +1031,7 @@ without PSRAM. In 0.1.3 a board *with* PSRAM ran out of internal RAM (N4R2:
 4 KB free a minute after boot, every maintenance request refused): `malloc`
 keeps requests below `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` internal, and the
 hub's data are many small Rust allocations, while 2 MB of PSRAM stayed empty.
-From 0.1.4 Rust allocations prefer PSRAM (`firmware/hub/src/alloc.rs`; C
+From 0.1.4 Rust allocations prefer PSRAM (`firmware/espapp/src/alloc.rs`; C
 mallocs above 1 KiB and Wi-Fi/lwIP buffers too; thread stacks stay internal).
 On PSRAM the S32C1I instruction behind every atomic read-modify-write is
 not atomic between the two cores (ESP-IDF builds its C code without it,
@@ -1061,7 +1074,7 @@ ID comes from a shared counter), since any blocking send of the app (events,
 keepalive pings) can meet the server thread in a handler; sessions of
 closed connections are dropped on a Close frame, when the sender reports
 the socket closed, or when the 30 s WebSocket ping fails. The `/api`
-endpoint is registered on raw esp_http_server calls (`firmware/hub/src/ws.rs`)
+endpoint is registered on raw esp_http_server calls (`firmware/espapp/src/ws.rs`)
 with control frames passed to the handler: with esp-idf-svc's `ws_handler`
 (0.53) esp_http_server leaves the rest of a client PONG unread, the next
 frame is parsed from inside it: the connection drops, or esp-idf-svc panics

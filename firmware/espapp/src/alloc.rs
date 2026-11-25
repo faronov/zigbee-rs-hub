@@ -21,7 +21,8 @@
 //! zeroed `Sender`s, failed mutex unlocks, cache and MMU faults under load).
 //! `.cargo/config.toml` turns the instruction off for all Rust code (std
 //! included), so Rust atomics call those functions too; `hub atomics` on the
-//! console checks it.
+//! console checks it. The classic ESP32 (Dongle-M) has the same issue
+//! and the same flag.
 //!
 //! Without PSRAM (or before [`init`]) every request goes to the default
 //! heap, as before.

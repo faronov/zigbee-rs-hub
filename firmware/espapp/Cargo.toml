@@ -1,0 +1,42 @@
+[package]
+name = "zrh-espapp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "zigbee-rs-hub ESP-IDF glue shared by the hub firmwares (firmware/hub on the ESP32-S3, firmware/gateway on the classic ESP32): PSRAM heap, panic recorder, CPU and atomics checks, flash regions, and (feature app) the HTTP server, WebSocket API, web UI, log ring, SNTP, catalog store and MQTT transport"
+publish = false
+
+[lib]
+name = "zrh_espapp"
+harness = false
+test = false
+doctest = false
+
+[dependencies]
+esp-idf-svc = "0.53"
+hub-core = { workspace = true }
+hub-store = { workspace = true }
+log = "0.4"
+hub-app = { workspace = true, optional = true }
+hub-web = { workspace = true, optional = true }
+hub-mqtt = { workspace = true, optional = true }
+embedded-svc = { version = "0.29", optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = []
+# The application's side: HTTP server with the web UI and the WebSocket
+# API, the log ring and SNTP, the catalog store on a flash region.
+app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json"]
+# The MQTT bridge's transport (esp-mqtt, plain TCP).
+mqtt = ["app", "dep:hub-mqtt"]
+# The bridge's own MQTT 3.1.1 client on lwIP sockets instead of esp-mqtt.
+mqtt-lite = ["mqtt"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(esp32)", "cfg(esp32s3)"] }
+
+[build-dependencies]
+embuild = "0.33"

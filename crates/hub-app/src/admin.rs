@@ -832,6 +832,11 @@ impl Admin {
         self.board.lock().unwrap().progress_events()
     }
 
+    /// Maintenance jobs running (on their threads).
+    pub fn jobs_running(&self) -> usize {
+        self.board.lock().unwrap().running()
+    }
+
     /// Scan progress from the coordinator: `done` of `total` channels.
     #[inline(never)]
     pub fn scan_progress(&self, done: u8, total: u8) {

@@ -12,6 +12,8 @@
 //! | `wifi_ssid`, `wifi_pass` | Wi-Fi station credentials |
 //! | `board` | NCP wiring overrides (`BoardProfile::apply` syntax) |
 //! | `led` | LED brightness, 0–100 % |
+//! | `api_token` | the API token (generated at the first boot with the hub) |
+//! | `mqtt` | the MQTT bridge's settings (JSON) |
 
 use std::sync::Mutex;
 
@@ -36,8 +38,13 @@ pub fn open() {
 
 /// A string setting.
 pub fn get(key: &str) -> Option<String> {
+    get_long(key, 256)
+}
+
+/// A string setting of up to `max` bytes.
+pub fn get_long(key: &str, max: usize) -> Option<String> {
     let g = NVS.lock().unwrap();
-    let mut buf = [0u8; 256];
+    let mut buf = vec![0u8; max];
     g.as_ref()?.get_str(key, &mut buf).ok().flatten().map(str::to_string)
 }
 

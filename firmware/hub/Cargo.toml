@@ -24,6 +24,9 @@ embedded-svc = { version = "0.29", optional = true }
 serde_json = { version = "1", optional = true }
 log = "0.4"
 tbr-bridge = { path = "../bridge" }
+# ESP-IDF glue shared with firmware/gateway (heap, panic recorder, HTTP
+# server, WebSocket API, logs, MQTT transport, catalog flash).
+zrh-espapp = { path = "../espapp" }
 
 [features]
 default = ["zrhp", "app"]
@@ -34,18 +37,18 @@ zrhp = ["dep:hub-ncp", "hub-app?/zrhp"]
 # The application (device engine, registry) with its WebSocket JSON API over
 # Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
 # phase-1 hub (ZRHP host core only).
-app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json"]
+app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json", "zrh-espapp/app"]
 # Manual ZCL/Tuya console and frame viewer: in the 8 MB images, also
 # buildable for 4 MB. Every image detects PSRAM at boot (`resources`).
 advanced = ["app", "hub-app/advanced", "hub-web/advanced"]
 # The Zigbee2MQTT-compatible MQTT bridge (esp-mqtt, plain TCP; settings in
 # NVS, off until enabled). Included in both BR flash layouts by
 # tools/build-hub-firmware.sh; a build without it answers `unsupported`.
-mqtt = ["app", "dep:hub-mqtt"]
+mqtt = ["app", "dep:hub-mqtt", "zrh-espapp/mqtt"]
 # The same bridge on its own MQTT 3.1.1 client over lwIP sockets instead of
 # esp-mqtt (which links esp-tls and the mbedtls TLS layer even for plain
 # TCP). An option, off in every image.
-mqtt-lite = ["mqtt"]
+mqtt-lite = ["mqtt", "zrh-espapp/mqtt-lite"]
 # The Zigbee OTA Upgrade server for the devices (cluster 0x0019) with
 # streamed images (an API client holds the file). Not in the 4 MB images:
 # tools/build-hub-firmware.sh enables it, through `ota-store`, in the 8 MB

@@ -10,14 +10,20 @@
 //! tables (`HOST_TABLES`) come later.
 
 pub mod crc;
+pub mod files;
 pub mod flash;
 pub mod journal;
 pub mod kv;
+pub mod littlefs;
 pub mod state;
+#[cfg(test)]
+mod lfs_tests;
+#[cfg(test)]
+mod testutil;
 
 use std::io;
 
-pub use flash::{FileFlash, Flash, MemFlash};
+pub use flash::{FileFlash, Flash, Gated, MemFlash, WriteGate};
 pub use journal::{Journal, JournalStats};
 pub use kv::{Gate, Guarded, Kv, KvStore, OWNER_KEY, Scope};
 pub use state::{Change, DeviceRecord, EndpointRecord, FcRecord, FwPending, HostState, Meta, NetworkRecord};

@@ -2,17 +2,28 @@
 //!
 //! | Colour | Meaning |
 //! |---|---|
-//! | magenta, fast blink | MG24 probe or bootloader banner running (UART claimed by the console) |
-//! | green | network up (Ethernet or Wi-Fi has an address) |
-//! | blue, blinking | no network |
-//! | white flash | button pressed |
+//! | white flash | button pressed (white steady: held for 10 s or more) |
+//! | magenta, fast blink | MG24 probe or bootloader banner running (bring-up boot) |
+//! | yellow, blinking | joining open (permit join) |
+//! | red, blinking | the MG24 does not answer (no EZSP session for [`ERROR_AFTER`]), or the hub did not start |
+//! | blue, blinking | no network (Ethernet and Wi-Fi without an address) |
+//! | cyan | network up, no Zigbee network (none formed yet) |
+//! | green | network and Zigbee network up (bring-up boot: network up) |
 //!
-//! Brightness: setting `led` (0–100 %, default [`DEFAULT_PCT`]). The
-//! button is only reported (log, `info`) until a coordinator backend gives
-//! it a function (permit join).
+//! Brightness: setting `led` (0–100 %, default [`DEFAULT_PCT`]).
+//!
+//! The button: a **short press** (under 3 s) opens joining for
+//! [`BUTTON_PERMIT_S`](crate::hub::BUTTON_PERMIT_S) s, as the web UI's
+//! "Permit join". A press of 3 s or more does nothing; held for 10 s or
+//! more the LED turns white and nothing happens either (no factory reset
+//! from the button: nothing destructive without the console or the web
+//! UI). Held while the dongle powers up or resets, it ignores the stored
+//! board overrides for that boot.
 
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
+
+use hub_app::AppStatus;
 
 use esp_idf_svc::sys;
 use hub_core::profile::{BoardProfile, Input, Led, Output};
@@ -25,6 +36,12 @@ pub const DEFAULT_PCT: u8 = 30;
 static PCT: AtomicU8 = AtomicU8::new(DEFAULT_PCT);
 /// Short presses since boot.
 pub static PRESSES: AtomicU32 = AtomicU32::new(0);
+/// No EZSP session this long: the LED shows an error.
+pub const ERROR_AFTER: Duration = Duration::from_secs(30);
+/// Longest short press.
+const SHORT_PRESS: Duration = Duration::from_secs(3);
+/// A long press (no function).
+const LONG_PRESS: Duration = Duration::from_secs(10);
 
 const MODE: sys::ledc_mode_t = sys::ledc_mode_t_LEDC_LOW_SPEED_MODE;
 const TIMER: sys::ledc_timer_t = sys::ledc_timer_t_LEDC_TIMER_0;
@@ -106,8 +123,30 @@ pub(crate) fn held_at_boot(i: &Input) -> bool {
     })
 }
 
+/// What the LED shows besides the network.
+#[derive(Clone, Copy)]
+struct Hub {
+    /// The hub's status, `None` in a bring-up boot.
+    status: Option<(bool, bool, u32)>,
+    /// The EZSP session has been down for [`ERROR_AFTER`].
+    stuck: bool,
+}
+
+fn hub_now(session_since: &mut Instant) -> Hub {
+    let status = crate::hub::APP.get().map(|a| {
+        let AppStatus { session_up, network_up, permit_join_s, .. } = a.status();
+        (session_up, network_up, permit_join_s)
+    });
+    if status.is_none_or(|(session, _, _)| session) {
+        *session_since = Instant::now();
+    }
+    // The hub did not start (no PSRAM, the UART taken): an error too.
+    let missing = status.is_none() && !crate::bringup();
+    Hub { status, stuck: missing || session_since.elapsed() >= ERROR_AFTER }
+}
+
 /// (r, g, b) at LED tick `t` (125 ms).
-fn colour(t: u32, flash: bool) -> [bool; 3] {
+fn colour(t: u32, flash: bool, hub: Hub) -> [bool; 3] {
     let blink = |period: u32| t % period < period / 2;
     if flash {
         return [true; 3];
@@ -116,7 +155,29 @@ fn colour(t: u32, flash: bool) -> [bool; 3] {
         let on = blink(2);
         return [on, false, on];
     }
-    if net::up() { [false, true, false] } else { [false, false, blink(8)] }
+    if hub.status.is_some_and(|(_, _, permit)| permit > 0) {
+        let on = blink(8);
+        return [on, on, false];
+    }
+    if hub.stuck {
+        return [blink(8), false, false];
+    }
+    match (net::up(), hub.status) {
+        (false, _) => [false, false, blink(8)],
+        (true, Some((_, false, _))) => [false, true, true],
+        (true, _) => [false, true, false],
+    }
+}
+
+fn short_press() {
+    PRESSES.fetch_add(1, Ordering::Relaxed);
+    if crate::hub::APP.get().is_none() {
+        return;
+    }
+    match crate::hub::permit_join(crate::hub::BUTTON_PERMIT_S) {
+        Ok(()) => info!("button: permit join for {} s", crate::hub::BUTTON_PERMIT_S),
+        Err(e) => warn!("button: permit join: {e}"),
+    }
 }
 
 /// Start the LED/button thread if the board has either.
@@ -141,21 +202,28 @@ pub fn start(board: &BoardProfile) {
     if let Some(b) = &button {
         configure_in(b);
     }
-    let spawned = std::thread::Builder::new().name("led".into()).stack_size(3072).spawn(move || {
+    let spawned = std::thread::Builder::new().name("led".into()).stack_size(4096).spawn(move || {
         let mut t = 0u32;
         let mut down_since: Option<Instant> = None;
         let mut flash_until = Instant::now();
+        let mut session_since = Instant::now();
         loop {
+            let mut held_long = false;
             if let Some(btn) = &button {
                 match (pressed(btn), down_since) {
                     (true, None) => down_since = Some(Instant::now()),
+                    (true, Some(since)) => held_long = since.elapsed() >= LONG_PRESS,
                     (false, Some(since)) => {
                         down_since = None;
                         let held = since.elapsed();
-                        if held >= Duration::from_millis(40) {
-                            PRESSES.fetch_add(1, Ordering::Relaxed);
+                        if held >= LONG_PRESS {
+                            info!("button: held for {} s: no function", held.as_secs());
+                        } else if held >= SHORT_PRESS {
+                            info!("button: pressed for {} ms: no function (short press: permit join)", held.as_millis());
+                        } else if held >= Duration::from_millis(40) {
                             info!("button: pressed for {} ms", held.as_millis());
                             flash_until = Instant::now() + Duration::from_millis(250);
+                            short_press();
                         }
                     }
                     _ => {}
@@ -163,7 +231,8 @@ pub fn start(board: &BoardProfile) {
             }
             // Button every 25 ms, LED every 125 ms.
             if rgb.is_some() && t.is_multiple_of(5) {
-                show(colour(t / 5, Instant::now() < flash_until));
+                let hub = hub_now(&mut session_since);
+                show(colour(t / 5, held_long || Instant::now() < flash_until, hub));
             }
             t = t.wrapping_add(1);
             std::thread::sleep(Duration::from_millis(25));

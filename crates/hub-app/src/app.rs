@@ -22,8 +22,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hub_coord::{
-    BackendConfig, CoordEvent, EVENT_SLOTS, EndpointConfig, EventQueue, NcpInfo, NetChange, NetworkAdmin, RadioControl,
-    Reply, Request, RequestId, SessionEvent, SessionState as CoordSession, Terminal,
+    BackendConfig, CoordEvent, EVENT_SLOTS, EndpointConfig, EventQueue, NcpInfo, NetChange, NetState, NetworkAdmin,
+    RadioControl, Reply, Request, RequestId, SessionEvent, SessionState as CoordSession, Terminal,
 };
 use hub_devices::api::{ApiExtension, ApiServer, Frame, SessionId};
 use hub_devices::bankcat::StoreCatalog;
@@ -300,6 +300,15 @@ pub struct AppStatus {
     /// Devices imported from the NCP's tables (see
     /// [`AppConfig::import_ncp_devices`]).
     pub imported: usize,
+    /// The backend's session is ready (requests flow); for a status LED.
+    pub session_up: bool,
+    /// The NCP's network is up.
+    pub network_up: bool,
+    /// Permit-join seconds left.
+    pub permit_join_s: u32,
+    /// Maintenance jobs running on their threads (`network/jobs`); they
+    /// write the hub's records too.
+    pub jobs: usize,
 }
 
 /// The definitions catalog in `hubdata` (device-support 9). The hub never
@@ -459,13 +468,15 @@ impl App {
         false
     }
 
-    /// Persist and stop.
-    pub fn shutdown(&self) {
+    /// Persist and stop; whether the app thread stopped within 5 s (it
+    /// writes nothing more then).
+    pub fn shutdown(&self) -> bool {
         let _ = self.tx.send(Input::Shutdown);
         let until = Instant::now() + Duration::from_secs(5);
         while !self.stopped.load(Ordering::SeqCst) && Instant::now() < until {
             thread::sleep(Duration::from_millis(5));
         }
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -1356,6 +1367,12 @@ impl Runner {
         // Device traffic waits until the NCP's network is the records'
         // (`NcpNv` backends; always for ZRHP).
         let verified = self.records.verified();
+        {
+            let mut s = self.status.lock().unwrap();
+            s.session_up = ready;
+            s.network_up = ready && st.network_state == NetState::Up;
+            s.jobs = self.admin.jobs_running();
+        }
         let cookie = st.epoch;
         if ready && self.maintenance_for != cookie {
             self.maintenance_for = cookie;
@@ -1561,5 +1578,7 @@ impl Runner {
         st.aps = self.engine.transport.counters;
         st.endpoint_registered = self.registered;
         st.imported = self.imported;
+        st.permit_join_s = self.permit_left;
+        st.jobs = self.admin.jobs_running();
     }
 }
