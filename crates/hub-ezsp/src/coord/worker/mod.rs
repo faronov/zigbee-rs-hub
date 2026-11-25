@@ -209,6 +209,12 @@ impl EzspCoordinator {
         ))
     }
 
+    /// Cancellations the worker keeps for requests not taken yet.
+    #[cfg(test)]
+    pub(crate) fn cancels_kept(&self) -> usize {
+        self.shared.cancels.lock().unwrap().ids.len()
+    }
+
     /// Requests queued for the worker now, and the most at once.
     pub fn queued(&self) -> (usize, usize) {
         (
@@ -1038,10 +1044,9 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         }
         self.state = SessionState::Incompatible;
         for (id, _) in std::mem::take(&mut self.fifo) {
-            self.shared.queued.fetch_sub(1, Ordering::Relaxed);
             let e =
                 CoordError::described(CoordError::LinkDown, "NCP speaks no supported EZSP version");
-            self.done(id, Terminal::Unknown(e));
+            self.end_queued(id, Terminal::Unknown(e));
         }
         self.retry_at = self.now() + self.opts.retry_max.as_millis() as u64;
         self.publish();
@@ -1456,12 +1461,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             return;
         }
         for (id, _) in std::mem::take(&mut self.fifo) {
-            self.shared.queued.fetch_sub(1, Ordering::Relaxed);
             let e = CoordError::described(
                 CoordError::LinkDown,
                 "not sent: the NCP's network is not verified as the application's",
             );
-            self.done(id, Terminal::Refused(e));
+            self.end_queued(id, Terminal::Refused(e));
         }
     }
 

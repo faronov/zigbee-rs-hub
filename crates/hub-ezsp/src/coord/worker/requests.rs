@@ -4,13 +4,27 @@
 use super::*;
 
 impl<T: Transport, C: Clock> Worker<T, C> {
-    /// `false` when request `id` was cancelled.
+    /// The worker takes queued request `id` (requests are taken in order);
+    /// `false` when it was cancelled.
     pub(super) fn take(&self, id: RequestId) -> bool {
         let mut c = self.shared.cancels.lock().unwrap();
         c.taken = id.0;
-        let before = c.ids.len();
-        c.ids.retain(|x| *x != id.0);
-        c.ids.len() == before
+        let cancelled = c.ids.contains(&id.0);
+        // Cancellations up to `taken` can never match again.
+        c.ids.retain(|x| *x > id.0);
+        !cancelled
+    }
+
+    /// Ends queued request `id` without sending it: `t`, or `Cancelled`
+    /// when the application cancelled it.
+    pub(super) fn end_queued(&mut self, id: RequestId, t: Terminal) {
+        self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+        let t = if self.take(id) {
+            t
+        } else {
+            Terminal::Cancelled
+        };
+        self.done(id, t);
     }
 
     /// Acknowledged unicasts on the NCP (its APS unicast slots).

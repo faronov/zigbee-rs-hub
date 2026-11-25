@@ -889,6 +889,42 @@ fn with_a_traffic_hold_requests_wait_for_the_decision_about_a_new_session() {
     rig.finish();
 }
 
+/// Requests the application cancels while they wait for an absent NCP (a
+/// traffic hold, the worker resetting it) end `Cancelled` when the hold
+/// ends, and leave no cancellation behind, episode after episode.
+#[test]
+fn cancellations_of_requests_ended_unsent_are_forgotten() {
+    let mut cfg = sim(13);
+    cfg.boot_ms = 3_600_000;
+    let mut o = opts();
+    o.host.ash.rstack_timeout_ms = 300;
+    o.host.ash.reset_retries = 0;
+    o.traffic = Some(Arc::new(std::sync::atomic::AtomicU32::new(0)));
+    o.traffic_hold = Duration::from_secs(2);
+    let mut rig = Rig::with(cfg, o, Faults::none(), EVENT_SLOTS);
+    // Cancelled within the hold.
+    let ids: Vec<RequestId> = (0..5).map(|_| rig.submit(unicast(0x1234))).collect();
+    for id in &ids {
+        rig.coord().cancel(*id);
+    }
+    for id in ids {
+        assert_eq!(rig.outcome(id), Terminal::Cancelled);
+    }
+    assert_eq!(rig.coord().cancels_kept(), 0);
+    // After it: ended at once, or cancelled first.
+    for _ in 0..5 {
+        let id = rig.submit(unicast(0x1234));
+        rig.coord().cancel(id);
+        let t = rig.outcome(id);
+        assert!(
+            matches!(t, Terminal::Cancelled | Terminal::Refused(_)),
+            "{t:?}"
+        );
+        assert_eq!(rig.coord().cancels_kept(), 0);
+    }
+    rig.finish();
+}
+
 /// An NCP reset: `Down`, then the request on the NCP ends
 /// `Unknown(DeliveryUnknown)` (EZSP loses it, design §2.2); the queued one
 /// goes out after the next `Up`, in a new epoch.
