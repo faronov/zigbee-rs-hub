@@ -36,7 +36,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0:
 | Feature | In the image |
 |---|---|
 | Hub application: devices, catalog, groups, bindings, reporting, automations | yes: `hub-app` on `Backend::ezsp` (features `ezsp`, `advanced`, `ota-store`) |
-| Web UI with the advanced console, WebSocket API | yes: the page with the gateway cards (`hub-web` feature `gateway`, 36,553 B of the 36 KiB budget) |
+| Web UI with the advanced console, WebSocket API | yes: the page with the gateway cards (`hub-web` feature `gateway`, 36,642 B of the 36 KiB budget) |
 | MQTT with Home Assistant discovery | yes (esp-mqtt, plain TCP; off until enabled, settings in NVS `zrh/mqtt`) |
 | Zigbee device OTA | yes: the 1 MiB image store in the claimed `files` region (`ota_store`), larger images streamed from a client; streamed only until the claim |
 | ESP32 self-update | yes: `firmware/*` requests, Settings › Hub firmware; into the other app slot (the first one replaces SONOFF's application, after a confirmation) |
@@ -114,19 +114,29 @@ image magic, the image length against the partition, the chip revision
 range, the appended SHA-256 (ESP-IDF `esp_ota_end`), and a checksum the
 web page computes. Our image is a plain ESP32 app image: chip ESP32,
 revision v3.0–v3.99 (the unit is v3.1), DIO 40 MHz, SHA-256 appended,
-about 2.95 MB of the 6 MiB slot. Its project name is `libespidf`
+about 2.96 MB of the 6 MiB slot. Its project name is `libespidf`
 (esp-idf-sys); SONOFF's guide says ESPHome images are accepted. **To verify
 on hardware.**
 
 **Lab: over USB with hwlab esprom** (below), `ota_1` and one `otadata`
 sector.
 
-After the first boot: the console (CP2102N, 115 200 8N1) prints the API
-token (`token`); the web UI is at `http://<address>/` once Ethernet or
-Wi-Fi has an address (`net`, `wifi set <ssid> <password>` or the UI);
-**claim the `files` partition first** (Settings › Storage, or `files claim
-confirm`), before adding devices: until then the hub keeps its data in RAM
-only.
+The first boot claims SONOFF's `files` partition for the hub's data
+(SONOFF's files are copied into it first; next section) and generates the
+API token. The console (CP2102N, 115 200 8N1) prints the token (`token`);
+the web UI is at `http://<address>/` once Ethernet or Wi-Fi has an address
+(`net`, `wifi set <ssid> <password>` or the UI). If the claim was refused,
+the log, `files` and a banner in the web UI say why: the hub then keeps its
+data in RAM only.
+
+**API token**: 12 random bytes from the ESP32's RNG with an entropy source.
+The classic ESP32's RNG is a true RNG only while the radio runs or the
+SAR-ADC entropy is on, and a dongle on Ethernet never starts its radio: the
+token (at the first boot, and `hub/token/rotate`) is read with
+`bootloader_random_enable` around it unless the Wi-Fi station runs; the
+Wi-Fi start waits for such a read (`firmware/gateway/src/entropy.rs`). The
+firmware uses neither the ADC nor I2S. Network keys, PAN ID and EPID are
+the host's random bytes XOR the MG24's TRNG (`docs/ezsp-backend.md`).
 
 **No trial boot.** SONOFF's application was built without ESP-IDF's app
 rollback: its `esp_ota_ops` carries the error strings that every build has
@@ -173,12 +183,17 @@ firmware is USB only. The hub's data are not touched by an update.
 `ota_0` holds SONOFF's application (project `Dongle-M`):
 
 1. if the hub claimed `files` (or a claim or return was interrupted): the
-   hub application stops (it saves the registry), SONOFF's blocks are
-   written back from the copy and the copy is erased (next section); the
-   hub's data on the region are gone;
-2. `ota_0` is selected in `otadata` (ESP-IDF verifies the image first) and
-   the dongle restarts into SONOFF's firmware with its settings in `nvs`
-   and `files`.
+   hub application stops (it saves the registry; refused while a
+   maintenance job runs, `network/jobs`: a scan, a channel change, a
+   network reset or restore writes the records from its own thread), the
+   gate of every window of the region the hub holds closes (the journal,
+   the OTA image store, the catalog: a write under way ends first, every
+   later one fails), SONOFF's blocks are written back from the copy and the
+   copy is erased (next section); the hub's data on the region are gone;
+2. `ota_0` is selected in `otadata` (ESP-IDF verifies the image first), the
+   first boot's claim is forgotten (`zrh/files_auto`: a later installation
+   claims again) and the dongle restarts into SONOFF's firmware with its
+   settings in `nvs` and `files`.
 
 If writing back fails, `ota_0` is not selected (`stock confirm` again, or
 `restart`: the hub then runs with its data in RAM). After a self-update has
@@ -199,49 +214,71 @@ host-tested):
 | `radio` | 0x2E2000 | 640 KiB | one MG24 `.gbl` image, reserved for the Gecko updater (erased by the claim, not used yet) |
 | `stock_copy` | 0x382000 | 120 KiB | SONOFF's blocks in use at the claim: an index block and up to 29 blocks |
 
-### Before the claim: RAM only
+### The first boot claims it
 
-**Decision: until `files` is claimed the hub runs normally with its data
-in RAM only, and never writes `files`.** Every feature works, but the
-device registry (names, interviews), groups, bindings the hub made,
-automations, reporting settings, the ownership tag and the hub's other
-records are lost at every restart. What survives: the Zigbee network itself
-(in the MG24's NVM: after a restart the hub takes the NCP's network again,
-as on a first start, and imports the devices the NCP knows), and what is in
+**Decision (2026-11-25): the hub claims `files` by itself on its first
+boot**, before the application starts, when the claim's preconditions hold
+(below); SONOFF's files are copied first, as for every claim. The attempt
+is kept in NVS (`zrh/files_auto`: `claimed`, or `refused: <why>`): a
+refusal is not retried at every boot, an interrupted first claim is
+resumed, a claim cut short after its commit is finished (any boot), a
+return to stock cut short is left for `stock confirm`
+(`hub_store::files::boot_action`, host-tested). A completed `stock
+confirm` forgets the attempt, so a later installation is a first boot
+again.
+
+**If the claim is refused, the hub runs with its data in RAM only**, and
+says so loudly: the boot log (`!!!`), `files`, `hub` and `info` on the
+console, `hub/system` and `storage/status` (`ram_only`: why;
+`first_boot_claim`), and a banner over every page of the web UI. Every
+feature works, but the device registry (names, interviews), groups,
+bindings the hub made, automations, reporting settings, the ownership tag
+and the hub's other records are lost at every restart. What survives: the
+Zigbee network itself (in the MG24's NVM: after a restart the hub takes the
+NCP's network again and imports the devices the NCP knows), and what is in
 NVS (`zrh`: Wi-Fi, API token, MQTT settings, LED). No catalog can be
 installed (the built-in examples are there) and the Zigbee OTA image store
-is off (streamed images work). The log, `info`, `hub`, `hub/system`
-(`storage`, `store.volatile`) and Settings › Storage say so.
-
-Why not refuse network writes instead: the NCP keeps the network either
-way, so nothing is lost that a claim later would keep, and a hub that does
-nothing until it is set up is no safer; refusing would also block a
-network the MG24 already runs (from SONOFF's firmware with ZHA/Z2M over
-TCP). Why not claim automatically: the claim changes SONOFF's data region
-(its file system is no longer valid without the hub's copy), so it needs
-the operator's decision.
+is off (streamed images work). Once the cause is gone (e.g. SONOFF's
+settings reset in its web console), the claim can be made by hand.
 
 ### The claim
 
-Console `files claim` (what it would do), `files claim confirm`; API
-`storage/claim` with `"confirm": true` (without it: `confirm_required`),
-Settings › Storage › Claim storage; `storage/status` reports `content`,
-`claimed`, `state`, `copy`, `in_use`, `busy`, `last`. It runs on its own
-thread and restarts the hub when it is done (the RAM data of this boot are
-lost; the next boot opens the store on the region).
+At the first boot, or by hand: console `files claim` (what it would do),
+`files claim confirm`; API `storage/claim` with `"confirm": true` (without
+it: `confirm_required`), Settings › Storage › Claim storage. A claim by
+hand runs on its own thread and restarts the hub when it is done (the RAM
+data of this boot are lost). `storage/status` reports `content`,
+`claimed`, `state`, `copy`, `in_use`, `ram_only`, `first_boot_claim`,
+`busy`, `last`.
 
-1. **Scan.** Every 4 KiB block outside `stock_copy` that is not erased
-   counts as in use by SONOFF's LittleFS (LittleFS does not erase the
-   blocks it frees, so this may count more than its files need). Refused,
-   writing nothing, when more than 29 blocks are in use (an MG24 update
-   staged by SONOFF can be that large: reset SONOFF's settings in its web
-   console, or take a USB backup), when `stock_copy` is not erased
-   (SONOFF's file system may use those blocks), or when the region holds
-   neither LittleFS nor erased flash.
-2. **Copy.** The index (`ZRHS`: block numbers and CRC-32C of each block;
-   its body first, its magic last) into the first block of `stock_copy`,
-   the blocks into the slots after it, each read back, then the index's
-   `DONE` word. SONOFF's file system is still intact.
+1. **Scan.** SONOFF's blocks are those its LittleFS uses: from the
+   superblock pair {0, 1} the metadata pairs are followed through their
+   tails and through the directory entries, of each pair the newer block
+   with a valid commit (CRC) replayed (a torn commit after the last valid
+   one is ignored, as littlefs does), and the CTZ skip-lists of its files
+   walked, as littlefs's own traversal does (`hub_store::littlefs`, read
+   only; host tests compare it with upstream littlefs's `lfs_fs_traverse`
+   on images made by littlefs v2.9 configured as esp_littlefs). Following
+   the directory entries too covers a power cut while littlefs relocates a
+   directory (the parent already points at the new pair, the tails still at
+   the old one; littlefs reads the new pair, its traversal misses it): a
+   test cuts littlefs off after every program and erase of such a
+   relocation and checks that every file still reads the same with only
+   the walked blocks kept. Blocks LittleFS freed are not counted (it
+   does not erase them: an MG24 update staged and installed by SONOFF
+   leaves ~70 written blocks behind). If the walk fails (a CRC that never
+   matches, a pointer beyond the file system, a cycle, no superblock),
+   every block that is not erased counts instead. Refused, writing
+   nothing, when more than 29 blocks are in use outside `stock_copy`, when
+   SONOFF's file system uses a block of `stock_copy` (without the walk:
+   any written block there), or when the region holds neither LittleFS
+   nor erased flash.
+2. **Copy.** Written blocks of `stock_copy` that SONOFF's file system freed
+   are erased; the index (`ZRHS`: block numbers and CRC-32C of each block,
+   and whether they came from the walk; its body first, its magic last)
+   into the first block of `stock_copy`, the blocks into the slots after
+   it, each read back, then the index's `DONE` word. SONOFF's file system
+   is still intact.
 3. **Commit.** A claim record (`erasing`) over block 0, the LittleFS
    superblock: from here the region is the hub's. Block 1 and the hub's
    areas (`hubdata`, `ota_store`, `radio`; blocks already erased are only
@@ -250,23 +287,25 @@ lost; the next boot opens the store on the region).
 **Power cuts**: the claim and the return are idempotent, every write and
 erase is a safe stopping point (host tests cut each one, with torn writes
 and half-erased blocks, then run the claim or the return to stock again
-and compare the region byte for byte). Before the commit SONOFF's file
-system is untouched: the stock firmware still works, a new claim starts
-over (an interrupted copy, also a torn first write of the index, is
-recognised as the hub's and erased), and `stock confirm` erases the copy.
-After the commit the next boot finishes the erase on its own (the claim
-was confirmed). A copy whose source blocks changed since (SONOFF's firmware
-ran in between) is made again.
+and compare the region byte for byte, or mount the littlefs image and read
+its files back). Before the commit SONOFF's file system is untouched: the
+stock firmware still works, a new claim starts over (an interrupted copy,
+also a torn first write of the index, is recognised as the hub's and
+erased), and `stock confirm` erases the copy. After the commit the next
+boot finishes the erase on its own. A copy whose source blocks changed
+since (SONOFF's firmware ran in between) is made again.
 
 On the lab unit SONOFF's LittleFS uses blocks 0, 1 and 411 (inside
-`hubdata`), so the copy is three blocks.
+`hubdata`), so the copy is three blocks (littlefs allocates from 411 on a
+fresh file system of this size, as the tests show).
 
 ### Return to stock after a claim
 
 A record `restoring`; every block outside `stock_copy` is erased (if it is
 not) and the copied blocks are written back to their block numbers and read
 back, the claim blocks last (the one holding the newest record at the very
-end); then `stock_copy` is erased, its index last. A power cut anywhere:
+end); then `stock_copy` is erased, its index last. Blocks SONOFF's file
+system had freed come back erased. A power cut anywhere:
 `stock confirm` again finishes it (or `files claim confirm` claims the
 region again: the copy stays until the return is complete); the hub boots
 with its data in RAM meanwhile. A copy that does not verify is never
@@ -349,7 +388,7 @@ python3 tools/make-otadata.py --seq 2 -o target/otadata-donglem-ota1.bin
 (A local build whose ESP-IDF Python check fails on a constraint the
 package index cannot meet yet builds with `IDF_PYTHON_CHECK_CONSTRAINTS=no`.)
 
-Size: about **2.95 MB of the 6 MiB slot** (the bring-up image was 0.92
+Size: about **2.96 MB of the 6 MiB slot** (the bring-up image was 0.92
 MB; CI prints the exact number and fails above the slot). Static RAM:
 IRAM 101.5 KB of 128 KB, DRAM `.data` + `.bss` 33.2 KB (bring-up 30.9 KB).
 
@@ -466,8 +505,8 @@ comes first: SONOFF's firmware on a claimed region would format it.
 | `permit [s]` | open joining (default 180 s, 0 closes; the result is logged) |
 | `token` | the API token (generated at the first boot with the hub; `hub/token/rotate` changes it) |
 | `files` | what `files` holds: claimed, interrupted, the copy; where the hub's data are; a running claim |
-| `files claim` | what the claim would copy (reads the region), or why it is refused |
-| `files claim confirm` | the claim (own thread), then a restart |
+| `files claim` | what the claim would copy (reads the region: blocks used by the LittleFS walk or written), or why it is refused |
+| `files claim confirm` | the claim by hand when the first boot's was refused (own thread), then a restart |
 | `board`, `board set <k=v …>`, `board clear` | profile pins; NCP wiring overrides (e.g. `baud=460800`), next boot. Overrides that take flash/PSRAM or console pins are refused; **holding the button while the dongle powers up or resets ignores stored overrides for that boot** (then `board clear`) |
 | `net`, `wifi set <ssid> [pw]`, `wifi clear` | Ethernet/Wi-Fi state; station credentials, used at once (the station runs when Ethernet has had no address for 10 s); `clear` from the next boot |
 | `led <0-100>` | LED brightness |
@@ -494,9 +533,9 @@ stored network (the hub's backend calls it at every session start).
   requirements of `coordinator-profiles.md` (backup export first,
   allow-list manifest, persisted state) are not met. Not compiled; the
   `radio` area is reserved for it.
-- The claim counts every block that is not erased as SONOFF's (no LittleFS
-  parser): a file system with many freed but not erased blocks is refused
-  above 29 blocks.
+- A SONOFF file system that the LittleFS walk cannot read is counted by
+  its written blocks (refused above 29); more than 29 blocks in use is
+  refused either way (RAM only, the reason in the banner).
 - No app rollback (SONOFF's bootloader): a hub image that does not start
   needs USB.
 - No SoftAP setup: the first network access is Ethernet (DHCP) or Wi-Fi
@@ -508,16 +547,17 @@ stored network (the hub's backend calls it at every session start).
 1. Flash the hub image over USB as above (`ota_1`, `otadata` sector 1);
    boot log: PSRAM 2 MB, `memory mode psram`, stock table `Foreign`,
    running `ota_1`, `ota_0` = SONOFF Dongle-M, `files` = SONOFF's
-   LittleFS, not claimed; "the hub's data stay in RAM"; `info` heap figures
-   for the RAM budget, at the console and after a minute.
+   LittleFS; the first boot's claim (three blocks on the lab unit, walked
+   by LittleFS), `files` claimed and in use; `info` heap figures for the
+   RAM budget, at the console and after a minute.
 2. EZSP session on the stock NCP: `hub` shows the session up, `network/info`
    (NO_NETWORK on a fresh NCP), the LED cyan with a network address.
 3. Ethernet link and DHCP, the web UI and `/api` with the token; Wi-Fi
    fallback with Ethernet unplugged (`wifi set`, then the UI's Wi-Fi), the
    heap with Wi-Fi up.
-4. `files claim` (three blocks on the lab unit), `files claim confirm`:
-   restart, `files` claimed and in use, `hub/system` `store` not volatile;
-   power cut during a second unit's claim if available.
+4. `hub/system` `store` not volatile; restart: data kept. On a second
+   unit if available: a power cut during the first boot's claim, and a
+   refused claim (RAM-only banner).
 5. Form a network (Settings › New network), join a device with the button
    (yellow LED), interview, control, restart: the device and its name stay.
 6. MQTT with a broker and HA discovery; the catalog upload; a Zigbee OTA
