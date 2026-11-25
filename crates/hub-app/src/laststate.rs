@@ -16,7 +16,7 @@ use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
 use hub_devices::model::Category;
 use hub_devices::transport::ZigbeeTransport;
-use hub_store::{KvStore, kv};
+use hub_store::{Gate, KvStore, kv};
 use log::{info, warn};
 
 /// Key prefix.
@@ -42,14 +42,20 @@ pub struct LastValues {
     pub bytes: u64,
     /// See `writes`.
     pub errors: u64,
+    /// The kept values were read (the store's gate did not hide them).
+    pub loaded: bool,
 }
 
 impl LastValues {
-    /// Puts the kept values back (after the registry restored the devices).
+    /// Puts the kept values back (after the registry restored the devices),
+    /// unless the gate hides them (they are network records): at the start,
+    /// or when the app loads the network's records later.
     #[inline(never)]
     pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) {
-        let recs: Vec<(String, Vec<u8>)> =
-            kv::with(kv, |s| s.prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect());
+        let (gate, recs): (Gate, Vec<(String, Vec<u8>)>) = kv::with(kv, |s| {
+            (s.gate(), s.prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect())
+        });
+        self.loaded = gate != Gate::Closed;
         for (id, v) in recs {
             if let Ok(t) = std::str::from_utf8(&v) {
                 self.restored += engine.restore_last_values(&id, t, now);

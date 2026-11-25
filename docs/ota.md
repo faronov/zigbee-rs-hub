@@ -140,8 +140,9 @@ deleted when the job is done.
   (identity, policy, job; progress every 10 %), settings `ota/cfg`. The
   device states are network records (`hub_store::kv::scope`, ownership
   tag): like the registry they are loaded once readable (at the start, or
-  after `network/registry/adopt`), written only while the records are this
-  hub's (meanwhile they stay in memory), and dropped by
+  after `network/registry/adopt`; after the devices, and on their own when
+  the gate closed between the two at the start), written only while the
+  records are this hub's (meanwhile they stay in memory), and dropped by
   `network/registry/clear`; `ota/start` and `ota/devices/policy` answer
   `registry_read_only` until then, and `auto` acts as `manual` (a
   device's own `off` may be among the records not loaded). A job kept

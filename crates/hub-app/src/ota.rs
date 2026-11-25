@@ -288,23 +288,22 @@ impl Ota {
         cfg!(feature = "ota-store")
     }
 
-    /// Settings and, unless the gate hides them, device states from the
-    /// journal.
-    pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis) {
+    /// The settings from the journal (the hub's: always readable; the
+    /// device states load with the network's records).
+    pub fn load_settings(&mut self, kv: &dyn KvStore) {
         if let Some(b) = kv::with(kv, |s| s.get(SETTINGS_KEY).map(<[u8]>::to_vec)) {
             let tz = self.server.settings.tz_offset_s;
             self.server.settings = Settings::from_bytes(&b);
             self.server.settings.tz_offset_s = tz;
         }
-        self.load_devices(kv, engine, now);
     }
 
-    /// The stored device states, once the gate shows them: at the start,
-    /// or when the app loads the network's records later (adopted, or
-    /// readable after the start). A stored state replaces the one made
-    /// meanwhile; one that runs a job is kept with the stored policy (a
-    /// stored `off` ends the job at the next tick). Records of devices the
-    /// engine does not know are deleted (gate open).
+    /// The stored device states, once the gate shows them and after the
+    /// devices: at the start, or when the app loads the network's records
+    /// later (adopted, or readable after the start). A stored state
+    /// replaces the one made meanwhile; one that runs a job is kept with
+    /// the stored policy (a stored `off` ends the job at the next tick).
+    /// Records of devices the engine does not know are deleted (gate open).
     pub fn load_devices<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis) {
         type Records = Vec<(String, Vec<u8>)>;
         let (gate, devs): (Gate, Records) =
@@ -351,6 +350,11 @@ impl Ota {
         self.tx_failed.clear();
         self.loaded = true;
         self.snapshot_dirty = true;
+    }
+
+    /// Whether the stored device states were loaded ([`load_devices`](Self::load_devices)).
+    pub fn loaded(&self) -> bool {
+        self.loaded
     }
 
     /// Whether the network records are this hub's (every tick, from the

@@ -193,6 +193,8 @@ pub struct Automations {
     /// Rules cannot be stored (the hub's network records are not its own):
     /// enable and disable actions fail.
     pub read_only: bool,
+    /// The stored rules were read (the store's gate did not hide them).
+    pub loaded: bool,
 }
 
 fn key(s: &StateRef) -> String {

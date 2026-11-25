@@ -2545,7 +2545,12 @@ clears them; `network/reset` and `network/restore` take them for the new
 network too. Adopting keeps devices the hub met meanwhile (an NCP import,
 a join): the stored record replaces each in place (`device_updated`, no
 removal; its last values stay). Records written before the tag existed are tagged for the
-stored network at the first start.
+stored network at the first start. Each kind of network record (devices
+with their groups and bindings, last values, automations, OTA device
+states) is loaded once, on its own: when the records turn foreign between
+these loads at the start, adopting them (or their becoming readable
+again) loads the kinds that were hidden, and the last values and OTA
+states load only after their devices.
 
 **Background jobs.** `network/energy_scan`, `network/active_scan` and
 `network/topology` (with `refresh`) answer at once with `{job, kind,

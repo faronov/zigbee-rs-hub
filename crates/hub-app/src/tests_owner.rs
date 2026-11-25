@@ -1,17 +1,23 @@
 //! The ownership tag of the hub's records end to end (design §7 row I):
 //! the first start of a tagging build on PR A's untagged journal, a start
-//! on records that are not this hub's, and the operator's adopt and clear.
+//! on records that are not this hub's, the operator's adopt and clear, and
+//! records that turn foreign between their loads at the start.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Receiver;
 
-use hub_coord::{BackendKind, OwnerTag, RegistryState};
+use hub_coord::{BackendKind, CoordStatus, OwnerTag, RegistryState};
 use hub_ncp::coord::owner;
-use hub_store::kv::scope;
-use hub_store::{Flash, Journal, OWNER_KEY, Scope, Store};
+use hub_store::kv::{Guarded, Kv, scope};
+use hub_store::{Flash, Gate, Journal, JournalStats, KvStore, OWNER_KEY, Scope, Store};
 use serde_json::{Value as J, json};
 
-use crate::App;
+use crate::backend::Report;
+use crate::{App, Backend, Records};
 use crate::baseline;
 use crate::tests::{T, call, cfg, form, ok, rig, rig_with, session};
 use crate::tests_baseline::SharedMem;
@@ -412,6 +418,238 @@ fn while_foreign_the_hub_wide_auto_starts_no_download() {
     ok(&call(&app, sid, &rx, 4, json!({"type": "network/registry/adopt", "confirm": true})));
     let l = ok(&call(&app, sid, &rx, 5, json!({"type": "ota/devices/list"}))).clone();
     assert_eq!((&l[0]["policy"], &l[0]["effective_policy"]), (&J::from("off"), &J::from("off")), "{l}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// Records of the host core that turn foreign during the start, right
+/// after the app read the `after` records `reads` times (the gate closes
+/// between two kinds of network records), until adopted, cleared or
+/// [`settle`]d; or, with `start_foreign`, that are foreign until then.
+///
+/// [`settle`]: Racy::settle
+struct Racy {
+    hub: hub_ncp::Hub,
+    after: &'static str,
+    reads: u8,
+    start_foreign: bool,
+    /// 0: before, 1: foreign, 2: as the host core says.
+    phase: AtomicU8,
+    hits: AtomicU8,
+}
+
+impl Racy {
+    fn foreign(&self) -> bool {
+        match self.phase.load(Ordering::SeqCst) {
+            0 => self.start_foreign,
+            1 => true,
+            _ => false,
+        }
+    }
+
+    /// The records are the host core's again, without the operator.
+    fn settle(&self) {
+        self.phase.store(2, Ordering::SeqCst);
+    }
+}
+
+/// Notes a read of the `after` records.
+struct Spy<'a> {
+    kv: &'a mut dyn Kv,
+    after: &'a str,
+    hit: &'a Cell<bool>,
+}
+
+impl Kv for Spy<'_> {
+    fn get(&self, key: &str) -> Option<&[u8]> {
+        self.kv.get(key)
+    }
+    fn prefix<'a>(&'a self, prefix: &'a str) -> Box<dyn Iterator<Item = (&'a str, &'a [u8])> + 'a> {
+        self.hit.set(self.hit.get() || prefix == self.after);
+        self.kv.prefix(prefix)
+    }
+    fn put(&mut self, key: &str, value: &[u8]) -> io::Result<()> {
+        self.kv.put(key, value)
+    }
+    fn delete(&mut self, key: &str) -> io::Result<()> {
+        self.kv.delete(key)
+    }
+    fn gate(&self) -> Gate {
+        self.kv.gate()
+    }
+}
+
+impl KvStore for Racy {
+    fn with_kv(&self, f: &mut dyn FnMut(&mut dyn Kv)) {
+        let (foreign, hit) = (self.foreign(), Cell::new(false));
+        self.hub.with_kv(&mut |kv| {
+            let mut closed;
+            let kv: &mut dyn Kv = if foreign {
+                closed = Guarded::new(kv, Gate::Closed);
+                &mut closed
+            } else {
+                kv
+            };
+            f(&mut Spy { kv, after: self.after, hit: &hit });
+        });
+        if hit.get() && self.hits.fetch_add(1, Ordering::SeqCst) + 1 == self.reads {
+            let next = if self.start_foreign { 2 } else { 1 };
+            let _ = self.phase.compare_exchange(0, next, Ordering::SeqCst, Ordering::SeqCst);
+        }
+    }
+    fn stats(&self) -> JournalStats {
+        self.hub.stats()
+    }
+}
+
+impl Records for Racy {
+    fn registry(&self) -> RegistryState {
+        if self.foreign() { RegistryState::Foreign { backend: "zrhp", why: "another network" } } else { self.hub.registry() }
+    }
+    fn adopt(&self, now: Report<'_>) -> io::Result<RegistryState> {
+        self.settle();
+        Records::adopt(&self.hub, now)
+    }
+    fn clear(&self, now: Report<'_>) -> io::Result<usize> {
+        self.settle();
+        Records::clear(&self.hub, now)
+    }
+    fn system(&self, st: &CoordStatus) -> (J, J) {
+        Records::system(&self.hub, st)
+    }
+}
+
+const RACE_PLUG: &str = "zb:5a52530000000001";
+
+/// The app on [`untagged`] records with one record of each kind network
+/// records load as (the plug's last values are there already): the group
+/// `Kitchen`, the rule `night`, the plug's OTA state with policy `auto`;
+/// behind [`Racy`] records.
+fn racy_start(after: &'static str, reads: u8, start_foreign: bool) -> (SharedMem, crate::tests::Rig, Arc<Racy>, App) {
+    let mem = untagged();
+    let mut store = Store::open(Box::new(mem.clone())).unwrap();
+    store.kv_put("grp/0001", br#"{"id":1,"name":"Kitchen","hub_member":false,"members":[],"scenes":[]}"#).unwrap();
+    store.kv_put("auto/night", rule("night").to_string().as_bytes()).unwrap();
+    #[cfg(feature = "ota")]
+    {
+        let st = hub_ota::server::DevState { policy: Some(hub_ota::Policy::Auto), ..Default::default() };
+        store.kv_put(&format!("ota/d/{RACE_PLUG}"), &st.to_bytes()).unwrap();
+    }
+    let r = rig(store);
+    let racy = Arc::new(Racy { hub: r.ncp.clone(), after, reads, start_foreign, phase: AtomicU8::new(0), hits: AtomicU8::new(0) });
+    let mut backend = Backend::zrhp(r.ncp.clone());
+    backend.kv = racy.clone();
+    let app = App::start_backend(backend, cfg(), None);
+    assert!(app.wait(T, |s| s.endpoint_registered));
+    (mem, r, racy, app)
+}
+
+fn rule(id: &str) -> J {
+    json!({"id": id, "triggers": [{"type": "time", "cron": "0 22 * * *"}],
+        "actions": [{"type": "request", "request": {"type": "network/permit_join", "duration_s": 0}}]})
+}
+
+/// What of the network records the app has: `[groups and bindings, last
+/// values, rules, OTA device states]` (see [`racy_start`]).
+fn loaded(app: &App, sid: u64, rx: &Receiver<String>) -> [bool; 4] {
+    let groups = ok(&call(app, sid, rx, 60, json!({"type": "groups/list"})))[0]["name"] == "Kitchen";
+    let last = app.status().last_values.0 > 0;
+    let rules = ok(&call(app, sid, rx, 61, json!({"type": "automations/list"})))["rules"][0]["id"] == "night";
+    #[cfg(feature = "ota")]
+    let ota = {
+        let l = ok(&call(app, sid, rx, 62, json!({"type": "ota/devices/list"}))).clone();
+        let row = l.as_array().unwrap().iter().find(|r| r["device"] == RACE_PLUG).cloned();
+        // Loaded, and the hold lifted: `auto` acts as `auto` again.
+        row.is_some_and(|r| (&r["policy"], &r["effective_policy"]) == (&J::from("auto"), &J::from("auto")))
+    };
+    #[cfg(not(feature = "ota"))]
+    let ota = true;
+    [groups, last, rules, ota]
+}
+
+/// Until every kind is loaded (a tick loads what became readable).
+fn all_loaded(app: &App, sid: u64, rx: &Receiver<String>) -> [bool; 4] {
+    let t = std::time::Instant::now();
+    loop {
+        let l = loaded(app, sid, rx);
+        if l == [true; 4] || t.elapsed() > T {
+            return l;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Written once loaded: a new rule is stored, the other records kept.
+fn written_and_kept(app: &App, sid: u64, rx: &Receiver<String>, mem: &SharedMem) {
+    ok(&call(app, sid, rx, 70, json!({"type": "automations/create", "rule": rule("late")})));
+    call(app, sid, rx, 71, json!({"type": "hub/reboot"}));
+    let kv = kv(mem);
+    let mut want = vec!["auto/late".to_string(), "auto/night".into(), "grp/0001".into(), format!("st/{RACE_PLUG}")];
+    if cfg!(feature = "ota") {
+        want.push(format!("ota/d/{RACE_PLUG}"));
+    }
+    for k in want {
+        assert!(kv.contains_key(&k), "{k}: {kv:?}");
+    }
+}
+
+/// The records turn foreign right after the start read `after`; then they
+/// are adopted (`adopt`) or become readable again by themselves: every
+/// kind the start did not load is loaded then (`at_start`: what it did).
+fn gate_closes_during_the_start(after: &'static str, mut at_start: [bool; 4], adopt: bool) {
+    // Without Zigbee OTA there are no OTA states.
+    at_start[3] |= cfg!(not(feature = "ota"));
+    let (mem, r, racy, app) = racy_start(after, 1, false);
+    let (sid, rx) = session(&app);
+    assert!(racy.foreign(), "the gate closed after {after}");
+    assert_eq!(registry(&app, sid, &rx)["state"], "foreign");
+    assert_eq!(loaded(&app, sid, &rx), at_start, "after {after}: loaded at the start");
+    if adopt {
+        ok(&call(&app, sid, &rx, 1, json!({"type": "network/registry/adopt", "confirm": true})));
+    } else {
+        racy.settle();
+    }
+    assert_eq!(all_loaded(&app, sid, &rx), [true; 4], "after {after}, adopt {adopt}");
+    written_and_kept(&app, sid, &rx, &mem);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+#[test]
+fn records_hidden_after_the_devices_load_on_adopt() {
+    // Groups and bindings are read with the devices; the rest after.
+    gate_closes_during_the_start("dev/", [true, false, false, false], true);
+}
+
+#[test]
+fn records_hidden_after_the_last_values_load_on_adopt() {
+    gate_closes_during_the_start("st/", [true, true, false, false], true);
+}
+
+#[cfg(feature = "ota")]
+#[test]
+fn ota_states_hidden_after_the_rules_load_on_adopt() {
+    gate_closes_during_the_start("auto/", [true, true, true, false], true);
+}
+
+#[test]
+fn records_hidden_during_the_start_load_once_readable() {
+    gate_closes_during_the_start("dev/", [true, false, false, false], false);
+}
+
+/// The other way round: hidden when the devices were read (by the start's
+/// registry and again with the rest), readable right after. The devices'
+/// last values and OTA states wait for them (a value of a device not
+/// restored yet would be lost, its OTA state deleted).
+#[test]
+fn records_readable_after_the_devices_wait_for_them() {
+    let (mem, r, racy, app) = racy_start("dev/", 2, true);
+    let (sid, rx) = session(&app);
+    assert!(!racy.foreign());
+    assert_eq!(all_loaded(&app, sid, &rx), [true; 4]);
+    written_and_kept(&app, sid, &rx, &mem);
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

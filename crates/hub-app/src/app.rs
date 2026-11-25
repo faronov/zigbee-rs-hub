@@ -769,15 +769,12 @@ impl Runner {
         r.registry = registry;
         // The clock first: kept times convert only once the time is known.
         r.admin.clock_tick(&mut r.engine.cfg, now);
-        let mut last = std::mem::take(&mut r.last);
-        last.load(&*r.records, &mut r.engine, now);
-        r.last = last;
-        let records: Vec<(String, Vec<u8>)> =
-            kv::with(&*r.records, |s| s.prefix(automations::PREFIX).map(|(k, v)| (k.to_string(), v.to_vec())).collect());
-        let n = r.automations.load(records);
-        if n > 0 {
-            info!("automations: {n} rules restored");
-        }
+        #[cfg(feature = "ota")]
+        r.ota.load_settings(&*r.records);
+        // The other network records as when they become readable later:
+        // each kind once, unless the gate hides it (it may close between
+        // them).
+        r.load_network(now);
         let _ = r.api.connect_as(AUTOMATIONS_SESSION);
         let auth = serde_json::json!({"type": "auth", "token": r.cfg.api_token}).to_string();
         let _ = r.api.handle_text(&mut r.engine, AUTOMATIONS_SESSION, &auth, now);
@@ -785,20 +782,9 @@ impl Runner {
             "automations",
             serde_json::json!({"format": automations::rule::FORMAT, "max_rules": automations::rule::MAX_RULES}),
         );
-        let known: Vec<(u64, u16)> = r.engine.devices().filter_map(|d| Some((d.ieee()?, d.nwk()?))).collect();
-        r.engine.transport.nwk.extend(known);
-        #[cfg(feature = "ota")]
-        r.ota.load(&*r.records, &r.engine, now);
         // Restored devices produce added events; nobody is subscribed yet,
         // and their snapshots are what the store holds.
         let _ = r.engine.drain_events();
-        r.automations.prime(&AppWorld {
-            engine: &mut r.engine,
-            api: &mut r.api,
-            now,
-            next_id: &mut 0,
-            results: &mut Vec::new(),
-        });
         r
     }
 

@@ -126,10 +126,15 @@ impl Registry {
 
     /// Restores the devices, then groups and bindings, from the store (at
     /// start, and once they are adopted: a stored device replaces the one
-    /// the engine made meanwhile); how many devices.
+    /// the engine made meanwhile); how many devices. All of them are read
+    /// under one lock with the gate, so [`loaded`](Self::loaded) holds for
+    /// each.
     pub fn load_network<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) -> usize {
-        let (gate, devs): (Gate, Records) =
-            kv::with(kv, |s| (s.gate(), s.prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect()));
+        let (gate, devs, zg): (Gate, Records, Records) = kv::with(kv, |s| {
+            let devs = s.prefix(DEV).map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+            let zg = s.prefix(GROUP_KEY).chain(s.prefix(BIND_KEY)).map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+            (s.gate(), devs, zg)
+        });
         let mut n = 0;
         for (key, bytes) in devs {
             match decode(&bytes).and_then(|s| engine.restore_device(s, Some(&ZdefSchemaDecoder), now)) {
@@ -138,12 +143,6 @@ impl Registry {
             }
         }
         self.restored += n;
-        let zg: Records = kv::with(kv, |s| {
-            s.prefix(GROUP_KEY)
-                .chain(s.prefix(BIND_KEY))
-                .map(|(k, v)| (k.to_string(), v.to_vec()))
-                .collect()
-        });
         for (key, v) in zg {
             if let Err(e) = engine.zg_import(&key, &v) {
                 warn!("registry: {key}: {e}");
