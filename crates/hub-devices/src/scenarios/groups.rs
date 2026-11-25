@@ -338,6 +338,31 @@ fn delete_group_leaves_members_and_hub_membership() {
     assert_eq!(hub.group_create("Hall", None, false, T0).unwrap()["id"], 1);
 }
 
+/// The hub endpoint joins no more groups than the coordinator's group
+/// table holds; groups without it are not limited.
+#[test]
+fn the_hub_joins_no_more_groups_than_the_coordinator_table_holds() {
+    let (mut hub, _sim) = setup();
+    hub.cfg.hub_groups_max = Some(2);
+    hub.group_create("A", None, true, T0).unwrap();
+    hub.group_create("B", None, true, T0).unwrap();
+    let e = hub.group_create("C", None, true, T0).unwrap_err();
+    assert_eq!(e.code, "no_space", "{e:?}");
+    assert!(e.message.contains("holds 2 groups"), "{}", e.message);
+    assert_eq!(hub.groups_list().len(), 2, "nothing created");
+    let c = hub.group_create("C", None, false, T0).unwrap()["id"]
+        .as_u64()
+        .unwrap() as u16;
+    assert_eq!(
+        hub.group_update(c, None, Some(true), T0).unwrap_err().code,
+        "no_space"
+    );
+    // The hub leaves A: room for C.
+    hub.group_update(1, None, Some(false), T0).unwrap();
+    hub.group_update(c, Some("C2"), Some(true), T0).unwrap();
+    assert!(hub.transport.sent.contains(&Sent::Group(1, c)));
+}
+
 #[test]
 fn membership_read_reconciles_and_failed_add() {
     let (mut hub, mut sim) = setup();

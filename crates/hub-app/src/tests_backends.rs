@@ -835,3 +835,49 @@ fn queued_requests_do_not_reach_the_network_after_an_ncp_reset() {
     assert_eq!(on_off(0), 0, "the queued Off did not go to the other network");
     rig.finish();
 }
+
+/// EZSP: the hub endpoint is a member of no more groups than the NCP's
+/// multicast table took (`network/info` `capacity`); groups without it
+/// are not limited.
+#[test]
+fn the_hub_endpoint_joins_as_many_groups_as_the_ncp_table_holds() {
+    use hub_ezsp::ezsp::ConfigId;
+    // An NCP image whose memory holds no more than 2 multicast entries.
+    let mut sim = ezsp_sim(true, 0xDD);
+    sim.config_values = vec![(ConfigId::MULTICAST_TABLE_SIZE, 2)];
+    sim.multicast_table_size = 2;
+    sim.table_memory = Some(0);
+    let rig = Rig::ezsp(sim, Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("session and network up", || rig.app.status().network_up);
+    assert_eq!(info(&rig.app, sid, &rx)["capacity"]["hub_groups"], 2);
+    for (i, name) in ["A", "B"].into_iter().enumerate() {
+        ok(&call(&rig.app, sid, &rx, i as u64 + 1, json!({"type": "groups/create", "name": name})));
+    }
+    let c = call(&rig.app, sid, &rx, 3, json!({"type": "groups/create", "name": "C"}));
+    assert_eq!(c["error"]["code"], "no_space", "{c}");
+    ok(&call(&rig.app, sid, &rx, 4, json!({"type": "groups/create", "name": "C", "hub_member": false})));
+    wait("the hub endpoint in two groups", || rig.link.groups().len() == 2);
+    rig.finish();
+}
+
+/// EZSP: SONOFF's EmberZNet 7.4.5 NCP appends a byte to
+/// `incomingMessageHandler` of a device that joined in its session; the
+/// device's responses still reach the engine and its interview completes
+/// (it ended `partial`, with nothing learned, while such frames were
+/// refused).
+#[test]
+fn an_ncp_that_appends_bytes_to_incoming_messages_still_interviews() {
+    let mut sim = ezsp_sim(true, 0xDD);
+    sim.incoming_trailer = vec![0x02];
+    let mut rig = Rig::ezsp(sim, Store::volatile());
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered);
+    let (sid, rx) = session(&rig.app);
+    rig.link.join(PLUG, PLUG_NWK);
+    wait("the plug's state", || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+    let dev = call(&rig.app, sid, &rx, 2, json!({"type": "devices/get", "device": "zb:5a52530000000001"}));
+    assert_eq!(ok(&dev)["interview"], "complete", "{dev}");
+    assert_eq!(ok(&dev)["model"], "SIM-PLUG");
+    rig.finish();
+}

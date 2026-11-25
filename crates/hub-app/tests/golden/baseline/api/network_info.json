@@ -1,4 +1,8 @@
 {
+  "capacity": {
+    "asdu": 82,
+    "in_flight": 4
+  },
   "channel": 15,
   "ext_pan_id": "00124b0001020304",
   "ncp": {
