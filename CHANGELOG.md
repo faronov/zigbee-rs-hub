@@ -72,6 +72,10 @@ install instructions and the list of merged pull requests. A pre-release
 - Automations: device-then-entity pickers that tell identical devices
   apart; the network map lays out small networks readably.
 - `network/info` reports the coordinator's table sizes (`capacity`).
+- SONOFF Dongle Max: network backup and restore through EZSP (Open
+  Coordinator Backup, the format zigpy/ZHA and Zigbee2MQTT use, so a
+  network can move between them and the hub); host-tested against the
+  simulated NCP (EZSP 13–18), not yet run on a Dongle Max.
 - Hub records are tagged with the network they belong to (`hub/owner`):
   `network/info.registry`, `network/registry/adopt` and
   `network/registry/clear` (both need `"confirm": true`). After an adopt,
@@ -118,8 +122,9 @@ install instructions and the list of merged pull requests. A pre-release
   from the console or the browser console).
 - SONOFF Dongle Max: experimental, full hub hardware test pending
   (Ethernet, `stock confirm`, self-update not yet run); installation
-  through SONOFF's web console not yet verified on hardware; no network
-  backup/restore through EZSP, no Green Power, no MG24 firmware update; at
+  through SONOFF's web console not yet verified on hardware; network
+  backup/restore through EZSP host-tested only, not yet run on a Dongle
+  Max; no Green Power, no MG24 firmware update; at
   most 8 groups on the hub's endpoint (the NCP's multicast table); if the
   first boot cannot claim SONOFF's `files`
   partition the hub keeps its data in RAM only (a banner says so). Not

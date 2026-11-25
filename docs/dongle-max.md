@@ -67,7 +67,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 | Zigbee device OTA | yes: the 1 MiB image store in the claimed `files` region (`ota_store`), larger images streamed from a client; streamed only until the claim |
 | ESP32 self-update | yes: `firmware/*` requests, Settings › Hub firmware; into the other app slot (the first one replaces SONOFF's application, after a confirmation) |
 | Ethernet (also PoE-powered) and Wi-Fi | yes: Ethernet first, the Wi-Fi station after 10 s without an Ethernet address |
-| Network backup/restore (Open Coordinator Backup) | the requests exist; the EZSP backend answers `unsupported` until key export lands (`docs/ezsp-backend.md`, follow-ups) |
+| Network backup/restore (Open Coordinator Backup) | yes: `network/backup` and `network/restore` on the EZSP backend, in the format zigpy/ZHA and Zigbee2MQTT use (`docs/ezsp-backend.md`, "Backup and restore"); host-tested against the simulated NCP (EZSP 13–18), not yet run on a Dongle Max |
 | Green Power through EZSP | later |
 | MG24 firmware update through the Gecko bootloader | later; the `radio` area is reserved, no code |
 | Installation through SONOFF's web console | yes: **SONOFF's partition table and bootloader never change** |
@@ -573,8 +573,10 @@ stored network (the hub's backend calls it at every session start).
 
 ## Not in this image, limits
 
-- **Network backup/restore through EZSP** (key export): `network/backup`
-  answers `unsupported` for now.
+- **Network backup/restore through EZSP**: host-tested only (the
+  simulated NCP); not yet run on a Dongle Max, so whether SONOFF's stock
+  NCP image answers every frame it uses (the token interface, the APS frame
+  counter) is open (`docs/ezsp-backend.md`).
 - **Green Power through EZSP**: GP frames are ignored.
 - **MG24 firmware updates** through the Gecko bootloader: the `donglem`
   branch's updater (radio banks in its own `hubdata`, ZRHP-based
