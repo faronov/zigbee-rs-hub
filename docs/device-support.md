@@ -2352,7 +2352,7 @@ code feels familiar:
 
 | Type | Parameters | Result |
 |---|---|---|
-| `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`; once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
+| `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`, `edition` (`standard`, or `devtools`: the developer edition, 14.6 `hub/developer/set`); once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
 | `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced`, `registry` (whose the hub's network records are, below: {`state`: `owned`, `untagged` (nothing stored yet), `unverified` (an NCP-held network not compared yet), `foreign` with `backend` and `why`}) (fields the host core does not know are absent; `unsupported` without a host core) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
 | `devices/list` | — | device records (4.1) |
@@ -2531,6 +2531,7 @@ written as text with fallible allocation, never as a JSON tree).
 | `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged), stamped `MM-DD HH:MM:SS` local time once the clock is set, else seconds since boot |
 | `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
 | `hub/time/set` | `tz` (POSIX TZ: `EET-2EEST,M3.5.0/3,M10.5.0/4`; `Mm.w.d`, `Jn` and `n` rules), `servers` (1–3 host names) | the `hub/time` record; both kept in the host store. The time zone drives the Time cluster server (0x000A) on the hub endpoint and the Tuya time sync (EF00 0x24); clients show times in their own zone |
+| `hub/developer/set` | `enabled` (bool) | `developer_mode`: kept in the host store (`cfg/dev`) and in `hub/info` (`developer_mode`), announced as `hub_updated` {`developer_mode`} (topic `network`), in images with the ZCL console (14.7) only; the others answer `unsupported` and have no field. While it is on the web UI shows its developer tools (the ZCL console tab) and the HTTP server serves their modules (`/ui/<build>/zcl.js`, else 403); the developer edition (devtools, `edition` in `hub/info`) has them always. It only controls the UI: the console's API (`zcl/*`, `tuya/send`, topic `frames`) follows the image's feature, not this switch — the API token already grants full control, and Home Assistant services may use it |
 | `hub/wifi/set` | `ssid` (1–32 bytes), `password` (empty or 8–63) | `stored`, `reconnecting`: kept in NVS, the station reconnects with them (the connection to the hub drops) |
 | `hub/token/rotate` | — | `token`: the new API token (persisted); sessions already authenticated stay, new ones need it |
 | `hub/reboot` | — | `rebooting` |
@@ -2539,7 +2540,8 @@ written as text with fallible allocation, never as a JSON tree).
 Events (topic `network`, API 1.2): `network_updated` {`reason`:
 `channel_changed` (with `channel`, `nwk_update_id`), `tx_power`, `restored`,
 `formed`, `registry_adopted`, `registry_cleared`} — clients read
-`network/info` again; `job_progress`, `job_done`, `job_failed` (below).
+`network/info` again; `job_progress`, `job_done`, `job_failed` (below);
+`hub_updated` {the `hub/info` fields that changed: `developer_mode`}.
 
 **Network records and their owner.** The device registry, last values,
 groups, bindings, automations, per-device OTA state and the last backup
@@ -2603,7 +2605,12 @@ omits it; the standard 8 MB image and desktop `hubctl` include it. A 4 MB
 advanced image is also buildable. `hub/info.advanced` advertises support;
 without it, `zcl/*`, `tuya/send` and subscription to `frames` answer
 `unsupported`. Normal device commands, Tuya definitions and interview
-remain available.
+remain available. The web UI's tab is a developer tool: shown, and its
+module served, with the hub's developer mode on (`hub/developer/set`,
+14.6), always in the developer edition (devtools: cargo feature `dev`, the
+`tbr-hub-<ver>-8mb-devtools[-opi]` and Dongle-M devtools images). The
+switch does not gate these requests: the API token already grants full
+control.
 
 Raw requests to one device endpoint, for writing and debugging
 definitions (web UI tab **ZCL**). They take the normal send path (queued
@@ -3501,8 +3508,12 @@ exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
 size table (definitions, strings, index) per run. The hub CI checks the app
 against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
 D24; README). The web page (`hub-web`, gzip as embedded) must stay within
-36 KiB (36 864 B, `hub_web::PAGE_BUDGET`) in every image variant; its
-tests build each variant and fail above it.
+36 KiB (36 864 B, `hub_web::PAGE_BUDGET`) in every image variant, each of
+the tab modules it loads on demand (Converters, Catalog, the ZCL console,
+Updates) within its `hub_web::MODULE_BUDGETS` entry, and the page with all
+of a variant's modules within `hub_web::TOTAL_BUDGET` (44 KiB; 64 KiB,
+`DEV_TOTAL_BUDGET`, in the developer edition, devtools); its tests build each variant
+and fail above them.
 
 ### 18.6 Hardware
 

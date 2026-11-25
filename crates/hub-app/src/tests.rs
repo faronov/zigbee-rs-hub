@@ -1404,6 +1404,55 @@ fn time_zone_and_servers_are_set_kept_and_reported() {
     assert!((n["time_utc"].as_f64().unwrap() - now).abs() < 5.0, "{n}");
 }
 
+/// Developer mode (images with the advanced console): off at first, set
+/// and reported in hub/info, announced to the other sessions
+/// (`hub_updated`, topic `network`), kept over a restart and shared with
+/// the HTTP server (which serves the developer tools' web modules only
+/// then); `unsupported` without the console. `edition` tells the developer
+/// edition.
+#[test]
+fn developer_mode_is_set_kept_and_shared() {
+    let flash: Box<dyn hub_ncp::store::Flash> = Box::new(MemFlash::new(32, 4096));
+    let r = rig(Store::open(flash).unwrap());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let (other, orx) = session(&app);
+    ok(&call(&app, other, &orx, 1, json!({"type": "subscribe", "topics": ["network"]})));
+    let info = call(&app, sid, &rx, 1, json!({"type": "hub/info"}));
+    assert_eq!(ok(&info)["edition"], if cfg!(feature = "dev") { "devtools" } else { "standard" }, "{info}");
+    assert!(!app.developer_mode());
+    let on = call(&app, sid, &rx, 2, json!({"type": "hub/developer/set", "enabled": true}));
+    if !cfg!(feature = "advanced") {
+        assert!(ok(&info).get("developer_mode").is_none(), "{info}");
+        assert_eq!(err_code(&on), "unsupported");
+        assert!(!app.developer_mode());
+        return;
+    }
+    assert_eq!(ok(&info)["developer_mode"], false, "{info}");
+    assert_eq!(ok(&on)["developer_mode"], true);
+    assert!(app.developer_mode());
+    let ev = loop {
+        let f: J = serde_json::from_str(&orx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "event" && f["event"]["topic"] == "hub_updated" {
+            break f;
+        }
+    };
+    assert_eq!(ev["event"], json!({"topic": "hub_updated", "developer_mode": true}));
+    assert_eq!(ok(&call(&app, sid, &rx, 3, json!({"type": "hub/info"})))["developer_mode"], true);
+    let bad = call(&app, sid, &rx, 4, json!({"type": "hub/developer/set", "enabled": "yes"}));
+    assert_eq!(err_code(&bad), "invalid_value");
+    app.shutdown();
+    let app = admin_app(&r, None);
+    assert!(app.developer_mode(), "kept over a restart");
+    let (sid, rx) = session(&app);
+    assert_eq!(ok(&call(&app, sid, &rx, 1, json!({"type": "hub/info"})))["developer_mode"], true);
+    let off = call(&app, sid, &rx, 2, json!({"type": "hub/developer/set", "enabled": false}));
+    assert_eq!(ok(&off)["developer_mode"], false);
+    assert!(!app.developer_mode());
+    assert_eq!(r.ncp.with_store(|s| s.kv_get(crate::admin::DEVELOPER_KEY).map(<[u8]>::to_vec)), None);
+    app.shutdown();
+}
+
 #[test]
 fn last_values_are_kept_over_a_restart() {
     use zigbee_zrhp::codec::Bytes16;

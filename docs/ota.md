@@ -230,7 +230,9 @@ index is downloaded by hand, or Home Assistant does it (the trimmed
 Updates UI stays, decided 2026-11-24; the page budget is
 `hub_web::PAGE_BUDGET`, 34 KiB gzip since #66 and 36 KiB since the
 event entities and catalog-update fixes; the 8 MB page with the store
-was 33 249 B, with streaming 33 394 B, when the Updates tab was trimmed).
+was 33 249 B, with streaming 33 394 B, when the Updates tab was trimmed;
+since then the tab is a module the page loads when it is first opened,
+`/ui/<build>/ota.js`, about 2 KB gzip of its own 3 KiB budget).
 
 The index URL is a hub setting (`index_url`, default Koenkk's) that
 clients share. Home Assistant fetches it a minute
@@ -383,8 +385,9 @@ newer than the running one; the image inside is what the product's
   generic Default Response; CI checks with `cargo tree` that this build
   links no `hub-ota`.
 - `hub-web`: the page of every feature combination within
-  `PAGE_BUDGET` (36 KiB gzip) and parsing; without `ota` no Updates tab
-  and no `ota/*` request.
+  `PAGE_BUDGET` (36 KiB gzip), the Updates tab's module within its 3 KiB,
+  and parsing; without `ota` no Updates tab, no module and no `ota/*`
+  request.
 - Release tooling (`tools/test_release_images.py`,
   `tools/test_hub_build.py`): a 4 MB image marked with `ota` or an 8 MB
   one without it is refused; the board entries are the features the build

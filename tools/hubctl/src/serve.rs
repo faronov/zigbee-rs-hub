@@ -1,6 +1,7 @@
 //! `hubctl serve`: the WebSocket JSON API (spec device-support 14) of the
-//! hub application on a desktop, the embedded web UI on `/` (as the
-//! firmware serves it), and `hubctl ws-call`, a minimal client.
+//! hub application on a desktop, the embedded web UI on `/` and its tab
+//! modules on `/ui/<build>/<name>.js` (as the firmware serves them), and
+//! `hubctl ws-call`, a minimal client.
 
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
@@ -15,7 +16,8 @@ fn timed_out(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
 }
 
-/// A plain HTTP request (no WebSocket upgrade): the web UI on `/`.
+/// A plain HTTP request (no WebSocket upgrade): the web UI on `/` and
+/// `/ui/…`, the web tools on `/zdefc/…`.
 /// Returns `false` if the connection is a WebSocket upgrade.
 fn http_page(app: &App, stream: &mut TcpStream) -> io::Result<bool> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -46,6 +48,20 @@ fn http_page(app: &App, stream: &mut TcpStream) -> io::Result<bool> {
         } else {
             write!(resp, "Content-Length: {}\r\n\r\n", hub_web::INDEX_HTML_GZ.len())?;
             resp.extend_from_slice(hub_web::INDEX_HTML_GZ);
+        }
+    } else if let Some(m) = hub_web::module(path) {
+        // A tab module of this build (the developer tools only in developer mode).
+        if !m.served(app.developer_mode()) {
+            write!(resp, "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n")?;
+        } else if hub_web::matches(inm, m.etag) {
+            write!(resp, "HTTP/1.1 304 Not Modified\r\nConnection: close\r\nETag: {}\r\nCache-Control: {}\r\n\r\n", m.etag, m.cache_control())?;
+        } else {
+            write!(resp, "HTTP/1.1 200 OK\r\nConnection: close\r\n")?;
+            for (k, v) in m.headers() {
+                write!(resp, "{k}: {v}\r\n")?;
+            }
+            write!(resp, "Content-Length: {}\r\n\r\n", m.gz.len())?;
+            resp.extend_from_slice(m.gz);
         }
     } else if let Some(name) = path.strip_prefix("/zdefc/") {
         // Web tools from hubdata (the definition compiler of the web UI).

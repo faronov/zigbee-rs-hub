@@ -21,6 +21,8 @@ zrh-gateway = { path = "../gateway" }
 [features]
 # The MQTT bridge on its own client instead of esp-mqtt (in no image).
 mqtt-lite = ["zrh-gateway/mqtt-lite"]
+# The developer edition ("devtools": the web UI's developer tools always on).
+dev = ["zrh-gateway/dev"]
 
 [build-dependencies]
 embuild = "0.33"

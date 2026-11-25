@@ -919,6 +919,11 @@ fn coordinator_boundary_scenario() {
             // The build's feature (a workspace build with hubctl has it).
             assert_eq!(v["advanced"], cfg!(feature = "advanced"), "{v}");
             v["advanced"] = "<feature>".into();
+            // Its developer mode switch (off by default) likewise.
+            assert_eq!(v.get("developer_mode").cloned(), cfg!(feature = "advanced").then_some(J::Bool(false)), "{v}");
+            v["developer_mode"] = "<feature>".into();
+            assert_eq!(v["edition"], if cfg!(feature = "dev") { "devtools" } else { "standard" }, "{v}");
+            v["edition"] = "<feature>".into();
             // Zigbee OTA (feature `ota`, the 8 MB images) likewise.
             assert_eq!(v.get("ota").is_some(), cfg!(feature = "ota"), "{v}");
             #[cfg(feature = "ota")]

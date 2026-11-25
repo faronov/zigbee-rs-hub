@@ -1,7 +1,8 @@
-//! The hub's HTTP server (esp_http_server): the web UI (one pre-compressed
-//! page, `crates/hub-web`), the web tools from the catalog store
-//! (`/zdefc/…`) and the WebSocket JSON API on `/api` ([`crate::ws`]). One
-//! server for every interface (it listens on all addresses).
+//! The hub's HTTP server (esp_http_server): the web UI (a pre-compressed
+//! page and the tab modules it loads on demand, `crates/hub-web`), the web
+//! tools from the catalog store (`/zdefc/…`) and the WebSocket JSON API on
+//! `/api` ([`crate::ws`]). One server for every interface (it listens on
+//! all addresses).
 
 use embedded_svc::http::Method;
 use embedded_svc::io::Write;
@@ -20,7 +21,7 @@ pub fn close_after(req: *mut esp_idf_svc::sys::httpd_req_t) {
     }
 }
 
-/// The server of a running app: page, web tools, `/api`.
+/// The server of a running app: page, modules, web tools, `/api`.
 pub fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
     let r = crate::resources::get();
     let mut server = EspHttpServer::new(&server::Configuration {
@@ -48,6 +49,30 @@ pub fn api_server(app: App) -> Result<EspHttpServer<'static>, EspError> {
         let headers = [hub_web::HEADERS.as_slice(), &[("Connection", "close")]].concat();
         req.into_response(200, None, &headers)?.write_all(hub_web::INDEX_HTML_GZ).map(|_| ())
     })?;
+    // The tabs the page loads when first opened, `/ui/<build>/<name>.js`: of
+    // this build only (another build's path is not found, and a page left
+    // open over an update reloads), cached for good; the developer tools
+    // only while the hub's developer mode is on (asked again every time).
+    for m in hub_web::MODULES {
+        let app = app.clone();
+        server.fn_handler(m.path, Method::Get, move |mut req| {
+            close_after(req.connection().handle());
+            if !m.served(app.developer_mode()) {
+                let headers = [("Cache-Control", "no-store"), ("Connection", "close")];
+                return req.into_response(403, Some("Forbidden"), &headers).map(|_| ());
+            }
+            if req.header("If-None-Match").is_some_and(|v| hub_web::matches(v, m.etag)) {
+                let headers = [("ETag", m.etag), ("Cache-Control", m.cache_control()), ("Connection", "close")];
+                return req.into_response(304, Some("Not Modified"), &headers).map(|_| ());
+            }
+            let headers = [m.headers().as_slice(), &[("Connection", "close")]].concat();
+            let mut resp = req.into_response(200, None, &headers)?;
+            for c in m.gz.chunks(4096) {
+                resp.write_all(c)?;
+            }
+            Ok(())
+        })?;
+    }
     // Web tools from hubdata (the definition compiler of the web UI).
     for (uri, name) in [("/zdefc/zdefc_wasm.js", "zdefc_wasm.js"), ("/zdefc/zdefc_wasm_bg.wasm", "zdefc_wasm_bg.wasm")] {
         let web = app.web().clone();

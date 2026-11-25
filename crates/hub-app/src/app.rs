@@ -343,6 +343,7 @@ pub struct App {
     next_session: Arc<AtomicU32>,
     web: SharedWeb,
     radio: Option<Arc<dyn RadioControl>>,
+    developer: Arc<AtomicBool>,
 }
 
 fn endpoint_config(e: &EndpointRecord) -> EndpointConfig {
@@ -396,12 +397,14 @@ impl App {
         let jobs = tx.clone();
         let web = SharedWeb::default();
         let web2 = web.clone();
+        let developer = Arc::new(AtomicBool::new(false));
+        let dev2 = developer.clone();
         thread::Builder::new()
             .name("hub-app".into())
             .stack_size(cfg.stack_size)
-            .spawn(move || Runner::new(records, coord, net, events, cfg, st, jobs, catalog, web2).run(rx, stop))
+            .spawn(move || Runner::new(records, coord, net, events, cfg, st, jobs, catalog, web2, dev2).run(rx, stop))
             .expect("hub-app thread");
-        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)), web, radio: backend.radio }
+        App { tx, status, stopped, next_session: Arc::new(AtomicU32::new(1)), web, radio: backend.radio, developer }
     }
 
     /// The backend's Wi-Fi coexistence control (the firmware's Wi-Fi
@@ -449,6 +452,13 @@ impl App {
     /// The web tools (`/zdefc/<file>`, served by the HTTP server).
     pub fn web(&self) -> &SharedWeb {
         &self.web
+    }
+
+    /// The hub's developer mode (`hub/developer/set`, kept in the host
+    /// store; always off without the advanced console): whether the HTTP
+    /// server serves the web UI's developer tools (`hub_web::Gate`).
+    pub fn developer_mode(&self) -> bool {
+        self.developer.load(Ordering::Relaxed)
     }
 
     /// Status snapshot.
@@ -696,6 +706,7 @@ impl Runner {
         jobs: Sender<Input>,
         setup: Option<CatalogSetup>,
         web: SharedWeb,
+        developer: Arc<AtomicBool>,
     ) -> Self {
         let builtin = if cfg.builtin_catalog { builtin_catalog() } else { MemoryCatalog::default() };
         let (catalog, service): (Box<dyn Catalog>, Option<CatalogService>) =
@@ -726,8 +737,10 @@ impl Runner {
         api.set_info("ota", ota.info());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
+        admin.developer = developer;
         admin.start_worker();
         admin.load_clock(&*records);
+        admin.load_developer(&*records, &mut api);
         let mut r = Self {
             records,
             cfg,

@@ -119,30 +119,14 @@ progress{width:12em}
 <p id="gcw" class="badge bad hide"></p>
 </section>
 </div>
-<div data-tab="conv" data-title="Converters" class="tab">
-<section class="card"><div class="row"><select id="cvd"></select><button id="cvr">Re-interview</button><button id="cvc">Reconfigure</button><button id="cvf">Find definition</button><button id="cvs">Scaffold</button></div>
-<dl class="kv" id="cvl"></dl><div class="row acts"><label>Definition <select id="cvp"></select></label></div><ul class="ents" id="cvm"></ul></section>
-<section class="card"><h2>Definition <span id="cvi" class="mut"></span></h2><textarea id="cvt" rows="18" spellcheck="false"></textarea>
-<div class="row acts"><button id="cvk">Check</button><button id="cvv">Preview</button><button class="p" id="cvu">Upload as user definition</button><button class="d" id="cvx">Delete user definition</button></div><pre id="cvo"></pre></section>
-</div>
-<!-- advanced:start -->
-<div data-tab="zcl" data-title="ZCL" class="tab">
-<section class="card"><div class="row"><select id="zd"></select><select id="ze"></select><select id="zc"></select><input id="zcx" placeholder="cluster 0x…" size="8"><input id="zm" placeholder="mfr code" size="7"></div>
-<div class="row"><input id="za" placeholder="attributes 0x0000,…" size="18"><input id="zt" placeholder="type (u16, 0x21)" size="10"><input id="zv" placeholder="value" size="10"><button id="zr">Read</button><button id="zw">Write</button><button id="zdi">Discover</button></div>
-<div class="row"><input id="zmin" placeholder="min s" size="5"><input id="zmax" placeholder="max s" size="5"><input id="zch" placeholder="change" size="6"><button id="zrc">Configure reporting</button><button id="zrr">Read reporting</button></div>
-<div class="row"><input id="zk" placeholder="command 0x…" size="9"><input id="zp" placeholder="payload hex" size="18"><label><input type="checkbox" id="zg"> global</label><label><input type="checkbox" id="ztc"> to client</label><label><input type="checkbox" id="zn"> no default rsp</label><button id="zs">Send</button><button id="zdr">Commands rx</button><button id="zdg">Commands tx</button></div>
-<pre id="zo"></pre></section>
-<section class="card"><h2>Tuya datapoints</h2><div class="row"><input id="zdp" placeholder="dp" size="4"><select id="zdt"><option>bool</option><option>value</option><option>enum</option><option>string</option><option>bitmap</option><option>raw</option></select><input id="zdv" placeholder="value" size="12"><button id="zds">Send DP</button></div><table id="zdl"></table></section>
-<section class="card"><h2>Frames</h2><div class="row"><label><input type="checkbox" id="zl"> live</label><input id="zf" placeholder="cluster filter 0x…" size="10"><button id="zfc">Clear</button></div><table id="zft"></table></section>
-</div>
-<!-- advanced:end -->
-<div data-tab="catalog" data-title="Catalog" class="tab">
-<section class="card"><h2>Catalog</h2><dl class="kv" id="ctl"></dl>
-<div class="row acts"><button class="p" id="ctu">Update from the mirror</button><button id="ctf">Fetch missing definitions</button><label>Files <input type="file" id="ctfi" multiple></label></div>
-<div class="row acts"><input id="ctb" size="48"><label><input type="checkbox" id="cta"> daily update</label><label><input type="checkbox" id="ctx"> fetch for new devices</label><button id="cts">Save</button></div>
-<div class="row"><progress id="ctp" class="hide"></progress><span id="ctm" class="mut"></span></div></section>
-<section class="card"><h2>Search</h2><input id="ctq" placeholder="vendor, model or id" size="30"><ul class="ents" id="ctr"></ul></section>
-</div>
+<div data-tab="conv" data-title="Converters" data-mod="conv" class="tab"></div>
+<!-- devmode:start -->
+<div data-tab="zcl" data-title="ZCL" data-need="developer_mode" data-mod="zcl" class="tab"></div>
+<!-- devmode:end -->
+<!-- dev:start -->
+<div data-tab="zcl" data-title="ZCL" data-mod="zcl" class="tab"></div>
+<!-- dev:end -->
+<div data-tab="catalog" data-title="Catalog" data-mod="catalog" class="tab"></div>
 <div data-tab="map" data-title="Map" class="tab">
 <section class="card"><div class="row"><h2 style="flex:1;margin:0">Network map</h2><span id="mpt" class="mut"></span><button class="p" id="mpb">Scan</button></div>
 <p class="mut">The coordinator's tables, then every router asked for its neighbours (Mgmt_Lqi) and routes. Lines: LQI as each side reports it (A/B when they differ), green ≥ 150, orange ≥ 80, red below, thicker is better; dashed: an end device and its parent. Tap a device for its links and routes.</p>
@@ -160,21 +144,7 @@ progress{width:12em}
 <section class="card"><h2>Run history</h2><ul class="ents" id="aur"></ul><pre id="aurd" class="hide"></pre></section>
 </div>
 <!-- ota:start -->
-<div data-tab="ota" data-title="Updates" data-need="ota" class="tab">
-<!-- stream:start -->
-<p id="otk" class="badge bad hide"></p>
-<!-- stream:end -->
-<section class="card"><h2>Device firmware <span id="otn" class="mut"></span></h2>
-<p class="mut"><b>manual</b>: after Update; <b>auto</b>: inside the window. Sleepy devices start when they wake up.</p>
-<ul class="ents" id="otd"></ul></section>
-<section class="card"><h2>Images <span id="otu" class="mut"></span></h2><ul class="ents" id="oti"></ul>
-<!-- store:start -->
-<div class="row acts"><input id="otf" type="file"><button class="p" id="otb">Upload to the hub</button><span id="otp" class="mut"></span></div></section>
-<!-- store:end -->
-<!-- stream:start -->
-<div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div></section>
-<!-- stream:end -->
-</div>
+<div data-tab="ota" data-title="Updates" data-need="ota" data-mod="ota" class="tab"></div>
 <!-- ota:end -->
 <div data-tab="settings" data-title="Settings" class="tab">
 <section class="card"><h2>Network</h2><dl class="kv" id="snet"></dl>
@@ -207,6 +177,12 @@ progress{width:12em}
 <div class="row acts"><label>Time zone <input id="tzi" list="tzl" size="26" placeholder="POSIX TZ, e.g. EET-2EEST,M3.5.0/3,M10.5.0/4"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button></div>
 <datalist id="tzl"><option value="UTC0">UTC</option><option value="GMT0BST,M3.5.0/1,M10.5.0">London</option><option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin, Paris, Warsaw</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Kyiv, Helsinki, Riga</option><option value="MSK-3">Moscow, Istanbul (+3)</option><option value="EST5EDT,M3.2.0,M11.1.0">New York</option><option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles</option><option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney</option></datalist>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
+<!-- devmode:start -->
+<div class="row hide" id="dvr"><label><input type="checkbox" id="dvm"> Developer mode: the ZCL console tab</label></div>
+<!-- devmode:end -->
+<!-- dev:start -->
+<p class="mut">Developer edition (devtools): the developer tools are always on.</p>
+<!-- dev:end -->
 <div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
 <section class="card"><h2>Reporting defaults</h2><p class="mut">Generic attributes: min max change (s, s, raw units) or off; empty = built-in. Definitions and per-device settings win; devices are reconfigured.</p><table id="rpd"></table><div class="row acts"><button class="p" id="rpb">Save</button></div></section>
 <section class="card" id="mqcard"><h2>MQTT (Zigbee2MQTT-compatible)</h2>
@@ -229,18 +205,38 @@ const el=(t,a={},...c)=>{const e=document.createElement(t);for(const k in a){if(
 const hex=(n,w)=>"0x"+n.toString(16).toUpperCase().padStart(w,"0");
 let ws,rid=0,pend={},devs={},ents={},states={},net={},hub={},pjEnd=0,retry=1000,authed=false,skew=0;
 // Tabs: every `<div class="tab" data-tab="id" data-title="Title">` in
-// <main> is a tab (in document order); `onTab[id]` runs when it is shown.
+// <main> is a tab (in document order), shown when the hub/info flag
+// `data-need` (if any) is set; `onTab[id]` runs when it is shown, after its
+// module `data-mod` (if any) is loaded. tabs(u): u when the user asked
+// (a tab clicked, a link followed), else for the hub (connect, hub/info).
 const onTab={};
-function tabs(){
+// Modules: the rarely used tabs, loaded on demand from the hub (never from
+// the internet), /ui/<build>/<name>.js (crates/hub-web). A classic script
+// run in this page's scope: it uses these helpers and state, its functions
+// and variables join them. Only of this page's build: a page left open
+// over a firmware update reloads (once) when the hub has no such module
+// (404) or another build answers, if the user asked for it (bg: a load for
+// an event never reloads, which could lose what is being edited). ui(n,bg):
+// the module, loaded once; uiDo(n,f): f once it is loaded, if it was ever
+// asked for.
+const UI={},UIB="__UI_BUILD__";
+function uiOld(bg){if(!bg&&sessionStorage.zrhUi!=UIB){sessionStorage.zrhUi=UIB;location.reload()}return Error("the hub's web UI was updated: reload the page")}
+function ui(n,bg){return UI[n]||(UI[n]=fetch("/ui/"+UIB+"/"+n+".js").then(r=>{if(r.status==403)throw Error(n+": developer mode is off");if(r.status==404)throw uiOld(bg);if(!r.ok)throw Error(n+": HTTP "+r.status);return r.text()}).then(t=>{if(!t.startsWith('"use strict";uiMod("'+UIB+'","'+n+'",'))throw uiOld(bg);document.head.append(el("script",{},t))}).catch(e=>{delete UI[n];toast(e.message);throw e}))}
+// A module's first statement: its build and its tab's markup.
+function uiMod(b,n,h){const t=$("[data-mod="+n+"]");if(b!=UIB||!t)throw uiOld(1);t.innerHTML=h}
+const uiDo=(n,f)=>UI[n]&&UI[n].then(f,()=>{});
+function tabs(u){
  const nav=$("#tabs");nav.textContent="";
  const want=(/^#\/(\w+)/.exec(location.hash)||[])[1];
  const tabsAll=[...document.querySelectorAll("main>.tab")],all=tabsAll.filter(t=>!t.dataset.need||hub[t.dataset.need]);
  for(const t of tabsAll)t.classList.add("hide");
  const cur=all.find(t=>t.dataset.tab==want)||all[0];
- for(const t of all){t.classList.toggle("hide",t!=cur);nav.append(el("button",{class:t==cur?"on":null,onclick:()=>{location.hash="#/"+t.dataset.tab}},t.dataset.title))}
- if(onTab[cur.dataset.tab])onTab[cur.dataset.tab]();
+ for(const t of all){t.classList.toggle("hide",t!=cur);nav.append(el("button",{class:t==cur?"on":null,onclick:()=>{const h="#/"+t.dataset.tab;if(location.hash==h)tabs(1);else location.hash=h}},t.dataset.title))}
+ // A module that did not load: why, and Retry (or its tab again).
+ const id=cur.dataset.tab,m=cur.dataset.mod,f=()=>{if(onTab[id]&&!cur.classList.contains("hide"))onTab[id]()};
+ if(m)ui(m,!u).then(f,e=>{cur.textContent="";cur.append(el("p",{class:"card mut"},e.message+" ",el("button",{onclick:()=>tabs(1)},"Retry")))});else f();
 }
-addEventListener("hashchange",tabs);
+addEventListener("hashchange",()=>tabs(1));
 function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",4000)}
 function status(s,c){$("#conn").textContent=s;$("#dot").className="dot "+c}
 function call(type,p={},q){return new Promise((ok,no)=>{if(!ws||ws.readyState!=1)return no(new Error("not connected"));const id=++rid;pend[id]={ok,no,q};ws.send(JSON.stringify(Object.assign({id,type},p)))})}
@@ -265,7 +261,7 @@ function onMsg(m,tok){
   gwBan();
 // gateway:end
 // ota:start
-  otRe();
+  uiDo("ota",()=>otRe());
 // ota:end
   if(hub.automations){call("subscribe",{topics:["automations"]}).catch(()=>{});if($("#aul").offsetParent)onTab.auto()}}).catch(()=>{});
   call("subscribe",{topics:["devices","entities","network","gp","catalog","groups",
@@ -278,7 +274,7 @@ function onMsg(m,tok){
  if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
 // ota:start
- if(m.type=="ota/block_needed"){otNeed(m);return}
+ if(m.type=="ota/block_needed"){uiDo("ota",()=>otNeed(m));return}
 // ota:end
  if(m.type=="event")onEvent(m.event);
 }
@@ -304,16 +300,20 @@ function onEvent(e){
  case"entity_state":states[e.uid]=e;{const x=ents[e.uid];if(x)renderEnt(x)}break;
  case"entity_reporting":if(document.getElementById("rp-"+e.device))repPanel(e.device,0,e.uid?0:e);break;
 // advanced:start
- case"frame":zFrame(e);break;
+ case"frame":uiDo("zcl",()=>zFrame(e));break;
 // advanced:end
  case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
+ // hub/info fields that changed (developer_mode, from any client).
+ case"hub_updated":{const d=hub.developer_mode;for(const k in e)if(k!="topic")hub[k]=e[k];if(hub.developer_mode!==d)tabs()}break;
 // ota:start
- case"ota_device":case"ota_images":otEv(e);break;
+ case"ota_device":case"ota_images":uiDo("ota",()=>otEv(e));break;
 // ota:end
- default:if(/^automation_/.test(e.topic))auEv(e);else if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic))ctEv(e);
+ // Catalog events go to its module once loaded; definition_needed loads it
+ // when fetching for new devices is on (it fetches the device's shards).
+ default:if(/^automation_/.test(e.topic))auEv(e);else if(/^gp\//.test(e.topic))gpEv(e);else if(/^(catalog_|definition_|web_tools)/.test(e.topic)){if(e.topic=="definition_needed"&&!UI.catalog)call("catalog/status").then(s=>s.config.auto_fetch&&ui("catalog",1).then(()=>ctEv(e))).catch(()=>{});else uiDo("catalog",()=>ctEv(e))}
  }
 }
 // Counters (Network card, Settings › Hub) follow joins, removals and re-resolution.
@@ -338,7 +338,7 @@ function ago(t){if(!t)return"never";const s=Math.max(0,Date.now()/1000+skew-t);r
 function renderAll(){const p=pgId(),ids=p?devs[p]?[p]:[]:Object.keys(devs).filter(i=>devs[i].group==null).sort((a,b)=>(devs[a].name||a).localeCompare(devs[b].name||b));$("#dash").classList.toggle("hide",!!p);$("#nd").textContent="("+ids.length+")";
  keep($("#devs"),()=>el("section",{id:"devs",class:p?"tab":"devs"},...ids.map(id=>devCard(id,p)),!ids.length&&snap?el("p",{class:"mut"},p?"No device "+p+". ":"No devices yet. Permit join and pair a device.",p?el("a",{href:"#/devices"},"All devices"):""):""));
 // advanced:start
-if($("#zd").offsetParent)onTab.zcl()
+uiDo("zcl",()=>{if($("#zd").offsetParent)onTab.zcl()})
 // advanced:end
 }
 function renderDev(id){if(/^grp:/.test(id))return renderGroups();const old=document.getElementById("d-"+id),p=pgId();if(!devs[id]){if(old)old.remove();return}if(old)keep(old,()=>devCard(id,p));else if(!p)renderAll()}
@@ -360,8 +360,8 @@ function pic(d,c){const us=picL(d),i=el("img",{class:"pic"+(c?" "+c:""),alt:"",l
  const next=()=>{const u=us.shift();i.dataset.u=u||"";i.src=u||PICI};
  i.onerror=()=>{if(i.dataset.u){PICB.add(i.dataset.u);next()}};next();return i}
 // A device without a definition: fetch the catalog shard that may hold one
-// (after the mirror's newer manifest, if any).
-function findDef(id){ctSerial(async()=>{try{toast(await ctFind(id))}catch(e){toast(e.message)}})}
+// (after the mirror's newer manifest, if any), with the Catalog module.
+function findDef(id){ui("catalog").then(()=>ctSerial(async()=>{try{toast(await ctFind(id))}catch(e){toast(e.message)}}),()=>{})}
 // Device cards (#/devices): sensors, controls, battery and signal; a click
 // outside the controls opens the device page (#device/<id>) with the rest.
 // Entity groups (HA's categories, and events): 0 sensors, 1 controls,
@@ -612,6 +612,12 @@ async function gfUp(u){const p=$("#gfp");await call("firmware/begin",{size:u.len
 $("#gfb").onclick=e=>{const f=$("#gff").files[0];if(!f)return;if(gfw.replaces_stock&&!$("#gfs").checked)return toast("This update replaces SONOFF's firmware: tick the box first");
  if(confirm("Update the hub with "+f.name+" and reboot into it?"))busy(e.target,f.arrayBuffer().then(b=>gfUp(new Uint8Array(b)))).catch(x=>{$("#gfp").textContent="";toast(x.message)})};
 // gateway:end
+// devmode:start
+// Developer mode (a hub setting, hub/info developer_mode): the developer
+// tools of this image (the ZCL console); the hub serves their modules only then.
+const dvOn=onTab.settings;onTab.settings=()=>{dvOn();$("#dvr").classList.toggle("hide",hub.developer_mode==null);$("#dvm").checked=!!hub.developer_mode};
+$("#dvm").onchange=e=>act("hub/developer/set",{enabled:e.target.checked}).then(r=>{hub.developer_mode=r.developer_mode;tabs()},()=>{e.target.checked=!!hub.developer_mode});
+// devmode:end
 $("#mdb").onclick=()=>{if(confirm("Reboot into bridge mode (USB bridge to the radio, no hub)? Back with the console command `mode hub`."))act("hub/mode/set",{mode:"bridge"}).then(()=>toast("Rebooting into bridge mode")).catch(()=>{})};
 function diag(reset,b){busy(b,act("network/diagnostics",reset?{reset:true}:{}).then(d=>{const box=$("#dg"),n=d.ncp||{},f=d.frame_counters||{};box.textContent="";
  const t=el("table");const row=(k,v)=>t.append(el("tr",{},el("th",{},k),el("td",{},String(v))));
@@ -682,45 +688,6 @@ function drawMap(m){
  $("#mpl").textContent="";$("#mpl").append(t);if(m.notes.length)$("#mpl").append(el("p",{class:"mut"},m.notes.join("; ")));
  $("#mpt").textContent=m.nodes.length+" nodes, "+Object.keys(pairs).length+" links · "+ago(m.time)+" · "+(m.duration_ms/1000).toFixed(1)+" s";
 }
-// advanced:start
-// ---- ZCL console (14.7) ----
-let zDev="",zSub=0;const zFr=[],zDps={};
-const zT={16:"bool",24:"map8",25:"map16",27:"map32",32:"u8",33:"u16",34:"u24",35:"u32",37:"u48",40:"i8",41:"i16",42:"i24",43:"i32",48:"enum8",49:"enum16",57:"f32",65:"ostr",66:"str",226:"utc"};
-const zH=v=>{v=(v||"").trim();return v===""?null:/^0x/i.test(v)||/[a-f]/i.test(v)?parseInt(v.replace(/^0x/i,""),16):+v};
-const zX=(n,w)=>"0x"+(n>>>0).toString(16).toUpperCase().padStart(w||4,"0");
-function zArgs(){const c=zH($("#zcx").value)??+$("#zc").value,m=zH($("#zm").value),a={device:$("#zd").value,endpoint:+$("#ze").value,cluster:c};if(m!=null)a.manufacturer=m;return a}
-function zOut(t,x){const o=$("#zo"),pre=el("div",{},t+": "+JSON.stringify(x));if(x&&x.records&&x.command==1)for(const r of x.records)if(r.status=="SUCCESS")pre.append(" ",el("button",{onclick:()=>zSnip(r)},"snippet "+zX(r.attribute)));o.prepend(pre);while(o.childNodes.length>30)o.lastChild.remove()}
-function zReq(type,extra){const a=Object.assign(zArgs(),extra||{});zOut("→ "+type,a);return call(type,a,r=>zOut("queued",r)).then(r=>{zOut("← "+type,r);if(r.records&&r.command==1&&r.records[0]&&r.records[0].type!=null)$("#zt").value=zT[r.records[0].type]||zX(r.records[0].type,2);return r}).catch(e=>zOut("✗ "+type,e.message))}
-// "Copy as definition snippet": an entity bound to the attribute.
-function zSnip(r){const a=zArgs(),m=a.manufacturer!=null?", mfr: "+zX(a.manufacturer):"",t=zT[r.type]||zX(r.type,2);
- const y="  - key: attr_"+zX(r.attribute).slice(2).toLowerCase()+"\n    platform: "+(t=="bool"?"binary_sensor":"sensor")+"\n    zcl: {cluster: "+zX(a.cluster)+", attr: "+zX(r.attribute)+", type: "+t+m+"}\n";
- (navigator.clipboard?navigator.clipboard.writeText(y):Promise.reject()).then(()=>toast("Snippet copied"),()=>prompt("Definition snippet",y))}
-const zAttrs=()=>$("#za").value.split(/[ ,]+/).filter(Boolean).map(zH);
-const zVal=()=>{const v=$("#zv").value.trim();return v=="true"||v=="false"?v=="true":v!==""&&!isNaN(v)?+v:v};
-const zTy=()=>{const t=$("#zt").value.trim();if(!t)return;const n=/^0x/i.test(t)?parseInt(t,16):/^\d+$/.test(t)?+t:+Object.keys(zT).find(k=>zT[k]==t);if(isNaN(n))toast("unknown type "+t);return n};
-$("#zr").onclick=()=>zReq("zcl/read",{attributes:zAttrs()});
-$("#zw").onclick=()=>zReq("zcl/write",{attribute:zAttrs()[0],data_type:zTy(),value:zVal()});
-$("#zdi").onclick=()=>zReq("zcl/discover",{what:"attributes",start:zAttrs()[0]||0});
-$("#zdr").onclick=()=>zReq("zcl/discover",{what:"commands_received"});
-$("#zdg").onclick=()=>zReq("zcl/discover",{what:"commands_generated"});
-$("#zrr").onclick=()=>zReq("zcl/read_reporting",{attributes:zAttrs()});
-$("#zrc").onclick=()=>{const c=$("#zch").value.trim();zReq("zcl/configure_reporting",{attribute:zAttrs()[0],data_type:zTy(),min:+$("#zmin").value||0,max:+$("#zmax").value||0,change:c===""?undefined:+c})};
-$("#zs").onclick=()=>zReq("zcl/command",{command:zH($("#zk").value)||0,payload:$("#zp").value,global:$("#zg").checked,to_client:$("#ztc").checked,disable_default_response:$("#zn").checked});
-$("#zds").onclick=()=>{const t=$("#zdt").value,v=$("#zdv").value.trim();zReq("tuya/send",{dps:[{dp:+$("#zdp").value,type:t,value:t=="bool"?v=="true"||v=="1":t=="string"||t=="raw"?v:+v}]})};
-function zEps(){call("devices/diagnostics",{device:zDev}).then(d=>{const eps=(d.fingerprint||{}).endpoints||[],e=$("#ze"),c=$("#zc");e.textContent="";for(const x of eps)e.append(el("option",{value:x.ep},"ep "+x.ep));
- const cl=()=>{c.textContent="";const x=eps.find(x=>x.ep==e.value)||{};for(const k of x.in_clusters||[])c.append(el("option",{value:k},zX(k)));for(const k of x.out_clusters||[])c.append(el("option",{value:k},zX(k)+" (client)"))};e.onchange=cl;cl();
- zFr.length=0;for(const f of d.frames||[])zFr.push({time:f.time,dir:"rx",cluster:parseInt(f.cluster,16),hex:f.hex});zDraw()}).catch(()=>{})}
-onTab.zcl=()=>{const s=$("#zd"),v=s.value||zDev;s.textContent="";for(const id of Object.keys(devs).filter(i=>devs[i].group==null).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value!=zDev||!$("#ze").options.length){zDev=s.value;if(zDev)zEps()}zDraw();zDpDraw()};
-$("#zd").onchange=()=>{zDev=$("#zd").value;for(const k in zDps)delete zDps[k];zEps();zDpDraw()};
-// Live frames: an own subscription to `frames` while the box is ticked.
-$("#zl").onchange=e=>{if(e.target.checked){zSub=++rid;pend[zSub]={ok:()=>{},no:x=>toast(x.message)};ws.send(JSON.stringify({id:zSub,type:"subscribe",topics:["frames"]}))}else if(zSub){call("unsubscribe",{subscription:zSub}).catch(()=>{});zSub=0}};
-$("#zfc").onclick=()=>{zFr.length=0;zDraw()};$("#zf").oninput=()=>zDraw();
-function zFrame(f){if(f.device!=zDev)return;zFr.push(f);if(zFr.length>200)zFr.shift();if(f.tuya)for(const d of f.tuya.dps)zDps[d.dp]=Object.assign({time:f.time},d);zDraw();if(f.tuya)zDpDraw()}
-function zDraw(){const t=$("#zft"),c=zH($("#zf").value);if(!$("#zft").offsetParent&&zFr.length)return;t.textContent="";t.append(el("tr",{},...["time","dir","ep","cluster","cmd","payload"].map(h=>el("th",{},h))));
- for(const f of zFr.slice().reverse())if(c==null||f.cluster==c){const z=f.zcl||{};t.append(el("tr",{},el("td",{},ago(f.time)),el("td",{},f.dir),el("td",{},f.endpoint??""),el("td",{},zX(f.cluster)),el("td",{},z.command!=null?(z.frame=="global"?"g ":"")+zX(z.command,2)+(z.manufacturer!=null?" m"+zX(z.manufacturer):""):""),el("td",{class:"mono"},f.hex+(f.tuya?" · "+f.tuya.dps.map(d=>"dp"+d.dp+"="+JSON.stringify(d.value)).join(" "):""))))}}
-function zDpDraw(){const t=$("#zdl");t.textContent="";t.append(el("tr",{},...["dp","type","value","raw","seen",""].map(h=>el("th",{},h))));const tn=["raw","bool","value","string","enum","bitmap"];
- for(const k of Object.keys(zDps).sort((a,b)=>a-b)){const d=zDps[k],n=tn[d.type]||d.type;t.append(el("tr",{},el("td",{},d.dp),el("td",{},n),el("td",{},JSON.stringify(d.value)),el("td",{class:"mono"},d.data),el("td",{},ago(d.time)),el("td",{},el("button",{onclick:()=>{const y="  - key: dp_"+d.dp+"\n    platform: "+(n=="bool"?"switch":n=="enum"?"select":"sensor")+"\n    tuya: ["+d.dp+", "+n+"]\n";(navigator.clipboard?navigator.clipboard.writeText(y):Promise.reject()).then(()=>toast("Snippet copied"),()=>prompt("Definition snippet",y))}},"snippet"))))}}
-// advanced:end
 // ---- Green Power tab ----
 let gpW={},gpP=[],gpF=[],gpD=[],gpB={},gpK={},gpEnd=0,gpEd=0;
 const gpN={32:"Off",33:"On",34:"Toggle",96:"Press",97:"Release",105:"Press",106:"Release"};
@@ -857,114 +824,9 @@ function bindPanel(id){
   el("div",{class:"row acts"},src,pre,cus,"→",dst,bt("Bind",go,"p")),
   el("div",{class:"row acts"},bt("Read from device",()=>act("bindings/read",{device:id})),bt("Read groups",()=>act("groups/membership",{device:id}))));
 }
-// ---- Converters and catalog tabs (device-support 9, 14.4) ----
-let zc,cvDev,cvDef,ct={config:{}};
-async function zdefc(){if(zc)return zc;try{const m=await import("/zdefc/zdefc_wasm.js");await m.default({module_or_path:"/zdefc/zdefc_wasm_bg.wasm"});return zc=m}catch(e){throw new Error("definition compiler not installed (Catalog: update)")}}
+// Shared by the modules (and the gateway's firmware upload).
 const b64=u=>{let s="";for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)};
-const unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const kvAdd=(kv,k,v)=>{if(v!=null&&v!=="")kv.append(el("dt",{},k),el("dd",{},String(v)))};
-onTab.conv=()=>{const s=$("#cvd"),v=s.value||cvDev;s.textContent="";for(const id of Object.keys(devs).filter(i=>devs[i].group==null).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value)cvLoad(s.value)};
-$("#cvd").onchange=e=>cvLoad(e.target.value);
-async function cvLoad(id){
- cvDev=id;const d=await act("devices/get",{device:id}),r=d.resolution||{},kv=$("#cvl");kv.textContent="";
- for(const l of r.layers||[])kvAdd(kv,l.source,l.id+(l.revision>1?" r"+l.revision:"")+(l.score!=null?" · score "+l.score:"")+(l.clause!=null?" · match["+l.clause+"]":"")+(l.content_hash?" · "+l.content_hash.slice(0,8):""));
- const ul=$("#cvm");ul.textContent="";
- for(const m of r.mappings||[]){const e=ents[m.uid]||{};ul.append(el("li",{},el("span",{class:"n"},(e.name||m.uid.split(":").pop())+" · "+(e.platform||"")+(e.device_class?"/"+e.device_class:"")),el("span",{class:"mut"},m.source+" · "+m.binding)))}
- const p=$("#cvp");p.textContent="";p.append(el("option",{value:""},"automatic"));
- for(const c of await call("definitions/list",{device:id}).catch(()=>[]))p.append(el("option",{value:c.id},c.id+" ("+c.source+")"));
- p.value=r.pinned||"";
- const top=(r.layers||[]).filter(l=>l.source!="generic").pop();cvDef=top&&top.id;
- $("#cvi").textContent=cvDef?cvDef+" ("+top.source+")":"generic only";$("#cvo").textContent="";$("#cvt").value="";
- if(cvDef)cvShow(cvDef).catch(e=>$("#cvt").value="# "+e.message)}
-$("#cvp").onchange=e=>act("devices/pin_definition",{device:cvDev,definition:e.target.value||null}).then(()=>cvLoad(cvDev)).catch(()=>{});
-async function cvShow(id){const g=await act("definitions/get",{definition:id});$("#cvt").value=g.source_text||(await zdefc()).decompile(unb64(g.cbor),"yaml")}
-for(const[b,t]of[["cvr","devices/reinterview"],["cvc","devices/reconfigure"]])$("#"+b).onclick=()=>act(t,{device:cvDev}).then(()=>toast(t+": ok")).catch(()=>{});
-$("#cvf").onclick=()=>ctSerial(()=>ctGo(()=>act("definitions/fetch",{device:cvDev}).then(r=>r.shards),1)).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message));
-$("#cvs").onclick=()=>act("definitions/scaffold",{device:cvDev}).then(s=>{
- const q=v=>JSON.stringify(v),i=s.identity||{},m=(s.match||[])[0]||{},y=["zdef: 1","id: "+q(((i.manufacturer||"vendor")+"/"+(i.model||"model")).toLowerCase().replace(/[^a-z0-9/_-]+/g,"-")),"revision: 1","vendor: "+q(i.manufacturer||""),"model: "+q(i.model||""),"match:","  - "+q(m),"entities:"];
- for(const e of s.generic_entities||[])y.push("  # generic: "+e.key+" ("+e.platform+", ep "+e.ep+")");
- for(const a of s.attributes||[])y.push("  # attribute ep "+a.ep+" "+a.cluster+"/"+a.attr+(a.mfr?" mfr "+a.mfr:"")+" = "+a.value);
- for(const t of s.tuya_dps||[])y.push("  # tuya dp "+t.dp+" "+t.type+" "+t.data);
- $("#cvt").value=y.join("\n")+"\n";cvDef=null}).catch(()=>{});
-async function cvCompile(){const z=await zdefc(),src=$("#cvt").value,c=JSON.parse(z.check(src,"yaml"));
- if(!c.ok){$("#cvo").textContent=c.errors.map(e=>(e.line?"line "+e.line+": ":"")+e.path+" "+e.message).join("\n");throw new Error("not valid")}
- return{src,cbor:z.compile(src,"yaml"),c}}
-const cvErr=e=>toast(e.message);
-$("#cvk").onclick=()=>cvCompile().then(({c})=>$("#cvo").textContent="ok · "+c.size+" B · "+c.content_hash.slice(0,12)+(c.requires.length?" · requires "+c.requires.join(", "):"")).catch(cvErr);
-$("#cvv").onclick=()=>cvCompile().then(x=>act("definitions/preview",{device:cvDev,cbor:b64(x.cbor)})).then(p=>$("#cvo").textContent=p.matches?["layers: "+p.layers.map(l=>l.id).join(" < "),"added: "+p.added.join(", "),"changed: "+p.changed.join(", "),"removed: "+p.removed.join(", ")].join("\n"):"does not match this device").catch(cvErr);
-$("#cvu").onclick=()=>cvCompile().then(x=>act("definitions/upload",{cbor:b64(x.cbor),source:x.src,source_format:"yaml"})).then(r=>{toast("uploaded "+r.id);if(cvDev)cvLoad(cvDev)}).catch(cvErr);
-$("#cvx").onclick=()=>{if(cvDev&&cvDef&&confirm("Delete the user definition "+cvDef+"?"))act("definitions/delete",{definition:cvDef}).then(()=>cvLoad(cvDev)).catch(()=>{})};
-const ctLoad=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.installed,m=s.manifest,w=s.wants||{};kv.textContent="";
- kvAdd(kv,"Bank",i?i.catalog_date+"."+i.catalog_serial+" · "+i.definitions+" definitions · slot "+s.active_slot+" · key "+i.kid:"none");
- kvAdd(kv,"Manifest",m&&m.catalog_date+"."+m.catalog_serial+(m.source?" · zhc "+m.source:""));
- kvAdd(kv,"To install",[w.bank&&w.bank.name,w.web&&w.web.name].filter(Boolean).join(", "));
- kvAdd(kv,"Compiler",s.web_tools.installed?Math.round(s.web_tools.size/1024)+" KiB":"not installed");
- kvAdd(kv,"Fetched",s.local.definitions+" definitions, "+Math.round(s.local.used/1024)+" of "+Math.round(s.local.size/1024)+" KiB");
- kvAdd(kv,"Without definition",(s.missing||[]).map(x=>devs[x.device]&&devs[x.device].name||x.device).join(", "));
- for(const x of s.warnings||[])kvAdd(kv,"Warning",x);
- V("ctb",s.config.base_url);$("#cta").checked=s.config.auto_update;$("#ctx").checked=s.config.auto_fetch}).catch(()=>{});
-// With daily updates on, opening the tab installs the mirror's newer
-// release (and, with fetching on, the definitions it has for new devices).
-onTab.catalog=()=>ctLoad().then(()=>{if(ct.config.auto_update)ctSerial(async()=>{const m=await ctNewer();if(m){if(ct.config.auto_fetch)await ctGo(()=>ctMiss(),0);ctMsg(ctTxt(m))}}).catch(e=>ctMsg(e.message)).then(ctLoad)});
-$("#cts").onclick=()=>act("catalog/config",{base_url:V("ctb"),auto_update:$("#cta").checked,auto_fetch:$("#ctx").checked}).then(ctLoad).catch(()=>{});
-const ctMsg=m=>$("#ctm").textContent=m,ctSay=m=>{ctMsg(m);toast(m)},ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
-async function ctGet(n){if(!ct.config.base_url)ct=await call("catalog/status");const r=await fetch(ct.config.base_url+"/"+n,{cache:"no-cache"});if(!r.ok)throw new Error(n+": HTTP "+r.status);return new Uint8Array(await r.arrayBuffer())}
-// Chunked upload (resumable: `from` = the hub's `upload.written`), then commit.
-// Once more from the start when the hub lost the upload to resume, or, 30 s
-// later, when another target's upload (another client) made it busy.
-async function ctPut(target,u,extra={},from=0,again){const p=$("#ctp");p.max=u.length;p.classList.remove("hide");
- try{for(let o=from;o==from||o<u.length;o+=4096){await call("catalog/upload_chunk",Object.assign({target,offset:o,data:b64(u.subarray(o,o+4096))},o?{}:{size:u.length}));p.value=o}
- return await call("catalog/commit",Object.assign({target},extra))}catch(e){const b=/is in progress/.test(e.message);if(again||!b&&!(from&&/offset/.test(e.message)))throw e;
-  if(b){ctSay("the hub is busy with another catalog upload, trying again in 30 s…");await new Promise(r=>setTimeout(r,31e3))}return await ctPut(target,u,extra,0,1)}finally{p.classList.add("hide")}}
-// One catalog transfer at a time (the hub keeps one upload): the update,
-// definition_needed fetches and file uploads queue up behind each other.
-let ctQ=Promise.resolve();const ctSerial=f=>ctQ=ctQ.catch(()=>{}).then(f);
-async function ctShards(sh){for(const n of sh||[]){const h=n.toString(16).padStart(2,"0");ctMsg("shard "+h+"…");const r=await ctPut("shard",await ctGet("shard-"+h+".cbor"),{shard:n});ctMsg("shard "+h+": "+(r.definitions.join(", ")||"nothing new"))}}
-// Shards with a definition for device id (no id: for every device without one).
-const ctMiss=async id=>{ct=await call("catalog/status");return[...new Set((ct.missing||[]).filter(x=>!id||x.device==id).flatMap(x=>x.shards))]};
-// Installs what s (a status or a manifest commit) wants: bank, web tools;
-// an interrupted upload of one (s.upload) first, where it stopped. The
-// number installed.
-async function ctWants(s){const u=s.upload||{},w=s.wants||{};let n=0;
- for(const t of[u.target,"bank","web"])if((t=="bank"||t=="web")&&w[t]){ctMsg(w[t].name+"…");await ctPut(t,await ctGet(w[t].name),{},t==u.target?u.written:0);delete w[t];n++}
- return n}
-// Catalog version of a signed manifest as the hub's (date << 16 | serial):
-// its payload map starts 0: 1, 1: date (uint32), 2: serial.
-const ctVer=u=>{for(let i=1;i<u.length-10;i++)if((u[i-1]&224)==160&&u[i]==0&&u[i+1]==1&&u[i+2]==1&&u[i+3]==26&&u[i+8]==2){const d=new DataView(u.buffer,u.byteOffset+i+4),s=u[i+9];return d.getUint32(0)*65536+(s<24?s:s==24?u[i+10]:d.getUint16(6))}};
-// The mirror's release when newer than the hub's: its manifest (which drops
-// an interrupted upload of the old release: the mirror no longer has those
-// files), then what it wants. The same release: what the hub still lacks
-// of it (an interrupted install continues). The manifest installed or
-// completed, else 0; an older or the same manifest is not sent.
-async function ctNewer(){const s=ct=await call("catalog/status"),o=(s.manifest||{}).version||0,u=await ctGet("manifest.cose"),v=ctVer(u);let m;
- if(v<o)return 0;
- if(v!=o){ctMsg("manifest…");m=await ctPut("manifest",u).catch(e=>{if(v)throw e});if(!m||m.version<o)return 0;if(m.version>o){await ctWants(m);return m}}
- return await ctWants(m?await call("catalog/status"):s)&&s.manifest}
-// Shards (get(): their numbers, asked again after an update). The hub checks
-// them against its manifest: with upd the mirror's newer one goes first —
-// a failed update does not stop the shards, which may still match —, also
-// after a refused shard, and the shards are tried once more: at most twice.
-// {n: shards, m: the manifest installed}.
-async function ctGo(get,upd){let m=0,er;if(upd)m=await ctNewer().catch(e=>{er=Error("catalog update: "+e.message);ctMsg(er.message)});
- for(;;){const sh=await get()||[];if(!sh.length){if(er)throw er;return{n:0,m}}
-  try{await ctShards(sh);return{n:sh.length,m}}catch(e){if(m||!upd||!/differs/.test(e.message))throw e;if(er||!(m=await ctNewer()))throw er||e;ctSay(ctTxt(m)+", retrying…")}}}
-// Find definition: then what the device resolves to (a bank the update
-// installed may hold its definition: no shard needed); by the name it had.
-async function ctFind(id){const n=devs[id]&&devs[id].name||id,r=await ctGo(()=>ctMiss(id),1),l=dL(await call("devices/get",{device:id}));
- return(r.m?ctTxt(r.m)+"; ":"")+(l.length?n+" now uses "+l[l.length-1].id:"the catalog has no definition for "+n)}
-const ctFetch=()=>ctGo(()=>ctMiss(),1);
-$("#ctu").onclick=()=>ctSerial(async()=>{try{const m=await ctNewer();await ctGo(()=>ctMiss(),0);ctMsg(m?ctTxt(m):"nothing newer on the mirror")}catch(e){ctMsg(e.message)}ctLoad()});
-$("#ctf").onclick=()=>ctSerial(ctFetch).then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(ctLoad);
-$("#ctfi").onchange=e=>ctSerial(async()=>{const fs=[...e.target.files].sort((a,b)=>(b.name=="manifest.cose")-(a.name=="manifest.cose"));
- try{for(const f of fs){const n=f.name,sh=/^shard-([0-9a-f]{2})\.cbor$/.exec(n),t=n=="manifest.cose"?"manifest":/\.zdb$/.test(n)?"bank":/\.zwb$/.test(n)?"web":sh&&"shard";
-  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";ctLoad()});
-$("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r=>{const ul=$("#ctr");ul.textContent="";
- for(const d of r.items)ul.append(el("li",{},el("span",{class:"n"},d.vendor+" "+d.model),el("span",{class:"mut"},d.id+" · "+d.source)));
- if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
-// A new device without a definition: its shards when fetching is on (and
-// the mirror's newer release first with daily updates on).
-function ctEv(e){if(e.topic=="definition_needed")ctSerial(async()=>{ct=await call("catalog/status");if(ct.config.auto_fetch)await ctGo(()=>ctMiss(e.device),ct.config.auto_update)}).catch(x=>ctMsg(x.message));if($("#ctl").offsetParent)ctLoad()}
-// ---- end of converters and catalog tabs ----
 // ---- automations tab (device-support 14.8) ----
 let au={rules:{}},auId=null;
 const CMDS={switch:"turn_on turn_off toggle",light:"turn_on turn_off toggle",fan:"turn_on turn_off toggle",siren:"turn_on turn_off",cover:"open_cover close_cover stop_cover set_cover_position",valve:"open_valve close_valve",lock:"lock unlock",number:"set_value",select:"select_option",button:"press",climate:"set_hvac_mode set_temperature"};
@@ -1033,56 +895,6 @@ $("#aus").onclick=()=>{const r=auSrc();act(auId?"automations/update":"automation
 $("#aux").onclick=()=>{if(!auId)return toast("Save first");act("automations/run",{automation:auId}).then(x=>{$("#aum").textContent=x.trace?x.trace.result:"";auTr()}).catch(()=>{})};
 $("#aun").onclick=()=>auEdit(null);
 $("#aud").onclick=()=>{if(auId&&confirm("Delete "+auId+"?"))act("automations/delete",{automation:auId}).then(()=>{delete au.rules[auId];auEdit(null);auRender()}).catch(()=>{})};
-// ota:start
-// ---- Updates (OTA) tab ----
-let otD={},otI=[],otA={},otStr={};
-const ver=v=>v==null?"?":hex(v,8),kb=n=>Math.round((n||0)/1024)+" KiB";
-const otL=()=>call("ota/images/list").then(l=>{otI=l;otImg()},()=>{});
-onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()},()=>{});otL();call("ota/status").then(s=>{otA=s.area;otImg()},()=>{})};
-function otEv(e){const r=e.device;if(!r){otA=e.area||otA;return otL()}otD[r.device]=r;otDev();
-// stream:start
- const j=r.job;if(j&&otStr[j.image]&&!/wait|queue|down|install/.test(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}
-// stream:end
-}
-function otDev(){
- const box=$("#otd"),ids=Object.keys(otD);box.textContent="";$("#otn").textContent="("+ids.length+")";
- if(!ids.length)box.append(el("li",{class:"mut"},"No device with an OTA client yet."));
- for(const id of ids){const d=otD[id],j=d.job,a=d.available,run=j&&/wait|queue|down|install/.test(j.state);
-  const b=(t,c,ty,f)=>el("button",{class:c,disabled:ty=="ota/start"&&!a?"":null,onclick:e=>busy(e.target,act(ty,{device:id}).then(f))},t);
-  const pol=el("select",{onchange:e=>act("ota/devices/policy",{device:id,policy:e.target.value||null}).catch(()=>{})},el("option",{value:""},"default ("+d.effective_policy+")"),...["manual","auto","off"].map(v=>el("option",{},v)));pol.value=d.policy||"";
-  box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||id),el("br"),el("span",{class:"mut"},(d.manufacturer_code!=null?hex(d.manufacturer_code,4)+"/"+hex(d.image_type,4)+" ":"")+"runs "+ver(d.current_version)+(a?" → "+ver(a.file_version):"")+(d.sleepy?" · sleepy":""))),
-   el("span",{class:"v mut"},j?j.state+(j.state=="downloading"?" "+j.progress+" %"+(j.stalled?" (stalled)":""):"")+(j.error&&!run?": "+j.error:""):""),pol,
-   b("Check","","ota/devices/check",()=>toast("Asked")),run?b("Abort","d","ota/abort"):b("Update","p","ota/start")))}
-// stream:start
- const sd=$("#otsd"),sv=sd.value;sd.textContent="";for(const id of ids)sd.append(el("option",{value:id},otD[id].name||id));if(sv)sd.value=sv
-// stream:end
-}
-function otImg(){const box=$("#oti"),a=otA||{};box.textContent="";$("#otu").textContent=a.capacity?kb(a.used)+" of "+kb(a.capacity)+" used, largest free "+kb(a.largest_free)+(a.foreign?"; the area holds other data":""):a.error||"";
- for(const i of otI){const s=i.state=="streamed",r=i.state=="ready";box.append(el("li",{},el("span",{class:"n"},el("b",{},i.label||i.name||"image "+i.image),el("br"),el("span",{class:"mut"},(s?"streamed · ":r?"":"uploading, "+kb(i.written)+" · ")+hex(i.manufacturer_code||0,4)+"/"+hex(i.image_type||0,4)+" "+ver(i.file_version)+" · "+kb(i.size)+(i.hw_min!=null?" · hw "+i.hw_min+"–"+i.hw_max:"")+(i.name?" · "+i.name:""))),
-  el("button",{class:"d",onclick:e=>{if(confirm("Delete this image?"))busy(e.target,act(s?"ota/stream/close":r?"ota/images/delete":"ota/upload/abort",s?{session:i.image}:r?{image:i.image}:{upload:i.image}).then(onTab.ota))}},"Delete")))}
- if(!otI.length)box.append(el("li",{class:"mut"},"No images."))}
-// The OTA file in a download (a vendor prefix before the magic is cut).
-function otCut(b){const u=new Uint8Array(b);for(let i=0;i<4096&&i+3<u.length;i++)if(u[i]==30&&u[i+1]==241&&u[i+2]==238&&u[i+3]==11)return u.subarray(i);throw new Error("not a Zigbee OTA file")}
-function otNeed(m){const u=otStr[m.session];if(u)call("ota/block_data",{session:m.session,offset:m.offset,data:b64(u.subarray(m.offset,m.offset+m.len))}).catch(()=>{})}
-// store:start
-// The image store (8 MB): files are uploaded, devices download from the hub.
-function otRe(){}
-async function otUp(b,name){const u=otCut(b),p=$("#otp"),r=await call("ota/upload/begin",{size:u.length,name}),n=r.chunk_max||8192;
- for(let at=r.offset;at<u.length;at+=n){await call("ota/upload/chunk",{upload:r.upload,offset:at,data:b64(u.subarray(at,at+n))});p.textContent=Math.round(Math.min(at+n,u.length)*100/u.length)+" %"}
- const i=await call("ota/upload/commit",{upload:r.upload});p.textContent="";toast("Stored "+(i.label||name)+" "+ver(i.file_version)+(i.devices.length?", for "+i.devices.length+" device(s)":""));onTab.ota()}
-$("#otb").onclick=e=>{const f=$("#otf").files[0];if(f)busy(e.target,f.arrayBuffer().then(b=>otUp(b,f.name)).catch(x=>toast(x.message)))};
-// store:end
-// stream:start
-// No store: this tab serves the file while the device downloads.
-function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: serving "+n+" image(s)";k.classList.toggle("hide",!n)}
-const otOffer=(u,name)=>call("ota/stream/offer",{size:u.length,name,header:b64(u.subarray(0,256))}).then(o=>{otStr[o.session]=u;otKeep();return o});
-// After a reconnect: offer the images again (the hub keeps the sessions for a while).
-function otRe(){const old=otStr;otStr={};for(const k in old)otOffer(old[k],"image.ota").catch(()=>{});otKeep()}
-onbeforeunload=e=>{if(Object.keys(otStr).length)e.preventDefault()};
-$("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otOffer(otCut(b),f.name)).then(o=>call("ota/start",{device:d,image:o.session})).then(()=>toast("Started")).catch(x=>toast(x.message)))};
-// stream:end
-// ---- end of Updates tab ----
-// ota:end
 connect();
 </script>
 </body>

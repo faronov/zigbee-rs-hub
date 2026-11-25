@@ -1,25 +1,57 @@
 use std::string::String;
 use std::vec::Vec;
 
-/// Feature sections of the page, `<!-- NAME:start -->` … `<!-- NAME:end -->`
-/// (or `// NAME:start` in the script): `advanced` (the manual ZCL/Tuya
-/// console), `ota` (the Updates tab: Zigbee device OTA), and inside it
-/// `store` (uploads into the OTA image store) and `stream` (serving an OTA
-/// file from the browser tab, for images without a store); `gateway` (the
-/// gateway firmware's storage claim, firmware update and Ethernet).
-pub const SECTIONS: [&str; 5] = ["advanced", "ota", "store", "stream", "gateway"];
+/// Feature sections of the page and its modules, `<!-- NAME:start -->` …
+/// `<!-- NAME:end -->` (or `// NAME:start` in a script): `advanced` (the
+/// manual ZCL/Tuya console), `ota` (the Updates tab: Zigbee device OTA),
+/// and inside it `store` (uploads into the OTA image store) and `stream`
+/// (serving an OTA file from the browser tab, for images without a store);
+/// `gateway` (the gateway firmware's storage claim, firmware update and
+/// Ethernet); `dev` (the developer edition: its tools always on) and
+/// `devmode` (`advanced` without `dev`: the console behind the hub's
+/// developer mode, Settings › Hub).
+pub const SECTIONS: [&str; 7] = ["advanced", "ota", "store", "stream", "gateway", "dev", "devmode"];
 
-/// The sections a build of the S3 hub includes (`ota_store` implies `ota`;
-/// the build script uses [`enabled_with`]).
-#[allow(dead_code)]
-pub fn enabled(advanced: bool, ota: bool, ota_store: bool) -> [(&'static str, bool); 5] {
-    enabled_with(advanced, ota, ota_store, false)
+/// The page features of a build (the crate's cargo features).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Features {
+    pub advanced: bool,
+    pub ota: bool,
+    pub ota_store: bool,
+    pub gateway: bool,
+    pub dev: bool,
 }
 
-/// The sections a build includes, `gateway` too.
-pub fn enabled_with(advanced: bool, ota: bool, ota_store: bool, gateway: bool) -> [(&'static str, bool); 5] {
-    let ota = ota || ota_store;
-    [("advanced", advanced), ("ota", ota), ("store", ota_store), ("stream", ota && !ota_store), ("gateway", gateway)]
+impl Features {
+    /// Every distinct combination: `ota_store` implies `ota`, `dev`
+    /// implies `advanced`.
+    #[allow(dead_code)]
+    pub fn all() -> Vec<Features> {
+        let mut v = Vec::new();
+        for gateway in [false, true] {
+            for (advanced, dev) in [(false, false), (true, false), (true, true)] {
+                for (ota, ota_store) in [(false, false), (true, false), (true, true)] {
+                    v.push(Features { advanced, ota, ota_store, gateway, dev });
+                }
+            }
+        }
+        v
+    }
+
+    /// The sections a build includes.
+    pub fn sections(self) -> [(&'static str, bool); 7] {
+        let ota = self.ota || self.ota_store;
+        let advanced = self.advanced || self.dev;
+        [
+            ("advanced", advanced),
+            ("ota", ota),
+            ("store", self.ota_store),
+            ("stream", ota && !self.ota_store),
+            ("gateway", self.gateway),
+            ("dev", self.dev),
+            ("devmode", advanced && !self.dev),
+        ]
+    }
 }
 
 /// The page with the sections of `on` kept and the others left out.

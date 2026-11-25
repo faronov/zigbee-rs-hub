@@ -1,0 +1,46 @@
+<style>
+@media(max-width:600px){#cvd{width:100%}}
+</style>
+<section class="card"><div class="row"><select id="cvd"></select><button id="cvr">Re-interview</button><button id="cvc">Reconfigure</button><button id="cvf">Find definition</button><button id="cvs">Scaffold</button></div>
+<dl class="kv" id="cvl"></dl><div class="row acts"><label>Definition <select id="cvp"></select></label></div><ul class="ents" id="cvm"></ul></section>
+<section class="card"><h2>Definition <span id="cvi" class="mut"></span></h2><textarea id="cvt" rows="18" spellcheck="false"></textarea>
+<div class="row acts"><button id="cvk">Check</button><button id="cvv">Preview</button><button class="p" id="cvu">Upload as user definition</button><button class="d" id="cvx">Delete user definition</button></div><pre id="cvo"></pre></section>
+<script>
+// ---- Converters tab (device-support 9, 14.4) ----
+// A module run in the page's scope (index.html ui()).
+let zc,cvDev,cvDef;
+async function zdefc(){if(zc)return zc;try{const m=await import("/zdefc/zdefc_wasm.js");await m.default({module_or_path:"/zdefc/zdefc_wasm_bg.wasm"});return zc=m}catch(e){throw new Error("definition compiler not installed (Catalog: update)")}}
+const unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+onTab.conv=()=>{const s=$("#cvd"),v=s.value||cvDev;s.textContent="";for(const id of Object.keys(devs).filter(i=>devs[i].group==null).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value)cvLoad(s.value)};
+$("#cvd").onchange=e=>cvLoad(e.target.value);
+async function cvLoad(id){
+ cvDev=id;const d=await act("devices/get",{device:id}),r=d.resolution||{},kv=$("#cvl");kv.textContent="";
+ for(const l of r.layers||[])kvAdd(kv,l.source,l.id+(l.revision>1?" r"+l.revision:"")+(l.score!=null?" · score "+l.score:"")+(l.clause!=null?" · match["+l.clause+"]":"")+(l.content_hash?" · "+l.content_hash.slice(0,8):""));
+ const ul=$("#cvm");ul.textContent="";
+ for(const m of r.mappings||[]){const e=ents[m.uid]||{};ul.append(el("li",{},el("span",{class:"n"},(e.name||m.uid.split(":").pop())+" · "+(e.platform||"")+(e.device_class?"/"+e.device_class:"")),el("span",{class:"mut"},m.source+" · "+m.binding)))}
+ const p=$("#cvp");p.textContent="";p.append(el("option",{value:""},"automatic"));
+ for(const c of await call("definitions/list",{device:id}).catch(()=>[]))p.append(el("option",{value:c.id},c.id+" ("+c.source+")"));
+ p.value=r.pinned||"";
+ const top=(r.layers||[]).filter(l=>l.source!="generic").pop();cvDef=top&&top.id;
+ $("#cvi").textContent=cvDef?cvDef+" ("+top.source+")":"generic only";$("#cvo").textContent="";$("#cvt").value="";
+ if(cvDef)cvShow(cvDef).catch(e=>$("#cvt").value="# "+e.message)}
+$("#cvp").onchange=e=>act("devices/pin_definition",{device:cvDev,definition:e.target.value||null}).then(()=>cvLoad(cvDev)).catch(()=>{});
+async function cvShow(id){const g=await act("definitions/get",{definition:id});$("#cvt").value=g.source_text||(await zdefc()).decompile(unb64(g.cbor),"yaml")}
+for(const[b,t]of[["cvr","devices/reinterview"],["cvc","devices/reconfigure"]])$("#"+b).onclick=()=>act(t,{device:cvDev}).then(()=>toast(t+": ok")).catch(()=>{});
+// Find definition: with the Catalog module's update and shard uploads.
+$("#cvf").onclick=()=>ui("catalog").then(()=>ctSerial(()=>ctGo(()=>act("definitions/fetch",{device:cvDev}).then(r=>r.shards),1)).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message)),()=>{});
+$("#cvs").onclick=()=>act("definitions/scaffold",{device:cvDev}).then(s=>{
+ const q=v=>JSON.stringify(v),i=s.identity||{},m=(s.match||[])[0]||{},y=["zdef: 1","id: "+q(((i.manufacturer||"vendor")+"/"+(i.model||"model")).toLowerCase().replace(/[^a-z0-9/_-]+/g,"-")),"revision: 1","vendor: "+q(i.manufacturer||""),"model: "+q(i.model||""),"match:","  - "+q(m),"entities:"];
+ for(const e of s.generic_entities||[])y.push("  # generic: "+e.key+" ("+e.platform+", ep "+e.ep+")");
+ for(const a of s.attributes||[])y.push("  # attribute ep "+a.ep+" "+a.cluster+"/"+a.attr+(a.mfr?" mfr "+a.mfr:"")+" = "+a.value);
+ for(const t of s.tuya_dps||[])y.push("  # tuya dp "+t.dp+" "+t.type+" "+t.data);
+ $("#cvt").value=y.join("\n")+"\n";cvDef=null}).catch(()=>{});
+async function cvCompile(){const z=await zdefc(),src=$("#cvt").value,c=JSON.parse(z.check(src,"yaml"));
+ if(!c.ok){$("#cvo").textContent=c.errors.map(e=>(e.line?"line "+e.line+": ":"")+e.path+" "+e.message).join("\n");throw new Error("not valid")}
+ return{src,cbor:z.compile(src,"yaml"),c}}
+const cvErr=e=>toast(e.message);
+$("#cvk").onclick=()=>cvCompile().then(({c})=>$("#cvo").textContent="ok · "+c.size+" B · "+c.content_hash.slice(0,12)+(c.requires.length?" · requires "+c.requires.join(", "):"")).catch(cvErr);
+$("#cvv").onclick=()=>cvCompile().then(x=>act("definitions/preview",{device:cvDev,cbor:b64(x.cbor)})).then(p=>$("#cvo").textContent=p.matches?["layers: "+p.layers.map(l=>l.id).join(" < "),"added: "+p.added.join(", "),"changed: "+p.changed.join(", "),"removed: "+p.removed.join(", ")].join("\n"):"does not match this device").catch(cvErr);
+$("#cvu").onclick=()=>cvCompile().then(x=>act("definitions/upload",{cbor:b64(x.cbor),source:x.src,source_format:"yaml"})).then(r=>{toast("uploaded "+r.id);if(cvDev)cvLoad(cvDev)}).catch(cvErr);
+$("#cvx").onclick=()=>{if(cvDev&&cvDef&&confirm("Delete the user definition "+cvDef+"?"))act("definitions/delete",{definition:cvDef}).then(()=>cvLoad(cvDev)).catch(()=>{})};
+</script>

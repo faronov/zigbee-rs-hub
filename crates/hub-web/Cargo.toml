@@ -5,10 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "The hub's embedded web UI: one static page, gzip-compressed at build time, talking only to the WebSocket JSON API"
+description = "The hub's embedded web UI: one static page and the tabs it loads on demand, gzip-compressed at build time, talking only to the WebSocket JSON API"
 publish = false
 
 [features]
+# The ZCL/Tuya console tab (a module behind the hub's developer mode,
+# Settings › Hub).
 advanced = []
 # The Updates tab (Zigbee device OTA): images with the OTA server.
 ota = []
@@ -18,6 +20,10 @@ ota-store = ["ota"]
 # The gateway firmware's cards (SONOFF Dongle-M): the storage claim of the
 # files partition, the hub's own firmware update, Ethernet.
 gateway = []
+# The developer edition ("devtools": the tbr-hub-<ver>-8mb-devtools and
+# Dongle-M devtools images): the developer tools always on, without the
+# developer mode switch.
+dev = ["advanced"]
 
 [build-dependencies]
 miniz_oxide = "0.8"
@@ -25,3 +31,4 @@ sha2 = "0.10"
 
 [dev-dependencies]
 miniz_oxide = "0.8"
+sha2 = "0.10"

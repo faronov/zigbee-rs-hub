@@ -12,6 +12,7 @@
 //! sent to the requesting session and in the host store, never in logs.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hub_coord::{
@@ -58,12 +59,15 @@ pub const TYPES: &[&str] = &[
     "hub/mode/set",
     "hub/time",
     "hub/time/set",
+    "hub/developer/set",
 ];
 
 /// Host store keys of the time settings.
 pub const TZ_KEY: &str = "cfg/tz";
 /// SNTP servers, comma separated.
 pub const NTP_KEY: &str = "cfg/ntp";
+/// Host store key of the developer mode (present: on).
+pub const DEVELOPER_KEY: &str = "cfg/dev";
 
 /// Host store key of the last complete backup (OCB text).
 pub const LAST_BACKUP_KEY: &str = "bkp/last";
@@ -171,6 +175,10 @@ pub struct Admin {
     worker: Option<jobs::Worker>,
     board: jobs::Shared,
     staged: Option<Staged>,
+    /// Developer mode (`hub/developer/set`, images with the advanced
+    /// console): shared with the HTTP server, which serves the web UI's
+    /// developer tools (the ZCL console module) only while it is on.
+    pub developer: Arc<AtomicBool>,
 }
 
 fn ncp_error(what: &str, e: CoordError) -> ApiError {
@@ -497,7 +505,16 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
-        Self { platform, source, job_stack: 16 * 1024, board: jobs::Shared::default(), staged: None, worker: None, clock: ClockState::default() }
+        Self {
+            platform,
+            source,
+            job_stack: 16 * 1024,
+            board: jobs::Shared::default(),
+            staged: None,
+            worker: None,
+            clock: ClockState::default(),
+            developer: Arc::default(),
+        }
     }
 
     /// Start the long-lived job thread (with `job_stack`); call once,
@@ -544,6 +561,7 @@ impl Admin {
                 Ok(()) => return vec![self.time_frame(id)],
                 Err(e) => Err(e),
             },
+            "hub/developer/set" => self.set_developer(&**ctx.records, ctx.api, &ctx.out, v),
             "hub/wifi/set" => self.wifi(v),
             "hub/token/rotate" => self.rotate_token(ctx.api),
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
@@ -702,6 +720,32 @@ impl Admin {
             w
         });
         w.and_then(Jw::finish).unwrap_or_else(|e| frame(id, Err(e)))
+    }
+
+    /// The kept developer mode (`hub/info` `developer_mode`, with the
+    /// advanced console only) and the image's `edition`.
+    pub fn load_developer(&mut self, kv: &dyn KvStore, api: &mut ApiServer) {
+        api.set_info("edition", if cfg!(feature = "dev") { "devtools" } else { "standard" }.into());
+        if cfg!(feature = "advanced") {
+            let on = kv::with(kv, |s| s.get(DEVELOPER_KEY).is_some());
+            self.developer.store(on, Ordering::Relaxed);
+            api.set_info("developer_mode", on.into());
+        }
+    }
+
+    fn set_developer(&mut self, kv: &dyn KvStore, api: &mut ApiServer, out: &Out, v: &J) -> Result<J, ApiError> {
+        if !cfg!(feature = "advanced") {
+            return Err(ApiError::new("unsupported", "this image has no developer tools"));
+        }
+        let on = field(v, "enabled").and_then(J::as_bool).ok_or_else(|| bad("enabled: true or false"))?;
+        kv::with(kv, |s| if on { s.put(DEVELOPER_KEY, b"1") } else { s.delete(DEVELOPER_KEY) })
+            .map_err(|e| ApiError::new("failed", e.to_string()))?;
+        self.developer.store(on, Ordering::Relaxed);
+        api.set_info("developer_mode", on.into());
+        // Other pages follow without a reconnect (topic `network`).
+        out(JobOut::Event(json!({"topic": "hub_updated", "developer_mode": on})));
+        info!("admin: developer mode {}", if on { "on" } else { "off" });
+        Ok(json!({"developer_mode": on}))
     }
 
     #[inline(never)]

@@ -221,7 +221,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `crates/hub-devices` | Device/entity engine (`std`, sans-IO): ZCL/ZDO codec, interview, generic tier, resolution, entity runtime, Tuya EF00, Green Power and GP bindings, WebSocket API model; golden scenarios and property tests |
 | `crates/hub-coord` | Coordinator backend boundary (`std`, no backend protocol crate): requests and outcomes, events, errors, capabilities, network identity, the administration traits, and the APS/Green Power types the engine exchanges (re-exported by `hub-devices`); see `docs/coordinator-boundary.md` |
 | `crates/hub-core` | Portable `no_std` core: board wiring (`board`) and board profiles (`profile`: Thread BR, SONOFF Dongle-M), flash layouts (`layout`), buffer limits (`resources`), esptool DTR/RTS → EN/BOOT logic (`lines`), re-export of `zigbee-zrhp` behind feature `zrhp` (git dependency on faronov/zigbee-rs, pinned rev) |
-| `crates/hub-web` | The embedded web UI: one static page (`web/index.html`), gzip-compressed by `build.rs` |
+| `crates/hub-web` | The embedded web UI: a static page (`web/index.html`) and the tabs it loads on demand (`web/ui/*.html`), gzip-compressed by `build.rs` |
 | `crates/hub-ota` | Zigbee OTA Upgrade server (cluster 0x0019): OTA file format, streamed images, image store (inactive app slot, 8 MB), server state machine, simulated OTA client ([`docs/ota.md`](docs/ota.md)) |
 | `crates/hub-app` | Stage 2: the engine on a coordinator backend (`Backend`: ZRHP with feature `zrhp`, EZSP with `ezsp`), transport, device registry in the host store and its ownership (`NcpNv` decision for EZSP), app thread with the API sessions, catalog verifier (trusted keys) |
 | `crates/hub-ezsp` | ASH + EZSP host for EmberZNet NCPs (EZSP 13–18), simulated NCP, the EZSP coordinator backend ([`docs/ezsp-backend.md`](docs/ezsp-backend.md)) |
@@ -234,7 +234,7 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `firmware/gateway`, `firmware/donglem` | SONOFF Dongle Max (classic ESP32 + EFR32MG24) firmware: the hub app on the EZSP backend, its data on SONOFF's `files` partition after a claim, Ethernet/Wi-Fi, self-update, LED, button (permit join), MG24 lines and probes, return to SONOFF's firmware; runs on SONOFF's unchanged partition table (`docs/dongle-max.md`) |
 | `tools/make-app-image.sh` | ELF → ESP app image (same `elf2image` arguments as ESP-IDF; `CHIP=esp32` for the Dongle-M), optional size limit |
 | `tools/make-otadata.py` | One `otadata` sector selecting an OTA slot (the Dongle-M's first flash) |
-| `tools/check-s32c1i.sh` | Fails if Rust code in a firmware ELF uses the S32C1I compare-and-set (disassembly attributed through the line table) |
+| `tools/check-s32c1i.sh` | Fails if Rust code in a firmware ELF has an S32C1I compare-and-set (SCOMPARE1 written, then S32C1I within 4 instructions in one straight run; in each function's own bytes, from its symbol's address and size; not on literal words; Rust by line table or mangled name). Data decoded as instructions (lone S32C1I/SCOMPARE1) is listed, not counted. CI runs it on every S3 and Dongle-M ELF and on a positive control (`tools/s32c1i-control`, built with S32C1I: each of its six atomics must be found) |
 | `tools/size-report.py` | Firmware size breakdown of an ELF: bytes per ESP-IDF component / library and per Rust crate (flash code, rodata, IRAM, DRAM), largest symbols |
 | `tools/flow/` | Reserved-line check, RAM-only H2 UART test program and the flow-control measurements (`reserved_lines.py`, `h2-uart-test/`, `flow_test.py`); button-free S3 reflash `s3_reflash.sh IMAGE TAG [4mb-dev or 8mb]` (the app offset comes from the partition table on the device via `s3_partition.py`; a different layout is refused) |
 | `docs/device-support.md` | Device support design: tiers, definition format, expression language, self-description, Green Power, entity model, budgets |
@@ -881,7 +881,7 @@ tools upload and a device resolved from the bank. Cost on the S3: app image
 +119.5 KB (Ed25519/COSE verification ~32 KB, bank reader ~15 KB, store and
 upload service ~50 KB), static RAM +32 B.
 
-**Web UI.** `http://<ip>/` serves one static page (`crates/hub-web/web/index.html`:
+**Web UI.** `http://<ip>/` serves a static page (`crates/hub-web/web/index.html`:
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
 on `/api`: network (state, PAN ID, channel, extended PAN ID, NCP firmware,
 IEEE and link), permit join with a countdown, compact device cards (picture,
@@ -899,7 +899,19 @@ selects and buttons, connection status with automatic reconnect; mobile
 layout, light/dark from `prefers-color-scheme`. The page is split into
 tabs (`#/devices`, …): each `<div class="tab" data-tab="id" data-title="…">`
 in `<main>` becomes one, in document order, and `onTab[id]` runs when it is
-shown, so a feature adds its own tab without touching the others.
+shown, so a feature adds its own tab without touching the others. The
+rarely used tabs — Converters, Catalog, the ZCL console and Updates — are
+modules (`crates/hub-web/web/ui/<name>.html`: the tab's markup, then its
+script; the tab's `data-mod`) that the page loads when the tab is first
+opened, or when it needs one: the device page's Find definition and a
+`definition_needed` event with fetching for new devices on load the
+Catalog's code. They come from the hub (`/ui/<build>/<name>.js`, never
+from the internet) as classic scripts run in the page's scope, and only of
+the page's own build: the build hash is in the path (cached for good,
+`immutable`) and in the module's first line, which the page checks before
+running it, so a page left open over a firmware update reloads once instead
+of mixing builds (an unknown path answers 404). An image without a module's
+feature has neither the module nor its tab.
 The **Green Power** tab (`#/gp`) opens and closes the GP commissioning
 window (duration, proxies, exit on first pairing) with a countdown, lists the
 GPDs in bidirectional commissioning, recent failures with their reason and the
@@ -918,7 +930,20 @@ any cluster or foundation command with a hex payload; answers are shown
 decoded. A live frame tail (topic `frames`, filter by cluster) and a Tuya
 EF00 datapoint viewer (DP, type, value; send DP) follow the device; read
 attributes and seen DPs can be copied as definition snippets
-(device-support 14.7).
+(device-support 14.7). In the standard images (feature `advanced`: the 8 MB
+ones and the gateway) it is a developer tool: the tab appears with
+**Developer mode** (Settings › Hub; `hub/developer/set`, kept by the hub,
+`developer_mode` in `hub/info`, a `hub_updated` event tells the other open
+pages) and the hub serves its module only then (403 otherwise,
+`Cache-Control: no-cache` so a browser asks again). Developer mode only
+shows the tab and serves its module: the console's API (`zcl/*`,
+`tuya/send`, topic `frames`) stays available with the API token, which
+already grants full control (Home Assistant services may use it). The
+**developer edition** ("devtools": cargo feature `dev`, the
+`tbr-hub-<ver>-8mb-devtools[-opi]` and Dongle-M devtools images; `edition`
+`devtools` in `hub/info`, `standard` otherwise; its further developer tools
+come later) always has it, without the switch; the 4 MB images have no
+developer tools.
 
 The **Groups** tab (`#/groups`) creates, renames and deletes Zigbee groups,
 adds and removes member endpoints (ZCL Groups, with their state: pending,
@@ -934,13 +959,18 @@ It asks for the API token
 once (console `token`; a link ending in `#token=…` stores it too) and keeps
 it in the browser. `build.rs` minifies the page line by line (indentation,
 blank lines and `//` comment lines in the script and style; `src/minify.rs`,
-which refuses constructs it cannot keep intact) and gzips it at build time
-(deterministic, pure Rust, no node toolchain) and derives a strong ETag (every image
-variant's page must stay within 36 KiB gzipped, `hub_web::PAGE_BUDGET`, checked by
-the crate's tests); the hub answers
-`Content-Encoding: gzip`, `Cache-Control: no-cache` and `304` on a matching
-`If-None-Match`. `hubctl serve` serves the same page on `/` (the WebSocket on
-`/api`), so the UI can be tried on a desktop, also with `--sim`. API 1.1
+which refuses constructs it cannot keep intact) and the modules alike, gzips
+each at build time (deterministic, pure Rust, no node toolchain) and derives
+strong ETags and the build hash (in every image variant the page must stay
+within 36 KiB gzipped, `hub_web::PAGE_BUDGET`, each module within its
+`MODULE_BUDGETS` entry and the page with all its modules within
+`TOTAL_BUDGET`, 44 KiB — `DEV_TOTAL_BUDGET`, 64 KiB, in the developer
+edition, devtools —, checked by the crate's tests, which also run every module in
+Node in one scope with the page); the hub answers
+`Content-Encoding: gzip`, `Cache-Control: no-cache` for the page and `304` on a matching
+`If-None-Match`. `hubctl serve` serves the same page on `/` and its modules
+(the WebSocket on `/api`; `--features dev` builds the developer edition,
+devtools), so the UI can be tried on a desktop, also with `--sim`. API 1.1
 added what the page needed: `network/info`, the `network` topic
 (`permit_join`, `network_state`), `time` in it for relative times, and `nwk`
 in device records (device-support 14.2); the header and the hub facts
@@ -962,7 +992,9 @@ fresh NCP), `network/reset` (confirm `RESET`: automatic backup, leave,
 form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
 `hub/system`, `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
 `hub/mode/set`, `hub/time` / `hub/time/set` (time zone as a POSIX TZ
-string, SNTP servers). `hubctl serve` implements the hub side for a desktop
+string, SNTP servers), `hub/developer/set` (developer mode: the web UI's
+developer tools, images with the advanced console; event `hub_updated`).
+`hubctl serve` implements the hub side for a desktop
 (credentials and token in memory, its own log tail; `--wifi-channel N` for
 the scan advice); `hubctl --sim --sim-demo serve` forms a network on the
 simulated NCP with three routers that answer Mgmt_Lqi/Mgmt_Rtg, and
@@ -1242,7 +1274,7 @@ without it (`ota/*` answers `unsupported`, the hub endpoint does not list
 start — and a device's Query Next Image gets only the Default Response it
 asks for, as before the server). The
 Koenkk/zigbee-OTA index is fetched by Home Assistant (the web page has no
-index search; the page budget is 36 KiB gzip). Per device: policy
+index search; the page budget is 36 KiB gzip, the Updates module's 3 KiB). Per device: policy
 `manual` (default), `auto` (schedule window) or `off` (never: `ota/start`
 refused, a running job aborted; decided); Image
 Notify (sleepy devices through the queue); blocks of min(device, 48 B,

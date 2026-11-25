@@ -28,3 +28,8 @@ tungstenite = "0.29"
 log = "0.4"
 # No libudev: the tool only opens a port by path.
 serialport = { version = "4.7", default-features = false }
+
+[features]
+# The developer edition ("devtools", as those images): the web UI's
+# developer tools always on, `hub/info` `edition` "devtools".
+dev = ["hub-web/dev", "hub-app/dev"]

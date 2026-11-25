@@ -1,0 +1,89 @@
+<style>
+@media(max-width:600px){#ctb{width:100%}#ctfi{max-width:15em}}
+</style>
+<section class="card"><h2>Catalog</h2><dl class="kv" id="ctl"></dl>
+<div class="row acts"><button class="p" id="ctu">Update from the mirror</button><button id="ctf">Fetch missing definitions</button><label>Files <input type="file" id="ctfi" multiple></label></div>
+<div class="row acts"><input id="ctb" size="48"><label><input type="checkbox" id="cta"> daily update</label><label><input type="checkbox" id="ctx"> fetch for new devices</label><button id="cts">Save</button></div>
+<div class="row"><progress id="ctp" class="hide"></progress><span id="ctm" class="mut"></span></div></section>
+<section class="card"><h2>Search</h2><input id="ctq" placeholder="vendor, model or id" size="30"><ul class="ents" id="ctr"></ul></section>
+<script>
+// ---- Catalog tab (device-support 9, 14.4) ----
+// A module run in the page's scope (index.html ui()); also loaded for the
+// device page's Find definition and for definition_needed events.
+let ct={config:{}};
+const ctLoad=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.installed,m=s.manifest,w=s.wants||{};kv.textContent="";
+ kvAdd(kv,"Bank",i?i.catalog_date+"."+i.catalog_serial+" · "+i.definitions+" definitions · slot "+s.active_slot+" · key "+i.kid:"none");
+ kvAdd(kv,"Manifest",m&&m.catalog_date+"."+m.catalog_serial+(m.source?" · zhc "+m.source:""));
+ kvAdd(kv,"To install",[w.bank&&w.bank.name,w.web&&w.web.name].filter(Boolean).join(", "));
+ kvAdd(kv,"Compiler",s.web_tools.installed?Math.round(s.web_tools.size/1024)+" KiB":"not installed");
+ kvAdd(kv,"Fetched",s.local.definitions+" definitions, "+Math.round(s.local.used/1024)+" of "+Math.round(s.local.size/1024)+" KiB");
+ kvAdd(kv,"Without definition",(s.missing||[]).map(x=>devs[x.device]&&devs[x.device].name||x.device).join(", "));
+ for(const x of s.warnings||[])kvAdd(kv,"Warning",x);
+ V("ctb",s.config.base_url);$("#cta").checked=s.config.auto_update;$("#ctx").checked=s.config.auto_fetch}).catch(()=>{});
+// With daily updates on, opening the tab installs the mirror's newer
+// release (and, with fetching on, the definitions it has for new devices).
+onTab.catalog=()=>ctLoad().then(()=>{if(ct.config.auto_update)ctSerial(async()=>{const m=await ctNewer(1);if(m){if(ct.config.auto_fetch)await ctGo(()=>ctMiss(),0);ctMsg(ctTxt(m))}}).catch(e=>ctMsg(e.message)).then(ctLoad)});
+$("#cts").onclick=()=>act("catalog/config",{base_url:V("ctb"),auto_update:$("#cta").checked,auto_fetch:$("#ctx").checked}).then(ctLoad).catch(()=>{});
+const ctMsg=m=>$("#ctm").textContent=m,ctSay=m=>{ctMsg(m);toast(m)},ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
+async function ctGet(n){if(!ct.config.base_url)ct=await call("catalog/status");const r=await fetch(ct.config.base_url+"/"+n,{cache:"no-cache"});if(!r.ok)throw new Error(n+": HTTP "+r.status);return new Uint8Array(await r.arrayBuffer())}
+// Chunked upload (resumable: `from` = the hub's `upload.written`), then commit.
+// Once more from the start when the hub lost the upload to resume, or, 30 s
+// later, when another target's upload (another client) made it busy.
+async function ctPut(target,u,extra={},from=0,again){const p=$("#ctp");p.max=u.length;p.classList.remove("hide");
+ try{for(let o=from;o==from||o<u.length;o+=4096){await call("catalog/upload_chunk",Object.assign({target,offset:o,data:b64(u.subarray(o,o+4096))},o?{}:{size:u.length}));p.value=o}
+ return await call("catalog/commit",Object.assign({target},extra))}catch(e){const b=/is in progress/.test(e.message);if(again||!b&&!(from&&/offset/.test(e.message)))throw e;
+  if(b){ctSay("the hub is busy with another catalog upload, trying again in 30 s…");await new Promise(r=>setTimeout(r,31e3))}return await ctPut(target,u,extra,0,1)}finally{p.classList.add("hide")}}
+// One catalog transfer at a time (the hub keeps one upload): the update,
+// definition_needed fetches and file uploads queue up behind each other.
+let ctQ=Promise.resolve();const ctSerial=f=>ctQ=ctQ.catch(()=>{}).then(f);
+async function ctShards(sh){for(const n of sh||[]){const h=n.toString(16).padStart(2,"0");ctMsg("shard "+h+"…");const r=await ctPut("shard",await ctGet("shard-"+h+".cbor"),{shard:n});ctMsg("shard "+h+": "+(r.definitions.join(", ")||"nothing new"))}}
+// Shards with a definition for device id (no id: for every device without one).
+const ctMiss=async id=>{ct=await call("catalog/status");return[...new Set((ct.missing||[]).filter(x=>!id||x.device==id).flatMap(x=>x.shards))]};
+// Installs what s (a status or a manifest commit) wants: bank, web tools;
+// an interrupted upload of one (s.upload) first, where it stopped. The
+// number installed. Files that failed in this page (by SHA-256: a bank is
+// ~500 KB) wait for a manual update: automatic runs (auto) skip them.
+const ctBad=new Set;
+async function ctWants(s,auto){const u=s.upload||{},w=s.wants||{};let n=0;
+ for(const t of[u.target,"bank","web"])if((t=="bank"||t=="web")&&w[t]){const f=w[t],h=f.sha256;
+  if(auto&&ctBad.has(h)){ctMsg(f.name+" failed before: Update from the mirror tries again");continue}
+  ctMsg(f.name+"…");try{await ctPut(t,await ctGet(f.name),{},t==u.target?u.written:0)}catch(e){ctBad.add(h);throw e}ctBad.delete(h);delete w[t];n++}
+ return n}
+// Catalog version of a signed manifest as the hub's (date << 16 | serial):
+// its payload map starts 0: 1, 1: date (uint32), 2: serial.
+const ctVer=u=>{for(let i=1;i<u.length-10;i++)if((u[i-1]&224)==160&&u[i]==0&&u[i+1]==1&&u[i+2]==1&&u[i+3]==26&&u[i+8]==2){const d=new DataView(u.buffer,u.byteOffset+i+4),s=u[i+9];return d.getUint32(0)*65536+(s<24?s:s==24?u[i+10]:d.getUint16(6))}};
+// The mirror's release when newer than the hub's: its manifest (which drops
+// an interrupted upload of the old release: the mirror no longer has those
+// files), then what it wants. The same release: what the hub still lacks
+// of it (an interrupted install continues). The manifest installed or
+// completed, else 0; an older or the same manifest is not sent. auto: an
+// automatic run (ctWants).
+async function ctNewer(auto){const s=ct=await call("catalog/status"),o=(s.manifest||{}).version||0,u=await ctGet("manifest.cose"),v=ctVer(u);let m;
+ if(v<o)return 0;
+ if(v!=o){ctMsg("manifest…");m=await ctPut("manifest",u).catch(e=>{if(v)throw e});if(!m||m.version<o)return 0;if(m.version>o){await ctWants(m,auto);return m}}
+ return await ctWants(m?await call("catalog/status"):s,auto)&&s.manifest}
+// Shards (get(): their numbers, asked again after an update). The hub checks
+// them against its manifest: with upd the mirror's newer one goes first —
+// a failed update does not stop the shards, which may still match —, also
+// after a refused shard, and the shards are tried once more: at most twice.
+// {n: shards, m: the manifest installed}. auto: an automatic run.
+async function ctGo(get,upd,auto){let m=0,er;if(upd)m=await ctNewer(auto).catch(e=>{er=Error("catalog update: "+e.message);ctMsg(er.message)});
+ for(;;){const sh=await get()||[];if(!sh.length){if(er)throw er;return{n:0,m}}
+  try{await ctShards(sh);return{n:sh.length,m}}catch(e){if(m||!upd||!/differs/.test(e.message))throw e;if(er||!(m=await ctNewer(auto)))throw er||e;ctSay(ctTxt(m)+", retrying…")}}}
+// Find definition: then what the device resolves to (a bank the update
+// installed may hold its definition: no shard needed); by the name it had.
+async function ctFind(id){const n=devs[id]&&devs[id].name||id,r=await ctGo(()=>ctMiss(id),1),l=dL(await call("devices/get",{device:id}));
+ return(r.m?ctTxt(r.m)+"; ":"")+(l.length?n+" now uses "+l[l.length-1].id:"the catalog has no definition for "+n)}
+const ctFetch=()=>ctGo(()=>ctMiss(),1);
+$("#ctu").onclick=()=>ctSerial(async()=>{try{const m=await ctNewer();await ctGo(()=>ctMiss(),0);ctMsg(m?ctTxt(m):"nothing newer on the mirror")}catch(e){ctMsg(e.message)}ctLoad()});
+$("#ctf").onclick=()=>ctSerial(ctFetch).then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(ctLoad);
+$("#ctfi").onchange=e=>ctSerial(async()=>{const fs=[...e.target.files].sort((a,b)=>(b.name=="manifest.cose")-(a.name=="manifest.cose"));
+ try{for(const f of fs){const n=f.name,sh=/^shard-([0-9a-f]{2})\.cbor$/.exec(n),t=n=="manifest.cose"?"manifest":/\.zdb$/.test(n)?"bank":/\.zwb$/.test(n)?"web":sh&&"shard";
+  if(!t)continue;ctMsg(n+"…");await ctPut(t,new Uint8Array(await f.arrayBuffer()),sh?{shard:parseInt(sh[1],16)}:{})}ctMsg("done")}catch(x){ctMsg(x.message)}e.target.value="";ctLoad()});
+$("#ctq").onchange=()=>call("definitions/list",{query:V("ctq"),limit:30}).then(r=>{const ul=$("#ctr");ul.textContent="";
+ for(const d of r.items)ul.append(el("li",{},el("span",{class:"n"},d.vendor+" "+d.model),el("span",{class:"mut"},d.id+" · "+d.source)));
+ if(r.total>r.items.length)ul.append(el("li",{class:"mut"},(r.total-r.items.length)+" more"))}).catch(()=>{});
+// A new device without a definition: its shards when fetching is on (and
+// the mirror's newer release first with daily updates on).
+function ctEv(e){if(e.topic=="definition_needed")ctSerial(async()=>{ct=await call("catalog/status");if(ct.config.auto_fetch)await ctGo(()=>ctMiss(e.device),ct.config.auto_update,1)}).catch(x=>ctMsg(x.message));if($("#ctl").offsetParent)ctLoad()}
+</script>
