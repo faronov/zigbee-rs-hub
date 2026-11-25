@@ -107,6 +107,8 @@ jobs:
       - name: hub-app without `ota` links no hub-ota
         run: "! cargo tree -p hub-app --no-default-features -e normal | grep -q ' hub-ota v'"
       - run: cargo test -p hub-web --features advanced
+      # The gateway's page (zrh-donglem): advanced, OTA store, gateway cards.
+      - run: cargo test -p hub-web --features advanced,ota-store,gateway
 
   hub-app-ezsp:
     name: hub-app on the EZSP backend (NcpNv ownership, the suite on both backends)
@@ -118,6 +120,8 @@ jobs:
       - run: cargo test -p hub-app --features ezsp
       # An EZSP image's app: no ZRHP code.
       - run: cargo test -p hub-app --no-default-features --features ezsp
+      # The Dongle-M image's app: EZSP, the advanced console, the OTA store.
+      - run: cargo test -p hub-app --no-default-features --features ezsp,advanced,ota-store
       - name: hub-app with EZSP only links no hub-ncp or zigbee-zrhp
         run: |
           deps=$(cargo tree -p hub-app --no-default-features --features ezsp -e normal --prefix none)
@@ -267,7 +271,7 @@ jobs:
             target/xtensa-esp32s3-espidf/release/tbr-hub
 
   donglem:
-    name: zrh-donglem firmware (SONOFF Dongle Max, classic ESP32)
+    name: zrh-donglem firmware (SONOFF Dongle Max, classic ESP32, hub on EZSP)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -305,6 +309,8 @@ jobs:
         run: |
           pip install --quiet "esptool>=5,<6"
           CHIP=esp32 FLASH_SIZE=16MB FLASH_FREQ=40m MIN_REV_FULL=300 MAX_APP_BYTES=6291456 tools/make-app-image.sh release target/zrh-donglem-app.bin zrh-donglem
+          # The self-update (firmware/end) selects zrh-donglem images only.
+          esptool --chip esp32 image-info target/zrh-donglem-app.bin | grep -q "App version: zrh-donglem-"
       - name: Partition table identical to SONOFF's stock one, otadata sector selecting ota_1
         run: |
           tools/make-partition-table.sh firmware/donglem/partitions.csv target/partitions-donglem.bin 16MB
