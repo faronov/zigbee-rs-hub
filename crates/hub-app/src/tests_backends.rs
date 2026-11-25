@@ -1106,3 +1106,72 @@ fn ezsp_the_replaced_networks_backup_survives_the_requesting_session() {
     assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
     rig.finish();
 }
+
+/// Network DD restored over EE (foreign records), then restored again
+/// while the NCP runs DD (the retry after a restore that failed late, the
+/// NCP back with DD): the half-restored DD is not another network to
+/// keep, and EE's kept backup stays.
+#[test]
+fn ezsp_a_retry_over_the_restored_network_keeps_the_replaced_one() {
+    let (rig, backup) = foreign_ee(None);
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let first = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
+    assert_eq!(ok(&first)["previous_network_backed_up"], true, "{first}");
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    let again = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true}));
+    assert_eq!(ok(&again)["backup"]["extended_pan_id"], "dddddddddddddddd", "{again}");
+    assert_eq!(ok(&again)["previous_network_backed_up"], true, "as the last backup: {again}");
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["replaced"], json!(["eeeeeeeeeeeeeeee"]), "{kept}");
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
+    rig.finish();
+}
+
+/// An automatic backup without the network key (the NCP's key export
+/// locked) neither replaces a kept one nor lets the network go: refused,
+/// unless `skip_backup`.
+#[test]
+fn ezsp_an_incomplete_automatic_backup_is_refused() {
+    let (rig, backup) = foreign_ee(None);
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    ok(&call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true})));
+    wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+    sim.ncp(|n| n.config_mut().key_exportable = false);
+    let reset = json!({"type": "network/reset", "confirm": "RESET", "channel": 15});
+    let r = call(&rig.app, sid, &rx, 3, reset.clone());
+    assert_eq!(r["error"]["code"], "backup_incomplete", "{r}");
+    assert!(sim.ncp(|n| n.config().network_formed && n.config().network.extended_pan_id == [0xDD; 8]), "nothing changed");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["replaced"], json!(["eeeeeeeeeeeeeeee"]), "{kept}");
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
+    let mut skip = reset;
+    skip["skip_backup"] = json!(true);
+    ok(&call(&rig.app, sid, &rx, 5, skip));
+    rig.finish();
+}
+
+/// Every network a reset replaces keeps its backup, the last
+/// REPLACED_KEPT of them, newest first; `ext_pan_id` picks one.
+#[test]
+fn ezsp_replaced_networks_keep_their_backups() {
+    let rig = Rig::ezsp(ezsp_sim(true, 0xEE), Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    for (i, e) in ["11", "22", "33", "44"].into_iter().enumerate() {
+        let r = call(&rig.app, sid, &rx, 2 + i as u64, json!({"type": "network/reset", "confirm": "RESET", "channel": 15, "ext_pan_id": e.repeat(8)}));
+        assert_eq!(ok(&r)["network"]["ext_pan_id"], e.repeat(8), "{r}");
+        wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    }
+    let kept = call(&rig.app, sid, &rx, 10, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["replaced"], json!(["3".repeat(16), "2".repeat(16), "1".repeat(16)]), "EE's went first: {kept}");
+    assert_eq!(ok(&kept)["backup"]["extended_pan_id"], "3".repeat(16));
+    let one = call(&rig.app, sid, &rx, 11, json!({"type": "network/backup/replaced", "ext_pan_id": "1".repeat(16)}));
+    assert_eq!(ok(&one)["backup"]["extended_pan_id"], "1".repeat(16), "{one}");
+    let gone = call(&rig.app, sid, &rx, 12, json!({"type": "network/backup/replaced", "ext_pan_id": "EE".repeat(8)}));
+    assert_eq!(gone["error"]["code"], "not_found", "{gone}");
+    rig.finish();
+}

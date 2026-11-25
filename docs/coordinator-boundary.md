@@ -291,7 +291,7 @@ Keys are classified by exact key:
 | Class | Keys |
 |---|---|
 | network-scoped | `dev/`, `st/`, `grp/`, `bnd/`, `auto/` (rules name device IDs), `ota/d/`, `bkp/last` |
-| hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`, `bkp/replaced` (the backup of a network a reset/restore replaced, written whatever the gate) |
+| hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`, `bkp/replaced/<ext_pan_id>` and their order `bkp/replaced` (the backups of the last 3 networks a reset/restore replaced, written whatever the gate) |
 | backend-scoped | `cfg/tx_power`, kept as is; future keys go under `zrhp/`, `ezsp/`, `znp/` |
 
 **Foreign gate.** It is enforced in the KV layer by a prefix guard that makes

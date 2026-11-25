@@ -1157,7 +1157,7 @@ fn keyed_backups_need_a_token_also_when_kept() {
     let again = reset(2);
     assert_eq!(ok(&again)["backup"], J::Null, "no keys in the answer without a token: {again}");
     assert!(r.ncp.store_state().kv.contains_key(crate::admin::LAST_BACKUP_KEY), "kept in the host store");
-    assert!(r.ncp.store_state().kv.contains_key(crate::admin::REPLACED_BACKUP_KEY), "kept as the replaced network's");
+    assert!(r.ncp.store_state().kv.keys().any(|k| k.starts_with(crate::admin::REPLACED_BACKUP_PREFIX)), "kept as the replaced network's");
     assert_eq!(err_code(&call(&app, sid, &rx, 3, json!({"type": "network/backup/last"}))), "unauthorized");
     assert_eq!(err_code(&call(&app, sid, &rx, 5, json!({"type": "network/backup/replaced"}))), "unauthorized");
     assert_eq!(err_code(&call(&app, sid, &rx, 4, json!({"type": "network/backup"}))), "unauthorized");
