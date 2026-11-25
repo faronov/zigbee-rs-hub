@@ -467,6 +467,50 @@ const c=t("Africa/Casablanca");eq(c.fixed,true);if(!/^(<[+-]\d\d>|[A-Z]{3,})-?\d
         assert!(out.status.success(), "time zone conversion checks failed");
     }
 
+    /// The Hub card with a `tz_name` this Intl does not know (the hub took
+    /// it from newer tzdata): the hub facts still load, the hub's own time
+    /// is shown, and Save keeps the name (the page's time code runs in Node
+    /// with stubs of the DOM and the API, when Node is installed).
+    #[test]
+    fn unknown_time_zone_names_are_kept() {
+        let src = include_str!("../web/index.html");
+        let a = src.find("const tzF=").unwrap();
+        let b = a + src[a..].find("$(\"#tzb\").onclick=").unwrap();
+        let b = b + src[b..].find('\n').unwrap();
+        let mock = r##"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+const E={},$=s=>E[s]||(E[s]={value:"",textContent:"",classList:{add(){}},append(){}}),document={activeElement:null};
+globalThis.Option=function(v){this.value=v};
+let sys=0,sent,toasts=[];const loadSys=()=>sys++,toast=m=>toasts.push(m),busy=(_,p)=>p;
+const HUB={tz:"EET-2EEST,M3.5.0/3,M10.5.0/4",local:"2026-11-25 10:00:00",time_synced:true,servers:["pool.ntp.org"]};
+let rec;const call=async()=>rec,act=async(t,p)=>{sent=p;return rec};
+"##;
+        let checks = r##"
+(async()=>{
+ for(const [name,shown] of [["Mars/Olympus_Mons","Hub time 2026-11-25 10:00:00"],["Europe/Tallinn","Hub time with Europe/Tallinn: 20"]]){
+  rec=Object.assign({tz_name:name},HUB);sys=0;toasts=[];
+  loadTime();await new Promise(r=>setTimeout(r));
+  eq([sys,$("#tzn").value,$("#tzm").textContent.startsWith(shown)],[1,name,true]);
+  await $("#tzb").onclick({target:{}});
+  eq([sent.tz,sent.tz_name,toasts,sys,$("#tzm").textContent.startsWith(shown)],[HUB.tz,name,["Time zone saved"],2,true]);
+ }
+})().catch(e=>{console.error(e);process.exit(1)});
+"##;
+        let js = std::format!("{mock}\n{}\n{checks}", &src[a..b]);
+        use std::io::Write;
+        let Ok(node) = std::process::Command::new("node")
+            .args(["-e", &js])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let out = node.wait_with_output().unwrap();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        assert!(out.status.success(), "unknown time zone name checks failed");
+    }
+
     /// Shard fetches against an older installed manifest (the mirror moved
     /// on): the page reads the signed manifest's version, installs a newer
     /// one first or after a refused shard and retries once; an older or the

@@ -598,13 +598,14 @@ function tzPosix(z,y=new Date().getUTCFullYear()){
 // The zone picked here (or the hub's tz_name) names the POSIX string; editing that string drops the name.
 let tm={},tzN="";const tzZ=(Intl.supportedValuesOf||(()=>[]))("timeZone");
 $("#tzl").append(...tzZ.map(z=>new Option(z)));tzZ[0]||$("#tzr").classList.add("hide");
-const tzShow=n=>$("#tzm").textContent=tzN?"Hub time with "+tzN+": "+new Date().toLocaleString("sv",{timeZone:tzN})+(n?". "+n:""):"";
+// A name this browser's Intl lacks (the hub's from newer tzdata) is kept; the hub's own time is shown.
+const tzShow=n=>{let s="";try{s=tzN&&"Hub time with "+tzN+": "+new Date().toLocaleString("sv",{timeZone:tzN})+(n?". "+n:"")}catch(e){s=tm.local?"Hub time "+tm.local:""}$("#tzm").textContent=s};
 function tzPick(){const z=$("#tzn").value.trim();tzN="";try{tzF(z)}catch(e){return tzShow()}
  const r=tzPosix(z);tzN=z;$("#tzi").value=r.tz;tzShow(r.fixed&&z+" has no yearly rule: today's offset is kept fixed")}
 $("#tzn").oninput=tzPick;$("#tzu").onclick=()=>{$("#tzn").value=Intl.DateTimeFormat().resolvedOptions().timeZone;tzPick()};
 $("#tzi").oninput=()=>{tzN=$("#tzn").value="";tzShow()};
-function loadTime(){call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");tzShow();loadSys()}).catch(()=>{})}
-$("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),tz_name:tzN,servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;tzShow();toast("Time zone saved");loadSys()})).catch(()=>{});
+function loadTime(){call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys();tzShow()}).catch(()=>{})}
+$("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),tz_name:tzN,servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;toast("Time zone saved");loadSys();tzShow()})).catch(()=>{});
 function loadRep(){call("reporting/defaults/get").then(r=>{const t=$("#rpd");t.textContent="";for(const c of r.classes)t.append(el("tr",{},el("td",{},c.key),el("td",{},el("input",{size:12,"data-k":c.key,value:c.edited?rTxt(c.report):"",placeholder:rTxt(c.builtin)}))))}).catch(()=>{})}
 $("#rpb").onclick=()=>{const d={};for(const i of $("#rpd").querySelectorAll("input"))d[i.dataset.k]=rVal(i.value);act("reporting/defaults/set",{defaults:d}).then(()=>{toast("Saved");loadRep()},()=>{})};
 function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a=s.app||{},n=s.ncp||{};
