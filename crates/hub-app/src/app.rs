@@ -306,6 +306,9 @@ pub struct AppStatus {
     pub network_up: bool,
     /// Permit-join seconds left.
     pub permit_join_s: u32,
+    /// Maintenance jobs running on their threads (`network/jobs`); they
+    /// write the hub's records too.
+    pub jobs: usize,
 }
 
 /// The definitions catalog in `hubdata` (device-support 9). The hub never
@@ -1368,6 +1371,7 @@ impl Runner {
             let mut s = self.status.lock().unwrap();
             s.session_up = ready;
             s.network_up = ready && st.network_state == NetState::Up;
+            s.jobs = self.admin.jobs_running();
         }
         let cookie = st.epoch;
         if ready && self.maintenance_for != cookie {
@@ -1575,5 +1579,6 @@ impl Runner {
         st.endpoint_registered = self.registered;
         st.imported = self.imported;
         st.permit_join_s = self.permit_left;
+        st.jobs = self.admin.jobs_running();
     }
 }

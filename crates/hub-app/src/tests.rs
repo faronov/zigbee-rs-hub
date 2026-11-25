@@ -1269,6 +1269,8 @@ fn scans_are_background_jobs_that_leave_the_api_usable() {
     let start = call(&app, sid, &rx, 2, json!({"type": "network/energy_scan", "passes": 3}));
     let job = ok(&start)["job"].as_u64().unwrap();
     assert_eq!(ok(&start)["passes"], 3);
+    // The firmware sees it (the Dongle-M refuses a return to stock then).
+    assert!(app.wait(T, |s| s.jobs == 1), "{:?}", app.status());
 
     // The rest of the API answers; only another radio job is busy.
     let info = call(&app, sid, &rx, 3, json!({"type": "network/info"}));
@@ -1320,6 +1322,7 @@ fn scans_are_background_jobs_that_leave_the_api_usable() {
     assert_eq!((ok(&kept)["job"].as_u64(), ok(&kept)["result"]["cancelled"].as_bool()), (Some(job), Some(true)));
     let jobs = call(&app, sid2, &rx2, 3, json!({"type": "network/jobs"}));
     assert_eq!(ok(&jobs)["running"], json!([]));
+    assert!(app.wait(T, |s| s.jobs == 0), "{:?}", app.status());
     let gone = call(&app, sid, &rx, 7, json!({"type": "network/job/cancel", "job": job}));
     assert_eq!(err_code(&gone), "not_found");
 
