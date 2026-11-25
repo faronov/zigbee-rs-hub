@@ -1,0 +1,17 @@
+# Positive control of tools/check-s32c1i.sh (CI): Rust atomics built with
+# S32C1I (the xtensa targets' default) must fail the check. Not a member of
+# the workspace; built as one object (one codegen unit, one .text section).
+[package]
+name = "s32c1i-control"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+debug = true
+codegen-units = 1
+
+[workspace]

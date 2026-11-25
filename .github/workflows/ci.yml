@@ -243,8 +243,23 @@ jobs:
       - name: Build tbr-hub developer edition (devtools, feature dev, as the 8 MB images; its release images come with the release tooling)
         working-directory: firmware/hub
         run: cargo build --release --features mqtt,dev,ota-store
+      # Each ELF right after its build (the next build replaces it).
+      - name: No S32C1I in the developer edition's Rust code (function bytes only)
+        run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)" target/xtensa-esp32s3-espidf/release/tbr-hub
       - name: Build tbr-hub (8 MB images with MQTT, the advanced console and Zigbee OTA with its image store; 4 MB images with MQTT only; quad and octal PSRAM)
         run: tools/build-hub-firmware.sh
+      - name: No S32C1I in the images' Rust code (8 MB and 4 MB, quad and octal PSRAM; function bytes only)
+        run: |
+          od="$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)"
+          for t in target-8mb target-8mb-opi target target-opi; do
+            echo "$t:"; tools/check-s32c1i.sh "$od" "$t/xtensa-esp32s3-espidf/release/tbr-hub"
+          done
+      - name: S32C1I check, positive control (Rust atomics built with S32C1I for xtensa-esp32s3 must fail it)
+        run: |
+          cargo +esp rustc -q --release -Zbuild-std=core --target xtensa-esp32s3-none-elf --manifest-path tools/s32c1i-control/Cargo.toml --target-dir target/s32c1i-control -- --emit=obj -Zfunction-sections=no
+          od="$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)"
+          rc=0; tools/check-s32c1i.sh "$od" target/s32c1i-control/xtensa-esp32s3-none-elf/release/deps/s32c1i_control-*.o || rc=$?
+          test "$rc" -eq 1
       - name: App images (tbr-hub must fit the 3 MiB production slot, with MQTT, and the 2 944 KiB dev slot)
         run: |
           pip install --quiet "esptool>=5,<6"
@@ -309,11 +324,20 @@ jobs:
       - name: Build zrh-donglem developer edition (devtools, feature dev; its release image comes with the release tooling)
         working-directory: firmware/donglem
         run: cargo build --release --features dev
+      # Each ELF right after its build (the next build replaces it).
+      - name: No S32C1I in the developer edition's Rust code (function bytes only)
+        run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" target/xtensa-esp32-espidf/release/zrh-donglem
       - name: Build zrh-donglem
         working-directory: firmware/donglem
         run: cargo build --release
-      - name: No S32C1I in Rust code (disassembly, attributed through the line table)
+      - name: No S32C1I in Rust code (function bytes only, attributed through the line table and the symbol name)
         run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" target/xtensa-esp32-espidf/release/zrh-donglem
+      - name: S32C1I check, positive control (Rust atomics built with S32C1I for xtensa-esp32 must fail it)
+        run: |
+          cargo +esp rustc -q --release -Zbuild-std=core --target xtensa-esp32-none-elf --manifest-path tools/s32c1i-control/Cargo.toml --target-dir target/s32c1i-control -- --emit=obj -Zfunction-sections=no
+          od="$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)"
+          rc=0; tools/check-s32c1i.sh "$od" target/s32c1i-control/xtensa-esp32-none-elf/release/deps/s32c1i_control-*.o || rc=$?
+          test "$rc" -eq 1
       - name: The API token reads the RNG with an entropy source (bootloader_random_enable/disable linked; the classic ESP32 has none without the radio)
         run: |
           nm="$(find .embuild/espressif/tools -name xtensa-esp32-elf-nm -type f | head -1)"
