@@ -285,9 +285,11 @@ Precedence rules:
   zigbeeModel, and each white-label fingerprint without, or with another
   value of, each field beyond the names) against all shard records of a
   built catalog; where zhc finds no definition the hub must find none.
-  zhc 26.130.0: 6,016 of the 6,022 vectors (of 8,107) whose definition
-  this hub can load pick zhc's definition and white label; 2,085 more need
-  features the hub lacks.
+  zhc 26.130.0: 6,081 of the 6,082 vectors (of 8,216) whose definition
+  this hub can load pick zhc's definition and white label; 2,134 more need
+  features the hub lacks. The one left cannot be: zhc gives the white
+  label MOT-C2Z10 to the model ID `"MOT-C2Z10\0\0…"` but not to
+  `"MOT-C2Z10"`, and the interview stores both without the trailing NULs.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
@@ -779,7 +781,7 @@ in `definitions/examples/`.
 | `vendor`, `model` | string | yes | display identity (HA device manufacturer/model) |
 | `description` | string | no | stripped from catalog banks (fetched with the UI help) |
 | `match` | list | yes | match clauses, OR-ed (6.2) |
-| `white_label` | list | no | `{vendor, model, manufacturer: [names], model_id: [names], sw_build: [names], logical_type, hw_version: [ints], endpoints: {ep: {profile, device_id, in, out}}}`; the first entry whose constraints all hold sets the display identity (at least one given): each list contains the device's value (Basic ManufacturerName, ModelIdentifier, SWBuildID 0x4000, HWVersion 0x0003), the node descriptor's logical type equals, and `endpoints` are exactly the device's endpoints (zigbee-herdsman-converters' fingerprint rule: the same endpoint IDs, each with the given profile and device ID and the same cluster sets, order free; an empty list is no constraint), unlike a clause's subset match |
+| `white_label` | list | no | `{vendor, model, manufacturer: [names], model_id: [names], sw_build: [names], logical_type, hw_version: [ints], endpoints: {ep: {profile, device_id, in, out}}}`; the first entry whose constraints all hold sets the display identity (at least one given): each list contains the device's value (Basic ManufacturerName, ModelIdentifier, SWBuildID 0x4000, HWVersion 0x0003; names compare without trailing NULs and spaces only, so leading spaces count, as in zigbee-herdsman-converters' exact white-label fingerprints), the node descriptor's logical type equals, and `endpoints` are exactly the device's endpoints (zigbee-herdsman-converters' fingerprint rule: the same endpoint IDs, each with the given profile and device ID and the same cluster sets, order free; an empty list is no constraint), unlike a clause's subset match |
 | `requires` | list | no | hub features needed (8.5); computed by the compiler, may be written |
 | `priority` | int | no | tie-break between equal scores (3.3) |
 | `device` | map | no | `power` (mains/battery/energy_harvesting), `sleepy`, `battery` (`voltage_to_percent: [min_mV, max_mV]` linear, or a named curve `3V_2100`, `3V_1500_2800`, `CR2032`), `checkin_s`, `availability` (`timeout_s`), `ota` (bool) |
