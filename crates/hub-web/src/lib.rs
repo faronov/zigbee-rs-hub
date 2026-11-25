@@ -331,7 +331,7 @@ const DIFF="shard 44: SHA-256 differs from the installed manifest",BANK=["get ba
     /// Ethernet) only in the gateway's page.
     #[test]
     fn gateway_cards_only_in_the_gateway_page() {
-        let items = ["\"storage/claim\"", "\"firmware/begin\"", "\"firmware/chunk\"", "replace_stock", "s.ethernet", "id=\"gsb\""];
+        let items = ["\"storage/claim\"", "\"firmware/begin\"", "\"firmware/chunk\"", "replace_stock", "s.ethernet", "id=\"gsb\"", "id=\"gsban\"", "gwBan("];
         for (advanced, ota, store, gateway) in variants() {
             let page = select_with(advanced, ota, store, gateway);
             for item in items {
