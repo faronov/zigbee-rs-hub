@@ -399,6 +399,10 @@ class FakeHub:
         self.catalog: FakeCatalog | None = None
         # `None`: a hub without local automations (before API 1.3).
         self.automations: dict[str, dict[str, Any]] | None = None
+        # `hub/time` (API 1.3); `None`: a hub without it. `time_names`
+        # False: a hub before `tz_name` (neither kept nor reported).
+        self.time: dict[str, Any] | None = {"tz": "UTC0", "tz_name": None}
+        self.time_names = True
         self.devices, self.entities, self.states = default_model()
         self.requests: list[dict[str, Any]] = []
         self.command_errors: dict[str, dict[str, str]] = {}
@@ -602,6 +606,14 @@ class FakeHub:
             await ok({"frames": [], "gp_data": {"key": "00112233445566778899aabbccddeeff"}})
         elif kind in ("devices/reinterview", "devices/reconfigure"):
             await ok({"started": True})
+        elif kind in ("hub/time", "hub/time/set") and self.time is not None:
+            if kind == "hub/time/set" and "tz" in req:
+                self.time["tz"] = req["tz"]
+                self.time["tz_name"] = req.get("tz_name") or None
+            await ok(
+                {k: v for k, v in self.time.items() if self.time_names or k != "tz_name"}
+                | {"servers": ["pool.ntp.org"]}
+            )
         elif kind.startswith("automations/") and self.automations is not None:
             await self._answer_automations(req, ok, err)
         elif kind.startswith(("catalog/", "definitions/")) and self.catalog is not None:

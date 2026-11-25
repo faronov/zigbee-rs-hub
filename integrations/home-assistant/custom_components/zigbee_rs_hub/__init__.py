@@ -7,8 +7,8 @@ import logging
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.const import CONF_HOST, CONF_PORT, EVENT_CORE_CONFIG_UPDATE
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryNotReady,
@@ -158,6 +158,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZigbeeRsHubConfigEntry) 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     for cancel in hub.catalog.async_start():
         entry.async_on_unload(cancel)
+
+    @callback
+    def time_zone_changed(_event: Event) -> None:
+        entry.async_create_task(hass, hub.async_sync_time_zone(), f"{DOMAIN} time zone")
+
+    async def options_updated(_hass: HomeAssistant, _entry: ConfigEntry) -> None:
+        await hub.async_sync_time_zone()
+
+    entry.async_on_unload(hass.bus.async_listen(EVENT_CORE_CONFIG_UPDATE, time_zone_changed))
+    entry.async_on_unload(entry.add_update_listener(options_updated))
     return True
 
 

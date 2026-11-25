@@ -22,8 +22,9 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from . import const
 from .api import CannotConnect, HubApiError, HubClient, HubError, InvalidAuth, hub_url
 from .catalog import CatalogUpdater
-from .const import COMMAND_TIMEOUT, CONF_PATH, DEFAULT_PATH, DOMAIN, TOPICS
+from .const import COMMAND_TIMEOUT, CONF_PATH, CONF_SYNC_TIME_ZONE, DEFAULT_PATH, DOMAIN, TOPICS
 from .ota import OtaIndex, OtaStreams
+from .time_zone import posix_tz, zone_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -228,6 +229,7 @@ class ZigbeeRsHub:
                 self.hass, self.ota_streams.resume(), f"{DOMAIN} OTA streams"
             )
         self._update_hub_device()
+        await self.async_sync_time_zone()
         _LOGGER.debug(
             "Connected to %s: %d devices, %d entities",
             self.url,
@@ -675,6 +677,38 @@ class ZigbeeRsHub:
             command=command,
             params=params or {},
         )
+
+    async def async_sync_time_zone(self) -> None:
+        """Give the hub Home Assistant's time zone (option `sync_time_zone`).
+
+        Its IANA name and the POSIX TZ string of its TZif file, when the
+        hub's differ. Hubs without `hub/time` are left alone.
+        """
+        if not self.entry.options.get(CONF_SYNC_TIME_ZONE) or self.client is None:
+            return
+        name = self.hass.config.time_zone
+        if not zone_name(name):
+            return
+        tz = await self.hass.async_add_executor_job(posix_tz, name)
+        if tz is None:
+            _LOGGER.warning("No POSIX TZ string for the time zone %s: the hub keeps its own", name)
+            return
+        try:
+            now = await self.client.request("hub/time")
+            if not isinstance(now, dict):
+                return
+            # Hubs before `tz_name` compare by the string only.
+            if now.get("tz") == tz and now.get("tz_name", name) == name:
+                return
+            await self.client.request("hub/time/set", tz=tz, tz_name=name)
+        except HubApiError as err:
+            if err.code not in ("invalid_format", "unsupported"):
+                _LOGGER.warning("Could not set the hub's time zone to %s (%s): %s", name, tz, err)
+            return
+        except HubError as err:
+            _LOGGER.debug("Time zone sync with %s failed: %s", self.url, err)
+            return
+        _LOGGER.info("The hub's time zone is now %s (%s)", name, tz)
 
     async def async_permit_join(
         self, duration: int, include_gp: bool = False, target: str | None = None

@@ -44,6 +44,19 @@
       "wrong_hub": "This address belongs to a different hub (another coordinator IEEE)."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "zigbee-rs hub",
+        "data": {
+          "sync_time_zone": "Sync the hub time zone from Home Assistant"
+        },
+        "data_description": {
+          "sync_time_zone": "Set the hub's time zone (its Time cluster and the Tuya time sync for devices, its automations' schedules) to Home Assistant's, now, on every connection and when Home Assistant's changes."
+        }
+      }
+    }
+  },
   "entity": {
     "binary_sensor": {
       "hub_connected": {

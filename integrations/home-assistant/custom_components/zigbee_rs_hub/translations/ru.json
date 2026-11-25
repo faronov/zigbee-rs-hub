@@ -44,6 +44,19 @@
       "wrong_hub": "По этому адресу находится другой хаб (другой IEEE координатора)."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "zigbee-rs hub",
+        "data": {
+          "sync_time_zone": "Брать часовой пояс хаба из Home Assistant"
+        },
+        "data_description": {
+          "sync_time_zone": "Устанавливать часовой пояс хаба (его кластер Time и синхронизацию времени Tuya для устройств, расписания его автоматизаций) равным поясу Home Assistant: сейчас, при каждом подключении и при изменении пояса в Home Assistant."
+        }
+      }
+    }
+  },
   "entity": {
     "binary_sensor": {
       "hub_connected": {

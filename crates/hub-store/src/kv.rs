@@ -28,7 +28,7 @@ pub enum Scope {
     /// `auto/` (rules name device IDs), `ota/d/`, `bkp/last`.
     Network,
     /// The hub, whatever the network: everything else (`udef/`, `usrc/`,
-    /// `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`,
+    /// `cfg/tz`, `cfg/tz_name`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`,
     /// [`OWNER_KEY`], `bkp/replaced/` and `bkp/replaced`: the backups of
     /// networks the operator replaced and their order, written whatever
     /// the gate).
@@ -205,7 +205,7 @@ mod tests {
         for k in ["dev/zb:1", "st/zb:1", "grp/0001", "bnd/zb:1", "auto/r1", "ota/d/zb:1", "bkp/last"] {
             assert_eq!(scope(k), Scope::Network, "{k}");
         }
-        for k in ["udef/a", "usrc/a", "cfg/tz", "cfg/ntp", "cfg/catalog", "cfg/report", "ota/cfg", OWNER_KEY, "bkp/lastx", "bkp/replaced", "bkp/replaced/eeeeeeeeeeeeeeee", "devx"] {
+        for k in ["udef/a", "usrc/a", "cfg/tz", "cfg/tz_name", "cfg/ntp", "cfg/catalog", "cfg/report", "ota/cfg", OWNER_KEY, "bkp/lastx", "bkp/replaced", "bkp/replaced/eeeeeeeeeeeeeeee", "devx"] {
             assert_eq!(scope(k), Scope::Hub, "{k}");
         }
         for k in ["cfg/tx_power", "zrhp/x", "ezsp/x", "znp/x"] {

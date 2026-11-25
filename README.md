@@ -992,7 +992,8 @@ fresh NCP), `network/reset` (confirm `RESET`: automatic backup, leave,
 form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
 `hub/system`, `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
 `hub/mode/set`, `hub/time` / `hub/time/set` (time zone as a POSIX TZ
-string, SNTP servers), `hub/developer/set` (developer mode: the web UI's
+string with an optional IANA name, SNTP servers; the web page picks an IANA
+zone and converts it in the browser), `hub/developer/set` (developer mode: the web UI's
 developer tools, images with the advanced console; event `hub_updated`).
 `hubctl serve` implements the hub side for a desktop
 (credentials and token in memory, its own log tail; `--wifi-channel N` for

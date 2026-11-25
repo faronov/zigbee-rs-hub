@@ -8,12 +8,18 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CannotConnect, HubClient, HubError, InvalidAuth, hub_url
-from .const import CONF_PATH, DEFAULT_PATH, DEFAULT_PORT, DOMAIN
+from .const import CONF_PATH, CONF_SYNC_TIME_ZONE, DEFAULT_PATH, DEFAULT_PORT, DOMAIN
 from .hub import async_fetch_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +41,12 @@ class ZigbeeRsHubConfigFlow(ConfigFlow, domain=DOMAIN):
     """Manual set-up (the hub does not advertise itself over mDNS yet)."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Options of an entry."""
+        return ZigbeeRsHubOptionsFlow()
 
     async def _probe(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Connect, authenticate and read the identity; raises `HubError`."""
@@ -79,6 +91,7 @@ class ZigbeeRsHubConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=f"zigbee-rs hub ({user_input[CONF_HOST]})",
                     data={**user_input, CONF_PATH: DEFAULT_PATH},
+                    options={CONF_SYNC_TIME_ZONE: True},
                 )
         return self.async_show_form(
             step_id="user", data_schema=_schema(user_input or {}), errors=errors
@@ -124,4 +137,18 @@ class ZigbeeRsHubConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reconfigure",
             data_schema=_schema(user_input or entry.data),
             errors=errors,
+        )
+
+
+class ZigbeeRsHubOptionsFlow(OptionsFlow):
+    """Whether the hub takes Home Assistant's time zone."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """The options form."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+        current = self.config_entry.options.get(CONF_SYNC_TIME_ZONE, False)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({vol.Required(CONF_SYNC_TIME_ZONE, default=current): bool}),
         )

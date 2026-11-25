@@ -344,7 +344,7 @@ const vm=require("vm"),S=JSON.parse(require("fs").readFileSync(0,"utf8"));
 const any=()=>new Proxy(function(){},{get:(t,k)=>k===Symbol.toPrimitive?()=>"":k=="then"?undefined:any(),set:()=>true,apply:()=>any(),construct:()=>any()});
 for(const order of [S.modules,S.modules.slice().reverse()]){
  const g={console,setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,document:any(),navigator:{},localStorage:{getItem:()=>null,setItem(){},removeItem(){}},sessionStorage:{},
-  location:{hash:"",protocol:"http:",host:"hub",pathname:"/",reload(){throw Error("reload")}},history:{replaceState(){}},addEventListener(){},WebSocket:function(){return any()},
+  location:{hash:"",protocol:"http:",host:"hub",pathname:"/",reload(){throw Error("reload")}},history:{replaceState(){}},addEventListener(){},WebSocket:function(){return any()},Option:function(){},
   fetch:()=>new Promise(()=>{}),Blob:function(){},URL:{createObjectURL:()=>""},btoa:s=>s,atob:s=>s,onbeforeunload:null,confirm:()=>false,prompt:()=>null};
  vm.createContext(g);vm.runInContext(S.page,g,{filename:"index.html"});
  for(const[n,js]of order)vm.runInContext(js,g,{filename:n+".js"});
@@ -419,6 +419,96 @@ for(const k of [0.01,0.1,0.5,2.5,10])for(const c of [0,1,7,50,999])eq(chR(String
 eq(Number.isNaN(chR("x",1,false)),true);
 "#;
         assert!(node(&format!("{helpers}\n{checks}"), ""), "conversion checks failed");
+    }
+
+    /// The time zone picker's IANA → POSIX conversion (`tzPosix`) with this
+    /// Node's Intl data (when Node is installed): rules the hub's parser
+    /// takes (`clock.rs`), checked hour by hour against Intl, and today's
+    /// offset, fixed, for changes on no yearly rule.
+    #[test]
+    fn time_zones_become_posix_rules() {
+        let src = include_str!("../web/index.html");
+        let (a, b) = (src.find("const tzF=").unwrap(), src.find("// The zone picked here").unwrap());
+        let checks = r#"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+const t=z=>tzPosix(z,2026);
+// Intl's short names where they are letters, else <+hh[mm]>; times other than 02:00 written out.
+eq(t("Europe/Tallinn"),{tz:"EET-2EEST,M3.5.0/3,M10.5.0/4"});
+eq(t("Europe/Kyiv"),{tz:"EET-2EEST,M3.5.0/3,M10.5.0/4"});
+eq(t("Europe/London"),{tz:"GMT0BST,M3.5.0/1,M10.5.0"});
+eq(t("America/New_York"),{tz:"EST5EDT,M3.2.0,M11.1.0"});
+// A 30 min shift; offsets and times with minutes.
+eq(t("Australia/Lord_Howe"),{tz:"<+1030>-10:30<+11>-11,M10.1.0,M4.1.0"});
+eq(t("Pacific/Chatham"),{tz:"<+1245>-12:45<+1345>,M9.5.0/2:45,M4.1.0/3:45"});
+// Changes a day off the rule's weekday: the Friday before the last Sunday
+// (not the last Friday, which differs in 2028), midnight after the first Saturday.
+eq(t("Asia/Jerusalem"),{tz:"<+02>-2<+03>,M3.4.4/26,M10.5.0"});
+eq(t("America/Santiago"),{tz:"<-04>4<-03>,M9.1.6/24,M4.1.6/24"});
+// No daylight saving time.
+eq(t("America/Sao_Paulo"),{tz:"<-03>3",fixed:false});
+eq(t("Asia/Kolkata"),{tz:"<+0530>-5:30",fixed:false});
+eq(t("UTC"),{tz:"UTC0",fixed:false});
+// 2026 in Morocco: Ramadan changes (and with tzdata 2026c a move to
+// permanent +00 in September) follow no yearly rule: today's offset,
+// fixed; its value and name depend on this Node's data (<+01>-1, WET0).
+const c=t("Africa/Casablanca");eq(c.fixed,true);if(!/^(<[+-]\d\d>|[A-Z]{3,})-?\d$/i.test(c.tz))throw new Error(c.tz);
+"#;
+        use std::io::Write;
+        let Ok(node) = std::process::Command::new("node")
+            .args(["-e", &std::format!("{}\n{checks}", &src[a..b])])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let out = node.wait_with_output().unwrap();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        assert!(out.status.success(), "time zone conversion checks failed");
+    }
+
+    /// The Hub card with a `tz_name` this Intl does not know (the hub took
+    /// it from newer tzdata): the hub facts still load, the hub's own time
+    /// is shown, and Save keeps the name (the page's time code runs in Node
+    /// with stubs of the DOM and the API, when Node is installed).
+    #[test]
+    fn unknown_time_zone_names_are_kept() {
+        let src = include_str!("../web/index.html");
+        let a = src.find("const tzF=").unwrap();
+        let b = a + src[a..].find("$(\"#tzb\").onclick=").unwrap();
+        let b = b + src[b..].find('\n').unwrap();
+        let mock = r##"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+const E={},$=s=>E[s]||(E[s]={value:"",textContent:"",classList:{add(){}},append(){}}),document={activeElement:null};
+globalThis.Option=function(v){this.value=v};
+let sys=0,sent,toasts=[];const loadSys=()=>sys++,toast=m=>toasts.push(m),busy=(_,p)=>p;
+const HUB={tz:"EET-2EEST,M3.5.0/3,M10.5.0/4",local:"2026-11-25 10:00:00",time_synced:true,servers:["pool.ntp.org"]};
+let rec;const call=async()=>rec,act=async(t,p)=>{sent=p;return rec};
+"##;
+        let checks = r##"
+(async()=>{
+ for(const [name,shown] of [["Mars/Olympus_Mons","Hub time 2026-11-25 10:00:00"],["Europe/Tallinn","Hub time with Europe/Tallinn: 20"]]){
+  rec=Object.assign({tz_name:name},HUB);sys=0;toasts=[];
+  loadTime();await new Promise(r=>setTimeout(r));
+  eq([sys,$("#tzn").value,$("#tzm").textContent.startsWith(shown)],[1,name,true]);
+  await $("#tzb").onclick({target:{}});
+  eq([sent.tz,sent.tz_name,toasts,sys,$("#tzm").textContent.startsWith(shown)],[HUB.tz,name,["Time zone saved"],2,true]);
+ }
+})().catch(e=>{console.error(e);process.exit(1)});
+"##;
+        let js = std::format!("{mock}\n{}\n{checks}", &src[a..b]);
+        use std::io::Write;
+        let Ok(node) = std::process::Command::new("node")
+            .args(["-e", &js])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let out = node.wait_with_output().unwrap();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        assert!(out.status.success(), "unknown time zone name checks failed");
     }
 
     /// Shard fetches against an older installed manifest (the mirror moved

@@ -12,6 +12,9 @@ DOMAIN: Final = "zigbee_rs_hub"
 DEFAULT_PORT: Final = 80
 DEFAULT_PATH: Final = "/api"
 CONF_PATH: Final = "path"
+# Option: give the hub Home Assistant's time zone (`hub/time/set`); on for
+# entries made since, off for older ones.
+CONF_SYNC_TIME_ZONE: Final = "sync_time_zone"
 
 # Subscription topics (device-support spec 14.1).
 TOPICS: Final = ["devices", "entities", "events"]
