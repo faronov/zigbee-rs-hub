@@ -104,9 +104,10 @@ pub const TOP_EXT: &[(u16, &str)] = &[(64, "x-partial")];
 pub const CLAUSE_EXT: &[(u16, &str)] = &[(64, "x-priority"), (65, "x-white-label")];
 
 /// Keys of a white-label entry in the extension range: `64 model_id`
-/// (Basic ModelIdentifiers that select it). Hubs before it ignore the key
-/// and select the white label by manufacturer name only, as before.
-pub const WHITE_LABEL_EXT: &[(u16, &str)] = &[(64, "model_id")];
+/// (Basic ModelIdentifiers that select it) and `65 sw_build` (Basic
+/// SWBuildIDs that select it). Hubs before a key ignore it and select the
+/// white label by the lists they know, as before.
+pub const WHITE_LABEL_EXT: &[(u16, &str)] = &[(64, "model_id"), (65, "sw_build")];
 
 /// Part names usable as keys of `parts` (a subset of [`SUB`]).
 pub const PART_NAMES: &[&str] = &[

@@ -275,7 +275,7 @@ Precedence rules:
   the definitions repository (`tools/conformance/zhc-vectors.cjs`: zhc's
   `findByDevice` choice for every fingerprint, zigbeeModel and white-label
   fingerprint) against all shard records of a built catalog. zhc 26.130.0:
-  5,703 of the 5,726 vectors whose definition this hub can load pick zhc's
+  5,720 of the 5,726 vectors whose definition this hub can load pick zhc's
   definition and white label; 1,833 more need features the hub lacks.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
@@ -768,7 +768,7 @@ in `definitions/examples/`.
 | `vendor`, `model` | string | yes | display identity (HA device manufacturer/model) |
 | `description` | string | no | stripped from catalog banks (fetched with the UI help) |
 | `match` | list | yes | match clauses, OR-ed (6.2) |
-| `white_label` | list | no | `{vendor, model, manufacturer: [names], model_id: [names]}`; the first entry whose lists all contain the device's Basic names (at least one list given) sets the display identity |
+| `white_label` | list | no | `{vendor, model, manufacturer: [names], model_id: [names], sw_build: [names]}`; the first entry whose lists all contain the device's Basic names (ManufacturerName, ModelIdentifier, SWBuildID 0x4000; at least one list given) sets the display identity |
 | `requires` | list | no | hub features needed (8.5); computed by the compiler, may be written |
 | `priority` | int | no | tie-break between equal scores (3.3) |
 | `device` | map | no | `power` (mains/battery/energy_harvesting), `sleepy`, `battery` (`voltage_to_percent: [min_mV, max_mV]` linear, or a named curve `3V_2100`, `3V_1500_2800`, `CR2032`), `checkin_s`, `availability` (`timeout_s`), `ota` (bool) |
@@ -1256,9 +1256,10 @@ canonical CBOR with text keys): top level `64 x-partial` (the generator's
 "partially translated" marker), match clause `64 x-priority` (zhc's
 definition priority) and `65 x-white-label` (`true`: the clause only lists
 white-label manufacturer names and scores as if it had none, 3.3). A
-white-label entry's `model_id` list is key 64 of its map, in the extension
-range, so hubs before it skip it (they select the white label by
-manufacturer name only) instead of rejecting the definition. Other
+white-label entry's `model_id` and `sw_build` lists are keys 64 and 65 of
+its map, in the extension range, so hubs before them skip them (they select
+the white label by the lists they know: manufacturer names, then model IDs)
+instead of rejecting the definition. Other
 keys 64–127 have no source form; the decoder
 keeps them (top level, match clause, entity) so a decode/encode round trip
 is lossless, and ignores them otherwise.

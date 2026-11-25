@@ -618,6 +618,7 @@ pub fn schema() -> Node {
                     ("model", ty("string")),
                     ("manufacturer", list_of(ty("string"))),
                     ("model_id", list_of(ty("string"))),
+                    ("sw_build", list_of(ty("string"))),
                 ],
                 &[],
             )),
