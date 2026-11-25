@@ -1414,8 +1414,23 @@ impl Callback {
         }
     }
 
-    /// Host side.
+    /// Host side: [`decode_with_trailing`](Self::decode_with_trailing)
+    /// without the count of bytes past the known fields.
     pub fn decode(frame_id: u16, v: EzspVersion, params: &[u8]) -> Result<Callback, DecodeError> {
+        Self::decode_with_trailing(frame_id, v, params).map(|(cb, _)| cb)
+    }
+
+    /// Host side, and how many bytes followed the fields this crate knows.
+    /// They are ignored, as the SDK host's `command-functions.h` reads a
+    /// callback's fields and never checks for more: SONOFF's EmberZNet
+    /// 7.4.5 NCP (Dongle Max) appends a byte (0x02) to
+    /// `incomingMessageHandler` for a device that joined in the NCP's
+    /// session; refused, every frame of such a device was lost.
+    pub fn decode_with_trailing(
+        frame_id: u16,
+        v: EzspVersion,
+        params: &[u8],
+    ) -> Result<(Callback, usize), DecodeError> {
         let mut r = Reader::new(params);
         let cb = match frame_id {
             id::STACK_STATUS_HANDLER => Callback::StackStatus {
@@ -1523,14 +1538,16 @@ impl Callback {
                 }
             }
             _ => {
-                return Ok(Callback::Unknown {
-                    frame_id,
-                    params: params.to_vec(),
-                });
+                return Ok((
+                    Callback::Unknown {
+                        frame_id,
+                        params: params.to_vec(),
+                    },
+                    0,
+                ));
             }
         };
-        r.finish()?;
-        Ok(cb)
+        Ok((cb, r.remaining()))
     }
 
     /// NCP side.

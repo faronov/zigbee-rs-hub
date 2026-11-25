@@ -341,6 +341,26 @@ pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>, registry: 
         }
         o["ncp"] = ncp_o;
     }
+    // What the NCP holds (EZSP: the configuration values it took).
+    if let Some(c) = &st.caps {
+        let t = &c.tables;
+        let mut cap = json!({"in_flight": c.max_in_flight, "asdu": c.max_asdu});
+        for (k, v) in [
+            ("hub_groups", t.multicast),
+            ("address_table", t.address_map),
+            ("children", t.children),
+            ("neighbors", t.neighbors),
+            ("routes", t.routes),
+            ("source_routes", t.source_routes),
+            ("bindings", t.bindings),
+            ("link_keys", t.link_keys),
+        ] {
+            if let Some(v) = v {
+                cap[k] = v.into();
+            }
+        }
+        o["capacity"] = cap;
+    }
     o
 }
 

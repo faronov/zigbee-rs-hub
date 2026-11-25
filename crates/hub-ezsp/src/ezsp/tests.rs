@@ -1017,7 +1017,8 @@ fn session_correlates_and_classifies() {
         s.on_frame(&cb_frame),
         Ok(Inbound::Callback {
             callback: cb,
-            flags: Flags::default()
+            flags: Flags::default(),
+            trailing: 0,
         })
     );
     assert_eq!(s.outstanding(), Some(seq));
@@ -1127,4 +1128,65 @@ fn session_correlates_and_classifies() {
         s.on_frame(&hex("00 98 01 19 00 00 00 00 00")),
         Err(SessionError::ReservedCallbackType)
     );
+}
+
+/// Frames from SONOFF's EmberZNet 7.4.5 NCP (Dongle Max, EZSP 13), as
+/// captured: `incomingMessageHandler` of a device that joined in the NCP's
+/// session carries one byte (0x02) after the message. The SDK host reads
+/// the fields and ignores it; refusing the frame lost every response of the
+/// device (its interview ended `partial` with nothing learned).
+#[test]
+fn incoming_messages_with_a_trailing_byte_are_taken() {
+    let mut s = Session::new();
+    s.set_version(v(13));
+    // Node_Desc_rsp (ZDO 0x8002, TSN 1) from 0x12D2, an end device.
+    let node_desc = hex(
+        "62 90 01 45 00 00 00 00 02 80 00 00 40 00 00 00 01 FF E7 D2 12 FF FF 11 \
+         01 00 D2 12 02 40 80 00 00 7F 7F 00 00 2C 7F 00 00 02",
+    );
+    match s.on_frame(&node_desc) {
+        Ok(Inbound::Callback {
+            callback:
+                Callback::IncomingMessage {
+                    kind,
+                    aps,
+                    info,
+                    message,
+                },
+            trailing,
+            ..
+        }) => {
+            assert_eq!(kind, IncomingMessageType::UNICAST);
+            assert_eq!((aps.profile_id, aps.cluster_id), (0x0000, 0x8002));
+            assert_eq!((aps.source_endpoint, aps.destination_endpoint), (0, 0));
+            assert_eq!(aps.options, ApsOptions::RETRY);
+            assert_eq!(aps.sequence, 1);
+            assert_eq!((info.last_hop_lqi, info.last_hop_rssi), (0xFF, -25));
+            assert_eq!(info.sender, 0x12D2);
+            assert_eq!(message.len(), 17);
+            assert_eq!(
+                &message[..4],
+                &[0x01, 0x00, 0xD2, 0x12],
+                "TSN, status, NWK address"
+            );
+            assert_eq!(trailing, 1);
+        }
+        other => panic!("{other:?}"),
+    }
+    // Its Device_annce broadcast (ZDO 0x0013).
+    let annce = hex(
+        "62 90 01 45 00 04 00 00 13 00 00 00 00 00 00 00 00 FF E8 D2 12 FF FF 0C \
+         F2 D2 12 88 96 F6 00 00 F9 55 60 80 02",
+    );
+    assert!(matches!(
+        s.on_frame(&annce),
+        Ok(Inbound::Callback {
+            callback: Callback::IncomingMessage { kind: IncomingMessageType::BROADCAST, ref message, .. },
+            trailing: 1,
+            ..
+        }) if message.len() == 12 && message[3..11] == [0x88, 0x96, 0xF6, 0x00, 0x00, 0xF9, 0x55, 0x60]
+    ));
+    // A message that is cut short still fails.
+    let cut = &node_desc[..node_desc.len() - 3];
+    assert!(matches!(s.on_frame(cut), Ok(Inbound::BadCallback { .. })));
 }

@@ -493,8 +493,9 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             gp_commissioning: false,
             permit_join: self.permit_until.is_some(),
         });
-        let ash = self.host.ash().stats().clone();
-        let host = self.host.stats().clone();
+        let c = self.host.counters();
+        let (ash, host) = (&c.ash, &c.host);
+        let t = self.start.unwrap_or_default();
         let link = [
             (0x0101, "tx_data", ash.tx_data),
             (0x0102, "tx_retransmissions", ash.tx_retransmit),
@@ -509,6 +510,22 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             (0x010B, "resets", ash.resets),
             (0x010C, "rx_xoff", ash.rx_xoff),
             (0x010D, "xoff_timeouts", ash.xoff_timeouts),
+            (0x010E, "rx_ack", ash.rx_ack),
+            (
+                0x010F,
+                "rx_bad_frames",
+                ash.rx_bad_control
+                    + ash.rx_bad_length
+                    + ash.rx_bad_ack_num
+                    + ash.rx_too_short
+                    + ash.rx_too_long,
+            ),
+            (
+                0x0110,
+                "rx_discarded",
+                ash.rx_discarded + ash.rx_cancelled + ash.rx_substituted,
+            ),
+            (0x0111, "rx_stale_rstack", ash.rx_stale_rstack),
             (0x0201, "commands", host.commands),
             (0x0202, "callbacks", host.callbacks),
             (0x0203, "dropped_callbacks", host.dropped_callbacks),
@@ -517,12 +534,30 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             (0x0206, "devices_left", self.stats.devices_left),
             (0x0207, "route_records", self.stats.route_records),
             (0x0208, "gp_frames_ignored", self.stats.gp_frames),
+            (0x0209, "failed_starts", self.failed_starts),
+            (0x020A, "bad_frames", host.bad_frames),
+            (0x020B, "unexpected_responses", host.unexpected_responses),
+            (0x020C, "callbacks_trailing", host.callbacks_trailing),
+            (0x0301, "uart_overruns", c.line.overruns),
+            (0x0302, "uart_line_errors", c.line.errors),
+            (0x0401, "start_ms", t.total_ms),
+            (0x0402, "start_reset_ms", t.reset_ms),
+            (0x0403, "start_version_ms", t.version_ms),
+            (0x0404, "start_config_ms", t.config_ms),
+            (0x0405, "start_setup_ms", t.setup_ms),
+            (0x0406, "start_network_ms", t.network_ms),
+            (0x0407, "start_rest_ms", t.rest_ms),
         ];
         d.host_link = link
             .into_iter()
             .map(|(id, name, value)| DiagCounter {
                 id,
-                group: if id < 0x0200 { "link" } else { "host" },
+                group: match id >> 8 {
+                    1 => "link",
+                    2 => "host",
+                    3 => "uart",
+                    _ => "start",
+                },
                 name: Some(name),
                 value,
             })

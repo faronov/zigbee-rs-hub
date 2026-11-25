@@ -1379,6 +1379,8 @@ impl Runner {
             #[cfg(feature = "ota")]
             self.ota.set_asdu(st.caps.as_ref().map(|c| u32::from(c.max_asdu)));
             self.set_maintenance(st.caps.as_deref());
+            // The hub endpoint's groups: as many as the NCP's group table holds.
+            self.engine.cfg.hub_groups_max = st.caps.as_ref().and_then(|c| c.tables.multicast);
         }
         // Group memberships of the hub endpoint, once per NCP session.
         if self.registered && ready && verified && self.groups_for != cookie {

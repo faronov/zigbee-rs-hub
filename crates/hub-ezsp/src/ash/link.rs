@@ -677,6 +677,26 @@ impl Ash {
                     if rst_pending || reset_code != ResetCode::SOFTWARE.0 {
                         self.stats.rx_discarded += 1;
                         self.stats.rx_stale_rstack += 1;
+                        // UNVERIFIED (EmberZNet 7.4.5 on the Dongle Max:
+                        // an RST in its first ~0.2 s after nRESET is lost):
+                        // the NCP announced its own boot after our RST went
+                        // out, so it was still starting and did not see the
+                        // RST. Send it again now (one attempt) instead of
+                        // waiting out the RSTACK timeout (3.2 s).
+                        if let State::Resetting {
+                            attempt,
+                            rst_pending: false,
+                            ..
+                        } = self.state
+                            && reset_code != ResetCode::SOFTWARE.0
+                            && attempt < self.cfg.reset_retries
+                        {
+                            self.state = State::Resetting {
+                                attempt: attempt + 1,
+                                rst_pending: true,
+                                deadline: None,
+                            };
+                        }
                     } else if version != ASH_VERSION {
                         self.fail(FailReason::AshVersion(version));
                     } else {

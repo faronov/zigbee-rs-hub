@@ -49,7 +49,13 @@ pub enum Inbound {
         flags: Flags,
     },
     /// An asynchronous (or synchronous) callback.
-    Callback { callback: Callback, flags: Flags },
+    Callback {
+        callback: Callback,
+        flags: Flags,
+        /// Bytes after the fields the callback is known to have (ignored,
+        /// [`Callback::decode_with_trailing`]).
+        trailing: usize,
+    },
     /// A callback that did not decode; dropped.
     BadCallback {
         frame_id: u16,
@@ -219,10 +225,15 @@ impl Session {
                     params: params.to_vec(),
                 },
                 flags,
+                trailing: 0,
             };
         };
-        match Callback::decode(h.frame_id, v, params) {
-            Ok(callback) => Inbound::Callback { callback, flags },
+        match Callback::decode_with_trailing(h.frame_id, v, params) {
+            Ok((callback, trailing)) => Inbound::Callback {
+                callback,
+                flags,
+                trailing,
+            },
             Err(error) => Inbound::BadCallback {
                 frame_id: h.frame_id,
                 error,

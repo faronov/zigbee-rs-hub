@@ -46,6 +46,10 @@ pub struct HubConfig {
     pub gp_group: u16,
     /// The hub's clock for the Time cluster server (the app keeps it current).
     pub clock: Clock,
+    /// Groups the hub endpoint can be a member of: the coordinator's group
+    /// (multicast) table, from the backend's capabilities (`None`: not
+    /// known, no limit).
+    pub hub_groups_max: Option<u16>,
 }
 
 /// What the Time cluster (0x000A) server on the hub endpoint reports.
@@ -73,6 +77,7 @@ impl Default for HubConfig {
             tz_offset_s: 0,
             gp_group: 0x0B84,
             clock: Clock::default(),
+            hub_groups_max: None,
         }
     }
 }

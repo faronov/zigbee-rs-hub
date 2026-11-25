@@ -5,12 +5,12 @@ backend for Silicon Labs EmberZNet NCPs: `hub-coord`'s `Coordinator` and
 `NetworkAdmin` over the ASH + EZSP host of `hub-ezsp`. Design:
 `docs/coordinator-boundary.md` §2, §3, §5.
 
-**Status: host-tested only**, against the simulated NCP of `hub_ezsp::sim`.
-The hub app runs on it (hub-app feature `ezsp`, `Backend::ezsp`, PR H1;
-"In the hub app" below), on the desktop with `hubctl --backend ezsp --sim`,
-and in the SONOFF Dongle Max image `zrh-donglem` (PR H2,
-`docs/dongle-max.md`), not run against hardware yet (HIL on the Dongle Max
-is a follow-up).
+**Status: host-tested** against the simulated NCP of `hub_ezsp::sim`, and
+**running on one SONOFF Dongle Max** (stock EmberZNet 7.4.5 NCP; "On the
+Dongle Max" below). The hub app runs on it (hub-app feature `ezsp`,
+`Backend::ezsp`, PR H1; "In the hub app" below), on the desktop with
+`hubctl --backend ezsp --sim`, and in the SONOFF Dongle Max image
+`zrh-donglem` (PR H2, `docs/dongle-max.md`).
 
 ## Target
 
@@ -38,6 +38,42 @@ yet this backend) confirmed:
 - 115 200 Bd without flow control: no retransmission, NAK or CRC error over
   the probe's exchanges.
 - Gecko Bootloader v2.04.02 (for the firmware update follow-up).
+
+### On the Dongle Max (the backend in `zrh-donglem`)
+
+- **Session start: 2.6 s** from the hub's start to `Session::Up` with the
+  network up (reset 2.2 s, version 10 ms, configuration 0.2 s, policies and
+  endpoints 30 ms, `networkInit` 20 ms, the rest 80 ms; `hub` on the
+  console). It took ~52 s first: the gateway's UART read asked ESP-IDF's
+  `uart_read_bytes` for 256 bytes, which returns only when they have come
+  or the line has been quiet for the whole timeout, so every short frame
+  (ACK, response) waited up to 1 s (`firmware/gateway/src/uart.rs` now
+  returns what is buffered once the first byte is in).
+- **RST and RSTACK**: an idle NCP answers RST after 1.14 s (it reboots). An
+  RST in the first ~0.2 s after the MG24's nRESET is lost; the NCP then
+  announces its own boot (RSTACK with a hardware reset code) and the host
+  sends RST again at once instead of after the 3.2 s RSTACK timeout
+  (`Ash::reset`; 4.3 s → 2.2 s).
+- **Configuration values of SONOFF's image** (`mg24 ezsp config` in a
+  bring-up boot): neighbors 26, APS unicasts 32, bindings 32, address
+  table 8, multicast table 8, routes 16, discovery 8, children 32, source
+  routes 200, key table 12, trust center address cache 0, broadcasts 15,
+  GP proxy 5 / sink 0, indirect transmission 3000 ms, stack profile 0. The
+  NCP's memory takes no more: multicast 16 and address table 16 are refused
+  with `ERROR_OUT_OF_MEMORY` (address table 12 fits), the trust center
+  address cache stays 0. The hub's groups are limited to the 8 multicast
+  entries ("Capabilities").
+- **`incomingMessageHandler` with a trailing byte**: for a device that
+  joined in the NCP's current session the NCP appends one byte (0x02 every
+  time; not documented, the SDK host reads the fields and ignores it). The
+  backend refused such frames as malformed, so every frame of a freshly
+  joined device was lost and its interview ended `partial` with nothing
+  learned, while ZDO requests went out and were acknowledged. Bytes after
+  the known fields of a callback are now ignored and counted
+  (`callbacks_trailing`; `Callback::decode_with_trailing`); a regression
+  test feeds the captured frames.
+- 115 200 Bd without flow control: no retransmission, NAK, CRC error or
+  UART overrun over a session start, joins and interviews.
 
 ## Versions
 
@@ -90,7 +126,8 @@ failed. The worker waits on the UART in slices of `EzspOptions::poll`
 Every session begins with an NCP reset, because EmberZNet keeps the EZSP
 state (configuration, endpoints, policies, multicast table) in RAM:
 
-1. ASH reset (Cancel + RST, RSTACK) and the version exchange.
+1. ASH reset (Cancel + RST, RSTACK; RST again at once when the NCP
+   announces its own boot after it) and the version exchange.
 2. `getValue(VERSION_INFO)` for the firmware string (build, major, minor,
    patch, special, type: `ezspGetVersionStruct`, Gecko SDK 4.4.6 `ezsp.c`).
 3. Configuration values (below), read back for the capabilities.
@@ -115,27 +152,36 @@ every 30 s.
 
 ## Configuration values
 
-Set before `networkInit`; a value the NCP refuses (no RAM) is logged, and
-the capabilities report what it took.
+Set before `networkInit`, in this order (`DEFAULT_CONFIG`). The tables come
+last, by priority, and are **capacities**: the hub asks for at least so
+many and never lowers a larger value of the NCP's own; a value the NCP's
+memory does not hold (`ERROR_OUT_OF_MEMORY`) is fitted: the largest of at
+most 8 values between the NCP's own and the asked one it accepts, tried
+from the top (a refusal costs nothing, only the accepted value takes
+memory), else the NCP's own. The outcome is logged once at info and kept:
+after an NCP reset the next session sets it with one command. The other
+values are set as they are (a refusal is logged). The values are read back
+for the capabilities; `hub` and `network/diagnostics` list what did not
+fit.
 
-| Value | Set to | Why |
-|---|---|---|
-| `STACK_PROFILE` | 2 | ZigBee PRO (default, explicit) |
-| `SECURITY_LEVEL` | 5 | NWK encryption + MIC (default, explicit) |
-| `SUPPORTED_NETWORKS` | 1 | RAM for the tables |
-| `APPLICATION_ZDO_FLAGS` | 0x01 | supported ZDO requests (device announcements) reach the host; the NCP still answers them |
-| `APS_UNICAST_MESSAGE_COUNT` | 32 | acknowledged unicasts in flight (default 10) |
-| `BROADCAST_TABLE_SIZE` | 15 | spec value |
-| `NEIGHBOR_TABLE_SIZE` | 16 | default |
-| `MAX_END_DEVICE_CHILDREN` | 32 | direct children of the coordinator |
-| `SOURCE_ROUTE_TABLE_SIZE` | 200 | the NCP keeps the source routes (high-RAM concentrator); the host keeps none |
-| `ADDRESS_TABLE_SIZE` | 16 | EUI64 ↔ short address entries |
-| `TRUST_CENTER_ADDRESS_CACHE_SIZE` | 4 | near-simultaneous joins (default 2) |
-| `MULTICAST_TABLE_SIZE` | 16 | hub group memberships |
-| `INDIRECT_TRANSMISSION_TIMEOUT` | 7680 ms | spec default for sleepy children |
-| `END_DEVICE_POLL_TIMEOUT` | 8 (2⁸ min) | end devices that negotiate no timeout |
-| `MAX_HOPS` | 30 | default |
-| `TRANSIENT_KEY_TIMEOUT_S` | 300 s | longer than the longest permit-join window (254 s) |
+| Value | Set to | Why | Dongle Max (SONOFF's image → taken) |
+|---|---|---|---|
+| `SUPPORTED_NETWORKS` | 1 | RAM for the tables | 1 |
+| `STACK_PROFILE` | 2 | ZigBee PRO (explicit) | 0 → 2 |
+| `SECURITY_LEVEL` | 5 | NWK encryption + MIC (default, explicit) | 5 |
+| `APPLICATION_ZDO_FLAGS` | 0x01 | supported ZDO requests (device announcements) reach the host; the NCP still answers them | 0 → 0x01 |
+| `INDIRECT_TRANSMISSION_TIMEOUT` | 7680 ms | spec default for sleepy children | 3000 → 7680 |
+| `END_DEVICE_POLL_TIMEOUT` | 8 (2⁸ min) | end devices that negotiate no timeout | 8 |
+| `MAX_HOPS` | 30 | default | 30 |
+| `TRANSIENT_KEY_TIMEOUT_S` | 300 s | longer than the longest permit-join window (254 s) | 300 |
+| `MULTICAST_TABLE_SIZE` | ≥ 16 | hub group memberships (`network/info` `capacity.hub_groups`) | 8 (16 does not fit) |
+| `ADDRESS_TABLE_SIZE` | ≥ 16 | EUI64 ↔ short address entries | 8 → 12 |
+| `TRUST_CENTER_ADDRESS_CACHE_SIZE` | ≥ 4 | near-simultaneous joins (UG100 default 2) | 0 (nothing fits) |
+| `MAX_END_DEVICE_CHILDREN` | ≥ 32 | direct children of the coordinator | 32 |
+| `APS_UNICAST_MESSAGE_COUNT` | ≥ 32 | acknowledged unicasts in flight (UG100 default 10) | 32 |
+| `NEIGHBOR_TABLE_SIZE` | ≥ 16 | default | 26 (kept) |
+| `BROADCAST_TABLE_SIZE` | ≥ 15 | spec value | 15 |
+| `SOURCE_ROUTE_TABLE_SIZE` | ≥ 200 | the NCP keeps the source routes (high-RAM concentrator); the host keeps none; last: the largest table takes what is left | 200 |
 
 `PACKET_BUFFER_COUNT` is not set: EmberZNet 7.4 sizes packet buffers at
 build time ("The NCP no longer supports configuration of packet buffer count
@@ -215,9 +261,16 @@ explicit force removal of unreachable or sleepy children, is a follow-up.
 
 `backend: Ezsp`, `ownership: NcpNv`, `max_in_flight` =
 `APS_UNICAST_MESSAGE_COUNT`, `max_asdu` = `maximumPayloadLength`, table
-sizes from the configuration values, group membership, energy/active scan,
-channel change and TX power, diagnostics. No fragmentation, Green Power,
-coexistence, backup or firmware update yet.
+sizes from the configuration values the NCP took, group membership,
+energy/active scan, channel change and TX power, diagnostics. No
+fragmentation, Green Power, coexistence, backup or firmware update yet.
+
+The application shows the capacities in `network/info` (`capacity`:
+`in_flight`, `asdu`, `hub_groups`, `address_table`, `children`,
+`neighbors`, `routes`, `source_routes`, `bindings`, `link_keys`) and limits
+the hub endpoint's groups to the multicast table: `groups/create` or
+`groups/update` with the hub as a member is refused `no_space` once it is
+a member of that many groups (groups without the hub are not limited).
 
 ## Identity and ownership
 
@@ -319,9 +372,17 @@ applied in every session (`EzspOptions::tx_power`). A device leave
 ## Diagnostics
 
 The EmberZNet counters (`readCounters`, or `readAndClearCounters` with
-reset) by name, the NWK frame counter, and host counters (ASH frames,
-retransmissions, XOFF, EZSP commands and callbacks, NCP overflows, sessions,
-devices left, route records, GP frames ignored).
+reset) by name, the NWK frame counter, and host counters: ASH frames,
+retransmissions, ACKs, NAKs, CRC and other bad frames, discarded and stale
+RSTACKs, XOFF; EZSP commands, callbacks, callbacks with trailing bytes, bad
+frames and unexpected responses; NCP overflows, sessions, failed starts,
+devices left, route records, GP frames ignored; the UART driver's overruns
+and line errors (`Transport::line_errors`); and the last session start,
+phase by phase (`start_ms`, `start_reset_ms`, `start_version_ms`,
+`start_config_ms`, `start_setup_ms`, `start_network_ms`, `start_rest_ms`).
+The same, with the configuration values that did not fit, is in
+`EzspOptions::link` (`LinkReport`, refreshed about once a second) for a
+firmware console: `hub` on the Dongle Max.
 
 ## Not verified, known gaps
 
@@ -368,9 +429,10 @@ devices left, route records, GP frames ignored).
    claimed `files` region; `docs/dongle-max.md`). Done in H1: the hub-app
    `ezsp` feature, the `NcpNv` ownership decision, the TX power kept
    across restarts.
-6. HIL on the Dongle Max: session start on the stock "1.0.0" image, XON/XOFF
-   on the 115 200 Bd line, key export, permit join with real devices,
-   channel change, callback bursts and the capacities the NCP accepts.
+6. HIL on the Dongle Max, still open: XON/XOFF on the 115 200 Bd line, key
+   export, channel change, callback bursts, more devices (done: session
+   start, capacities, permit join, join and interview of a sleepy end
+   device).
 
 ## Sources
 

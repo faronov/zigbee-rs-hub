@@ -139,10 +139,32 @@ pub fn baud() -> u32 {
 }
 
 /// Read what is buffered, waiting up to `ms` for the first byte.
+/// `uart_read_bytes` itself returns only once `buf` is full or the line
+/// has been quiet for its whole timeout: asked for 256 bytes it held every
+/// short ASH frame (ACK, EZSP response) until the timeout, up to 1 s per
+/// command. So: one byte with the timeout, then what the ring holds,
+/// without waiting (as `firmware/bridge`).
 pub fn read(buf: &mut [u8], ms: u32) -> io::Result<usize> {
     let p = port().ok_or_else(not_installed)?;
-    let n = unsafe { sys::uart_read_bytes(p, buf.as_mut_ptr().cast(), buf.len() as u32, ms) };
-    if n < 0 { Err(io::Error::other("uart_read_bytes failed")) } else { Ok(n as usize) }
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let ticks = ms.saturating_mul(sys::configTICK_RATE_HZ) / 1000;
+    let n = unsafe { sys::uart_read_bytes(p, buf.as_mut_ptr().cast(), 1, ticks.max(u32::from(ms > 0))) };
+    if n < 0 {
+        return Err(io::Error::other("uart_read_bytes failed"));
+    }
+    if n == 0 {
+        return Ok(0);
+    }
+    let mut avail: usize = 0;
+    unsafe { sys::uart_get_buffered_data_len(p, &mut avail) };
+    let more = avail.min(buf.len() - 1);
+    if more == 0 {
+        return Ok(1);
+    }
+    let m = unsafe { sys::uart_read_bytes(p, buf[1..].as_mut_ptr().cast(), more as u32, 0) };
+    Ok(1 + m.max(0) as usize)
 }
 
 /// Write every byte (blocks while the TX ring is full).

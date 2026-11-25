@@ -14,7 +14,7 @@ use hub_app::catalog::data::DataFlash;
 use hub_app::{App, AppConfig, Backend, CatalogSetup, OtaFlash, SessionSink};
 use hub_core::profile::BoardProfile;
 use hub_ezsp::SystemClock;
-use hub_ezsp::coord::EzspOptions;
+use hub_ezsp::coord::{EzspOptions, LinkReport};
 use hub_store::Store;
 use log::{error, info, warn};
 use zrh_espapp::cpu;
@@ -25,6 +25,8 @@ use crate::{ezsp, files, platform, settings, update};
 /// The running application.
 pub static APP: OnceLock<App> = OnceLock::new();
 static MQTT: OnceLock<hub_mqtt::MqttService> = OnceLock::new();
+/// What the EZSP worker reports of the link (`hub` on the console).
+static LINK: OnceLock<Arc<Mutex<LinkReport>>> = OnceLock::new();
 
 /// Stack of the application thread (engine handlers, serde_json), as on
 /// the S3.
@@ -114,7 +116,8 @@ pub fn start(board: &BoardProfile) -> Option<App> {
             extra_keys: Vec::new(),
         });
     }
-    let opts = EzspOptions { baud: board.uart.line.baud, flow_control: board.uart.line.flow, ..Default::default() };
+    let link = LINK.get_or_init(Arc::default).clone();
+    let opts = EzspOptions { baud: board.uart.line.baud, flow_control: board.uart.line.flow, link: Some(link), ..Default::default() };
     let backend = Backend::ezsp(port, SystemClock::default(), opts, store);
     let app = cpu::named(c"hub-app", || App::start_backend(backend, cfg, catalog));
     app.add_hook(Box::new(files::StorageHook));
@@ -204,5 +207,25 @@ pub fn status_text() -> String {
         a.aps.not_delivered,
         a.aps.unconfirmed,
         files::ram_only_reason().map_or("files region".into(), |why| format!("!!! RAM only, lost at every restart: {why}")),
-    )
+    ) + &link_text()
+}
+
+/// The EZSP link: sessions, the last start's phases, counters, and the
+/// configuration values that did not fit the NCP.
+fn link_text() -> String {
+    let Some(r) = LINK.get().map(|l| l.lock().unwrap_or_else(|p| p.into_inner()).clone()) else {
+        return String::new();
+    };
+    let mut s = format!(
+        "ezsp: {} session(s), {} failed start(s); last start {}\r\nezsp link: {}\r\n",
+        r.sessions,
+        r.failed_starts,
+        r.start.map_or("none yet".into(), |t| t.to_string()),
+        r.counters,
+    );
+    if !r.fitted.is_empty() {
+        let f: Vec<String> = r.fitted.iter().map(|f| format!("{:?} {} of {}", f.id, f.took, f.asked)).collect();
+        s += &format!("ezsp config (the NCP's memory): {}\r\n", f.join(", "));
+    }
+    s
 }

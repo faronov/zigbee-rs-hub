@@ -1369,6 +1369,32 @@ impl<T: ZigbeeTransport> Hub<T> {
         ids.len()
     }
 
+    /// Refuses one more group with the hub endpoint as a member when the
+    /// coordinator's group table is full ([`HubConfig::hub_groups_max`]).
+    ///
+    /// [`HubConfig::hub_groups_max`]: crate::hub::HubConfig::hub_groups_max
+    fn hub_group_room(&self) -> Result<(), ApiError> {
+        let Some(max) = self.cfg.hub_groups_max else {
+            return Ok(());
+        };
+        let n = self
+            .zg
+            .groups
+            .iter()
+            .filter(|g| g.hub_member && !g.deleting)
+            .count();
+        if n >= usize::from(max) {
+            return Err(ApiError::new(
+                "no_space",
+                format!(
+                    "the coordinator's group table holds {max} groups with the hub as a member: \
+                     use \"hub_member\": false, or take the hub out of another group"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// `groups/create`.
     pub fn group_create(
         &mut self,
@@ -1390,6 +1416,9 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .find(free)
                 .ok_or_else(|| ApiError::new("no_space", "no free group ID"))?,
         };
+        if hub_member {
+            self.hub_group_room()?;
+        }
         self.zg.insert(Group {
             id,
             name: name.to_string(),
@@ -1424,6 +1453,10 @@ impl<T: ZigbeeTransport> Hub<T> {
         hub_member: Option<bool>,
         now: Millis,
     ) -> Result<J, ApiError> {
+        let joins = hub_member == Some(true) && self.group_mut(id).is_ok_and(|g| !g.hub_member);
+        if joins {
+            self.hub_group_room()?;
+        }
         let g = self.group_mut(id)?;
         if let Some(n) = name {
             g.name = n.to_string();

@@ -39,6 +39,17 @@ fn opts() -> EzspOptions {
     }
 }
 
+/// An EZSP 13 NCP whose image has `n` APS unicast slots, and options that
+/// ask for no more (the hub never lowers a table of the NCP's own).
+fn aps_slots(n: u16) -> (SimConfig, EzspOptions) {
+    let mut cfg = sim(13);
+    cfg.config_values = vec![(ConfigId::APS_UNICAST_MESSAGE_COUNT, n)];
+    let mut o = opts();
+    o.config
+        .retain(|(id, _)| *id != ConfigId::APS_UNICAST_MESSAGE_COUNT);
+    (cfg, o)
+}
+
 fn sim(version: u8) -> SimConfig {
     SimConfig {
         ezsp_version: version,
@@ -652,13 +663,67 @@ fn control_requests_are_barriers_and_submit_never_waits() {
     rig.finish();
 }
 
+/// Tables the NCP's memory does not hold as asked: the most that fits is
+/// set (the source route table, last, takes what is left), the
+/// capabilities say what the NCP took, and after an NCP reset the next
+/// session sets the fitted values at once, without trying again.
+#[test]
+fn tables_that_do_not_fit_the_ncp_take_what_fits() {
+    let mut cfg = sim(13);
+    // As SONOFF's image: 26 neighbors, more than the hub asks for (16).
+    cfg.config_values = vec![(ConfigId::NEIGHBOR_TABLE_SIZE, 26)];
+    // The image's tables take 1832 B; everything asked but the source
+    // routes 3000 B: 400 B (50 routes) are left.
+    cfg.table_memory = Some(3400);
+    let mut rig = Rig::with(cfg, opts(), Faults::none(), EVENT_SLOTS);
+    rig.next_up();
+    let caps = rig.coord().status().caps.unwrap();
+    assert_eq!(
+        caps.tables.neighbors,
+        Some(26),
+        "the NCP's own, not lowered"
+    );
+    assert_eq!(caps.tables.multicast, Some(16));
+    assert_eq!(caps.tables.address_map, Some(16));
+    assert_eq!(caps.tables.children, Some(32));
+    assert_eq!(caps.max_in_flight, 32);
+    assert_eq!(caps.tables.source_routes, Some(50), "200 down to what fits");
+    let sets = |c: &[u16]| {
+        c.iter()
+            .filter(|f| **f == id::SET_CONFIGURATION_VALUE)
+            .count()
+    };
+    let first = sets(&rig.commands());
+    // Neighbors (16) and broadcasts (15) are the NCP's own already: not
+    // set.
+    let asked = DEFAULT_CONFIG.len() - 2;
+    // 200, 175, 150, 125, 100 and 75 refused, 50 taken.
+    assert_eq!(first, asked + 6);
+    rig.sim.ncp(|n| n.spontaneous_reset(ResetCode::WATCHDOG));
+    rig.next_up();
+    assert_eq!(
+        sets(&rig.commands()) - first,
+        asked,
+        "one command per value"
+    );
+    assert_eq!(
+        rig.sim
+            .ncp(|n| n.configuration(ConfigId::SOURCE_ROUTE_TABLE_SIZE)),
+        Some(50)
+    );
+    assert_eq!(
+        rig.coord().status().caps.unwrap().tables.source_routes,
+        Some(50)
+    );
+    rig.finish();
+}
+
 /// Acknowledged unicasts beyond the NCP's APS unicast slots wait in the
 /// queue, in order (design §3.6), instead of being refused by the NCP.
 #[test]
 fn unicasts_beyond_the_ncp_slots_wait_in_order() {
-    let mut o = opts();
-    o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 2));
-    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    let (cfg, o) = aps_slots(2);
+    let mut rig = Rig::with(cfg, o, Faults::none(), EVENT_SLOTS);
     rig.next_up();
     assert_eq!(rig.coord().status().caps.unwrap().max_in_flight, 2);
     rig.sim.ncp(|n| n.hold_message_sent(true));
@@ -789,10 +854,9 @@ fn with_a_traffic_gate_queued_requests_do_not_outlive_the_session() {
         )
         .is_ok()
     };
-    let mut o = opts();
-    o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 1));
+    let (cfg, mut o) = aps_slots(1);
     o.traffic = Some(gate.clone());
-    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    let mut rig = Rig::with(cfg, o, Faults::none(), EVENT_SLOTS);
     let first = rig.next_up();
     assert_eq!(
         gate.load(Ordering::SeqCst),
@@ -851,11 +915,10 @@ fn with_a_traffic_hold_requests_wait_for_the_decision_about_a_new_session() {
     let to = |dst: u16| move |c: &Command| matches!(c, Command::SendUnicast { index_or_destination, .. } if *index_or_destination == dst);
     let refused =
         |t: &Terminal| matches!(t, Terminal::Refused(e) if *e.meaning() == CoordError::LinkDown);
-    let mut o = opts();
-    o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 1));
+    let (cfg, mut o) = aps_slots(1);
     o.traffic = Some(gate.clone());
     o.traffic_hold = Duration::from_secs(5);
-    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    let mut rig = Rig::with(cfg, o, Faults::none(), EVENT_SLOTS);
     // Queued before the first session: held until the decision.
     let a = rig.submit(unicast(0x1234));
     let first = rig.next_up();
@@ -930,9 +993,8 @@ fn cancellations_of_requests_ended_unsent_are_forgotten() {
 /// goes out after the next `Up`, in a new epoch.
 #[test]
 fn an_ncp_reset_ends_requests_on_the_ncp_at_down_and_sends_the_queued_after_up() {
-    let mut o = opts();
-    o.config.push((ConfigId::APS_UNICAST_MESSAGE_COUNT, 1));
-    let mut rig = Rig::with(sim(13), o, Faults::none(), EVENT_SLOTS);
+    let (cfg, o) = aps_slots(1);
+    let mut rig = Rig::with(cfg, o, Faults::none(), EVENT_SLOTS);
     let epoch = rig.next_up();
     rig.sim.ncp(|n| n.hold_message_sent(true));
     let a = rig.submit(unicast(0x1234));

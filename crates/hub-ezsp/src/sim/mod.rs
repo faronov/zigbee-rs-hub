@@ -105,6 +105,37 @@ pub struct SimConfig {
     pub beacons: Vec<(ZigbeeNetwork, u8, i8)>,
     /// `readCounters` values.
     pub counters: Vec<u16>,
+    /// Bytes the tables sized by configuration values may take
+    /// ([`table_bytes`]); a value beyond is refused with
+    /// `ERROR_OUT_OF_MEMORY`, as EmberZNet does. `None`: no limit.
+    pub table_memory: Option<u32>,
+    /// Configuration values of the NCP's image that differ from the UG100
+    /// defaults (after every reset).
+    pub config_values: Vec<(ConfigId, u16)>,
+    /// Bytes appended to every `incomingMessageHandler` (SONOFF's
+    /// EmberZNet 7.4.5 NCP appends 0x02 for a device that joined in the
+    /// NCP's session).
+    pub incoming_trailer: Vec<u8>,
+}
+
+/// Bytes per entry of the tables the simulated NCP sizes from
+/// configuration values (an assumption, of EmberZNet's order of magnitude).
+pub fn table_bytes(id: ConfigId) -> Option<u32> {
+    Some(match id {
+        ConfigId::NEIGHBOR_TABLE_SIZE => 40,
+        ConfigId::APS_UNICAST_MESSAGE_COUNT => 20,
+        ConfigId::BINDING_TABLE_SIZE => 16,
+        ConfigId::ADDRESS_TABLE_SIZE => 12,
+        ConfigId::MULTICAST_TABLE_SIZE => 4,
+        ConfigId::ROUTE_TABLE_SIZE => 8,
+        ConfigId::DISCOVERY_TABLE_SIZE => 12,
+        ConfigId::MAX_END_DEVICE_CHILDREN => 24,
+        ConfigId::TRUST_CENTER_ADDRESS_CACHE_SIZE => 12,
+        ConfigId::SOURCE_ROUTE_TABLE_SIZE => 8,
+        ConfigId::KEY_TABLE_SIZE => 24,
+        ConfigId::BROADCAST_TABLE_SIZE => 8,
+        _ => return None,
+    })
 }
 
 impl Default for SimConfig {
@@ -149,6 +180,9 @@ impl Default for SimConfig {
             energy: Vec::new(),
             beacons: Vec::new(),
             counters: (0..41).collect(),
+            table_memory: None,
+            config_values: Vec::new(),
+            incoming_trailer: Vec::new(),
         }
     }
 }
@@ -230,12 +264,12 @@ impl SimNcp {
     pub fn new(cfg: SimConfig) -> SimNcp {
         let link = Ash::new_ncp(cfg.ash.clone()).expect("valid simulator ASH config");
         let multicast = vec![MulticastTableEntry::default(); cfg.multicast_table_size];
-        SimNcp {
+        let mut n = SimNcp {
             cfg,
             link,
             version: None,
             last_sequence: 0,
-            config: default_config(),
+            config: BTreeMap::new(),
             values: BTreeMap::new(),
             endpoints: Vec::new(),
             network_up: false,
@@ -259,7 +293,9 @@ impl SimNcp {
             random: 0x1234,
             early: Vec::new(),
             permit: 0,
-        }
+        };
+        n.reset_ezsp();
+        n
     }
 
     pub fn config(&self) -> &SimConfig {
@@ -376,6 +412,9 @@ impl SimNcp {
     fn reset_ezsp(&mut self) {
         self.version = None;
         self.config = default_config();
+        for (id, v) in &self.cfg.config_values {
+            self.config.insert(id.0, *v);
+        }
         self.values.clear();
         self.endpoints.clear();
         self.network_up = false;
@@ -555,9 +594,12 @@ impl SimNcp {
     /// overflow flag, as the UG100 successor §2 "NCP Status" describes.
     pub fn callback(&mut self, cb: Callback) {
         let Some(v) = self.version else { return };
-        let params = cb
+        let mut params = cb
             .encode_params(v)
             .expect("simulator builds version-correct callbacks");
+        if matches!(cb, Callback::IncomingMessage { .. }) {
+            params.extend_from_slice(&self.cfg.incoming_trailer);
+        }
         let flags = ResponseFlags {
             async_callback: true,
             ..self.take_flags()
@@ -599,8 +641,23 @@ impl SimNcp {
                 },
             },
             Command::SetConfigurationValue { id, value } => {
+                let over = |c: &BTreeMap<u8, u16>, limit: u32| {
+                    let used: u32 = c
+                        .iter()
+                        .filter(|(k, _)| **k != id.0)
+                        .chain([(&id.0, &value)])
+                        .filter_map(|(k, n)| Some(table_bytes(ConfigId(*k))? * u32::from(*n)))
+                        .sum();
+                    used > limit
+                };
                 let status = if self.network_up {
                     Self::st(v, Ezsp, K::InvalidCall)
+                } else if self
+                    .cfg
+                    .table_memory
+                    .is_some_and(|limit| table_bytes(id).is_some() && over(&self.config, limit))
+                {
+                    Self::st(v, Ezsp, K::OutOfMemory)
                 } else if let Some(slot) = self.config.get_mut(&id.0) {
                     *slot = value;
                     if id == ConfigId::MULTICAST_TABLE_SIZE {
