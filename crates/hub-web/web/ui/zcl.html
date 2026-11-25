@@ -1,0 +1,49 @@
+<section class="card"><div class="row"><select id="zd"></select><select id="ze"></select><select id="zc"></select><input id="zcx" placeholder="cluster 0x…" size="8"><input id="zm" placeholder="mfr code" size="7"></div>
+<div class="row"><input id="za" placeholder="attributes 0x0000,…" size="18"><input id="zt" placeholder="type (u16, 0x21)" size="10"><input id="zv" placeholder="value" size="10"><button id="zr">Read</button><button id="zw">Write</button><button id="zdi">Discover</button></div>
+<div class="row"><input id="zmin" placeholder="min s" size="5"><input id="zmax" placeholder="max s" size="5"><input id="zch" placeholder="change" size="6"><button id="zrc">Configure reporting</button><button id="zrr">Read reporting</button></div>
+<div class="row"><input id="zk" placeholder="command 0x…" size="9"><input id="zp" placeholder="payload hex" size="18"><label><input type="checkbox" id="zg"> global</label><label><input type="checkbox" id="ztc"> to client</label><label><input type="checkbox" id="zn"> no default rsp</label><button id="zs">Send</button><button id="zdr">Commands rx</button><button id="zdg">Commands tx</button></div>
+<pre id="zo"></pre></section>
+<section class="card"><h2>Tuya datapoints</h2><div class="row"><input id="zdp" placeholder="dp" size="4"><select id="zdt"><option>bool</option><option>value</option><option>enum</option><option>string</option><option>bitmap</option><option>raw</option></select><input id="zdv" placeholder="value" size="12"><button id="zds">Send DP</button></div><table id="zdl"></table></section>
+<section class="card"><h2>Frames</h2><div class="row"><label><input type="checkbox" id="zl"> live</label><input id="zf" placeholder="cluster filter 0x…" size="10"><button id="zfc">Clear</button></div><table id="zft"></table></section>
+<script>
+// ---- ZCL console (14.7) ----
+// A developer tool: a module run in the page's scope (index.html ui()),
+// with `advanced`; served while the hub's developer mode is on, always in
+// the developer edition (`dev`).
+let zDev="",zSub=0;const zFr=[],zDps={};
+const zT={16:"bool",24:"map8",25:"map16",27:"map32",32:"u8",33:"u16",34:"u24",35:"u32",37:"u48",40:"i8",41:"i16",42:"i24",43:"i32",48:"enum8",49:"enum16",57:"f32",65:"ostr",66:"str",226:"utc"};
+const zH=v=>{v=(v||"").trim();return v===""?null:/^0x/i.test(v)||/[a-f]/i.test(v)?parseInt(v.replace(/^0x/i,""),16):+v};
+const zX=(n,w)=>"0x"+(n>>>0).toString(16).toUpperCase().padStart(w||4,"0");
+function zArgs(){const c=zH($("#zcx").value)??+$("#zc").value,m=zH($("#zm").value),a={device:$("#zd").value,endpoint:+$("#ze").value,cluster:c};if(m!=null)a.manufacturer=m;return a}
+function zOut(t,x){const o=$("#zo"),pre=el("div",{},t+": "+JSON.stringify(x));if(x&&x.records&&x.command==1)for(const r of x.records)if(r.status=="SUCCESS")pre.append(" ",el("button",{onclick:()=>zSnip(r)},"snippet "+zX(r.attribute)));o.prepend(pre);while(o.childNodes.length>30)o.lastChild.remove()}
+function zReq(type,extra){const a=Object.assign(zArgs(),extra||{});zOut("→ "+type,a);return call(type,a,r=>zOut("queued",r)).then(r=>{zOut("← "+type,r);if(r.records&&r.command==1&&r.records[0]&&r.records[0].type!=null)$("#zt").value=zT[r.records[0].type]||zX(r.records[0].type,2);return r}).catch(e=>zOut("✗ "+type,e.message))}
+// "Copy as definition snippet": an entity bound to the attribute.
+function zSnip(r){const a=zArgs(),m=a.manufacturer!=null?", mfr: "+zX(a.manufacturer):"",t=zT[r.type]||zX(r.type,2);
+ const y="  - key: attr_"+zX(r.attribute).slice(2).toLowerCase()+"\n    platform: "+(t=="bool"?"binary_sensor":"sensor")+"\n    zcl: {cluster: "+zX(a.cluster)+", attr: "+zX(r.attribute)+", type: "+t+m+"}\n";
+ (navigator.clipboard?navigator.clipboard.writeText(y):Promise.reject()).then(()=>toast("Snippet copied"),()=>prompt("Definition snippet",y))}
+const zAttrs=()=>$("#za").value.split(/[ ,]+/).filter(Boolean).map(zH);
+const zVal=()=>{const v=$("#zv").value.trim();return v=="true"||v=="false"?v=="true":v!==""&&!isNaN(v)?+v:v};
+const zTy=()=>{const t=$("#zt").value.trim();if(!t)return;const n=/^0x/i.test(t)?parseInt(t,16):/^\d+$/.test(t)?+t:+Object.keys(zT).find(k=>zT[k]==t);if(isNaN(n))toast("unknown type "+t);return n};
+$("#zr").onclick=()=>zReq("zcl/read",{attributes:zAttrs()});
+$("#zw").onclick=()=>zReq("zcl/write",{attribute:zAttrs()[0],data_type:zTy(),value:zVal()});
+$("#zdi").onclick=()=>zReq("zcl/discover",{what:"attributes",start:zAttrs()[0]||0});
+$("#zdr").onclick=()=>zReq("zcl/discover",{what:"commands_received"});
+$("#zdg").onclick=()=>zReq("zcl/discover",{what:"commands_generated"});
+$("#zrr").onclick=()=>zReq("zcl/read_reporting",{attributes:zAttrs()});
+$("#zrc").onclick=()=>{const c=$("#zch").value.trim();zReq("zcl/configure_reporting",{attribute:zAttrs()[0],data_type:zTy(),min:+$("#zmin").value||0,max:+$("#zmax").value||0,change:c===""?undefined:+c})};
+$("#zs").onclick=()=>zReq("zcl/command",{command:zH($("#zk").value)||0,payload:$("#zp").value,global:$("#zg").checked,to_client:$("#ztc").checked,disable_default_response:$("#zn").checked});
+$("#zds").onclick=()=>{const t=$("#zdt").value,v=$("#zdv").value.trim();zReq("tuya/send",{dps:[{dp:+$("#zdp").value,type:t,value:t=="bool"?v=="true"||v=="1":t=="string"||t=="raw"?v:+v}]})};
+function zEps(){call("devices/diagnostics",{device:zDev}).then(d=>{const eps=(d.fingerprint||{}).endpoints||[],e=$("#ze"),c=$("#zc");e.textContent="";for(const x of eps)e.append(el("option",{value:x.ep},"ep "+x.ep));
+ const cl=()=>{c.textContent="";const x=eps.find(x=>x.ep==e.value)||{};for(const k of x.in_clusters||[])c.append(el("option",{value:k},zX(k)));for(const k of x.out_clusters||[])c.append(el("option",{value:k},zX(k)+" (client)"))};e.onchange=cl;cl();
+ zFr.length=0;for(const f of d.frames||[])zFr.push({time:f.time,dir:"rx",cluster:parseInt(f.cluster,16),hex:f.hex});zDraw()}).catch(()=>{})}
+onTab.zcl=()=>{const s=$("#zd"),v=s.value||zDev;s.textContent="";for(const id of Object.keys(devs).filter(i=>devs[i].group==null).sort())s.append(el("option",{value:id},(devs[id].name||id)+(devs[id].model?" · "+devs[id].model:"")));if(v&&devs[v])s.value=v;if(s.value!=zDev||!$("#ze").options.length){zDev=s.value;if(zDev)zEps()}zDraw();zDpDraw()};
+$("#zd").onchange=()=>{zDev=$("#zd").value;for(const k in zDps)delete zDps[k];zEps();zDpDraw()};
+// Live frames: an own subscription to `frames` while the box is ticked.
+$("#zl").onchange=e=>{if(e.target.checked){zSub=++rid;pend[zSub]={ok:()=>{},no:x=>toast(x.message)};ws.send(JSON.stringify({id:zSub,type:"subscribe",topics:["frames"]}))}else if(zSub){call("unsubscribe",{subscription:zSub}).catch(()=>{});zSub=0}};
+$("#zfc").onclick=()=>{zFr.length=0;zDraw()};$("#zf").oninput=()=>zDraw();
+function zFrame(f){if(f.device!=zDev)return;zFr.push(f);if(zFr.length>200)zFr.shift();if(f.tuya)for(const d of f.tuya.dps)zDps[d.dp]=Object.assign({time:f.time},d);zDraw();if(f.tuya)zDpDraw()}
+function zDraw(){const t=$("#zft"),c=zH($("#zf").value);if(!$("#zft").offsetParent&&zFr.length)return;t.textContent="";t.append(el("tr",{},...["time","dir","ep","cluster","cmd","payload"].map(h=>el("th",{},h))));
+ for(const f of zFr.slice().reverse())if(c==null||f.cluster==c){const z=f.zcl||{};t.append(el("tr",{},el("td",{},ago(f.time)),el("td",{},f.dir),el("td",{},f.endpoint??""),el("td",{},zX(f.cluster)),el("td",{},z.command!=null?(z.frame=="global"?"g ":"")+zX(z.command,2)+(z.manufacturer!=null?" m"+zX(z.manufacturer):""):""),el("td",{class:"mono"},f.hex+(f.tuya?" · "+f.tuya.dps.map(d=>"dp"+d.dp+"="+JSON.stringify(d.value)).join(" "):""))))}}
+function zDpDraw(){const t=$("#zdl");t.textContent="";t.append(el("tr",{},...["dp","type","value","raw","seen",""].map(h=>el("th",{},h))));const tn=["raw","bool","value","string","enum","bitmap"];
+ for(const k of Object.keys(zDps).sort((a,b)=>a-b)){const d=zDps[k],n=tn[d.type]||d.type;t.append(el("tr",{},el("td",{},d.dp),el("td",{},n),el("td",{},JSON.stringify(d.value)),el("td",{class:"mono"},d.data),el("td",{},ago(d.time)),el("td",{},el("button",{onclick:()=>{const y="  - key: dp_"+d.dp+"\n    platform: "+(n=="bool"?"switch":n=="enum"?"select":"sensor")+"\n    tuya: ["+d.dp+", "+n+"]\n";(navigator.clipboard?navigator.clipboard.writeText(y):Promise.reject()).then(()=>toast("Snippet copied"),()=>prompt("Definition snippet",y))}},"snippet"))))}}
+</script>

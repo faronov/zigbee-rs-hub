@@ -1,45 +1,55 @@
-//! `web/index.html` → `$OUT_DIR/index.html.gz` (deterministic gzip: no
-//! file name, mtime 0, OS "unknown") and `$OUT_DIR/etag` (quoted strong
-//! ETag from the SHA-256 of the compressed bytes). No node toolchain: the
-//! page is hand-written, minified line by line (`src/minify.rs`) and
-//! compressed.
+//! `web/index.html` and the tab modules `web/ui/*.html` → `$OUT_DIR`:
+//! `index.html.gz` (deterministic gzip: no file name, mtime 0, OS
+//! "unknown") with its quoted strong ETag `etag` (from the SHA-256 of the
+//! compressed bytes), `ui/<name>.js.gz` for each module of the build, and
+//! `ui.rs` (the build hash and the module table). No node toolchain: the
+//! page is hand-written, minified line by line (`src/minify.rs`), split
+//! and compressed (`src/bundle.rs`).
 
 use std::{env, fs, path::Path};
 
-use sha2::{Digest, Sha256};
-
+#[path = "src/bundle.rs"]
+mod bundle;
 #[path = "src/minify.rs"]
 mod minify;
 #[path = "src/variant.rs"]
 mod variant;
 
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
-}
-
 fn main() {
-    let src = Path::new("web/index.html");
-    println!("cargo:rerun-if-changed={}", src.display());
-    println!("cargo:rerun-if-changed=src/minify.rs");
-    println!("cargo:rerun-if-changed=src/variant.rs");
-    let html = fs::read_to_string(src).expect("web/index.html");
-    let on = variant::enabled_with(cfg!(feature = "advanced"), cfg!(feature = "ota"), cfg!(feature = "ota-store"), cfg!(feature = "gateway"));
-    let html = variant::select(&html, &on).expect("web feature sections");
-    let html = minify::minify(&html).unwrap_or_else(|e| panic!("web/index.html: {e}")).into_bytes();
-    let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff];
-    gz.extend(miniz_oxide::deflate::compress_to_vec(&html, 10));
-    gz.extend(crc32(&html).to_le_bytes());
-    gz.extend((html.len() as u32).to_le_bytes());
+    for f in ["src/bundle.rs", "src/minify.rs", "src/variant.rs", "web/index.html"] {
+        println!("cargo:rerun-if-changed={f}");
+    }
+    for m in bundle::SOURCES {
+        println!("cargo:rerun-if-changed=web/ui/{m}.html");
+    }
+    let f = variant::Features {
+        advanced: cfg!(feature = "advanced"),
+        ota: cfg!(feature = "ota"),
+        ota_store: cfg!(feature = "ota-store"),
+        gateway: cfg!(feature = "gateway"),
+        dev: cfg!(feature = "dev"),
+    };
+    let read = |name: &str| fs::read_to_string(Path::new("web").join(name)).unwrap_or_else(|e| panic!("web/{name}: {e}"));
+    let b = bundle::bundle(f, &read).unwrap_or_else(|e| panic!("web/{e}"));
     let out = env::var("OUT_DIR").unwrap();
-    fs::write(Path::new(&out).join("index.html.gz"), &gz).unwrap();
-    let digest = Sha256::digest(&gz);
-    let etag: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    fs::write(Path::new(&out).join("etag"), format!("\"{etag}\"")).unwrap();
+    let out = Path::new(&out);
+    let gz = bundle::gzip(b.page.as_bytes());
+    fs::write(out.join("index.html.gz"), &gz).unwrap();
+    fs::write(out.join("etag"), bundle::etag(&gz)).unwrap();
+    fs::create_dir_all(out.join("ui")).unwrap();
+    let mut rs = format!("/// The build hash of the page and its modules.\npub const BUILD: &str = \"{}\";\n\n", b.build);
+    rs.push_str("/// The tab modules of this build.\npub const MODULES: &[Module] = &[\n");
+    for m in &b.modules {
+        let gz = bundle::gzip(m.js.as_bytes());
+        fs::write(out.join(format!("ui/{}.js.gz", m.name)), &gz).unwrap();
+        rs.push_str(&format!(
+            "    Module {{ name: \"{n}\", path: \"/ui/{b}/{n}.js\", gz: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/ui/{n}.js.gz\")), etag: {e:?}, gate: Gate::{g} }},\n",
+            n = m.name,
+            b = b.build,
+            e = bundle::etag(&gz),
+            g = if m.developer { "DeveloperMode" } else { "Always" },
+        ));
+    }
+    rs.push_str("];\n");
+    fs::write(out.join("ui.rs"), rs).unwrap();
 }

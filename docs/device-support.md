@@ -2529,6 +2529,7 @@ written as text with fallible allocation, never as a JSON tree).
 | `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged), stamped `MM-DD HH:MM:SS` local time once the clock is set, else seconds since boot |
 | `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
 | `hub/time/set` | `tz` (POSIX TZ: `EET-2EEST,M3.5.0/3,M10.5.0/4`; `Mm.w.d`, `Jn` and `n` rules), `servers` (1–3 host names) | the `hub/time` record; both kept in the host store. The time zone drives the Time cluster server (0x000A) on the hub endpoint and the Tuya time sync (EF00 0x24); clients show times in their own zone |
+| `hub/developer/set` | `enabled` (bool) | `developer_mode`: kept in the host store (`cfg/dev`) and in `hub/info` (`developer_mode`), in images with the ZCL console (14.7) only; the others answer `unsupported` and have no field. While it is on the web UI shows its developer tools (the ZCL console tab) and the HTTP server serves their modules (`/ui/<build>/zcl.js`, else 403); the developer edition (`hub-web` feature `dev`) has them always. The console's API (`zcl/*`, `tuya/send`, topic `frames`) follows the image's feature, not this switch |
 | `hub/wifi/set` | `ssid` (1–32 bytes), `password` (empty or 8–63) | `stored`, `reconnecting`: kept in NVS, the station reconnects with them (the connection to the hub drops) |
 | `hub/token/rotate` | — | `token`: the new API token (persisted); sessions already authenticated stay, new ones need it |
 | `hub/reboot` | — | `rebooting` |
@@ -2601,7 +2602,10 @@ omits it; the standard 8 MB image and desktop `hubctl` include it. A 4 MB
 advanced image is also buildable. `hub/info.advanced` advertises support;
 without it, `zcl/*`, `tuya/send` and subscription to `frames` answer
 `unsupported`. Normal device commands, Tuya definitions and interview
-remain available.
+remain available. The web UI's tab is a developer tool: shown, and its
+module served, with the hub's developer mode on (`hub/developer/set`,
+14.6), always in the developer edition (`hub-web` feature `dev`, the `-dev`
+8 MB images).
 
 Raw requests to one device endpoint, for writing and debugging
 definitions (web UI tab **ZCL**). They take the normal send path (queued
@@ -3499,8 +3503,12 @@ exceeds 4 KiB, or an expression exceeds the verifier limits; it prints the
 size table (definitions, strings, index) per run. The hub CI checks the app
 against its slots: 3 MiB (8 MB production) and 2 944 KiB (4 MB dev layout,
 D24; README). The web page (`hub-web`, gzip as embedded) must stay within
-36 KiB (36 864 B, `hub_web::PAGE_BUDGET`) in every image variant; its
-tests build each variant and fail above it.
+36 KiB (36 864 B, `hub_web::PAGE_BUDGET`) in every image variant, each of
+the tab modules it loads on demand (Converters, Catalog, the ZCL console,
+Updates) within its `hub_web::MODULE_BUDGETS` entry, and the page with all
+of a variant's modules within `hub_web::TOTAL_BUDGET` (44 KiB; 64 KiB,
+`DEV_TOTAL_BUDGET`, in the developer edition); its tests build each variant
+and fail above them.
 
 ### 18.6 Hardware
 

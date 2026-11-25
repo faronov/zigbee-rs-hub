@@ -1,0 +1,63 @@
+<!-- stream:start -->
+<p id="otk" class="badge bad hide"></p>
+<!-- stream:end -->
+<section class="card"><h2>Device firmware <span id="otn" class="mut"></span></h2>
+<p class="mut"><b>manual</b>: after Update; <b>auto</b>: inside the window. Sleepy devices start when they wake up.</p>
+<ul class="ents" id="otd"></ul></section>
+<section class="card"><h2>Images <span id="otu" class="mut"></span></h2><ul class="ents" id="oti"></ul>
+<!-- store:start -->
+<div class="row acts"><input id="otf" type="file"><button class="p" id="otb">Upload to the hub</button><span id="otp" class="mut"></span></div></section>
+<!-- store:end -->
+<!-- stream:start -->
+<div class="row acts"><input id="otsf" type="file"><select id="otsd"></select><button id="otsb">Install from this tab</button></div></section>
+<!-- stream:end -->
+<script>
+// ---- Updates (OTA) tab ----
+// A module run in the page's scope (index.html ui()), with `ota` only.
+let otD={},otI=[],otA={},otStr={};
+const ver=v=>v==null?"?":hex(v,8),kb=n=>Math.round((n||0)/1024)+" KiB";
+const otL=()=>call("ota/images/list").then(l=>{otI=l;otImg()},()=>{});
+onTab.ota=()=>{if(!authed)return;call("ota/devices/list").then(l=>{otD={};for(const d of l)otD[d.device]=d;otDev()},()=>{});otL();call("ota/status").then(s=>{otA=s.area;otImg()},()=>{})};
+function otEv(e){const r=e.device;if(!r){otA=e.area||otA;return otL()}otD[r.device]=r;otDev();
+// stream:start
+ const j=r.job;if(j&&otStr[j.image]&&!/wait|queue|down|install/.test(j.state)){call("ota/stream/close",{session:j.image}).catch(()=>{});delete otStr[j.image];otKeep()}
+// stream:end
+}
+function otDev(){
+ const box=$("#otd"),ids=Object.keys(otD);box.textContent="";$("#otn").textContent="("+ids.length+")";
+ if(!ids.length)box.append(el("li",{class:"mut"},"No device with an OTA client yet."));
+ for(const id of ids){const d=otD[id],j=d.job,a=d.available,run=j&&/wait|queue|down|install/.test(j.state);
+  const b=(t,c,ty,f)=>el("button",{class:c,disabled:ty=="ota/start"&&!a?"":null,onclick:e=>busy(e.target,act(ty,{device:id}).then(f))},t);
+  const pol=el("select",{onchange:e=>act("ota/devices/policy",{device:id,policy:e.target.value||null}).catch(()=>{})},el("option",{value:""},"default ("+d.effective_policy+")"),...["manual","auto","off"].map(v=>el("option",{},v)));pol.value=d.policy||"";
+  box.append(el("li",{},el("span",{class:"n"},el("b",{},d.name||id),el("br"),el("span",{class:"mut"},(d.manufacturer_code!=null?hex(d.manufacturer_code,4)+"/"+hex(d.image_type,4)+" ":"")+"runs "+ver(d.current_version)+(a?" → "+ver(a.file_version):"")+(d.sleepy?" · sleepy":""))),
+   el("span",{class:"v mut"},j?j.state+(j.state=="downloading"?" "+j.progress+" %"+(j.stalled?" (stalled)":""):"")+(j.error&&!run?": "+j.error:""):""),pol,
+   b("Check","","ota/devices/check",()=>toast("Asked")),run?b("Abort","d","ota/abort"):b("Update","p","ota/start")))}
+// stream:start
+ const sd=$("#otsd"),sv=sd.value;sd.textContent="";for(const id of ids)sd.append(el("option",{value:id},otD[id].name||id));if(sv)sd.value=sv
+// stream:end
+}
+function otImg(){const box=$("#oti"),a=otA||{};box.textContent="";$("#otu").textContent=a.capacity?kb(a.used)+" of "+kb(a.capacity)+" used, largest free "+kb(a.largest_free)+(a.foreign?"; the area holds other data":""):a.error||"";
+ for(const i of otI){const s=i.state=="streamed",r=i.state=="ready";box.append(el("li",{},el("span",{class:"n"},el("b",{},i.label||i.name||"image "+i.image),el("br"),el("span",{class:"mut"},(s?"streamed · ":r?"":"uploading, "+kb(i.written)+" · ")+hex(i.manufacturer_code||0,4)+"/"+hex(i.image_type||0,4)+" "+ver(i.file_version)+" · "+kb(i.size)+(i.hw_min!=null?" · hw "+i.hw_min+"–"+i.hw_max:"")+(i.name?" · "+i.name:""))),
+  el("button",{class:"d",onclick:e=>{if(confirm("Delete this image?"))busy(e.target,act(s?"ota/stream/close":r?"ota/images/delete":"ota/upload/abort",s?{session:i.image}:r?{image:i.image}:{upload:i.image}).then(onTab.ota))}},"Delete")))}
+ if(!otI.length)box.append(el("li",{class:"mut"},"No images."))}
+// The OTA file in a download (a vendor prefix before the magic is cut).
+function otCut(b){const u=new Uint8Array(b);for(let i=0;i<4096&&i+3<u.length;i++)if(u[i]==30&&u[i+1]==241&&u[i+2]==238&&u[i+3]==11)return u.subarray(i);throw new Error("not a Zigbee OTA file")}
+function otNeed(m){const u=otStr[m.session];if(u)call("ota/block_data",{session:m.session,offset:m.offset,data:b64(u.subarray(m.offset,m.offset+m.len))}).catch(()=>{})}
+// store:start
+// The image store (8 MB): files are uploaded, devices download from the hub.
+function otRe(){}
+async function otUp(b,name){const u=otCut(b),p=$("#otp"),r=await call("ota/upload/begin",{size:u.length,name}),n=r.chunk_max||8192;
+ for(let at=r.offset;at<u.length;at+=n){await call("ota/upload/chunk",{upload:r.upload,offset:at,data:b64(u.subarray(at,at+n))});p.textContent=Math.round(Math.min(at+n,u.length)*100/u.length)+" %"}
+ const i=await call("ota/upload/commit",{upload:r.upload});p.textContent="";toast("Stored "+(i.label||name)+" "+ver(i.file_version)+(i.devices.length?", for "+i.devices.length+" device(s)":""));onTab.ota()}
+$("#otb").onclick=e=>{const f=$("#otf").files[0];if(f)busy(e.target,f.arrayBuffer().then(b=>otUp(b,f.name)).catch(x=>toast(x.message)))};
+// store:end
+// stream:start
+// No store: this tab serves the file while the device downloads.
+function otKeep(){const n=Object.keys(otStr).length,k=$("#otk");k.textContent="Keep this tab open: serving "+n+" image(s)";k.classList.toggle("hide",!n)}
+const otOffer=(u,name)=>call("ota/stream/offer",{size:u.length,name,header:b64(u.subarray(0,256))}).then(o=>{otStr[o.session]=u;otKeep();return o});
+// After a reconnect: offer the images again (the hub keeps the sessions for a while).
+function otRe(){const old=otStr;otStr={};for(const k in old)otOffer(old[k],"image.ota").catch(()=>{});otKeep()}
+onbeforeunload=e=>{if(Object.keys(otStr).length)e.preventDefault()};
+$("#otsb").onclick=e=>{const f=$("#otsf").files[0],d=V("otsd");if(f&&d)busy(e.target,f.arrayBuffer().then(b=>otOffer(otCut(b),f.name)).then(o=>call("ota/start",{device:d,image:o.session})).then(()=>toast("Started")).catch(x=>toast(x.message)))};
+// stream:end
+</script>

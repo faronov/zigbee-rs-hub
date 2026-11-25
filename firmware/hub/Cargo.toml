@@ -38,9 +38,14 @@ zrhp = ["dep:hub-ncp", "hub-app?/zrhp"]
 # Wi-Fi and JSON lines on CDC 0. Without it (`--no-default-features`): the
 # phase-1 hub (ZRHP host core only).
 app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json", "zrh-espapp/app"]
-# Manual ZCL/Tuya console and frame viewer: in the 8 MB images, also
-# buildable for 4 MB. Every image detects PSRAM at boot (`resources`).
+# Manual ZCL/Tuya console and frame viewer: in the 8 MB images (its web
+# tab behind the hub's developer mode, Settings › Hub), also buildable for
+# 4 MB. Every image detects PSRAM at boot (`resources`).
 advanced = ["app", "hub-app/advanced", "hub-web/advanced"]
+# The developer edition (the `-dev` 8 MB images, with `ota-store`): the
+# developer tools of the web UI always on, without the developer mode
+# switch.
+dev = ["advanced", "hub-web/dev"]
 # The Zigbee2MQTT-compatible MQTT bridge (esp-mqtt, plain TCP; settings in
 # NVS, off until enabled). Included in both BR flash layouts by
 # tools/build-hub-firmware.sh; a build without it answers `unsupported`.
