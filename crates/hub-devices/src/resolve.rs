@@ -18,6 +18,7 @@ pub const HUB_FEATURES: &[&str] = &[
     "gp",
     "struct.zcl_tagged",
     "codec.tuya_schedule_day",
+    "codec.tuya_schedule_week",
     "codec.bcd_time",
     "codec.hhmm",
     "codec.ascii",
@@ -926,6 +927,20 @@ mod tests {
         let (best, _) = best_match([a, b, Arc::new(wd)], &f, HUB_FEATURES, &mut skipped).unwrap();
         assert_eq!(best.id, "b");
         assert_eq!(skipped, ["definition_skipped: w requires wasm"]);
+    }
+
+    #[test]
+    fn resolution_takes_every_feature_loading_takes() {
+        for code in 0..128u16 {
+            if let Some(f) = zdef::enums::Feature::from_code(u64::from(code)) {
+                assert_eq!(
+                    crate::zdef_adapter::hub_features().has(code),
+                    HUB_FEATURES.contains(&f.as_str()),
+                    "{}",
+                    f.as_str()
+                );
+            }
+        }
     }
 
     #[test]

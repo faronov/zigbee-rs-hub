@@ -297,12 +297,18 @@ pub struct WhiteLabel {
 impl WhiteLabel {
     /// Whether a device is this white label: every constraint given holds
     /// (a list contains the device's value), and at least one is given.
+    /// Names compare without trailing NULs and spaces only (the interview
+    /// strips those): zigbee-herdsman-converters compares white-label
+    /// fingerprints exactly, so `" Smart shedder module"` is not
+    /// `"Smart shedder module"` here, unlike in a match clause.
     pub fn selects(&self, fp: &crate::matching::Fingerprint) -> bool {
-        use crate::matching::trim_name;
+        fn name(s: &str) -> &str {
+            s.trim_end_matches(['\0', ' '])
+        }
         let has = |list: &[String], v: &Option<String>| {
             list.is_empty()
                 || v.as_deref()
-                    .is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
+                    .is_some_and(|v| list.iter().any(|n| name(n) == name(v)))
         };
         let any = !self.manufacturer.is_empty()
             || !self.model_id.is_empty()

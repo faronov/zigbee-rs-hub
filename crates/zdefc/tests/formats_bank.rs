@@ -204,6 +204,15 @@ fn white_labels_by_fingerprint() {
     assert_eq!(shown(other, &fp), "X", "another cluster");
     fp.endpoints = vec![ep(1, &[0, 1, 3, 0x0500]), ep(2, &[0])];
     assert_eq!(shown(other, &fp), "X", "another endpoint");
+
+    // Leading spaces count in white labels (zhc compares them exactly).
+    let legrand = "zdef: 1\nid: legrand/412015\nrevision: 1\nvendor: Legrand\nmodel: '412015'\nmatch: [{model: Smart shedder module}]\nwhite_label: [{vendor: Legrand, model: '412172', model_id: [' Smart shedder module']}]\n";
+    let model = |m: &str| zdef::Fingerprint {
+        model_id: Some(m.into()),
+        ..Default::default()
+    };
+    assert_eq!(shown(legrand, &model(" Smart shedder module\0")), "412172");
+    assert_eq!(shown(legrand, &model("Smart shedder module")), "412015");
 }
 
 fn to_json(n: &Node) -> serde_json::Value {
