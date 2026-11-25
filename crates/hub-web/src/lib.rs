@@ -344,7 +344,7 @@ const vm=require("vm"),S=JSON.parse(require("fs").readFileSync(0,"utf8"));
 const any=()=>new Proxy(function(){},{get:(t,k)=>k===Symbol.toPrimitive?()=>"":k=="then"?undefined:any(),set:()=>true,apply:()=>any(),construct:()=>any()});
 for(const order of [S.modules,S.modules.slice().reverse()]){
  const g={console,setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,document:any(),navigator:{},localStorage:{getItem:()=>null,setItem(){},removeItem(){}},sessionStorage:{},
-  location:{hash:"",protocol:"http:",host:"hub",pathname:"/",reload(){throw Error("reload")}},history:{replaceState(){}},addEventListener(){},WebSocket:function(){return any()},
+  location:{hash:"",protocol:"http:",host:"hub",pathname:"/",reload(){throw Error("reload")}},history:{replaceState(){}},addEventListener(){},WebSocket:function(){return any()},Option:function(){},
   fetch:()=>new Promise(()=>{}),Blob:function(){},URL:{createObjectURL:()=>""},btoa:s=>s,atob:s=>s,onbeforeunload:null,confirm:()=>false,prompt:()=>null};
  vm.createContext(g);vm.runInContext(S.page,g,{filename:"index.html"});
  for(const[n,js]of order)vm.runInContext(js,g,{filename:n+".js"});
