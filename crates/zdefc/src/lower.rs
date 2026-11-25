@@ -384,35 +384,37 @@ impl L {
                 "logical_type" => {
                     c.logical_type = self.enum_str(v, &p, LogicalType::parse, "logical type")
                 }
-                "endpoints" => {
-                    for (ep, en) in self.int_keyed(v, &p, 1, 254) {
-                        let ep_p = format!("{p}/{ep}");
-                        let Some(ef) = self.obj(en, &ep_p, &["profile", "device_id", "in", "out"])
-                        else {
-                            continue;
-                        };
-                        let mut m = EpMatch::default();
-                        for (k2, _, v2) in ef {
-                            let p2 = format!("{ep_p}/{}", k2.as_json());
-                            match k2.as_str().unwrap_or("") {
-                                "profile" => m.profile = self.u16_(v2, &p2),
-                                "device_id" => m.device_id = self.u16_(v2, &p2),
-                                "in" => m.in_clusters = self.list(v2, &p2, |l, n, p| l.u16_(n, p)),
-                                "out" => {
-                                    m.out_clusters = self.list(v2, &p2, |l, n, p| l.u16_(n, p))
-                                }
-                                _ => {}
-                            }
-                        }
-                        c.endpoints.push((ep as u8, m));
-                    }
-                    c.endpoints.sort_by_key(|e| e.0);
-                }
+                "endpoints" => c.endpoints = self.endpoints(v, &p),
                 "gp" => c.gp = self.gp_match(v, &p),
                 _ => {}
             }
         }
         Some(c)
+    }
+
+    /// `{ep: {profile, device_id, in, out}}` (a clause's or a white label's).
+    fn endpoints(&mut self, v: &Node, p: &str) -> Vec<(u8, EpMatch)> {
+        let mut out = Vec::new();
+        for (ep, en) in self.int_keyed(v, p, 1, 254) {
+            let ep_p = format!("{p}/{ep}");
+            let Some(ef) = self.obj(en, &ep_p, &["profile", "device_id", "in", "out"]) else {
+                continue;
+            };
+            let mut m = EpMatch::default();
+            for (k2, _, v2) in ef {
+                let p2 = format!("{ep_p}/{}", k2.as_json());
+                match k2.as_str().unwrap_or("") {
+                    "profile" => m.profile = self.u16_(v2, &p2),
+                    "device_id" => m.device_id = self.u16_(v2, &p2),
+                    "in" => m.in_clusters = self.list(v2, &p2, |l, n, p| l.u16_(n, p)),
+                    "out" => m.out_clusters = self.list(v2, &p2, |l, n, p| l.u16_(n, p)),
+                    _ => {}
+                }
+            }
+            out.push((ep as u8, m));
+        }
+        out.sort_by_key(|e| e.0);
+        out
     }
 
     fn gp_match(&mut self, n: &Node, path: &str) -> Option<GpMatch> {
@@ -1488,7 +1490,16 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                     let f = l.obj(
                         n,
                         p,
-                        &["vendor", "model", "manufacturer", "model_id", "sw_build"],
+                        &[
+                            "vendor",
+                            "model",
+                            "manufacturer",
+                            "model_id",
+                            "sw_build",
+                            "logical_type",
+                            "hw_version",
+                            "endpoints",
+                        ],
                     )?;
                     let mut w = WhiteLabel::default();
                     for (k2, _, v2) in f {
@@ -1498,6 +1509,12 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                             "model" => w.model = l.str_(v2, &p2),
                             "model_id" => w.model_id = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
                             "sw_build" => w.sw_build = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
+                            "logical_type" => {
+                                w.logical_type =
+                                    l.enum_str(v2, &p2, LogicalType::parse, "logical type")
+                            }
+                            "hw_version" => w.hw_version = l.list(v2, &p2, |l, n, p| l.u8_(n, p)),
+                            "endpoints" => w.endpoints = l.endpoints(v2, &p2),
                             _ => w.manufacturer = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
                         }
                     }

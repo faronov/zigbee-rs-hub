@@ -556,9 +556,11 @@ pub fn adapt(
         .map(|w| WhiteLabel {
             vendor: w.vendor.clone().unwrap_or_else(|| d.vendor.clone()),
             model: w.model.clone().unwrap_or_else(|| d.model.clone()),
-            manufacturer: w.manufacturer.clone(),
-            model_id: w.model_id.clone(),
-            sw_build: w.sw_build.clone(),
+            select: zdef::model::WhiteLabel {
+                vendor: None,
+                model: None,
+                ..w.clone()
+            },
         })
         .collect();
     d.requires = zd

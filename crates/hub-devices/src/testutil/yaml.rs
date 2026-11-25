@@ -511,20 +511,20 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
     }
     if let Some(Y::Sequence(w)) = get(&v, "white_label") {
         for x in w {
+            let list = |k: &str| -> R<Vec<String>> {
+                match get(x, k) {
+                    Some(Y::Sequence(l)) => l.iter().map(s).collect(),
+                    _ => Ok(Vec::new()),
+                }
+            };
             d.white_label.push(WhiteLabel {
                 vendor: opt_s(x, "vendor")?.unwrap_or_default(),
                 model: opt_s(x, "model")?.unwrap_or_default(),
-                manufacturer: match get(x, "manufacturer") {
-                    Some(Y::Sequence(l)) => l.iter().map(s).collect::<R<_>>()?,
-                    _ => Vec::new(),
-                },
-                model_id: match get(x, "model_id") {
-                    Some(Y::Sequence(l)) => l.iter().map(s).collect::<R<_>>()?,
-                    _ => Vec::new(),
-                },
-                sw_build: match get(x, "sw_build") {
-                    Some(Y::Sequence(l)) => l.iter().map(s).collect::<R<_>>()?,
-                    _ => Vec::new(),
+                select: zdef::model::WhiteLabel {
+                    manufacturer: list("manufacturer")?,
+                    model_id: list("model_id")?,
+                    sw_build: list("sw_build")?,
+                    ..Default::default()
                 },
             });
         }

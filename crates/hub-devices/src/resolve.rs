@@ -795,7 +795,12 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());
             res.def_model = Some(d.model.clone());
-            if let Some(wl) = d.white_label.iter().find(|w| w.selects(fp)) {
+            let zfp =
+                (!d.white_label.is_empty()).then(|| crate::zdef_adapter::zdef_fingerprint(fp));
+            if let Some(wl) = zfp
+                .as_ref()
+                .and_then(|zfp| d.white_label.iter().find(|w| w.selects(zfp)))
+            {
                 res.vendor = Some(wl.vendor.clone());
                 res.model = Some(wl.model.clone());
             }
@@ -938,9 +943,12 @@ mod tests {
             d.white_label.push(WhiteLabel {
                 vendor: "Paulmann".into(),
                 model: model.into(),
-                manufacturer: vec!["Paulmann Licht GmbH".into()],
-                model_id: vec!["RGBWW".into()],
-                sw_build: vec![sw.into()],
+                select: zdef::model::WhiteLabel {
+                    manufacturer: vec!["Paulmann Licht GmbH".into()],
+                    model_id: vec!["RGBWW".into()],
+                    sw_build: vec![sw.into()],
+                    ..Default::default()
+                },
             });
         }
         let mut cat = MemoryCatalog::default();

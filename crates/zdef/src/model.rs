@@ -177,16 +177,14 @@ impl Definition {
         out
     }
 
-    /// Display identity for a device's Basic names (white labels, spec 6.1):
-    /// the first white label that selects it.
+    /// Display identity of a device (white labels, spec 6.1): the first
+    /// white label that selects it.
     pub fn display_identity<'s>(
         &'s self,
-        manufacturer_name: Option<&str>,
-        model_id: Option<&str>,
-        sw_build_id: Option<&str>,
+        fp: &crate::matching::Fingerprint,
     ) -> (Option<&'s str>, Option<&'s str>) {
         for wl in &self.white_label {
-            if wl.selects(manufacturer_name, model_id, sw_build_id) {
+            if wl.selects(fp) {
                 return (
                     wl.vendor.as_deref().or(self.vendor.as_deref()),
                     wl.model.as_deref().or(self.model.as_deref()),
@@ -288,25 +286,40 @@ pub struct WhiteLabel {
     pub model_id: Vec<String>,
     /// Basic SWBuildIDs (white-label fingerprints by `softwareBuildID`).
     pub sw_build: Vec<String>,
+    /// Node descriptor logical type (fingerprint `type`).
+    pub logical_type: Option<LogicalType>,
+    /// Basic HWVersions (fingerprint `hardwareVersion`).
+    pub hw_version: Vec<u8>,
+    /// The device's endpoints, exactly (fingerprint `endpoints`).
+    pub endpoints: Vec<(u8, EpMatch)>,
 }
 
 impl WhiteLabel {
-    /// Whether a device with these Basic names is this white label: every
-    /// list given contains its name, and at least one list is given.
-    pub fn selects(
-        &self,
-        manufacturer_name: Option<&str>,
-        model_id: Option<&str>,
-        sw_build_id: Option<&str>,
-    ) -> bool {
+    /// Whether a device is this white label: every constraint given holds
+    /// (a list contains the device's value), and at least one is given.
+    pub fn selects(&self, fp: &crate::matching::Fingerprint) -> bool {
         use crate::matching::trim_name;
-        let has = |list: &[String], v: Option<&str>| {
-            list.is_empty() || v.is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
+        let has = |list: &[String], v: &Option<String>| {
+            list.is_empty()
+                || v.as_deref()
+                    .is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
         };
-        (!self.manufacturer.is_empty() || !self.model_id.is_empty() || !self.sw_build.is_empty())
-            && has(&self.manufacturer, manufacturer_name)
-            && has(&self.model_id, model_id)
-            && has(&self.sw_build, sw_build_id)
+        let any = !self.manufacturer.is_empty()
+            || !self.model_id.is_empty()
+            || !self.sw_build.is_empty()
+            || self.logical_type.is_some()
+            || !self.hw_version.is_empty()
+            || !self.endpoints.is_empty();
+        any && has(&self.manufacturer, &fp.manufacturer_name)
+            && has(&self.model_id, &fp.model_id)
+            && has(&self.sw_build, &fp.sw_build_id)
+            && self
+                .logical_type
+                .is_none_or(|t| fp.logical_type == Some(t.code()))
+            && (self.hw_version.is_empty()
+                || fp.hw_version.is_some_and(|v| self.hw_version.contains(&v)))
+            && (self.endpoints.is_empty()
+                || crate::matching::endpoints_equal(&self.endpoints, &fp.endpoints))
     }
 }
 

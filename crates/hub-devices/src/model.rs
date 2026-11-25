@@ -1095,28 +1095,15 @@ pub struct WhiteLabel {
     pub vendor: String,
     /// Model.
     pub model: String,
-    /// Manufacturer names that select it.
-    pub manufacturer: Vec<String>,
-    /// Basic ModelIdentifiers that select it.
-    pub model_id: Vec<String>,
-    /// Basic SWBuildIDs that select it.
-    pub sw_build: Vec<String>,
+    /// What selects it: the zdef entry (manufacturer names, model IDs,
+    /// SW build IDs, logical type, HW versions, endpoints).
+    pub select: zdef::model::WhiteLabel,
 }
 
 impl WhiteLabel {
-    /// Whether a device with these Basic names is this white label (every
-    /// list given contains its name, at least one list given).
-    pub fn selects(&self, fp: &crate::fingerprint::Fingerprint) -> bool {
-        use zdef::matching::trim_name;
-        let has = |list: &[String], v: &Option<String>| {
-            list.is_empty()
-                || v.as_deref()
-                    .is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
-        };
-        (!self.manufacturer.is_empty() || !self.model_id.is_empty() || !self.sw_build.is_empty())
-            && has(&self.manufacturer, &fp.manufacturer_name)
-            && has(&self.model_id, &fp.model_id)
-            && has(&self.sw_build, &fp.sw_build_id)
+    /// Whether the device is this white label (zdef's rule).
+    pub fn selects(&self, fp: &zdef::Fingerprint) -> bool {
+        self.select.selects(fp)
     }
 }
 

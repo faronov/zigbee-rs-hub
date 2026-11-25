@@ -281,6 +281,15 @@ pub fn schema() -> Node {
         ],
         &["cluster", "attr", "type", "value"],
     );
+    let endpoints = int_keyed(obj(
+        vec![
+            ("profile", r("u16")),
+            ("device_id", r("u16")),
+            ("in", list_of(r("u16"))),
+            ("out", list_of(r("u16"))),
+        ],
+        &[],
+    ));
     let clause = obj(
         vec![
             ("manufacturer", r("name_match")),
@@ -307,18 +316,7 @@ pub fn schema() -> Node {
             ("logical_type", enum_all!(zdef::enums::LogicalType)),
             ("x-priority", ty("integer")),
             ("x-white-label", ty("boolean")),
-            (
-                "endpoints",
-                int_keyed(obj(
-                    vec![
-                        ("profile", r("u16")),
-                        ("device_id", r("u16")),
-                        ("in", list_of(r("u16"))),
-                        ("out", list_of(r("u16"))),
-                    ],
-                    &[],
-                )),
-            ),
+            ("endpoints", endpoints.clone()),
             (
                 "gp",
                 obj(
@@ -619,6 +617,9 @@ pub fn schema() -> Node {
                     ("manufacturer", list_of(ty("string"))),
                     ("model_id", list_of(ty("string"))),
                     ("sw_build", list_of(ty("string"))),
+                    ("logical_type", enum_all!(zdef::enums::LogicalType)),
+                    ("hw_version", list_of(r("u8"))),
+                    ("endpoints", endpoints),
                 ],
                 &[],
             )),
