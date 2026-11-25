@@ -15,6 +15,9 @@ ota = []
 # The page of an image with the OTA image store (8 MB): uploads to the
 # store instead of serving files from the browser tab.
 ota-store = ["ota"]
+# The gateway firmware's cards (SONOFF Dongle-M): the storage claim of the
+# files partition, the hub's own firmware update, Ethernet.
+gateway = []
 
 [build-dependencies]
 miniz_oxide = "0.8"

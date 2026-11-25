@@ -5,13 +5,21 @@ use std::vec::Vec;
 /// (or `// NAME:start` in the script): `advanced` (the manual ZCL/Tuya
 /// console), `ota` (the Updates tab: Zigbee device OTA), and inside it
 /// `store` (uploads into the OTA image store) and `stream` (serving an OTA
-/// file from the browser tab, for images without a store).
-pub const SECTIONS: [&str; 4] = ["advanced", "ota", "store", "stream"];
+/// file from the browser tab, for images without a store); `gateway` (the
+/// gateway firmware's storage claim, firmware update and Ethernet).
+pub const SECTIONS: [&str; 5] = ["advanced", "ota", "store", "stream", "gateway"];
 
-/// The sections a build includes (`ota_store` implies `ota`).
-pub fn enabled(advanced: bool, ota: bool, ota_store: bool) -> [(&'static str, bool); 4] {
+/// The sections a build of the S3 hub includes (`ota_store` implies `ota`;
+/// the build script uses [`enabled_with`]).
+#[allow(dead_code)]
+pub fn enabled(advanced: bool, ota: bool, ota_store: bool) -> [(&'static str, bool); 5] {
+    enabled_with(advanced, ota, ota_store, false)
+}
+
+/// The sections a build includes, `gateway` too.
+pub fn enabled_with(advanced: bool, ota: bool, ota_store: bool, gateway: bool) -> [(&'static str, bool); 5] {
     let ota = ota || ota_store;
-    [("advanced", advanced), ("ota", ota), ("store", ota_store), ("stream", ota && !ota_store)]
+    [("advanced", advanced), ("ota", ota), ("store", ota_store), ("stream", ota && !ota_store), ("gateway", gateway)]
 }
 
 /// The page with the sections of `on` kept and the others left out.

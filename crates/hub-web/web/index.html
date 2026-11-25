@@ -192,6 +192,13 @@ progress{width:12em}
 <p class="mut">Leaves the current network and forms a new one; every device must then be paired again. The current network is backed up and the file offered first.</p>
 <div class="row"><label>Channel <select id="nch"><option value="">quietest</option></select></label><label>PAN ID <input id="npan" placeholder="random" size="6"></label><label>Ext. PAN ID <input id="nepid" placeholder="random" size="17"></label><label>TX power <input id="ntx" type="number" class="num" placeholder="keep"></label></div>
 <div class="row acts"><input id="nconf" placeholder="type RESET" size="11"><button class="d" id="nrb">Back up and reset</button></div></section>
+<!-- gateway:start -->
+<section class="card f-storage"><h2>Storage</h2><dl class="kv" id="gst"></dl>
+<p class="mut">Until SONOFF's files partition is claimed, the hub keeps devices, names, groups and automations in RAM only: lost at every restart. The claim copies SONOFF's files into it first; <code>stock confirm</code> on the console writes them back before it returns to SONOFF's firmware.</p>
+<div class="row acts"><button class="p" id="gsb">Claim storage…</button></div></section>
+<section class="card f-firmware"><h2>Hub firmware</h2><dl class="kv" id="gfw"></dl>
+<div class="row acts"><input id="gff" type="file" accept=".bin"><label id="gfl" class="hide"><input type="checkbox" id="gfs"> Replace SONOFF's firmware (then only USB returns to it)</label><button class="p" id="gfb">Update</button><span id="gfp" class="mut"></span></div></section>
+<!-- gateway:end -->
 <section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
 <div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
 <div class="row acts"><label>Time zone <input id="tzi" list="tzl" size="26" placeholder="POSIX TZ, e.g. EET-2EEST,M3.5.0/3,M10.5.0/4"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button></div>
@@ -569,6 +576,9 @@ function loadRep(){call("reporting/defaults/get").then(r=>{const t=$("#rpd");t.t
 $("#rpb").onclick=()=>{const d={};for(const i of $("#rpd").querySelectorAll("input"))d[i.dataset.k]=rVal(i.value);act("reporting/defaults/set",{defaults:d}).then(()=>{toast("Saved");loadRep()},()=>{})};
 function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a=s.app||{},n=s.ncp||{};
  kv($("#ssys"),[["Version",s.version],["API",hub.api_version],["Mode",s.mode],["Uptime",s.uptime_s!=null&&dur(s.uptime_s)],["Time",tm.time_synced?tm.local+" ("+tm.source+(tm.dst&&tm.dst.active?", daylight saving":"")+")":"not synchronised yet"],["Free heap",h.free!=null&&Math.round(h.free/1024)+" KiB (min "+Math.round(h.min_free/1024)+" KiB"+(h.largest_block?", largest "+Math.round(h.largest_block/1024)+" KiB":"")+")"],
+// gateway:start
+  ["Board",s.board],["Ethernet",s.ethernet&&[s.ethernet.state,s.ethernet.ip].filter(Boolean).join(" · ")],
+// gateway:end
   ["Wi-Fi",[w.ssid,w.state,w.ip,w.rssi!=null&&w.rssi+" dBm",w.channel&&"channel "+w.channel].filter(Boolean).join(" · ")],["Reset reason",s.reset_reason],["NCP",n.fw&&n.fw+" · "+n.resumes+" resumes, "+n.restarts+" restarts"],["NCP error",n.last_error],
   ["Store",s.store&&(s.store.volatile?"RAM only":"hubdata, generation "+s.store.journal_generation)],["App",a.devices+" devices, "+a.sessions+" sessions, APS "+(a.aps?(a.aps.delivered!=null?a.aps.delivered+" delivered / "+a.aps.not_delivered+" not delivered / "+(a.aps.busy+a.aps.failed)+" refused":a.aps.accepted+" ok / "+a.aps.failed+" failed"):"")]]);
  if(w.ssid&&!$("#wss").value)$("#wss").value=w.ssid}).catch(()=>{})}
@@ -582,6 +592,19 @@ $("#pics").checked=picOn();$("#pics").onchange=e=>{localStorage.setItem("zrhPics
 $("#wb").onclick=()=>{const ssid=$("#wss").value.trim();if(!ssid)return;if(!confirm("Save Wi-Fi \""+ssid+"\" and reconnect? This page loses the hub until it is on that network."))return;act("hub/wifi/set",{ssid,password:$("#wpw").value}).then(()=>toast("Wi-Fi saved, reconnecting")).catch(()=>{})};
 $("#tkb").onclick=()=>{if(!confirm("Create a new API token? Other clients (Home Assistant) need it then; this page switches to it."))return;act("hub/token/rotate").then(r=>{localStorage.setItem("zrhToken",r.token);prompt("New API token (copy it for other clients):",r.token)}).catch(()=>{})};
 $("#rbb").onclick=()=>{if(confirm("Reboot the hub?"))act("hub/reboot").then(()=>toast("Rebooting…")).catch(()=>{})};
+// gateway:start
+// Gateway (Dongle-M): the files partition claim and the hub's own firmware.
+let gfw={};
+function loadGw(){if(has("storage"))call("storage/status").then(g=>{kv($("#gst"),[["Hub data",g.in_use?"on the files partition":"RAM only: lost at restart"],["files",g.text||g.error],["Running",g.busy],["Last claim",g.last]]);$("#gsb").disabled=g.claimed||!!g.busy}).catch(()=>{});
+ if(has("firmware"))call("firmware/status").then(f=>{gfw=f;kv($("#gfw"),[["Running",f.version+" ("+f.running+")"],["Update writes",f.target+(f.target_holds?", now "+f.target_holds:"")],["Written",f.ready_version&&f.ready_version+": reboot to start it"]]);$("#gfl").classList.toggle("hide",!f.replaces_stock)}).catch(()=>{})}
+const stOn=onTab.settings;onTab.settings=()=>{stOn();if(authed)loadGw()};
+$("#gsb").onclick=e=>{if(confirm("Claim SONOFF's files partition for the hub's data? SONOFF's files are copied into it first. The hub restarts; what it kept in RAM (devices, names, automations) is lost."))busy(e.target,act("storage/claim",{confirm:true}).then(()=>{toast("Claiming; the hub restarts when it is done");setTimeout(loadGw,2000)})).catch(()=>{})};
+async function gfUp(u){const p=$("#gfp");await call("firmware/begin",{size:u.length,replace_stock:$("#gfs").checked});
+ for(let at=0;at<u.length;at+=4096){await call("firmware/chunk",{offset:at,data:b64(u.subarray(at,at+4096))});p.textContent=Math.round(Math.min(at+4096,u.length)*100/u.length)+" %"}
+ const r=await call("firmware/end");p.textContent="";toast(r.version+" written, rebooting");return act("hub/reboot")}
+$("#gfb").onclick=e=>{const f=$("#gff").files[0];if(!f)return;if(gfw.replaces_stock&&!$("#gfs").checked)return toast("This update replaces SONOFF's firmware: tick the box first");
+ if(confirm("Update the hub with "+f.name+" and reboot into it?"))busy(e.target,f.arrayBuffer().then(b=>gfUp(new Uint8Array(b)))).catch(x=>{$("#gfp").textContent="";toast(x.message)})};
+// gateway:end
 $("#mdb").onclick=()=>{if(confirm("Reboot into bridge mode (USB bridge to the radio, no hub)? Back with the console command `mode hub`."))act("hub/mode/set",{mode:"bridge"}).then(()=>toast("Rebooting into bridge mode")).catch(()=>{})};
 function diag(reset,b){busy(b,act("network/diagnostics",reset?{reset:true}:{}).then(d=>{const box=$("#dg"),n=d.ncp||{},f=d.frame_counters||{};box.textContent="";
  const t=el("table");const row=(k,v)=>t.append(el("tr",{},el("th",{},k),el("td",{},String(v))));
