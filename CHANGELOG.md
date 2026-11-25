@@ -70,7 +70,14 @@ install instructions and the list of merged pull requests. A pre-release
 - "Find definition" no longer fails with `SHA-256 differs from the
   installed manifest`: the catalog is updated before shards are fetched.
 - Automations: device-then-entity pickers that tell identical devices
-  apart; the network map lays out small networks readably.
+  apart; the run mode is labelled and explained in the editor (*single*
+  ignores triggers while a run is in progress, *restart* starts over); the
+  network map lays out small networks readably.
+- **Time zone picker** in Settings › Hub: search the zone by name or take
+  the browser's (the hub keeps the IANA name, `hub/time` `tz_name`, next to
+  its POSIX string); Home Assistant can keep the hub's zone in sync with
+  its own (integration option). Settings no longer scrolls sideways on
+  phones.
 - `network/info` reports the coordinator's table sizes (`capacity`).
 - SONOFF Dongle Max: network backup and restore through EZSP (Open
   Coordinator Backup, the format zigpy/ZHA and Zigbee2MQTT use, so a
@@ -106,7 +113,8 @@ install instructions and the list of merged pull requests. A pre-release
   **8 MB boards:** OTA, the advanced console and MQTT.
 - **Home Assistant:** integration **0.5.0**, from this release's source
   (`integrations/home-assistant`): it adds the firmware `update` entities
-  of the Zigbee OTA server (8 MB hubs).
+  of the Zigbee OTA server (8 MB hubs) and the option to sync the hub's
+  time zone from Home Assistant.
 - **tbr-bridge 0.2.5** (the S3 app for bridge mode on Espressif's stock
   layout): no functional change; a new version because the rebuilt image
   differs from the 0.2.4 file of release 0.2.0.
