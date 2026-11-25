@@ -512,7 +512,9 @@ fn reset_discards_frames_before_rstack() {
 
 /// After nRESET or a power cycle the NCP sends RSTACK(external/power-on)
 /// unprompted. Such an RSTACK, or any RSTACK before our RST went out, is
-/// not the answer to our RST and must not connect the link.
+/// not the answer to our RST and must not connect the link. One that comes
+/// after our RST says the NCP was still starting and lost it: the RST goes
+/// out again at once, not after the RSTACK timeout.
 #[test]
 fn stale_rstack_is_ignored_while_resetting() {
     let mut h = Ash::new(AshConfig::default()).unwrap();
@@ -533,6 +535,8 @@ fn stale_rstack_is_ignored_while_resetting() {
     assert_eq!(h.state(), LinkState::Resetting);
     assert_eq!(h.stats().rx_stale_rstack, 3);
     assert_eq!(h.stats().rx_discarded, 3);
+    assert_eq!(transmit(&mut h, 2).len(), 1, "the RST again, at once");
+    assert_eq!(h.stats().tx_rst, 2);
     feed(&mut h, &SOFTWARE_RSTACK, 3);
     assert_eq!(h.state(), LinkState::Connected);
     assert_eq!(
