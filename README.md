@@ -82,7 +82,8 @@ feature `dev`: the web UI's developer tools always on; built once
 `firmware/hub` has the feature, its own entry in the web flasher), plus the
 `tbr-bridge` app; for the SONOFF Dongle Max (experimental) the app for
 `ota_1` (`zrh-donglem-X.Y.Z-app.bin`, also the file for SONOFF's web
-console) and the `otadata` sector that selects it
+console; `zrh-donglem-X.Y.Z-devtools-app.bin` for its developer
+edition) and the `otadata` sector that selects it
 (`zrh-donglem-X.Y.Z-otadata-ota1.bin`, at 0x5D000); `release-manifest.json`
 and `SHA256SUMS`. The release notes are the changelog section, then the
 esptool commands. Both flash sizes carry the MQTT bridge; the 8 MB images

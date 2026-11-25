@@ -28,6 +28,13 @@ install instructions and the list of merged pull requests. A pre-release
 - **Device page** (`#device/<id>`) with compact device cards on the
   dashboard; event entities (remotes) show their last action; grouped
   sections (Sensors, Controls, Events, Configuration, Diagnostic).
+- **Developer edition (devtools)** of the 8 MB images
+  (`tbr-hub-0.3.0-8mb-devtools[-opi]-…`, its own entry in the web flasher)
+  and of the Dongle Max (`zrh-donglem-0.3.0-devtools-app.bin`): the web UI's
+  developer tools (the ZCL/Tuya console) always on, `edition: "devtools"`
+  in `hub/info`. For developers; everyone else keeps the standard image.
+  Same layout and data as the standard image: switching keeps `nvs` and
+  `hubdata`.
 - **Last panic in RTC memory:** the console's `info` shows the last
   ESP-IDF panic and how many boots ago it happened.
 - **SONOFF Dongle Max (experimental):** the hub application on the
@@ -46,9 +53,20 @@ install instructions and the list of merged pull requests. A pre-release
   Zigbee network but does not start the application and says which image
   to flash.
 - Definitions: device selection matches zigbee-herdsman-converters for
-  99.6 % of its fingerprints; white labels by model ID and by software
-  build (e.g. Paulmann `RGBWW` lights), `date_code` clauses; a *generic*
-  badge and *Find definition* for unmatched devices.
+  6,081 of its 6,082 fingerprint vectors. White labels by model ID,
+  software build (Paulmann `RGBWW`), logical type, hardware version and
+  endpoints (SONOFF SNZB-03/SNZB-05, BTicino K4027C), with zhc's exact
+  names; `date_code` clauses. Tuya week-schedule thermostats (ENGO EONE,
+  TS0601_thermostat_2, …) get their definition instead of staying generic.
+  The interview keeps the Green Power endpoint 242 for matching, so 13
+  more models match (e.g. Shelly 2PM, OSRAM DALI, Gledopto GL-C-007-1ID).
+  A *generic* badge and *Find definition* for unmatched devices.
+- SWBuildID and DateCode are read again after an OTA upgrade and on
+  rejoin, so the definition and white label follow the new firmware
+  without a re-interview.
+- Web UI: the rarely used tabs (Converters, Catalog, ZCL console,
+  Updates) load when first opened, which keeps the page small; a page left
+  open over a firmware update reloads once.
 - "Find definition" no longer fails with `SHA-256 differs from the
   installed manifest`: the catalog is updated before shards are fetched.
 - Automations: device-then-entity pickers that tell identical devices
@@ -56,7 +74,10 @@ install instructions and the list of merged pull requests. A pre-release
 - `network/info` reports the coordinator's table sizes (`capacity`).
 - Hub records are tagged with the network they belong to (`hub/owner`):
   `network/info.registry`, `network/registry/adopt` and
-  `network/registry/clear` (both need `"confirm": true`).
+  `network/registry/clear` (both need `"confirm": true`). After an adopt,
+  or once the records are readable again, groups, bindings, last values,
+  automations and OTA states load too (a start-up race left them hidden
+  until the next restart).
 - Internal: the coordinator boundary (host store, coordinator traits, the
   non-blocking ZRHP pump, ticketed device transport) and the EZSP backend
   as a build option. The TBR board images stay on ZRHP and need no NCP
@@ -72,6 +93,10 @@ install instructions and the list of merged pull requests. A pre-release
 - **Web flasher:** pick the board, leave *Erase* unticked; the image is
   chosen from the detected flash and PSRAM. Changing the layout (4 MB dev
   ↔ 8 MB) still needs an erase: back up the network first.
+- **ZCL/Tuya console (8 MB, Dongle Max):** the tab is now a developer
+  tool: switch on **Developer mode** (Settings › Hub) to see it; the
+  console's API (`zcl/*`, `tuya/send`, topic `frames`) stays available with
+  the API token. The developer edition always shows it.
 - **4 MB boards:** no Zigbee OTA (no Updates tab, `ota/*` answers
   `unsupported`) and no advanced console any more; MQTT is new there.
   **8 MB boards:** OTA, the advanced console and MQTT.

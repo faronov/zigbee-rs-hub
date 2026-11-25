@@ -522,12 +522,29 @@ def zrhp_protocol(rev: str) -> str | None:
     return None
 
 
+def hub_elfs(tbr: bool, donglem: bool) -> list[tuple[str, Path]]:
+    """(chip, ELF) of every hub image the selected boards release: the tbr-hub and zrh-donglem
+    builds, whose Rust heap is in PSRAM, so their Rust code must not use S32C1I
+    (tools/check-s32c1i.sh). tbr-bridge keeps no Rust data in PSRAM and is not listed."""
+    out = []
+    if tbr:
+        for target in dict.fromkeys(spec["target"] for spec in s3_boards()):
+            out.append(("esp32s3", ROOT / target / "xtensa-esp32s3-espidf/release/tbr-hub"))
+    if donglem:
+        out.append(("esp32", ROOT / "target/xtensa-esp32-espidf/release/zrh-donglem"))
+        if has_feature("firmware/donglem/Cargo.toml", "dev"):
+            out.append(("esp32", ROOT / "target-devtools/xtensa-esp32-espidf/release/zrh-donglem"))
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--tag", required=True)
-    parser.add_argument("--commit", required=True)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--list-elfs", action="store_true",
+                        help="print `chip path` of every hub ELF the selected boards release, then exit")
+    parser.add_argument("--version")
+    parser.add_argument("--tag")
+    parser.add_argument("--commit")
+    parser.add_argument("--out")
     parser.add_argument("--date")
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", "faronov/zigbee-rs-hub"))
     parser.add_argument("--toolchain", default="{}")
@@ -536,6 +553,13 @@ def main() -> None:
     args = parser.parse_args()
     tbr = args.boards in ("all", "tbr")
     donglem = args.boards in ("all", "donglem")
+    if args.list_elfs:
+        for chip, elf in hub_elfs(tbr, donglem):
+            print(chip, elf.relative_to(ROOT))
+        return
+    missing = [f"--{k}" for k in ("version", "tag", "commit", "out") if getattr(args, k) is None]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
     try:
         if cargo_version("firmware/hub/Cargo.toml") != args.version:
             raise ReleaseError("firmware/hub/Cargo.toml version differs from the tag")

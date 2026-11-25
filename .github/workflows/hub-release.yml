@@ -61,6 +61,7 @@ on:
             - firmware/*/sdkconfig.defaults
             - firmware/*/partitions*.csv
             - tools/check-s32c1i.sh
+            - tools/s32c1i-control/**
     workflow_dispatch:
         inputs:
             donglem:
@@ -190,12 +191,6 @@ jobs:
                   # developer edition (devtools) once tbr-hub has the feature dev. Quad and octal PSRAM
                   # (N4R8/N8R8/N16R8): ESP-IDF fixes the mode at build time.
                   tools/build-hub-firmware.sh --locked
-                  # Rust atomics must not use S32C1I (not atomic between the cores on PSRAM: the 0.2.0 crashes).
-                  od="$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)"
-                  for t in target target-opi target-8mb target-8mb-opi target-8mb-devtools target-8mb-devtools-opi; do
-                    elf="$t/xtensa-esp32s3-espidf/release/tbr-hub"
-                    if [ -f "$elf" ]; then tools/check-s32c1i.sh "$od" "$elf"; fi
-                  done
             - name: Build zrh-donglem (SONOFF Dongle Max, classic ESP32)
               if: steps.meta.outputs.donglem == 'true'
               env:
@@ -210,10 +205,35 @@ jobs:
                     cp "target/$elf" "target-devtools/$elf"
                   fi
                   (cd firmware/donglem && cargo build --release --locked)
-                  # Rust atomics must not use S32C1I (not atomic between the cores on PSRAM).
-                  od="$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)"
-                  for t in target target-devtools; do
-                    if [ -f "$t/$elf" ]; then tools/check-s32c1i.sh "$od" "$t/$elf"; fi
+            - name: No S32C1I compare-and-set in the released hub images' Rust code
+              env:
+                  BOARDS: ${{ steps.meta.outputs.boards }}
+              run: |
+                  set -euo pipefail
+                  # Every tbr-hub and zrh-donglem ELF the release packages (release-images.py --list-elfs):
+                  # their Rust heap is in PSRAM, where S32C1I is not atomic between the cores (the 0.2.0
+                  # crashes). Fails closed: a missing ELF or objdump fails the run. Then, per chip, the
+                  # positive control of ci.yml: Rust atomics built with S32C1I must fail the check, each
+                  # of the control's six found.
+                  python3 tools/release-images.py --list-elfs --boards "$BOARDS" >target/hub-elfs.txt
+                  cat target/hub-elfs.txt
+                  [ -s target/hub-elfs.txt ]
+                  find_od() { find .embuild/espressif/tools -name "xtensa-$1-elf-objdump" -type f | head -1; }
+                  chips=""
+                  while read -r chip elf; do
+                    od=$(find_od "$chip")
+                    [ -n "$od" ] || { echo "::error::no xtensa-$chip-elf-objdump"; exit 1; }
+                    [ -f "$elf" ] || { echo "::error::$elf missing"; exit 1; }
+                    echo "$elf:"
+                    tools/check-s32c1i.sh "$od" "$elf"
+                    case " $chips " in *" $chip "*) ;; *) chips="$chips $chip" ;; esac
+                  done <target/hub-elfs.txt
+                  for chip in $chips; do
+                    cargo +esp rustc -q --release -Zbuild-std=core --target "xtensa-$chip-none-elf" --manifest-path tools/s32c1i-control/Cargo.toml --target-dir target/s32c1i-control -- --emit=obj -Zfunction-sections=no
+                    out=$(tools/check-s32c1i.sh "$(find_od "$chip")" target/s32c1i-control/xtensa-"$chip"-none-elf/release/deps/s32c1i_control-*.o) && rc=0 || rc=$?
+                    echo "$out"
+                    test "$rc" -eq 1
+                    test "$(grep -c '^S32C1I compare-and-set in Rust' <<<"$out")" -eq 6
                   done
             - name: Release images
               run: |

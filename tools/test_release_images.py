@@ -80,6 +80,20 @@ class BuildCheckTests(unittest.TestCase):
         with mock.patch.object(release_images, "has_feature", return_value=True):
             self.assertEqual(len(release_images.s3_boards()), 6)
 
+    def test_every_released_hub_elf_is_listed_for_the_atomics_scan(self):
+        with mock.patch.object(release_images, "has_feature", return_value=True):
+            listed = [(chip, str(elf.relative_to(release_images.ROOT))) for chip, elf in release_images.hub_elfs(True, True)]
+            # Every target directory a released S3 board reads its ELF from.
+            targets = {b["target"] for b in release_images.s3_boards()}
+        self.assertEqual({p.split("/")[0] for c, p in listed if c == "esp32s3"}, targets)
+        self.assertEqual(len(targets), 6)
+        self.assertIn(("esp32", "target-devtools/xtensa-esp32-espidf/release/zrh-donglem"), listed)
+        self.assertIn(("esp32", "target/xtensa-esp32-espidf/release/zrh-donglem"), listed)
+        self.assertFalse(any("bridge" in p for _, p in listed))
+        with mock.patch.object(release_images, "has_feature", return_value=False):
+            self.assertEqual(len(release_images.hub_elfs(True, True)), 5)
+            self.assertEqual(release_images.hub_elfs(False, True), [("esp32", release_images.ROOT / "target/xtensa-esp32-espidf/release/zrh-donglem")])
+
     def test_other_features_and_psram_mode_must_match(self):
         spec = self.board("thread-br-s3-hub-4mb-dev")
         for features, psram in [(["mqtt", "advanced"], "quad"), ([], "quad"), (["mqtt"], "octal")]:

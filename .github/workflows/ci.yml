@@ -247,20 +247,17 @@ jobs:
           grep -qx 'target_feature="s32c1i"' <<<"$default"
           if grep -qx 'target_feature="s32c1i"' <<<"$flagged"; then echo "-s32c1i did not remove the feature"; exit 1; fi
           grep -q '"target-feature=-s32c1i"' firmware/hub/.cargo/config.toml
-      - name: Build tbr-hub developer edition (devtools, feature dev, as the 8 MB images; its release images come with the release tooling)
-        working-directory: firmware/hub
-        run: cargo build --release --features mqtt,dev,ota-store
-      # Each ELF right after its build (the next build replaces it).
-      - name: No S32C1I compare-and-set in the developer edition's Rust code
-        run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)" target/xtensa-esp32s3-espidf/release/tbr-hub
-      - name: Build tbr-hub (8 MB images with MQTT, the advanced console and Zigbee OTA with its image store; 4 MB images with MQTT only; quad and octal PSRAM)
+      - name: Build tbr-hub (8 MB images with MQTT, the advanced console and Zigbee OTA with its image store; the 8 MB developer edition, devtools, feature dev; 4 MB images with MQTT only; quad and octal PSRAM)
         run: tools/build-hub-firmware.sh
-      - name: No S32C1I compare-and-set in the images' Rust code (8 MB and 4 MB, quad and octal PSRAM)
+      - name: No S32C1I compare-and-set in the images' Rust code (every tbr-hub ELF a release packages, release-images.py --list-elfs)
         run: |
           od="$(find .embuild/espressif/tools -name xtensa-esp32s3-elf-objdump -type f | head -1)"
-          for t in target-8mb target-8mb-opi target target-opi; do
-            echo "$t:"; tools/check-s32c1i.sh "$od" "$t/xtensa-esp32s3-espidf/release/tbr-hub"
-          done
+          elfs=$(python3 tools/release-images.py --list-elfs --boards tbr)
+          echo "$elfs"
+          test "$(wc -l <<<"$elfs")" -ge 4
+          while read -r _ elf; do
+            echo "$elf:"; tools/check-s32c1i.sh "$od" "$elf"
+          done <<<"$elfs"
       - name: S32C1I check, positive control (Rust atomics built with S32C1I for xtensa-esp32s3 must fail it, each found)
         run: |
           cargo +esp rustc -q --release -Zbuild-std=core --target xtensa-esp32s3-none-elf --manifest-path tools/s32c1i-control/Cargo.toml --target-dir target/s32c1i-control -- --emit=obj -Zfunction-sections=no
@@ -331,9 +328,11 @@ jobs:
           grep -qx 'target_feature="s32c1i"' <<<"$default"
           if grep -qx 'target_feature="s32c1i"' <<<"$flagged"; then echo "-s32c1i did not remove the feature"; exit 1; fi
           grep -q '"target-feature=-s32c1i"' firmware/donglem/.cargo/config.toml
-      - name: Build zrh-donglem developer edition (devtools, feature dev; its release image comes with the release tooling)
-        working-directory: firmware/donglem
-        run: cargo build --release --features dev
+      - name: Build zrh-donglem developer edition (devtools, feature dev; kept in target-devtools/, where release-images.py reads it)
+        run: |
+          (cd firmware/donglem && cargo build --release --features dev)
+          mkdir -p target-devtools/xtensa-esp32-espidf/release
+          cp target/xtensa-esp32-espidf/release/zrh-donglem target-devtools/xtensa-esp32-espidf/release/
       # Each ELF right after its build (the next build replaces it).
       - name: No S32C1I compare-and-set in the developer edition's Rust code
         run: tools/check-s32c1i.sh "$(find .embuild/espressif/tools -name xtensa-esp32-elf-objdump -type f | head -1)" target/xtensa-esp32-espidf/release/zrh-donglem
