@@ -883,3 +883,45 @@ fn the_identity_is_read_again_after_an_upgrade_and_on_rejoin() {
     assert_eq!(basic_reads(&sim), 1);
     assert_eq!(model(&hub).as_deref(), Some("TH-1"));
 }
+
+/// A router with a GP proxy endpoint (242) as the interview stores it:
+/// zigbee-herdsman-converters' fingerprints list 242, so a definition that
+/// needs it matches; the GP-profile endpoint gets no entities, binds or
+/// reporting.
+#[test]
+fn the_gp_endpoint_is_kept_for_matching_only() {
+    const BULB: u64 = 0x0017880100ddeeff;
+    let id = "zb:0017880100ddeeff";
+    let src = "zdef: 1\nid: acme/bulb\nrevision: 1\nvendor: ACME\nmodel: BULB-1\nmatch:\n  - model: BULB-1\n    manufacturer: ACME\n    endpoints:\n      1: {profile: 0x0104, device_id: 0x0101, in: [0x0000, 0x0006, 0x0008]}\n      242: {profile: 0xA1E0, device_id: 0x0061, out: [0x0021]}\n";
+    let cbor = zdefc::compile_str(src, zdefc::Format::Yaml, &zdefc::Options::default())
+        .unwrap()
+        .cbor;
+    let mut cat = MemoryCatalog::default();
+    cat.insert(crate::zdef_adapter::load_cbor(&cbor, crate::model::LayerSource::Catalog).unwrap());
+    let mut hub = Hub::new(
+        MockTransport::default(),
+        HubConfig::default(),
+        Box::new(cat),
+    );
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(BULB, 0x2345, LogicalType::Router, true, 0x100b)
+            .endpoint(1, 0x0104, 0x0101, &[0x0000, 0x0003, 0x0006, 0x0008], &[])
+            .endpoint(242, 0xA1E0, 0x0061, &[], &[0x0021])
+            .basic("ACME", "BULB-1", 0x01),
+    );
+    sim.join(&mut hub, BULB, T0);
+    let d = hub.device(id).unwrap();
+    assert!(!d.interview_partial);
+    let eps: Vec<u8> = d.fp.endpoints.iter().map(|e| e.ep).collect();
+    assert_eq!(eps, [1, 242]);
+    let layers: Vec<&str> = d.resolution.layers.iter().map(|l| l.id.as_str()).collect();
+    assert!(layers.contains(&"acme/bulb"), "{layers:?}");
+    assert!(
+        !d.entities.iter().any(|e| e.r.ep == 242),
+        "no entity on 242"
+    );
+    let dev = sim.dev(BULB);
+    assert!(!dev.binds.iter().any(|b| b.0 == 242), "{:?}", dev.binds);
+    assert!(!dev.reporting.iter().any(|r| r.0 == 242));
+}

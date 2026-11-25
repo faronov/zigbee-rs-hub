@@ -179,7 +179,7 @@ user "re-interview" request.
 |---|---|---|
 | 1 | Node_Desc_req | logical type, manufacturer code, MAC capabilities (RxOnWhenIdle), max buffer sizes |
 | 2 | Active_EP_req | endpoint list |
-| 3 | Simple_Desc_req per endpoint (skip 242 = GP) | profile, device ID, version, input and output clusters |
+| 3 | Simple_Desc_req per endpoint, the GP endpoint 242 last | profile, device ID, version, input and output clusters; 242 (a GP proxy, profile 0xA1E0) is kept for matching only (zigbee-herdsman-converters' fingerprints list it): GP-profile endpoints get no entities, binds or reporting, and a failure on 242 does not make the interview partial |
 | 4 | Basic (0x0000) Read Attributes on the first endpoint with Basic: 0x0004 ManufacturerName, 0x0005 ModelIdentifier, 0x0007 PowerSource, then 0x0000 ZCLVersion, 0x0001 ApplicationVersion, 0x0002 StackVersion, 0x0003 HWVersion, 0x0006 DateCode, 0x4000 SWBuildID (one request per ≤ 5 attributes; UNSUPPORTED_ATTRIBUTE tolerated) | identity strings and versions |
 | 5 | Resolve (3.3) with what is known so far | candidate definition |
 | 6 | Definition-requested reads (e.g. Tuya "magic packet", 10.4) | — |
@@ -284,7 +284,9 @@ Precedence rules:
   fingerprint, a white-label fingerprint without a model ID once per
   zigbeeModel, and each white-label fingerprint without, or with another
   value of, each field beyond the names) against all shard records of a
-  built catalog; where zhc finds no definition the hub must find none.
+  built catalog, with the endpoints the interview stores
+  (`hub::interview_endpoints`); where zhc finds no definition the hub must
+  find none.
   zhc 26.130.0: 6,081 of the 6,082 vectors (of 8,216) whose definition
   this hub can load pick zhc's definition and white label; 2,134 more need
   features the hub lacks. The one left cannot be: zhc gives the white

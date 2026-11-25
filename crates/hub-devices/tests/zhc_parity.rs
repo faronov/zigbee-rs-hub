@@ -130,7 +130,11 @@ fn hub_picks_the_definition_zhc_picks() {
         let expect = v["expect"].as_object();
         let want = expect.and_then(|e| e["model"].as_str()).unwrap_or("");
         let want_base = expect.and_then(|e| e["base"].as_str()).unwrap_or("");
-        let fp = fingerprint(&v["fp"]);
+        let mut fp = fingerprint(&v["fp"]);
+        // Only what the interview stores (zhc lists every endpoint).
+        let ids: Vec<u8> = fp.endpoints.iter().map(|e| e.ep).collect();
+        let stored = hub_devices::hub::interview_endpoints(&ids);
+        fp.endpoints.retain(|e| stored.contains(&e.ep));
         let res = resolve(&ResolveInput {
             fp: &fp,
             generic: &generic,

@@ -16,7 +16,7 @@ meta 5a510000000001020100e0e00000000000000000b379379f
 @ permit join: open 60 s
 @ join: device joined, interview, configure
 device b0c0000000006b6d 44448e00
-kv_put dev/zb:6d6b00000000c0b0 0/1 1385 B
+kv_put dev/zb:6d6b00000000c0b0 0/1 1467 B
 kv_put st/zb:6d6b00000000c0b0 0/1 152 B
 @ permit join: close
 @ group: create, add member
@@ -29,7 +29,7 @@ kv_put st/zb:6d6b00000000c0b0 0/1 152 B
 kv_put dev/gp:00f40002 0/1 1152 B
 kv_put st/gp:00f40002 0/1 97 B
 @ gp: remote pairing (binding on the light)
-kv_put dev/zb:6d6b00000000c0b0 0/1 1437 B
+kv_put dev/zb:6d6b00000000c0b0 0/1 1519 B
 kv_put st/zb:6d6b00000000c0b0 0/1 152 B
 @ app stop
 @ app restart: registry restored, NCP device import
