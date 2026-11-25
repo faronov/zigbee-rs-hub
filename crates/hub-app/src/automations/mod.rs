@@ -193,6 +193,8 @@ pub struct Automations {
     /// Rules cannot be stored (the hub's network records are not its own):
     /// enable and disable actions fail.
     pub read_only: bool,
+    /// The stored rules were read (the store's gate did not hide them).
+    pub loaded: bool,
 }
 
 fn key(s: &StateRef) -> String {
@@ -302,7 +304,9 @@ impl Automations {
     }
 
     /// Reads the current values the triggers compare against (after
-    /// loading or changing rules).
+    /// loading or changing rules, and once the network records loaded):
+    /// new ones, and unknown ones (a device or its last values restored
+    /// since).
     pub fn prime(&mut self, w: &dyn World) {
         let mut keys = Vec::new();
         let mut devs = Vec::new();
@@ -311,7 +315,7 @@ impl Automations {
                 match t {
                     Trigger::State(s) => {
                         let k = key(s);
-                        if !self.last.contains_key(&k) {
+                        if self.last.get(&k).is_none_or(J::is_null) {
                             let v = w.state(&s.uid).map(|m| value_of(&m, &s.attribute)).unwrap_or(J::Null);
                             self.last.insert(k.clone(), v);
                         }
@@ -380,7 +384,12 @@ impl Automations {
                     }
                     hit = Some(h);
                 }
-                seen.push((k, new));
+                // An entity never reported (restored or made again: its
+                // value follows) keeps the last known value; a reported
+                // unknown (invalid, unmapped) is the previous value then.
+                if !new.is_null() || msg.get("last_reported").is_some_and(|t| !t.is_null()) {
+                    seen.push((k, new));
+                }
             }
             if let Some(h) = hit {
                 fire.push((r.id.clone(), h));

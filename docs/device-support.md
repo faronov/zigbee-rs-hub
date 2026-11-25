@@ -2545,7 +2545,12 @@ clears them; `network/reset` and `network/restore` take them for the new
 network too. Adopting keeps devices the hub met meanwhile (an NCP import,
 a join): the stored record replaces each in place (`device_updated`, no
 removal; its last values stay). Records written before the tag existed are tagged for the
-stored network at the first start.
+stored network at the first start. Each kind of network record (devices
+with their groups and bindings, last values, automations, OTA device
+states) is loaded once, on its own: when the records turn foreign between
+these loads at the start, adopting them (or their becoming readable
+again) loads the kinds that were hidden, and the last values and OTA
+states load only after their devices.
 
 **Background jobs.** `network/energy_scan`, `network/active_scan` and
 `network/topology` (with `refresh`) answer at once with `{job, kind,
@@ -2659,7 +2664,7 @@ Triggers (any of them starts a run):
 
 | `type` | Fields | Fires |
 |---|---|---|
-| `state` | `uid`, `attribute` (optional: an attribute of the state message instead of `state`), `op` (`equals`, `not_equals`, `above`, `below`, `changed`), `value` | `changed`: on a change between two known values (unknown → value is not a change; a repeated report is not either); the comparisons when they start to hold (from not holding or unknown). Numbers compare by value (`"21.5"` = 21.5), `true` = `"on"`, `false` = `"off"` |
+| `state` | `uid`, `attribute` (optional: an attribute of the state message instead of `state`), `op` (`equals`, `not_equals`, `above`, `below`, `changed`), `value` | `changed`: on a change between two known values (unknown → value is not a change; a repeated report is not either); the comparisons when they start to hold (from not holding or unknown). A reported unknown (an invalid or unmapped value) is the previous value like any other, so a comparison can start to hold again after it; the state of an entity never reported (restored or made again, its value not known yet) is not: the previous value stays the last known one. A rule loaded with the network records compares with the devices' restored last values. Numbers compare by value (`"21.5"` = 21.5), `true` = `"on"`, `false` = `"off"` |
 | `event` | `uid`, `event_type` (optional) | an `entity_event` (buttons, remotes, GP commands, 4.7) |
 | `availability` | `device`, `to` (`available`/`unavailable`, optional) | the device's availability changed |
 | `time` | `cron`: `minute hour day month weekday` (numbers, `*`, `a-b`, lists, `/step`; weekday 0–7 or `sun`…`sat`, months `jan`…`dec`; day and weekday both restricted = either) | once per local minute (the hub's fixed UTC offset); nothing is caught up after a clock step |

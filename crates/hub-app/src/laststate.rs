@@ -16,7 +16,7 @@ use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
 use hub_devices::model::Category;
 use hub_devices::transport::ZigbeeTransport;
-use hub_store::{KvStore, kv};
+use hub_store::{Gate, KvStore, kv};
 use log::{info, warn};
 
 /// Key prefix.
@@ -42,14 +42,20 @@ pub struct LastValues {
     pub bytes: u64,
     /// See `writes`.
     pub errors: u64,
+    /// The kept values were read (the store's gate did not hide them).
+    pub loaded: bool,
 }
 
 impl LastValues {
-    /// Puts the kept values back (after the registry restored the devices).
+    /// Puts the kept values back (after the registry restored the devices),
+    /// unless the gate hides them (they are network records): at the start,
+    /// or when the app loads the network's records later.
     #[inline(never)]
     pub fn load<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &mut Engine<T>, now: Millis) {
-        let recs: Vec<(String, Vec<u8>)> =
-            kv::with(kv, |s| s.prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect());
+        let (gate, recs): (Gate, Vec<(String, Vec<u8>)>) = kv::with(kv, |s| {
+            (s.gate(), s.prefix(KEY).map(|(k, v)| (k[KEY.len()..].to_string(), v.to_vec())).collect())
+        });
+        self.loaded = gate != Gate::Closed;
         for (id, v) in recs {
             if let Ok(t) = std::str::from_utf8(&v) {
                 self.restored += engine.restore_last_values(&id, t, now);
@@ -94,9 +100,15 @@ impl LastValues {
         }
     }
 
-    /// Writes the changed devices every [`SAVE_MS`] (`force`: now).
+    /// Writes the changed devices every [`SAVE_MS`] (`force`: now). They
+    /// are network records: nothing is written before the kept values were
+    /// loaded, nor while the gate is not open; what changed stays noted
+    /// until then (no write is attempted, none counts as failed).
     #[inline(never)]
     pub fn flush<T: ZigbeeTransport>(&mut self, kv: &dyn KvStore, engine: &Engine<T>, now: Millis, force: bool) {
+        if !self.loaded {
+            return;
+        }
         let slow = force || now.saturating_sub(self.last_slow) >= SLOW_MS;
         if !slow && now.saturating_sub(self.last_save) < SAVE_MS {
             return;
@@ -114,13 +126,14 @@ impl LastValues {
         if ids.is_empty() && self.removed.is_empty() {
             return;
         }
-        let puts: Vec<(String, String)> = ids
-            .into_iter()
-            .filter_map(|id| engine.last_values(&id).map(|t| (format!("{KEY}{id}"), t)))
-            .collect();
-        let dels: Vec<String> = std::mem::take(&mut self.removed).into_iter().map(|id| format!("{KEY}{id}")).collect();
+        let puts: Vec<(String, String)> =
+            ids.iter().filter_map(|id| engine.last_values(id).map(|t| (format!("{KEY}{id}"), t))).collect();
+        let dels: Vec<String> = self.removed.iter().map(|id| format!("{KEY}{id}")).collect();
         let (mut w, mut b, mut e) = (0, 0, 0);
-        kv::with(kv, |s| {
+        let open = kv::with(kv, |s| {
+            if s.gate() != Gate::Open {
+                return false;
+            }
             for (k, t) in &puts {
                 if s.get(k) == Some(t.as_bytes()) {
                     continue;
@@ -138,7 +151,14 @@ impl LastValues {
                     e += 1;
                 }
             }
+            true
         });
+        if !open {
+            // Kept for the first flush with the gate open.
+            self.dirty = ids;
+            return;
+        }
+        self.removed.clear();
         self.writes += w;
         self.bytes += b;
         if e > 0 {
@@ -163,9 +183,10 @@ mod tests {
     fn a_device_removed_and_added_again_keeps_its_values() {
         let kv = Mutex::new(Store::volatile());
         kv::with(&kv, |s| s.put("st/zb:1", b"{}")).unwrap();
-        let e = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
+        let mut e = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
         let (removed, added) = (HubEvent::DeviceRemoved("zb:1".into()), HubEvent::DeviceAdded("zb:1".into()));
         let mut lv = LastValues::default();
+        lv.load(&kv, &mut e, 0);
         lv.note(&[removed.clone(), added], &e);
         lv.flush(&kv, &e, 1, true);
         assert!(kv::with(&kv, |s| s.get("st/zb:1").is_some()));
