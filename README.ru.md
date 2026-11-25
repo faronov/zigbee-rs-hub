@@ -979,8 +979,9 @@ ZigBee Coordinator Backup в том виде, как его пишут zigpy/ZHA
 `RESET`: автоматический бэкап, выход из сети, формирование с выбранными
 каналом/каналами, PAN ID, EPID, мощностью) и сам хаб: `hub/system`,
 `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
-`hub/mode/set`, `hub/time` / `hub/time/set` (часовой пояс строкой POSIX TZ,
-серверы SNTP), `hub/developer/set` (режим разработчика: инструменты
+`hub/mode/set`, `hub/time` / `hub/time/set` (часовой пояс строкой POSIX TZ
+с необязательным именем IANA, серверы SNTP; веб-страница выбирает зону IANA
+и преобразует её в браузере), `hub/developer/set` (режим разработчика: инструменты
 разработчика веб-интерфейса, образы с консолью advanced; событие
 `hub_updated`). `hubctl serve` реализует сторону хаба для компьютера
 (учётные данные и токен в памяти, собственный хвост журнала;

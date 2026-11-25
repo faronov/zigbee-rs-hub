@@ -2325,7 +2325,8 @@ code feels familiar:
   `reporting/defaults/get`, `reporting/defaults/set`, the `report` and
   `part` parameters of `entities/update` and the event `entity_reporting`;
   the hub records' ownership: `registry` in `network/info`,
-  `network/registry/adopt` and `network/registry/clear`.
+  `network/registry/adopt` and `network/registry/clear`; `tz_name` in
+  `hub/time` and `hub/time/set`.
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2530,8 +2531,8 @@ written as text with fallible allocation, never as a JSON tree).
 | `network/registry/clear` | `confirm` = `true` | `deleted` (records), `forgotten` (devices), `registry`. Deletes the network records and drops the devices, groups, bindings and automations from the hub without network traffic (no leave, no removal on the NCP); the NCP's devices are imported again. User definitions and the hub's settings stay |
 | `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason`), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time`, `time_synced` |
 | `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged), stamped `MM-DD HH:MM:SS` local time once the clock is set, else seconds since boot |
-| `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
-| `hub/time/set` | `tz` (POSIX TZ: `EET-2EEST,M3.5.0/3,M10.5.0/4`; `Mm.w.d`, `Jn` and `n` rules), `servers` (1–3 host names) | the `hub/time` record; both kept in the host store. The time zone drives the Time cluster server (0x000A) on the hub endpoint and the Tuya time sync (EF00 0x24); clients show times in their own zone |
+| `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_name` (the IANA name the client gave with `tz`, or null), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
+| `hub/time/set` | `tz` (POSIX TZ: `EET-2EEST,M3.5.0/3,M10.5.0/4`; `Mm.w.d`, `Jn` and `n` rules; times may be negative or past 24 h: `M3.5.0/-1`, `M3.4.4/26`), `tz_name` (optional, only with `tz`: the IANA zone it was made from, such as `Europe/Kyiv`; 1–64 of `A–Z a–z 0–9 / _ + -`, starting with a letter; display only, never interpreted; a `tz` without it removes the old name), `servers` (1–3 host names) | the `hub/time` record; all kept in the host store (`cfg/tz`, `cfg/tz_name`, `cfg/ntp`, hub-scoped). The web page turns an IANA zone into the POSIX string in the browser (Intl offsets of this and next year, hour by hour; rules that hold for 28 years; else today's offset, fixed, and it says so); the Home Assistant integration sends HA's zone with its TZif footer. The time zone drives the Time cluster server (0x000A) on the hub endpoint and the Tuya time sync (EF00 0x24); clients show times in their own zone |
 | `hub/developer/set` | `enabled` (bool) | `developer_mode`: kept in the host store (`cfg/dev`) and in `hub/info` (`developer_mode`), announced as `hub_updated` {`developer_mode`} (topic `network`), in images with the ZCL console (14.7) only; the others answer `unsupported` and have no field. While it is on the web UI shows its developer tools (the ZCL console tab) and the HTTP server serves their modules (`/ui/<build>/zcl.js`, else 403); the developer edition (devtools, `edition` in `hub/info`) has them always. It only controls the UI: the console's API (`zcl/*`, `tuya/send`, topic `frames`) follows the image's feature, not this switch — the API token already grants full control, and Home Assistant services may use it |
 | `hub/wifi/set` | `ssid` (1–32 bytes), `password` (empty or 8–63) | `stored`, `reconnecting`: kept in NVS, the station reconnects with them (the connection to the hub drops) |
 | `hub/token/rotate` | — | `token`: the new API token (persisted); sessions already authenticated stay, new ones need it |
@@ -3111,7 +3112,7 @@ API.
 
 | Area | Offset | Size | Content |
 |---|---:|---:|---|
-| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/ntp`), reporting defaults (`cfg/report`, 5.2), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8), automations (`auto/`, 14.8) |
+| Host store journal | 0x000000 | 128 KiB | ZRHP host tables, device registry, user definitions (`udef/`), catalog settings (`cfg/catalog`), time settings (`cfg/tz`, `cfg/tz_name`, `cfg/ntp`), reporting defaults (`cfg/report`, 5.2), last known values (`st/`, about 0.2–0.5 KB per device), GP registry and bindings (13.8), automations (`auto/`, 14.8) |
 | Catalog state | 0x020000 | 8 KiB | active-bank record, two 4 KiB slots (9.1) |
 | Manifest | 0x022000 | 24 KiB | the installed, verified `manifest.cose` (9.3; 9 KB today) |
 | Converter bank A | 0x028000 | 256 KiB | catalog bank (9.1) |

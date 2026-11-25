@@ -135,7 +135,7 @@ progress{width:12em}
 <div data-tab="auto" data-title="Automations" class="tab">
 <section class="card"><h2>Automations</h2><p id="aut" class="mut"></p><ul class="ents" id="aul"></ul></section>
 <section class="card"><h2 id="auh">New automation</h2>
-<div class="row"><input id="anm" placeholder="name" size="24"><select id="amd"><option>single</option><option>restart</option></select></div>
+<div class="row"><input id="anm" placeholder="name" size="24"><label>mode <select id="amd"><option>single</option><option>restart</option></select></label><span class="mut">single ignores triggers while a run is in progress (e.g. in “after N s”); restart cancels the run and starts over</span></div>
 <div class="row acts"><b>When</b><select id="att"><option value="state">state of</option><option value="event">event of</option><option value="availability">device</option><option value="time">time</option><option value="start">hub start</option></select><select id="atd"></select><select id="atu"></select><select id="ato"><option>changed</option><option>equals</option><option>above</option><option>below</option></select><input id="atv" size="10" placeholder="value"></div>
 <div class="row acts"><b>If</b><select id="act"><option value="">always</option><option value="state">state of</option><option value="time">time between</option></select><select id="acd"></select><select id="acu"></select><select id="aco"><option>equals</option><option>not_equals</option><option>above</option><option>below</option></select><input id="acv" size="10" placeholder="value"></div>
 <div class="row acts"><b>Then</b><select id="aat"><option value="command">command</option><option value="notify">notify</option></select><select id="aaD"></select><select id="aau"></select><select id="aac"></select><input id="aav" size="10" placeholder="value"><label>after <input id="aad" class="num" placeholder="s"> s</label><select id="aa2"></select></div>
@@ -174,8 +174,8 @@ progress{width:12em}
 <!-- gateway:end -->
 <section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
 <div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
-<div class="row acts"><label>Time zone <input id="tzi" list="tzl" size="26" placeholder="POSIX TZ, e.g. EET-2EEST,M3.5.0/3,M10.5.0/4"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button></div>
-<datalist id="tzl"><option value="UTC0">UTC</option><option value="GMT0BST,M3.5.0/1,M10.5.0">London</option><option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin, Paris, Warsaw</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Kyiv, Helsinki, Riga</option><option value="MSK-3">Moscow, Istanbul (+3)</option><option value="EST5EDT,M3.2.0,M11.1.0">New York</option><option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles</option><option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney</option></datalist>
+<div class="row acts" id="tzr"><label>Time zone <input id="tzn" list="tzl" size="20" placeholder="e.g. Europe/Kyiv"></label><button id="tzu">Use this browser's zone</button><datalist id="tzl"></datalist></div>
+<div class="row acts"><label>Advanced: POSIX string <input id="tzi" size="20"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button><span class="mut" id="tzm"></span></div>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <!-- devmode:start -->
 <div class="row hide" id="dvr"><label><input type="checkbox" id="dvm"> Developer mode: the ZCL console tab</label></div>
@@ -575,9 +575,36 @@ $("#nrb").onclick=e=>{
  if(c)p.channel=+c;if(pan)p.pan_id=parseInt(pan,16);if(ep)p.ext_pan_id=ep;if(tx!=="")p.tx_power=+tx;
  if(!confirm("Leave the current network and form a new one? All devices must be paired again."))return;
  busy(e.target,act("network/reset",p).then(r=>{if(r.backup)saveBackup(r.backup);$("#nconf").value="";toast("New network: PAN "+hex(r.network.pan_id,4)+", channel "+r.network.channel)})).catch(()=>{})};
-function loadTime(){call("hub/time").then(t=>{tm=t;if(document.activeElement!=$("#tzi"))$("#tzi").value=t.tz;if(document.activeElement!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys()}).catch(()=>{})}
-let tm={};
-$("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;toast("Time zone saved");loadSys()})).catch(()=>{});
+// An IANA zone as a POSIX TZ string (hub/time/set): the zone's offsets from
+// Intl hour by hour this year and next; its two changes a year become
+// Mm.w.d/time rules (the local day before a change or a day either side,
+// whichever holds for 28 years) that must give every hour's offset; else
+// today's offset, fixed.
+const tzF=(z,l,n)=>new Intl.DateTimeFormat(l,{timeZone:z,timeZoneName:n}),tzV=(f,t)=>f.formatToParts(t*6e4).find(p=>p.type=="timeZoneName").value;
+function tzPosix(z,y=new Date().getUTCFullYear()){
+ const F=tzF(z,"en","longOffset"),M=(Y,m,d)=>Date.UTC(Y,m,d)/6e4,D=t=>new Date(t*6e4),Y0=M(y,0,1),hs=[],tr=[],
+  o=t=>{const v=tzV(F,t).slice(3);return v?(v[0]+1)*(v.slice(1,3)*60+ +v.slice(4)):0},
+  hm=n=>(n<0?"-":"")+(Math.abs(n)/60|0)+(n%60?":"+Math.abs(n%60):""),
+  nm=t=>["en-US","en-GB"].map(l=>tzV(tzF(z,l,"short"),t)).find(n=>/^[a-z]{3,}$/i.test(n))||"<"+(tzV(F,t).slice(3)||"+00").replace(/:(00)?/,"")+">",
+  at=(Y,[m,w,d,s],v)=>{const a=M(Y,m-1,1);let k=(d+10-a/1440%7)%7+7*w-7;if(k*1440>=M(Y,m,1)-a)k-=7;return a+k*1440+s-v},
+  rule=x=>{if(x)for(const k of[0,-1,1])for(const w of[5,0]){const l=x[0]+x[1],d=D(l+k*1440),r=[d.getUTCMonth()+1,w||Math.ceil(d.getUTCDate()/7),d.getUTCDay(),l%1440-k*1440];
+   if([...Array(28)].every((_,i)=>{const t=at(y+i,r,x[1]);return o(t-1)==x[1]&&o(t)==x[2]}))return r}},
+  R=([m,w,d,s])=>",M"+m+"."+w+"."+d+(s==120?"":"/"+hm(s));
+ for(let t=Y0,p=o(t);t<M(y+2,0,1);t+=60){const q=o(t);if(q!=p){let h=t-60;while(o(h)==p)h++;tr.push([h,p,q])}hs.push(p=q)}
+ const S=Math.min(...hs),L=Math.max(...hs),b=tr.find(x=>x[2]==L),e=tr.find(x=>x[2]==S),B=rule(b),E=rule(e),now=Date.now()/6e4;
+ if(B&&E&&hs.every((q,i)=>{const t=Y0+i*60,Y=D(t).getUTCFullYear(),s=at(Y,B,S),f=at(Y,E,L);return q==(t>=s^t<f^s<f?L:S)}))
+  return{tz:nm(b[0]-1)+hm(-S)+nm(b[0])+(L-S==60?"":hm(-L))+R(B)+R(E)};
+ return{tz:nm(now)+hm(-o(now)),fixed:!!tr[0]}}
+// The zone picked here (or the hub's tz_name) names the POSIX string; editing that string drops the name.
+let tm={},tzN="";const tzZ=(Intl.supportedValuesOf||(()=>[]))("timeZone");
+$("#tzl").append(...tzZ.map(z=>new Option(z)));tzZ[0]||$("#tzr").classList.add("hide");
+const tzShow=n=>$("#tzm").textContent=tzN?"Hub time with "+tzN+": "+new Date().toLocaleString("sv",{timeZone:tzN})+(n?". "+n:""):"";
+function tzPick(){const z=$("#tzn").value.trim();tzN="";try{tzF(z)}catch(e){return tzShow()}
+ const r=tzPosix(z);tzN=z;$("#tzi").value=r.tz;tzShow(r.fixed&&z+" has no yearly rule: today's offset is kept fixed")}
+$("#tzn").oninput=tzPick;$("#tzu").onclick=()=>{$("#tzn").value=Intl.DateTimeFormat().resolvedOptions().timeZone;tzPick()};
+$("#tzi").oninput=()=>{tzN=$("#tzn").value="";tzShow()};
+function loadTime(){call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");tzShow();loadSys()}).catch(()=>{})}
+$("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),tz_name:tzN,servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;tzShow();toast("Time zone saved");loadSys()})).catch(()=>{});
 function loadRep(){call("reporting/defaults/get").then(r=>{const t=$("#rpd");t.textContent="";for(const c of r.classes)t.append(el("tr",{},el("td",{},c.key),el("td",{},el("input",{size:12,"data-k":c.key,value:c.edited?rTxt(c.report):"",placeholder:rTxt(c.builtin)}))))}).catch(()=>{})}
 $("#rpb").onclick=()=>{const d={};for(const i of $("#rpd").querySelectorAll("input"))d[i.dataset.k]=rVal(i.value);act("reporting/defaults/set",{defaults:d}).then(()=>{toast("Saved");loadRep()},()=>{})};
 function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a=s.app||{},n=s.ncp||{};
@@ -872,7 +899,7 @@ function auBuild(){
 }
 function auEdit(id){
  auId=id;const r=id&&au.rules[id];$("#auh").textContent=r?"Edit "+(r.name||id):"New automation";$("#aud").classList.toggle("hide",!r);
- if(r){const x={};for(const k of["id","name","enabled","mode","max_per_min","triggers","conditions","actions"])x[k]=r[k];V("auj",JSON.stringify(x,null,1));$("#ajd").open=true;V("anm",r.name||"")}
+ if(r){const x={};for(const k of["id","name","enabled","mode","max_per_min","triggers","conditions","actions"])x[k]=r[k];V("auj",JSON.stringify(x,null,1));$("#ajd").open=true;V("anm",r.name||"");V("amd",r.mode)}
  else{V("anm","");$("#ajd").open=false;auBuild()}
 }
 const auSum=r=>(r.triggers||[]).map(t=>t.type=="state"?eName(t.uid)+" "+t.op+(t.value!=null?" "+t.value:""):t.type=="event"?eName(t.uid)+(t.event_type?" "+t.event_type:""):t.type=="time"?"at "+t.cron:t.type=="availability"?t.device+" "+(t.to||"availability"):t.type).join(", ")||"manual";
