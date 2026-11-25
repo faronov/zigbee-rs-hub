@@ -1893,7 +1893,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .values()
                 .filter(|d| d.ieee().is_some())
                 .flat_map(|d| {
-                    d.fp.endpoints.iter().map(move |e| {
+                    d.fp.endpoints.iter().filter(|e| e.profile != crate::zcl::PROFILE_GP).map(move |e| {
                         json!({"device": d.id, "endpoint": e.ep, "in": e.in_clusters, "out": e.out_clusters})
                     })
                 })

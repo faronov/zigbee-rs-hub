@@ -1123,27 +1123,19 @@ impl<T: ZigbeeTransport> Hub<T> {
                     now,
                 );
             }
-            InterviewStep::SimpleDesc(i) => {
-                let eps: Vec<u8> = d
-                    .active_eps
-                    .iter()
-                    .copied()
-                    .filter(|e| *e != crate::gp::GP_ENDPOINT)
-                    .collect();
-                match eps.get(i) {
-                    Some(&ep) => {
-                        let tsn = self.next_zdo_tsn();
-                        self.send_zdo(
-                            id,
-                            zdo::cluster::SIMPLE_DESC_REQ,
-                            zdo::simple_desc_req(tsn, nwk, ep),
-                            Purpose::Interview(step),
-                            now,
-                        );
-                    }
-                    None => self.interview_step(id, InterviewStep::Basic(0), now),
+            InterviewStep::SimpleDesc(i) => match interview_eps(d).get(i) {
+                Some(&ep) => {
+                    let tsn = self.next_zdo_tsn();
+                    self.send_zdo(
+                        id,
+                        zdo::cluster::SIMPLE_DESC_REQ,
+                        zdo::simple_desc_req(tsn, nwk, ep),
+                        Purpose::Interview(step),
+                        now,
+                    );
                 }
-            }
+                None => self.interview_step(id, InterviewStep::Basic(0), now),
+            },
             InterviewStep::Basic(i) => {
                 let ep =
                     d.fp.endpoints
@@ -1294,14 +1286,14 @@ impl<T: ZigbeeTransport> Hub<T> {
                         in_clusters: sd.in_clusters,
                         out_clusters: sd.out_clusters,
                     });
-                } else {
+                } else if !gp_step(d, step) {
                     d.interview_partial = true;
                 }
                 self.interview_step(id, InterviewStep::SimpleDesc(i + 1), now);
             }
             (step, _) => {
                 // Failed status: continue with what is known.
-                d.interview_partial = true;
+                d.interview_partial |= !gp_step(d, step);
                 let next = match step {
                     InterviewStep::NodeDesc => InterviewStep::ActiveEp,
                     InterviewStep::ActiveEp => InterviewStep::Basic(0),
@@ -2534,7 +2526,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         match purpose {
             Purpose::Interview(step) => {
                 if let Some(d) = self.devices.get_mut(id) {
-                    d.interview_partial = true;
+                    d.interview_partial |= !gp_step(d, *step);
                 }
                 let next = match *step {
                     InterviewStep::NodeDesc => InterviewStep::ActiveEp,
@@ -3048,6 +3040,30 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.emit(HubEvent::EntityRemoved(uid.to_string()));
         Ok(())
     }
+}
+
+/// The endpoints of `active` whose Simple descriptors the interview reads
+/// and stores, in order: all, the GP endpoint (242) last. 242 is kept for
+/// matching (zigbee-herdsman-converters' fingerprints list it);
+/// GP-profile endpoints get no entities, binds or reporting.
+pub fn interview_endpoints(active: &[u8]) -> Vec<u8> {
+    let gp = crate::gp::GP_ENDPOINT;
+    let mut eps: Vec<u8> = active.iter().copied().filter(|e| *e != gp).collect();
+    if active.contains(&gp) {
+        eps.push(gp);
+    }
+    eps
+}
+
+fn interview_eps(d: &Device) -> Vec<u8> {
+    interview_endpoints(&d.active_eps)
+}
+
+/// The interview step asks the GP endpoint's descriptor: optional, a
+/// failure does not make the interview partial.
+fn gp_step(d: &Device, step: InterviewStep) -> bool {
+    matches!(step, InterviewStep::SimpleDesc(i)
+        if interview_eps(d).get(i) == Some(&crate::gp::GP_ENDPOINT))
 }
 
 /// The schema endpoint of a device (0xFC6B server).
