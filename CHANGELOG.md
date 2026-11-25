@@ -45,8 +45,9 @@ install instructions and the list of merged pull requests. A pre-release
   Zigbee network but does not start the application and says which image
   to flash.
 - Definitions: device selection matches zigbee-herdsman-converters for
-  99.6 % of its fingerprints; white labels by model ID, `date_code`
-  clauses; a *generic* badge and *Find definition* for unmatched devices.
+  99.6 % of its fingerprints; white labels by model ID and by software
+  build (e.g. Paulmann `RGBWW` lights), `date_code` clauses; a *generic*
+  badge and *Find definition* for unmatched devices.
 - "Find definition" no longer fails with `SHA-256 differs from the
   installed manifest`: the catalog is updated before shards are fetched.
 - Automations: device-then-entity pickers that tell identical devices
