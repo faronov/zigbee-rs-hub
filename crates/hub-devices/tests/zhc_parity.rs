@@ -1,8 +1,9 @@
 //! Selection parity with zigbee-herdsman-converters (spec 3.3).
 //!
 //! For every fingerprint zhc knows (its fingerprints, zigbeeModels and
-//! white-label fingerprints), the definition the hub resolves from the
-//! catalog's shards must be the one zhc's `findByDevice` picks. Needs the
+//! white-label fingerprints and their variants), the definition the hub
+//! resolves from the catalog's shards must be the one zhc's `findByDevice`
+//! picks, or none where zhc finds none. Needs the
 //! vectors of the definitions repository and a built catalog:
 //!
 //! ```sh
@@ -125,11 +126,10 @@ fn hub_picks_the_definition_zhc_picks() {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut examples: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for v in &vectors {
-        let Some(expect) = v["expect"].as_object() else {
-            continue;
-        };
-        let want = expect["model"].as_str().unwrap_or("");
-        let want_base = expect["base"].as_str().unwrap_or("");
+        // `expect: null`: zhc finds no definition, nor may the hub.
+        let expect = v["expect"].as_object();
+        let want = expect.and_then(|e| e["model"].as_str()).unwrap_or("");
+        let want_base = expect.and_then(|e| e["base"].as_str()).unwrap_or("");
         let fp = fingerprint(&v["fp"]);
         let res = resolve(&ResolveInput {
             fp: &fp,
@@ -144,6 +144,8 @@ fn hub_picks_the_definition_zhc_picks() {
         let got = res.model.as_deref().unwrap_or("");
         let class = if got_base == want_base && got == want {
             "same"
+        } else if expect.is_none() {
+            "zhc finds no definition"
         } else if !models.contains_key(want_base) {
             "expected definition not in the catalog"
         } else if !models[want_base] {

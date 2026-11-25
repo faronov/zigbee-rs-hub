@@ -158,22 +158,52 @@ fn requires_is_computed_and_merged() {
 }
 
 #[test]
-fn white_labels_by_software_build() {
-    let src = "zdef: 1\nid: paulmann/291.46\nrevision: 1\nvendor: Paulmann\nmodel: '291.46'\nmatch:\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC5800}\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC5809}\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC51104}\nwhite_label:\n  - {vendor: Paulmann, model: '291.52', manufacturer: [Paulmann Licht GmbH], model_id: [RGBWW], sw_build: [PIIC5800]}\n  - {vendor: Paulmann, model: '291.50', model_id: [RGBWW], sw_build: [PIIC51104]}\n";
-    let c = compile_str(src, Format::Yaml, &Options::default()).unwrap();
-    let d = zdef::load_canonical(&c.cbor, &zdef::HubFeatures::v1()).unwrap();
-    assert_eq!(d.white_label[0].sw_build, ["PIIC5800"]);
-    let shown = |sw: Option<&str>| {
-        d.display_identity(Some("Paulmann Licht GmbH"), Some("RGBWW"), sw)
-            .1
+fn white_labels_by_fingerprint() {
+    let shown = |src: &str, fp: &zdef::Fingerprint| {
+        let c = compile_str(src, Format::Yaml, &Options::default()).unwrap();
+        let again = zdefc::decompile(&c.cbor, Format::Yaml).unwrap();
+        assert_eq!(compile(&again, Format::Yaml), c.cbor, "{again}");
+        let d = zdef::load_canonical(&c.cbor, &zdef::HubFeatures::v1()).unwrap();
+        d.display_identity(fp).1.unwrap().to_string()
     };
-    assert_eq!(shown(Some("PIIC5800")), Some("291.52"));
-    assert_eq!(shown(Some("PIIC51104\0")), Some("291.50"));
-    assert_eq!(shown(Some("PIIC5809")), Some("291.46"));
-    assert_eq!(shown(None), Some("291.46"));
-    let again = zdefc::decompile(&c.cbor, Format::Yaml).unwrap();
-    assert!(again.contains("sw_build: [PIIC5800]"), "{again}");
-    assert_eq!(compile(&again, Format::Yaml), c.cbor);
+    let paulmann = "zdef: 1\nid: paulmann/291.46\nrevision: 1\nvendor: Paulmann\nmodel: '291.46'\nmatch:\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC5800}\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC51104}\nwhite_label:\n  - {vendor: Paulmann, model: '291.52', manufacturer: [Paulmann Licht GmbH], model_id: [RGBWW], sw_build: [PIIC5800]}\n  - {vendor: Paulmann, model: '291.50', model_id: [RGBWW], sw_build: [PIIC51104]}\n";
+    let sw = |v: Option<&str>| zdef::Fingerprint {
+        manufacturer_name: Some("Paulmann Licht GmbH".into()),
+        model_id: Some("RGBWW".into()),
+        sw_build_id: v.map(Into::into),
+        ..Default::default()
+    };
+    assert_eq!(shown(paulmann, &sw(Some("PIIC5800"))), "291.52");
+    assert_eq!(shown(paulmann, &sw(Some("PIIC51104\0"))), "291.50");
+    assert_eq!(shown(paulmann, &sw(Some("PIIC5809"))), "291.46");
+    assert_eq!(shown(paulmann, &sw(None)), "291.46");
+
+    let other = "zdef: 1\nid: t/x\nrevision: 1\nvendor: V\nmodel: X\nmatch: [{model: M}]\nwhite_label:\n  - {vendor: V, model: HW, hw_version: [9, 13]}\n  - vendor: V\n    model: EP\n    logical_type: end_device\n    endpoints: {1: {profile: 0x0104, device_id: 0x0402, in: [0, 3, 0x0500, 1], out: [3]}}\n";
+    let ep = |ep: u8, in_clusters: &[u16]| zdef::matching::Endpoint {
+        ep,
+        profile: 0x0104,
+        device_id: 0x0402,
+        in_clusters: in_clusters.to_vec(),
+        out_clusters: vec![3],
+    };
+    let mut fp = zdef::Fingerprint {
+        model_id: Some("M".into()),
+        hw_version: Some(13),
+        ..Default::default()
+    };
+    assert_eq!(shown(other, &fp), "HW");
+    fp.hw_version = Some(10);
+    assert_eq!(shown(other, &fp), "X");
+    fp.logical_type = Some(2);
+    fp.endpoints = vec![ep(1, &[0, 1, 3, 0x0500])];
+    assert_eq!(shown(other, &fp), "EP", "cluster order does not count");
+    fp.logical_type = Some(1);
+    assert_eq!(shown(other, &fp), "X", "router");
+    fp.logical_type = Some(2);
+    fp.endpoints = vec![ep(1, &[0, 1, 3, 0x0500, 0x0020])];
+    assert_eq!(shown(other, &fp), "X", "another cluster");
+    fp.endpoints = vec![ep(1, &[0, 1, 3, 0x0500]), ep(2, &[0])];
+    assert_eq!(shown(other, &fp), "X", "another endpoint");
 }
 
 fn to_json(n: &Node) -> serde_json::Value {

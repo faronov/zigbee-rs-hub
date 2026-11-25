@@ -234,6 +234,24 @@ fn subset(need: &[u16], have: &[u16]) -> bool {
     need.iter().all(|c| have.contains(c))
 }
 
+/// zigbee-herdsman-converters' fingerprint endpoints (white labels): the
+/// device has exactly these endpoint IDs, and each endpoint has the given
+/// profile, device ID and cluster sets (an empty list is no constraint).
+pub fn endpoints_equal(m: &[(u8, EpMatch)], eps: &[Endpoint]) -> bool {
+    let same = |a: &[u16], b: &[u16]| {
+        a.is_empty() || (a.len() == b.len() && a.iter().all(|x| b.contains(x)))
+    };
+    m.len() == eps.len()
+        && m.iter().all(|(ep, m)| {
+            eps.iter().find(|e| e.ep == *ep).is_some_and(|e| {
+                m.profile.is_none_or(|p| p == e.profile)
+                    && m.device_id.is_none_or(|d| d == e.device_id)
+                    && same(&m.in_clusters, &e.in_clusters)
+                    && same(&m.out_clusters, &e.out_clusters)
+            })
+        })
+}
+
 fn ep_matches(m: &EpMatch, e: &Endpoint) -> bool {
     m.profile.is_none_or(|p| p == e.profile)
         && m.device_id.is_none_or(|d| d == e.device_id)

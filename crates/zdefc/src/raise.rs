@@ -131,27 +131,7 @@ impl R<'_> {
             e.push(("logical_type", s(p.as_str())));
         }
         if !c.endpoints.is_empty() {
-            let eps = c
-                .endpoints
-                .iter()
-                .map(|(ep, m)| {
-                    let mut f = Vec::new();
-                    if let Some(v) = m.profile {
-                        f.push(("profile", Node::hex(v as i64, 4)));
-                    }
-                    if let Some(v) = m.device_id {
-                        f.push(("device_id", Node::hex(v as i64, 4)));
-                    }
-                    if !m.in_clusters.is_empty() {
-                        f.push(("in", hex_list(&m.in_clusters, 4)));
-                    }
-                    if !m.out_clusters.is_empty() {
-                        f.push(("out", hex_list(&m.out_clusters, 4)));
-                    }
-                    (Key::Int(*ep as i64), Default::default(), flow(map(f)))
-                })
-                .collect();
-            e.push(("endpoints", Node::synth(Value::Map(eps))));
+            e.push(("endpoints", endpoints(&c.endpoints)));
         }
         if let Some(g) = &c.gp {
             let mut f = Vec::new();
@@ -670,6 +650,30 @@ fn raw_node(r: &mut Reader<'_>) -> Result<Node, String> {
 }
 
 /// Converts a definition to a source tree.
+/// `{ep: {profile, device_id, in, out}}` (a clause's or a white label's).
+fn endpoints(eps: &[(u8, EpMatch)]) -> Node {
+    let eps = eps
+        .iter()
+        .map(|(ep, m)| {
+            let mut f = Vec::new();
+            if let Some(v) = m.profile {
+                f.push(("profile", Node::hex(v as i64, 4)));
+            }
+            if let Some(v) = m.device_id {
+                f.push(("device_id", Node::hex(v as i64, 4)));
+            }
+            if !m.in_clusters.is_empty() {
+                f.push(("in", hex_list(&m.in_clusters, 4)));
+            }
+            if !m.out_clusters.is_empty() {
+                f.push(("out", hex_list(&m.out_clusters, 4)));
+            }
+            (Key::Int(*ep as i64), Default::default(), flow(map(f)))
+        })
+        .collect();
+    Node::synth(Value::Map(eps))
+}
+
 pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
     let mut r = R {
         def,
@@ -736,6 +740,22 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
                         "sw_build",
                         flow(seq(w.sw_build.iter().map(|x| s(x)).collect())),
                     ));
+                }
+                if let Some(t) = w.logical_type {
+                    b.push(("logical_type", s(t.as_str())));
+                }
+                if !w.hw_version.is_empty() {
+                    b.push((
+                        "hw_version",
+                        flow(seq(w
+                            .hw_version
+                            .iter()
+                            .map(|x| Node::int(*x as i64))
+                            .collect())),
+                    ));
+                }
+                if !w.endpoints.is_empty() {
+                    b.push(("endpoints", flow(endpoints(&w.endpoints))));
                 }
                 flow(map(b))
             })

@@ -472,6 +472,19 @@ impl D<'_, '_, '_> {
         Ok(r)
     }
 
+    fn endpoints(&mut self) -> DR<Vec<(u8, EpMatch)>> {
+        let mut out = Vec::new();
+        let mut eps = self.keys()?;
+        while let Some(ep) = self.key(&mut eps, "endpoints")? {
+            if ep > 255 {
+                return self.inv("endpoint");
+            }
+            let m = self.endpoint_match()?;
+            out.push((ep as u8, m));
+        }
+        Ok(out)
+    }
+
     fn endpoint_match(&mut self) -> DR<EpMatch> {
         let mut m = EpMatch::default();
         let mut k = self.keys()?;
@@ -502,16 +515,7 @@ impl D<'_, '_, '_> {
                 54 => set(&mut c.hw_version, self.range()?),
                 55 => set(&mut c.sw_build, self.name_match(false)?),
                 190 => set(&mut c.date_code, self.name_match(false)?),
-                56 => {
-                    let mut eps = self.keys()?;
-                    while let Some(ep) = self.key(&mut eps, "endpoints")? {
-                        if ep > 255 {
-                            return self.inv("endpoint");
-                        }
-                        let m = self.endpoint_match()?;
-                        c.endpoints.push((ep as u8, m));
-                    }
-                }
+                56 => c.endpoints = self.endpoints()?,
                 156 => set(
                     &mut c.logical_type,
                     self.code(LogicalType::from_code, "logical_type")?,
@@ -614,6 +618,12 @@ impl D<'_, '_, '_> {
                         w.sw_build.push(self.text()?);
                     }
                 }
+                66 => set(
+                    &mut w.logical_type,
+                    self.code(LogicalType::from_code, "logical_type")?,
+                ),
+                67 => w.hw_version = self.u8s()?,
+                68 => w.endpoints = self.endpoints()?,
                 _ => self.other(key, "white_label")?,
             }
         }
@@ -1414,6 +1424,26 @@ fn text_list(w: &mut Writer, v: &[String]) {
     }
 }
 
+/// Endpoint matches by endpoint (a clause's or a white label's).
+fn endpoints(w: &mut Writer, v: &[(u8, EpMatch)]) {
+    let mut eps: Vec<&(u8, EpMatch)> = v.iter().collect();
+    crate::small_sort::sort_by_key(&mut eps, |e| e.0);
+    w.map(eps.len());
+    for (ep, em) in eps {
+        w.uint(*ep as u64);
+        let mut mm = M::new();
+        mm.uint(21, em.device_id.map(u64::from));
+        mm.uint(57, em.profile.map(u64::from));
+        if !em.in_clusters.is_empty() {
+            uint_list(mm.put(58), &em.in_clusters);
+        }
+        if !em.out_clusters.is_empty() {
+            uint_list(mm.put(59), &em.out_clusters);
+        }
+        mm.finish(w);
+    }
+}
+
 fn uint_list<T: Copy + Into<u64>>(w: &mut Writer, v: &[T]) {
     w.array(v.len());
     for x in v {
@@ -1522,6 +1552,13 @@ impl E<'_> {
                     for n in &wl.sw_build {
                         w.text(n);
                     }
+                }
+                mm.uint(66, wl.logical_type.map(|v| v.code() as u64));
+                if !wl.hw_version.is_empty() {
+                    uint_list(mm.put(67), &wl.hw_version);
+                }
+                if !wl.endpoints.is_empty() {
+                    endpoints(mm.put(68), &wl.endpoints);
                 }
                 mm.finish(w);
             }
@@ -1728,23 +1765,7 @@ impl E<'_> {
             self.name_match(m.put(190), n, false);
         }
         if !c.endpoints.is_empty() {
-            let w = m.put(56);
-            let mut eps: Vec<&(u8, EpMatch)> = c.endpoints.iter().collect();
-            crate::small_sort::sort_by_key(&mut eps, |e| e.0);
-            w.map(eps.len());
-            for (ep, em) in eps {
-                w.uint(*ep as u64);
-                let mut mm = M::new();
-                mm.uint(21, em.device_id.map(u64::from));
-                mm.uint(57, em.profile.map(u64::from));
-                if !em.in_clusters.is_empty() {
-                    uint_list(mm.put(58), &em.in_clusters);
-                }
-                if !em.out_clusters.is_empty() {
-                    uint_list(mm.put(59), &em.out_clusters);
-                }
-                mm.finish(w);
-            }
+            endpoints(m.put(56), &c.endpoints);
         }
         m.uint(156, c.logical_type.map(|v| v.code() as u64));
         ext(&mut m, &c.ext)?;
