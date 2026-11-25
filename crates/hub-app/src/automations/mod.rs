@@ -304,7 +304,9 @@ impl Automations {
     }
 
     /// Reads the current values the triggers compare against (after
-    /// loading or changing rules).
+    /// loading or changing rules, and once the network records loaded):
+    /// new ones, and unknown ones (a device or its last values restored
+    /// since).
     pub fn prime(&mut self, w: &dyn World) {
         let mut keys = Vec::new();
         let mut devs = Vec::new();
@@ -313,7 +315,7 @@ impl Automations {
                 match t {
                     Trigger::State(s) => {
                         let k = key(s);
-                        if !self.last.contains_key(&k) {
+                        if self.last.get(&k).is_none_or(J::is_null) {
                             let v = w.state(&s.uid).map(|m| value_of(&m, &s.attribute)).unwrap_or(J::Null);
                             self.last.insert(k.clone(), v);
                         }
@@ -382,7 +384,11 @@ impl Automations {
                     }
                     hit = Some(h);
                 }
-                seen.push((k, new));
+                // An unknown value (an entity restored or made again: its
+                // state follows) keeps the last known one.
+                if !new.is_null() {
+                    seen.push((k, new));
+                }
             }
             if let Some(h) = hit {
                 fire.push((r.id.clone(), h));

@@ -424,7 +424,7 @@ fn while_foreign_the_hub_wide_auto_starts_no_download() {
 }
 
 /// Records of the host core that turn foreign during the start, right
-/// after the app read the `after` records `reads` times (the gate closes
+/// after the app read the `after` records `reads` times (0: never; the gate closes
 /// between two kinds of network records), until adopted, cleared or
 /// [`settle`]d; or, with `start_foreign`, that are foreign until then.
 ///
@@ -527,8 +527,21 @@ const RACE_PLUG: &str = "zb:5a52530000000001";
 /// `Kitchen`, the rule `night`, the plug's OTA state with policy `auto`;
 /// behind [`Racy`] records.
 fn racy_start(after: &'static str, reads: u8, start_foreign: bool) -> (SharedMem, crate::tests::Rig, Arc<Racy>, App) {
+    racy_start_with(after, reads, start_foreign, &[])
+}
+
+/// [`racy_start`] with `extra` records in the store.
+fn racy_start_with(
+    after: &'static str,
+    reads: u8,
+    start_foreign: bool,
+    extra: &[(&str, J)],
+) -> (SharedMem, crate::tests::Rig, Arc<Racy>, App) {
     let mem = untagged();
     let mut store = Store::open(Box::new(mem.clone())).unwrap();
+    for (k, v) in extra {
+        store.kv_put(k, v.to_string().as_bytes()).unwrap();
+    }
     store.kv_put("grp/0001", br#"{"id":1,"name":"Kitchen","hub_member":false,"members":[],"scenes":[]}"#).unwrap();
     store.kv_put("auto/night", rule("night").to_string().as_bytes()).unwrap();
     #[cfg(feature = "ota")]
@@ -696,4 +709,60 @@ fn last_values_changed_before_they_load_wait_for_them() {
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();
+}
+
+/// State triggers compare with the devices' restored last values, not
+/// with an unknown one: rules readable before their devices (the order of
+/// [`records_readable_after_the_devices_wait_for_them`]) wait for them and
+/// their last values, and the restored devices' first (unknown) states do
+/// not replace the values the rules read; also when the records load on
+/// adopt. The plug was off (its stored last values): a first report of off
+/// fires no `equals false` (a change from unknown would), one of on fires
+/// `changed` (from unknown it would not).
+#[test]
+fn state_triggers_compare_with_the_restored_values() {
+    use hub_ncp::sim::indication;
+    use zigbee_zrhp::msg::ids;
+
+    let uid = format!("{RACE_PLUG}:1:switch");
+    let state_rule = |id: &str, op: &str| {
+        let mut t = json!({"type": "state", "uid": uid, "op": op});
+        if op == "equals" {
+            t["value"] = false.into();
+        }
+        let mut r = rule(id);
+        r["triggers"] = json!([t]);
+        (format!("auto/{id}"), r)
+    };
+    let (off, chg) = (state_rule("off", "equals"), state_rule("chg", "changed"));
+    for (adopt, first) in [(false, false), (false, true), (true, false), (true, true)] {
+        let extra = [(off.0.as_str(), off.1.clone()), (chg.0.as_str(), chg.1.clone())];
+        // Readable right after the devices were read, or foreign until adopted.
+        let (_mem, r, racy, app) = racy_start_with("dev/", if adopt { 0 } else { 2 }, true, &extra);
+        let (sid, rx) = session(&app);
+        if adopt {
+            assert!(racy.foreign());
+            ok(&call(&app, sid, &rx, 3, json!({"type": "network/registry/adopt", "confirm": true})));
+        }
+        assert!(!racy.foreign());
+        assert!(app.wait(T, |s| s.last_values.0 > 0), "{:?}", app.status().last_values);
+        ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["entities"]})));
+        let report = [0x18, 0x01, 0x0A, 0x00, 0x00, 0x10, u8::from(first)];
+        r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(0x5A01, 0x5a52_5300_0000_0001, 1, 1, 0x0104, 0x0006, &report));
+        // The rules saw it before its subscribers did.
+        loop {
+            let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+            if f["event"]["topic"] == "entity_state" && f["event"]["uid"] == uid.as_str() {
+                assert_eq!(f["event"]["state"], J::Bool(first), "{f}");
+                break;
+            }
+        }
+        let list = ok(&call(&app, sid, &rx, 2, json!({"type": "automations/list"}))).clone();
+        let runs = |id: &str| list["rules"].as_array().unwrap().iter().find(|r| r["id"] == id).map(|r| r["runs"].clone());
+        let want = if first { (0, 1) } else { (0, 0) };
+        assert_eq!((runs("off"), runs("chg")), (Some(want.0.into()), Some(want.1.into())), "adopt {adopt}, first report {first}: {list}");
+        app.shutdown();
+        r.ncp.shutdown();
+        r.sim.stop();
+    }
 }

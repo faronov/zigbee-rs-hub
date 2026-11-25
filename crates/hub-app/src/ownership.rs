@@ -118,15 +118,18 @@ impl Runner {
     /// the start, and once they are adopted, cleared or readable): devices
     /// (the stored ones replace those the engine has made since the start),
     /// groups and bindings; then, once the devices are in, their last
-    /// values; the rules; then the OTA device states. Loaded ones are not
-    /// read again. How many devices.
+    /// values; then the rules and the OTA device states. Loaded ones are
+    /// not read again. How many devices.
     pub(super) fn load_network(&mut self, now: Millis) -> usize {
         let n = if self.registry.loaded { 0 } else { self.registry.load_network(&*self.records, &mut self.engine, now) };
         // A value of a device not restored yet would be dropped.
         if self.registry.loaded && !self.last.loaded {
             self.last.load(&*self.records, &mut self.engine, now);
         }
-        if !self.automations.loaded {
+        // State triggers compare with the devices' values: restored first
+        // (one primed with a value not known yet would fire on the first
+        // report as a change from unknown).
+        if self.registry.loaded && self.last.loaded && !self.automations.loaded {
             let rules = self.load_rules();
             if rules > 0 {
                 info!("automations: {rules} rules restored");
