@@ -86,11 +86,13 @@ def automation_key(rule_id: str) -> str:
 
 
 def hub_version(name: str | None) -> str | None:
-    """Firmware version from a hub name such as `zigbee-rs-hub 0.2.4`."""
+    """Firmware version from a hub name: `zigbee-rs-hub 0.2.4`, `zigbee-rs-hub 0.3.0 (board)`."""
     if not name:
         return None
-    last = name.rsplit(" ", 1)[-1]
-    return last if last[:1].isdigit() else None
+    for word in name.split():
+        if word[:1].isdigit():
+            return word
+    return None
 
 
 class ZigbeeRsHub:

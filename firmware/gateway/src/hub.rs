@@ -95,7 +95,7 @@ pub fn start(board: &BoardProfile) -> Option<App> {
     };
     let r = zrh_espapp::resources::get();
     let mut cfg = AppConfig {
-        hub_name: format!("zigbee-rs-hub {} ({})", env!("CARGO_PKG_VERSION"), board.name),
+        hub_name: format!("zigbee-rs-hub {} ({})", crate::esp::app_version(), board.name),
         api_token,
         stack_size: APP_STACK,
         // The example definitions take ~90 KB decoded (PSRAM).
