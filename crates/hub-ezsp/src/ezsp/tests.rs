@@ -463,6 +463,37 @@ fn coordinator_commands() -> Vec<Command> {
         Command::LookupNodeIdByEui64 {
             eui64: Eui64::from_u64(5),
         },
+        Command::SetMfgToken {
+            token: MfgTokenId::CUSTOM_EUI_64,
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        },
+        Command::GetCurrentSecurityState,
+        Command::ExportLinkKeyByIndex { index: 2 },
+        Command::ImportLinkKey {
+            index: 1,
+            eui64: Eui64::from_u64(6),
+            key: [7; 16],
+        },
+        Command::ClearKeyTable,
+        Command::GetTokenData {
+            token: token::CREATOR_STACK_RESTORED_EUI64,
+            index: 0,
+        },
+        Command::SetTokenData {
+            token: token::NVM3KEY_STACK_NETWORK_MANAGEMENT,
+            index: 0,
+            data: vec![0, 0x80, 0, 0, 0, 0, 3, 0],
+        },
+        Command::SetChildData {
+            index: 0,
+            data: ChildData {
+                eui64: Eui64::from_u64(8),
+                node_type: NodeType::SLEEPY_END_DEVICE,
+                id: 0x4321,
+                timeout: 8,
+                ..ChildData::default()
+            },
+        },
     ]
 }
 
@@ -576,6 +607,47 @@ fn coordinator_frames_round_trip_for_every_verified_version() {
                 status: wide.then_some(sl_ok),
                 node_id: 0xFFFE,
             },
+            Response::SetMfgToken {
+                status: ok(ver, Ember),
+            },
+            Response::GetCurrentSecurityState {
+                status: ok(ver, Ember),
+                state: CurrentSecurityState {
+                    bitmask: 0x0094,
+                    trust_center_long_address: Eui64::from_u64(9),
+                },
+            },
+            Response::ExportLinkKeyByIndex {
+                status: sl_ok,
+                eui64: Eui64::from_u64(6),
+                key: [7; 16],
+                metadata: ApsKeyMetadata {
+                    bitmask: key_bitmask::HAS_PARTNER_EUI64,
+                    outgoing_frame_counter: 10,
+                    incoming_frame_counter: 11,
+                    ttl_in_seconds: 0,
+                },
+                context: wide.then_some(SecManContext {
+                    core_key_type: 4,
+                    key_index: 2,
+                    eui64: Eui64::from_u64(6),
+                    ..SecManContext::default()
+                }),
+            },
+            Response::ImportLinkKey { status: sl_ok },
+            Response::ClearKeyTable {
+                status: ok(ver, Ember),
+            },
+            Response::GetTokenData {
+                status: ok(ver, Ember),
+                data: vec![0xFF; 8],
+            },
+            Response::SetTokenData {
+                status: ok(ver, Ember),
+            },
+            Response::SetChildData {
+                status: ok(ver, Ember),
+            },
         ];
         for r in responses {
             let bytes = r.encode_params(ver).unwrap();
@@ -679,6 +751,109 @@ fn coordinator_frames_match_the_sdk_byte_order() {
             "EZSP {ver}"
         );
     }
+
+    // exportLinkKeyByIndex (Gecko SDK 4.4.6 `ezspExportLinkKeyByIndex`:
+    // eui, key, metadata, then the sl_status_t; Simplicity SDK
+    // `sl_zigbee_ezsp_sec_man_export_link_key_by_index`: the status, the
+    // context, the key, the metadata). Metadata: bitmask u16, outgoing
+    // and incoming frame counters u32, TTL u16.
+    let eui = "08 07 06 05 04 03 02 01";
+    let meta = "08 00 0A 00 00 00 0B 00 00 00 00 00";
+    let lk13 = Response::decode(
+        id::EXPORT_LINK_KEY_BY_INDEX,
+        v(13),
+        &hex(&format!("{eui} {key} {meta} 00 00 00 00")),
+    )
+    .unwrap();
+    let lk14 = Response::decode(
+        id::EXPORT_LINK_KEY_BY_INDEX,
+        v(14),
+        &hex(&format!(
+            "00 00 00 00 04 02 00 00 {eui} 00 03 00 00 00 00 {key} {meta}"
+        )),
+    )
+    .unwrap();
+    for r in [lk13, lk14] {
+        let Response::ExportLinkKeyByIndex {
+            status,
+            eui64,
+            key,
+            metadata,
+            ..
+        } = r
+        else {
+            panic!("{r:?}")
+        };
+        assert!(status.is_success());
+        assert_eq!(
+            (eui64, key),
+            (Eui64::from_u64(0x0102_0304_0506_0708), [0x5A; 16])
+        );
+        assert_eq!(
+            (
+                metadata.outgoing_frame_counter,
+                metadata.incoming_frame_counter
+            ),
+            (10, 11)
+        );
+    }
+    // importLinkKey: index, EUI64, key; sl_status_t in every version.
+    assert_eq!(
+        Command::ImportLinkKey {
+            index: 1,
+            eui64: Eui64::from_u64(0x0102_0304_0506_0708),
+            key: [0x5A; 16],
+        }
+        .encode_params(v(13))
+        .unwrap(),
+        hex(&format!("01 {eui} {key}"))
+    );
+    // getCurrentSecurityState: EmberStatus (u8) in 13, then bitmask and
+    // the trust center's EUI64.
+    let sec = Response::decode(
+        id::GET_CURRENT_SECURITY_STATE,
+        v(13),
+        &hex(&format!("00 94 00 {eui}")),
+    )
+    .unwrap();
+    assert!(
+        matches!(sec, Response::GetCurrentSecurityState { status: Status::Ember(EmberStatus::SUCCESS), state } if state.hashed_link_keys()),
+        "{sec:?}"
+    );
+    // set/getTokenData: token and index u32, the data as u32 size + bytes;
+    // setMfgToken: token ID, length-prefixed data.
+    assert_eq!(
+        Command::GetTokenData {
+            token: token::CREATOR_STACK_RESTORED_EUI64,
+            index: 0
+        }
+        .encode_params(v(13))
+        .unwrap(),
+        hex("2A E1 00 00 00 00 00 00")
+    );
+    assert_eq!(
+        Response::decode(
+            id::GET_TOKEN_DATA,
+            v(13),
+            &hex(&format!("00 08 00 00 00 {eui}"))
+        ),
+        Ok(Response::GetTokenData {
+            status: Status::Ember(EmberStatus::SUCCESS),
+            data: hex(eui)
+        })
+    );
+    assert_eq!(
+        Command::SetMfgToken {
+            token: MfgTokenId::CUSTOM_EUI_64,
+            data: hex(eui)
+        }
+        .encode_params(v(13))
+        .unwrap(),
+        hex(&format!("0C 08 {eui}"))
+    );
+    // A response with key material never shows it in an error text.
+    let leak = crate::host::HostError::UnexpectedResponse(export(13)).to_string();
+    assert!(!leak.contains("90, 90") && !leak.contains("5A"), "{leak}");
 
     // startScan answers sl_status_t already in EZSP 13; scanComplete's
     // status is an EmberStatus there.

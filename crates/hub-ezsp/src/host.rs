@@ -234,6 +234,10 @@ impl std::fmt::Display for HostError {
             HostError::Status { frame_id, status } => {
                 write!(f, "frame 0x{frame_id:04X} returned {status:?}")
             }
+            // Key material never reaches a log or an error text.
+            HostError::UnexpectedResponse(r) if r.has_secret() => {
+                write!(f, "unexpected response 0x{:04X}", r.frame_id())
+            }
             HostError::UnexpectedResponse(r) => write!(f, "unexpected response {r:?}"),
         }
     }

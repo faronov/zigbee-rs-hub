@@ -15,7 +15,17 @@
 //! energy and active scans, radio power, neighbor/route/child tables,
 //! counters, security manager key export and transient keys, the
 //! concentrator, channel change (`energyScanRequest` 0xFE), random
-//! numbers, manufacturing tokens and node ID lookup. Faults beyond the
+//! numbers, manufacturing tokens and node ID lookup. For backup and
+//! restore: the NWK and APS frame counters (values, kept across resets,
+//! reset by `formNetwork` without `NO_FRAME_COUNTER_RESET`), the trust
+//! center link key (root) and the current security state, the key table
+//! (`exportLinkKeyByIndex`, `importLinkKey`, `clearKeyTable`),
+//! `setChildData`, the custom EUI64 manufacturing token (written once,
+//! applied at the next reset) and, with [`SimConfig::token_interface`],
+//! the token frames for the restored EUI64 (rewritable, ahead of the
+//! custom one) and the network management token (`updateId`). As bellows
+//! reports for real NCPs, `formNetwork` ignores `nwkUpdateId` (0).
+//! Faults beyond the
 //! UART: `messageSentHandler`s held back ([`SimNcp::hold_message_sent`]),
 //! an APS unicast limit (`APS_UNICAST_MESSAGE_COUNT` held messages, then
 //! `MAX_MESSAGE_LIMIT_REACHED`), forced buffer exhaustion
@@ -116,6 +126,28 @@ pub struct SimConfig {
     /// EmberZNet 7.4.5 NCP appends 0x02 for a device that joined in the
     /// NCP's session).
     pub incoming_trailer: Vec<u8>,
+    /// The trust center link key: with [`Self::tclk_hashed`], the root
+    /// key hashed per device.
+    pub tc_link_key: KeyData,
+    /// The trust center uses hashed link keys.
+    pub tclk_hashed: bool,
+    /// The NWK frame counter (`getNetworkKeyInfo`, `NWK_FRAME_COUNTER`).
+    pub nwk_frame_counter: u32,
+    /// The APS frame counter (`APS_FRAME_COUNTER`).
+    pub aps_frame_counter: u32,
+    /// `getValue(APS_FRAME_COUNTER)` answers (else `ERROR_INVALID_ID`).
+    pub aps_frame_counter_readable: bool,
+    /// `KEY_TABLE_SIZE` after a reset.
+    pub key_table_size: u16,
+    /// Key table entries: partner, key, metadata.
+    pub key_table: Vec<Option<(Eui64, KeyData, ApsKeyMetadata)>>,
+    /// The custom EUI64 manufacturing token (`None`: erased).
+    pub custom_eui64: Option<Eui64>,
+    /// The NCP implements the token interface frames (`getTokenData`,
+    /// `setTokenData`); without them it answers `invalidCommand`.
+    pub token_interface: bool,
+    /// The restored EUI64 stack token (`None`: all 0xFF).
+    pub restored_eui64: Option<Eui64>,
 }
 
 /// Bytes per entry of the tables the simulated NCP sizes from
@@ -183,7 +215,28 @@ impl Default for SimConfig {
             table_memory: None,
             config_values: Vec::new(),
             incoming_trailer: Vec::new(),
+            tc_link_key: [0x3C; 16],
+            tclk_hashed: true,
+            nwk_frame_counter: 0x1000,
+            aps_frame_counter: 0x0100,
+            aps_frame_counter_readable: true,
+            key_table_size: 0,
+            key_table: Vec::new(),
+            custom_eui64: None,
+            token_interface: false,
+            restored_eui64: None,
         }
+    }
+}
+
+impl SimConfig {
+    /// The EUI64 the NCP uses after a reset: the restored EUI64 token, the
+    /// custom EUI64 token, the factory one, in this order.
+    // UNVERIFIED: the precedence of the two tokens on a real NCP.
+    pub fn effective_eui64(&self) -> Eui64 {
+        self.restored_eui64
+            .or(self.custom_eui64)
+            .unwrap_or(self.eui64)
     }
 }
 
@@ -198,6 +251,8 @@ pub struct SentMessage {
 #[derive(Debug)]
 pub struct SimNcp {
     cfg: SimConfig,
+    /// The EUI64 since the last reset ([`SimConfig::effective_eui64`]).
+    eui64: Eui64,
     link: Ash,
     version: Option<EzspVersion>,
     last_sequence: u8,
@@ -230,7 +285,7 @@ pub struct SimNcp {
     permit: u8,
 }
 
-fn default_config() -> BTreeMap<u8, u16> {
+fn default_config(key_table_size: u16) -> BTreeMap<u8, u16> {
     // Defaults of the UG100 successor §2 "Configuration Values" table.
     [
         (ConfigId::NEIGHBOR_TABLE_SIZE, 16),
@@ -248,7 +303,7 @@ fn default_config() -> BTreeMap<u8, u16> {
         (ConfigId::END_DEVICE_POLL_TIMEOUT, 8),
         (ConfigId::TRUST_CENTER_ADDRESS_CACHE_SIZE, 2),
         (ConfigId::SOURCE_ROUTE_TABLE_SIZE, 0),
-        (ConfigId::KEY_TABLE_SIZE, 0),
+        (ConfigId::KEY_TABLE_SIZE, key_table_size),
         (ConfigId::APS_ACK_TIMEOUT, 1600),
         (ConfigId::APPLICATION_ZDO_FLAGS, 0),
         (ConfigId::BROADCAST_TABLE_SIZE, 15),
@@ -265,6 +320,7 @@ impl SimNcp {
         let link = Ash::new_ncp(cfg.ash.clone()).expect("valid simulator ASH config");
         let multicast = vec![MulticastTableEntry::default(); cfg.multicast_table_size];
         let mut n = SimNcp {
+            eui64: cfg.effective_eui64(),
             cfg,
             link,
             version: None,
@@ -411,10 +467,11 @@ impl SimNcp {
 
     fn reset_ezsp(&mut self) {
         self.version = None;
-        self.config = default_config();
+        self.config = default_config(self.cfg.key_table_size);
         for (id, v) in &self.cfg.config_values {
             self.config.insert(id.0, *v);
         }
+        self.eui64 = self.cfg.effective_eui64();
         self.values.clear();
         self.endpoints.clear();
         self.network_up = false;
@@ -670,6 +727,22 @@ impl SimNcp {
                 };
                 Response::SetConfigurationValue { status }
             }
+            Command::GetValue { id } if id == ValueId::NWK_FRAME_COUNTER => Response::GetValue {
+                status: Self::st(v, Ezsp, K::Success),
+                value: self.cfg.nwk_frame_counter.to_le_bytes().to_vec(),
+            },
+            Command::GetValue { id }
+                if id == ValueId::APS_FRAME_COUNTER && self.cfg.aps_frame_counter_readable =>
+            {
+                Response::GetValue {
+                    status: Self::st(v, Ezsp, K::Success),
+                    value: self.cfg.aps_frame_counter.to_le_bytes().to_vec(),
+                }
+            }
+            Command::GetValue { id } if id == ValueId::APS_FRAME_COUNTER => Response::GetValue {
+                status: Self::st(v, Ezsp, K::InvalidId),
+                value: vec![],
+            },
             Command::GetValue { id } => match self.values.get(&id.0) {
                 Some(value) => Response::GetValue {
                     status: Self::st(v, Ezsp, K::Success),
@@ -692,6 +765,27 @@ impl SimNcp {
                     value: vec![],
                 },
             },
+            // UNVERIFIED: that a real NCP refuses the frame counters while
+            // a network is up (bellows sets them only without one).
+            Command::SetValue { id, value }
+                if id == ValueId::NWK_FRAME_COUNTER || id == ValueId::APS_FRAME_COUNTER =>
+            {
+                let status = match <[u8; 4]>::try_from(value.as_slice()) {
+                    _ if self.network_up => K::InvalidCall,
+                    Ok(b) if id == ValueId::NWK_FRAME_COUNTER => {
+                        self.cfg.nwk_frame_counter = u32::from_le_bytes(b);
+                        K::Success
+                    }
+                    Ok(b) => {
+                        self.cfg.aps_frame_counter = u32::from_le_bytes(b);
+                        K::Success
+                    }
+                    Err(_) => K::InvalidValue,
+                };
+                Response::SetValue {
+                    status: Self::st(v, Ezsp, status),
+                }
+            }
             Command::SetValue { id, value } => {
                 self.values.insert(id.0, value);
                 Response::SetValue {
@@ -749,9 +843,7 @@ impl SimNcp {
                     }
                 }
             }
-            Command::GetEui64 => Response::GetEui64 {
-                eui64: self.cfg.eui64,
-            },
+            Command::GetEui64 => Response::GetEui64 { eui64: self.eui64 },
             Command::GetNodeId => Response::GetNodeId {
                 node_id: self.cfg.node_id,
             },
@@ -857,13 +949,23 @@ impl SimNcp {
                 } else {
                     self.cfg.network = p;
                     self.cfg.network.nwk_manager_id = 0;
+                    // As bellows observed: `nwkUpdateId` is not taken.
+                    self.cfg.network.nwk_update_id = 0;
                     self.cfg.network_formed = true;
                     self.network_up = true;
-                    if let Some(sec) = self.security
-                        && sec.bitmask & security_bitmask::HAVE_NETWORK_KEY != 0
-                    {
+                    let sec = self.security.unwrap_or_default();
+                    if sec.bitmask & security_bitmask::HAVE_NETWORK_KEY != 0 {
                         self.cfg.network_key = sec.network_key;
                         self.cfg.network_key_sequence = sec.network_key_sequence_number;
+                    }
+                    if sec.bitmask & security_bitmask::HAVE_PRECONFIGURED_KEY != 0 {
+                        self.cfg.tc_link_key = sec.preconfigured_key;
+                        let h = security_bitmask::TRUST_CENTER_USES_HASHED_LINK_KEY;
+                        self.cfg.tclk_hashed = sec.bitmask & h == h;
+                    }
+                    if sec.bitmask & security_bitmask::NO_FRAME_COUNTER_RESET == 0 {
+                        self.cfg.nwk_frame_counter = 0;
+                        self.cfg.aps_frame_counter = 0;
                     }
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, StatusFamily::Ember, StatusKind::NetworkUp),
@@ -875,6 +977,7 @@ impl SimNcp {
                 if self.network_up {
                     self.network_up = false;
                     self.cfg.network_formed = false;
+                    self.cfg.children.clear();
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, StatusFamily::Ember, StatusKind::NetworkDown),
                     });
@@ -969,11 +1072,14 @@ impl SimNcp {
                 Response::ReadAndClearCounters { values }
             }
             Command::ExportKey(context) => {
-                let found = context.core_key_type == key_type::NETWORK
-                    && self.cfg.network_formed
-                    && self.cfg.key_exportable;
-                let (status, key) = if found {
-                    (SlStatus::OK, self.cfg.network_key)
+                let key = match context.core_key_type {
+                    key_type::NETWORK => Some(self.cfg.network_key),
+                    key_type::TC_LINK => Some(self.cfg.tc_link_key),
+                    _ => None,
+                };
+                let found = self.cfg.network_formed && self.cfg.key_exportable;
+                let (status, key) = if let Some(key) = key.filter(|_| found) {
+                    (SlStatus::OK, key)
                 } else if self.cfg.network_formed && !self.cfg.key_exportable {
                     (SlStatus::NOT_SUPPORTED, [0; 16])
                 } else {
@@ -996,7 +1102,7 @@ impl SimNcp {
                     alternate_network_key_set: false,
                     network_key_sequence_number: self.cfg.network_key_sequence,
                     alt_network_key_sequence_number: 0,
-                    network_key_frame_counter: 0x1000,
+                    network_key_frame_counter: self.cfg.nwk_frame_counter,
                 },
             },
             Command::ImportTransientKey { eui64, key, .. } => {
@@ -1047,9 +1153,171 @@ impl SimNcp {
                 data: match token {
                     MfgTokenId::BOARD_NAME => self.cfg.board_name.to_vec(),
                     MfgTokenId::STRING => self.cfg.mfg_string.to_vec(),
+                    MfgTokenId::CUSTOM_EUI_64 => {
+                        self.cfg.custom_eui64.map_or([0xFF; 8], |e| e.0).to_vec()
+                    }
                     _ => vec![0xFF, 0xFF],
                 },
             },
+            // UNVERIFIED: the status of a token already written.
+            Command::SetMfgToken { token, data } => Response::SetMfgToken {
+                status: match <[u8; 8]>::try_from(data.as_slice()) {
+                    Ok(b)
+                        if token == MfgTokenId::CUSTOM_EUI_64
+                            && self.cfg.custom_eui64.is_none() =>
+                    {
+                        self.cfg.custom_eui64 = Some(Eui64(b));
+                        ok
+                    }
+                    _ => Self::ember(v, E::INVALID_CALL),
+                },
+            },
+            Command::GetCurrentSecurityState => {
+                if self.network_up {
+                    let hashed = if self.cfg.tclk_hashed {
+                        current_security_bitmask::TRUST_CENTER_USES_HASHED_LINK_KEY
+                    } else {
+                        0
+                    };
+                    Response::GetCurrentSecurityState {
+                        status: ok,
+                        state: CurrentSecurityState {
+                            bitmask: current_security_bitmask::TRUST_CENTER_GLOBAL_LINK_KEY
+                                | current_security_bitmask::HAVE_TRUST_CENTER_LINK_KEY
+                                | hashed,
+                            trust_center_long_address: self.eui64,
+                        },
+                    }
+                } else {
+                    Response::GetCurrentSecurityState {
+                        status: Self::ember(v, E::NOT_JOINED),
+                        state: CurrentSecurityState::default(),
+                    }
+                }
+            }
+            Command::ExportLinkKeyByIndex { index } => {
+                let size = self.configuration(ConfigId::KEY_TABLE_SIZE).unwrap_or(0);
+                let entry = self
+                    .cfg
+                    .key_table
+                    .get(usize::from(index))
+                    .copied()
+                    .flatten();
+                let (status, (eui64, key, metadata)) = match entry {
+                    _ if u16::from(index) >= size => (SlStatus::INVALID_INDEX, Default::default()),
+                    Some(e) => (SlStatus::OK, e),
+                    None => (SlStatus::NOT_FOUND, Default::default()),
+                };
+                Response::ExportLinkKeyByIndex {
+                    status: Self::sl(status),
+                    eui64,
+                    key,
+                    metadata,
+                    context: v.simplicity_layout().then_some(SecManContext {
+                        core_key_type: 4,
+                        key_index: index,
+                        eui64,
+                        flags: 0x03,
+                        ..SecManContext::default()
+                    }),
+                }
+            }
+            Command::ImportLinkKey { index, eui64, key } => {
+                let size = self.configuration(ConfigId::KEY_TABLE_SIZE).unwrap_or(0);
+                let status = if u16::from(index) < size {
+                    let i = usize::from(index);
+                    if self.cfg.key_table.len() <= i {
+                        self.cfg.key_table.resize(i + 1, None);
+                    }
+                    let metadata = ApsKeyMetadata {
+                        bitmask: key_bitmask::HAS_PARTNER_EUI64
+                            | key_bitmask::HAS_OUTGOING_FRAME_COUNTER
+                            | key_bitmask::HAS_INCOMING_FRAME_COUNTER,
+                        ..ApsKeyMetadata::default()
+                    };
+                    self.cfg.key_table[i] = Some((eui64, key, metadata));
+                    SlStatus::OK
+                } else {
+                    SlStatus::INVALID_INDEX
+                };
+                Response::ImportLinkKey {
+                    status: Self::sl(status),
+                }
+            }
+            Command::ClearKeyTable => {
+                self.cfg.key_table.clear();
+                Response::ClearKeyTable { status: ok }
+            }
+            cmd @ (Command::GetTokenData { .. } | Command::SetTokenData { .. })
+                if !self.cfg.token_interface =>
+            {
+                let _ = cmd;
+                Response::InvalidCommand {
+                    reason: EzspStatus::ERROR_INVALID_FRAME_ID,
+                }
+            }
+            Command::GetTokenData { token: t, index: 0 }
+                if is_token(t, token::CREATOR_STACK_RESTORED_EUI64) =>
+            {
+                Response::GetTokenData {
+                    status: ok,
+                    data: self.cfg.restored_eui64.map_or([0xFF; 8], |e| e.0).to_vec(),
+                }
+            }
+            Command::GetTokenData { token: t, index: 0 }
+                if is_token(t, token::CREATOR_STACK_NETWORK_MANAGEMENT) =>
+            {
+                let n = &self.cfg.network;
+                let mut data = n.channels.to_le_bytes().to_vec();
+                data.extend_from_slice(&n.nwk_manager_id.to_le_bytes());
+                // `tokTypeStackNetworkManagement` with its padding byte.
+                data.extend_from_slice(&[n.nwk_update_id, 0]);
+                Response::GetTokenData { status: ok, data }
+            }
+            Command::GetTokenData { .. } => Response::GetTokenData {
+                status: Self::ember(v, E::NOT_FOUND),
+                data: vec![],
+            },
+            Command::SetTokenData {
+                token: t,
+                index: 0,
+                data,
+            } if is_token(t, token::CREATOR_STACK_RESTORED_EUI64) && data.len() == 8 => {
+                let e = Eui64(data.try_into().expect("8 bytes"));
+                self.cfg.restored_eui64 = (e.0 != [0xFF; 8]).then_some(e);
+                Response::SetTokenData { status: ok }
+            }
+            Command::SetTokenData {
+                token: t,
+                index: 0,
+                data,
+            } if is_token(t, token::CREATOR_STACK_NETWORK_MANAGEMENT) && data.len() >= 7 => {
+                let n = &mut self.cfg.network;
+                n.channels = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                n.nwk_manager_id = u16::from_le_bytes([data[4], data[5]]);
+                n.nwk_update_id = data[token::NETWORK_MANAGEMENT_UPDATE_ID];
+                Response::SetTokenData { status: ok }
+            }
+            Command::SetTokenData { .. } => Response::SetTokenData {
+                status: Self::ember(v, E::NOT_FOUND),
+            },
+            Command::SetChildData { index, data } => {
+                let max = self
+                    .configuration(ConfigId::MAX_END_DEVICE_CHILDREN)
+                    .unwrap_or(0);
+                let i = usize::from(index);
+                let status = if u16::from(index) >= max || i > self.cfg.children.len() {
+                    Self::ember(v, E::INDEX_OUT_OF_RANGE)
+                } else {
+                    if i == self.cfg.children.len() {
+                        self.cfg.children.push(data);
+                    } else {
+                        self.cfg.children[i] = data;
+                    }
+                    ok
+                };
+                Response::SetChildData { status }
+            }
             Command::LookupNodeIdByEui64 { eui64 } => {
                 let id = self
                     .cfg
@@ -1256,6 +1524,12 @@ impl SimNcp {
         self.link.ncp_spontaneous_reset(code);
         self.reset_ezsp();
     }
+}
+
+/// `t` names the stack token `creator`, by its creator code or its NVM3
+/// key.
+fn is_token(t: u32, creator: u32) -> bool {
+    t == creator || t == creator | 0x1_0000
 }
 
 #[derive(Debug)]
