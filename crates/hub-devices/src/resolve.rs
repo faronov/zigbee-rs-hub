@@ -795,11 +795,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());
             res.def_model = Some(d.model.clone());
-            if let Some(wl) = d
-                .white_label
-                .iter()
-                .find(|w| w.selects(fp.manufacturer_name.as_deref(), fp.model_id.as_deref()))
-            {
+            if let Some(wl) = d.white_label.iter().find(|w| w.selects(fp)) {
                 res.vendor = Some(wl.vendor.clone());
                 res.model = Some(wl.model.clone());
             }
@@ -925,6 +921,50 @@ mod tests {
         let (best, _) = best_match([a, b, Arc::new(wd)], &f, HUB_FEATURES, &mut skipped).unwrap();
         assert_eq!(best.id, "b");
         assert_eq!(skipped, ["definition_skipped: w requires wasm"]);
+    }
+
+    #[test]
+    fn white_label_by_software_build() {
+        let mut d = def(
+            "paulmann/291.46",
+            MatchClause {
+                model: Some(StrMatch::Exact("RGBWW".into())),
+                ..Default::default()
+            },
+            LayerSource::Catalog,
+        );
+        d.model = "291.46".into();
+        for (model, sw) in [("291.52", "PIIC5800"), ("291.50", "PIIC51104")] {
+            d.white_label.push(WhiteLabel {
+                vendor: "Paulmann".into(),
+                model: model.into(),
+                manufacturer: vec!["Paulmann Licht GmbH".into()],
+                model_id: vec!["RGBWW".into()],
+                sw_build: vec![sw.into()],
+            });
+        }
+        let mut cat = MemoryCatalog::default();
+        cat.insert(d);
+        let user = MemoryCatalog::default();
+        let generic = |_p: PowerKind| Vec::new();
+        let shown = |sw: Option<&str>| {
+            let mut f = fp("Paulmann Licht GmbH", "RGBWW");
+            f.sw_build_id = sw.map(Into::into);
+            let r = resolve(&ResolveInput {
+                fp: &f,
+                generic: &generic,
+                catalog: &cat,
+                user: &user,
+                self_description: None,
+                pinned: None,
+                features: HUB_FEATURES,
+            });
+            (r.model.unwrap(), r.def_model.unwrap())
+        };
+        assert_eq!(shown(Some("PIIC51104")), ("291.50".into(), "291.46".into()));
+        assert_eq!(shown(Some("PIIC5800")), ("291.52".into(), "291.46".into()));
+        assert_eq!(shown(Some("PIIC5809")), ("291.46".into(), "291.46".into()));
+        assert_eq!(shown(None), ("291.46".into(), "291.46".into()));
     }
 
     #[test]

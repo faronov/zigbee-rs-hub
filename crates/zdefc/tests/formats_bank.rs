@@ -157,6 +157,25 @@ fn requires_is_computed_and_merged() {
     );
 }
 
+#[test]
+fn white_labels_by_software_build() {
+    let src = "zdef: 1\nid: paulmann/291.46\nrevision: 1\nvendor: Paulmann\nmodel: '291.46'\nmatch:\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC5800}\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC5809}\n  - {model: RGBWW, manufacturer: Paulmann Licht GmbH, sw_build: PIIC51104}\nwhite_label:\n  - {vendor: Paulmann, model: '291.52', manufacturer: [Paulmann Licht GmbH], model_id: [RGBWW], sw_build: [PIIC5800]}\n  - {vendor: Paulmann, model: '291.50', model_id: [RGBWW], sw_build: [PIIC51104]}\n";
+    let c = compile_str(src, Format::Yaml, &Options::default()).unwrap();
+    let d = zdef::load_canonical(&c.cbor, &zdef::HubFeatures::v1()).unwrap();
+    assert_eq!(d.white_label[0].sw_build, ["PIIC5800"]);
+    let shown = |sw: Option<&str>| {
+        d.display_identity(Some("Paulmann Licht GmbH"), Some("RGBWW"), sw)
+            .1
+    };
+    assert_eq!(shown(Some("PIIC5800")), Some("291.52"));
+    assert_eq!(shown(Some("PIIC51104\0")), Some("291.50"));
+    assert_eq!(shown(Some("PIIC5809")), Some("291.46"));
+    assert_eq!(shown(None), Some("291.46"));
+    let again = zdefc::decompile(&c.cbor, Format::Yaml).unwrap();
+    assert!(again.contains("sw_build: [PIIC5800]"), "{again}");
+    assert_eq!(compile(&again, Format::Yaml), c.cbor);
+}
+
 fn to_json(n: &Node) -> serde_json::Value {
     match &n.v {
         Value::Null => serde_json::Value::Null,

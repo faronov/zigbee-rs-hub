@@ -731,6 +731,12 @@ pub fn raise(def: &Definition) -> Result<Node, Vec<String>> {
                         flow(seq(w.model_id.iter().map(|x| s(x)).collect())),
                     ));
                 }
+                if !w.sw_build.is_empty() {
+                    b.push((
+                        "sw_build",
+                        flow(seq(w.sw_build.iter().map(|x| s(x)).collect())),
+                    ));
+                }
                 flow(map(b))
             })
             .collect();

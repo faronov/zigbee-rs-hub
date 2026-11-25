@@ -601,11 +601,17 @@ impl D<'_, '_, '_> {
                 }
                 20 => set(&mut w.model, self.text()?),
                 43 => set(&mut w.vendor, self.text()?),
-                // keys::WHITE_LABEL_EXT: hubs before it skip the key.
+                // keys::WHITE_LABEL_EXT: hubs before them skip the keys.
                 64 => {
                     let n = self.r.array()?;
                     for _ in 0..n {
                         w.model_id.push(self.text()?);
+                    }
+                }
+                65 => {
+                    let n = self.r.array()?;
+                    for _ in 0..n {
+                        w.sw_build.push(self.text()?);
                     }
                 }
                 _ => self.other(key, "white_label")?,
@@ -1507,6 +1513,13 @@ impl E<'_> {
                     let w = mm.put(64);
                     w.array(wl.model_id.len());
                     for n in &wl.model_id {
+                        w.text(n);
+                    }
+                }
+                if !wl.sw_build.is_empty() {
+                    let w = mm.put(65);
+                    w.array(wl.sw_build.len());
+                    for n in &wl.sw_build {
                         w.text(n);
                     }
                 }

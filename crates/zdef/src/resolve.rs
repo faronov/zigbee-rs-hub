@@ -501,7 +501,11 @@ pub fn resolve<'a>(layers: &Layers<'a>, target: Target<'a>) -> Resolution<'a> {
         }
     }
     if let (Target::Zigbee(fp), Some(d)) = (target, top_def) {
-        let (v, m) = d.display_identity(fp.manufacturer_name.as_deref(), fp.model_id.as_deref());
+        let (v, m) = d.display_identity(
+            fp.manufacturer_name.as_deref(),
+            fp.model_id.as_deref(),
+            fp.sw_build_id.as_deref(),
+        );
         res.vendor = v.or(res.vendor);
         res.model = m.or(res.model);
     }

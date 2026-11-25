@@ -522,6 +522,10 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
                     Some(Y::Sequence(l)) => l.iter().map(s).collect::<R<_>>()?,
                     _ => Vec::new(),
                 },
+                sw_build: match get(x, "sw_build") {
+                    Some(Y::Sequence(l)) => l.iter().map(s).collect::<R<_>>()?,
+                    _ => Vec::new(),
+                },
             });
         }
     }

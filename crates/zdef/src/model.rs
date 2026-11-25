@@ -183,9 +183,10 @@ impl Definition {
         &'s self,
         manufacturer_name: Option<&str>,
         model_id: Option<&str>,
+        sw_build_id: Option<&str>,
     ) -> (Option<&'s str>, Option<&'s str>) {
         for wl in &self.white_label {
-            if wl.selects(manufacturer_name, model_id) {
+            if wl.selects(manufacturer_name, model_id, sw_build_id) {
                 return (
                     wl.vendor.as_deref().or(self.vendor.as_deref()),
                     wl.model.as_deref().or(self.model.as_deref()),
@@ -285,19 +286,27 @@ pub struct WhiteLabel {
     /// Basic ModelIdentifiers (zigbee-herdsman-converters' white-label
     /// fingerprints by `modelID`).
     pub model_id: Vec<String>,
+    /// Basic SWBuildIDs (white-label fingerprints by `softwareBuildID`).
+    pub sw_build: Vec<String>,
 }
 
 impl WhiteLabel {
     /// Whether a device with these Basic names is this white label: every
     /// list given contains its name, and at least one list is given.
-    pub fn selects(&self, manufacturer_name: Option<&str>, model_id: Option<&str>) -> bool {
+    pub fn selects(
+        &self,
+        manufacturer_name: Option<&str>,
+        model_id: Option<&str>,
+        sw_build_id: Option<&str>,
+    ) -> bool {
         use crate::matching::trim_name;
         let has = |list: &[String], v: Option<&str>| {
             list.is_empty() || v.is_some_and(|v| list.iter().any(|n| trim_name(n) == trim_name(v)))
         };
-        (!self.manufacturer.is_empty() || !self.model_id.is_empty())
+        (!self.manufacturer.is_empty() || !self.model_id.is_empty() || !self.sw_build.is_empty())
             && has(&self.manufacturer, manufacturer_name)
             && has(&self.model_id, model_id)
+            && has(&self.sw_build, sw_build_id)
     }
 }
 

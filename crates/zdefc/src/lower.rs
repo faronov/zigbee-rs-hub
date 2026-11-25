@@ -1485,7 +1485,11 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
             "match" => d.match_ = l.list(v, &p, |l, n, p| l.clause(n, p)),
             "white_label" => {
                 d.white_label = l.list(v, &p, |l, n, p| {
-                    let f = l.obj(n, p, &["vendor", "model", "manufacturer", "model_id"])?;
+                    let f = l.obj(
+                        n,
+                        p,
+                        &["vendor", "model", "manufacturer", "model_id", "sw_build"],
+                    )?;
                     let mut w = WhiteLabel::default();
                     for (k2, _, v2) in f {
                         let p2 = format!("{p}/{}", k2.as_json());
@@ -1493,6 +1497,7 @@ pub fn lower(root: &Node, emit_requires: bool) -> Result<Lowered, Vec<Diag>> {
                             "vendor" => w.vendor = l.str_(v2, &p2),
                             "model" => w.model = l.str_(v2, &p2),
                             "model_id" => w.model_id = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
+                            "sw_build" => w.sw_build = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
                             _ => w.manufacturer = l.list(v2, &p2, |l, n, p| l.str_(n, p)),
                         }
                     }
