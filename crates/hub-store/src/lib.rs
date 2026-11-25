@@ -14,7 +14,12 @@ pub mod files;
 pub mod flash;
 pub mod journal;
 pub mod kv;
+pub mod littlefs;
 pub mod state;
+#[cfg(test)]
+mod lfs_tests;
+#[cfg(test)]
+mod testutil;
 
 use std::io;
 

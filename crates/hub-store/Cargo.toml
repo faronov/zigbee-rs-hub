@@ -15,3 +15,6 @@ hub-core = { workspace = true }
 [dev-dependencies]
 # Cross-check of the CRC against the ZRHP crate's implementation.
 zigbee-zrhp = { workspace = true }
+# Real LittleFS images (upstream littlefs v2.9) for the files-region tests:
+# the walk against lfs_fs_traverse, restored images mounted and read back.
+littlefs2-sys = { version = "0.4", features = ["malloc"] }

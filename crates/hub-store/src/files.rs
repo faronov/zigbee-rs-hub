@@ -7,18 +7,23 @@
 //! Until the claim the region is SONOFF's LittleFS (or erased) and the hub
 //! never writes it. The claim:
 //!
-//! 1. **Scan**: every 4 KiB block outside `stock_copy` that is not erased
-//!    counts as in use by SONOFF's file system (LittleFS does not erase
-//!    the blocks it frees, so this may count more than the files need).
-//!    Refused when more than [`SLOTS`] blocks are in use, when the region
-//!    holds neither LittleFS nor erased flash, or when `stock_copy` is not
-//!    erased (SONOFF's file system may use those blocks).
-//! 2. **Copy**: the index (`ZRHS`: block numbers and CRC-32C of each
-//!    block; its body first, the magic last) at the first block of
-//!    `stock_copy`, the blocks into the slots after it, each read back,
-//!    then the index's `DONE` word. SONOFF's file system is still intact:
-//!    a power cut here leaves the stock firmware working, and the claim
-//!    starts over.
+//! 1. **Scan** ([`FilesRegion::scan`]): SONOFF's blocks are those its
+//!    LittleFS uses ([`crate::littlefs`]: the metadata pairs and the files'
+//!    blocks, walked read-only as littlefs's own traversal does, also
+//!    through the directory entries, for a relocation cut short); when the
+//!    region cannot be walked, every 4 KiB block that is not erased counts
+//!    (LittleFS does not erase the blocks it frees, so that may count many
+//!    more). Refused, writing nothing, when more than [`SLOTS`] blocks are
+//!    in use outside `stock_copy`, when SONOFF's file system uses a block of
+//!    `stock_copy` (without the walk: any written block there), or when the
+//!    region holds neither LittleFS nor erased flash.
+//! 2. **Copy**: written blocks of `stock_copy` that SONOFF's file system
+//!    freed are erased; the index (`ZRHS`: block numbers and CRC-32C of
+//!    each block, whether they came from the walk; its body first, the
+//!    magic last) at the first block of `stock_copy`, the blocks into the
+//!    slots after it, each read back, then the index's `DONE` word.
+//!    SONOFF's file system is still intact: a power cut here leaves the
+//!    stock firmware working, and the claim starts over.
 //! 3. **Commit**: the claim record (`ZRHF`, state `erasing`) over block 0
 //!    (LittleFS superblock), from here on the region is the hub's; block 1
 //!    and the hub's areas (`hubdata`, `ota_store`, `radio`) are erased, and
@@ -32,9 +37,9 @@
 //! The return to stock ([`FilesRegion::restore`]): a record `restoring`,
 //! every block outside `stock_copy` erased and the copied blocks written
 //! back (blocks 0 and 1 last, the one holding the newest record at the
-//! very end), then `stock_copy` erased (its index last). A claim that never
-//! committed is only undone (its copy erased); SONOFF's blocks were never
-//! touched.
+//! very end), then `stock_copy` erased (its index last). Blocks SONOFF's
+//! file system had freed come back erased. A claim that never committed is
+//! only undone (its copy erased); SONOFF's blocks were never touched.
 
 use std::io;
 
@@ -42,6 +47,7 @@ use hub_core::layout::dongle_files::{self as layout, Content};
 
 use crate::crc::crc32c;
 use crate::flash::Flash;
+use crate::littlefs::{self, LfsError};
 
 /// Block (sector) size.
 pub const BLOCK: u32 = 4096;
@@ -60,8 +66,11 @@ const RECORD_LEN: usize = 20;
 const INDEX_MAGIC: [u8; 4] = *b"ZRHS";
 const INDEX_DONE: [u8; 4] = *b"DONE";
 const INDEX_VERSION: u32 = 1;
-/// Index header: magic, done word, version, count.
-const INDEX_HEAD: usize = 16;
+/// Index header: magic, done word, version, count, flags.
+const INDEX_HEAD: usize = 20;
+/// Index flag: the copy holds the blocks the LittleFS walk found (the
+/// others may be written, free in SONOFF's file system).
+const WALKED: u32 = 1;
 
 /// What a claim record says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,17 +149,20 @@ pub struct Index {
     pub blocks: Vec<(u32, u32)>,
     /// Every slot was written and read back.
     pub done: bool,
+    /// The blocks are those the LittleFS walk found, not every written one.
+    pub walked: bool,
 }
 
 impl Index {
     /// The index block as written, `DONE` included.
-    fn image(blocks: &[(u32, u32)]) -> Vec<u8> {
+    fn image(blocks: &[(u32, u32)], walked: bool) -> Vec<u8> {
         let mut b = vec![0xFF; BLOCK as usize];
         b[..4].copy_from_slice(&INDEX_MAGIC);
         b[4..8].copy_from_slice(&INDEX_DONE);
-        let mut body = Vec::with_capacity(8 + 8 * blocks.len());
+        let mut body = Vec::with_capacity(12 + 8 * blocks.len());
         body.extend_from_slice(&INDEX_VERSION.to_le_bytes());
         body.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
+        body.extend_from_slice(&(if walked { WALKED } else { 0 }).to_le_bytes());
         for (block, crc) in blocks {
             body.extend_from_slice(&block.to_le_bytes());
             body.extend_from_slice(&crc.to_le_bytes());
@@ -178,7 +190,7 @@ impl Index {
         if blocks.iter().any(|(b, _)| *b >= INDEX_BLOCK) {
             return None;
         }
-        Some(Index { blocks, done: b.get(4..8)? == INDEX_DONE })
+        Some(Index { blocks, done: b.get(4..8)? == INDEX_DONE, walked: word(16)? & WALKED != 0 })
     }
 
     fn crc_of(&self, block: u32) -> Option<u32> {
@@ -238,15 +250,33 @@ impl Status {
     }
 }
 
+/// How [`FilesRegion::scan`] found SONOFF's blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMethod {
+    /// The LittleFS walk ([`crate::littlefs`]): the blocks the file
+    /// system uses.
+    LittleFs,
+    /// Every block that is not erased (no LittleFS the walk understands).
+    NonErased,
+}
+
 /// What the claim found ([`FilesRegion::scan`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scan {
     /// The first blocks.
     pub content: Content,
-    /// Blocks in use outside `stock_copy` (not erased).
+    /// SONOFF's blocks outside `stock_copy`: what the claim copies.
     pub used: Vec<u32>,
-    /// Blocks of `stock_copy` that are not erased.
+    /// SONOFF's blocks inside `stock_copy`: the claim is refused.
     pub copy_area_used: Vec<u32>,
+    /// Blocks of `stock_copy` that are not erased (SONOFF's or free).
+    pub copy_area_written: Vec<u32>,
+    /// Blocks of the region that are not erased.
+    pub written: usize,
+    /// How `used` was found.
+    pub method: ScanMethod,
+    /// Why the LittleFS walk did not count (LittleFS content only).
+    pub fallback: Option<String>,
 }
 
 /// Why a claim or a return to stock is refused or failed.
@@ -446,16 +476,33 @@ impl<F: Flash> FilesRegion<F> {
         Ok(Status { content: self.content()?, record: self.record()?.map(|(_, r)| r), copy: self.copy_state()?.0 })
     }
 
-    /// Blocks in use (reads the whole region).
+    /// SONOFF's blocks (reads the whole region): those its LittleFS uses
+    /// when the walk understands it, else every block that is not erased.
+    /// Deterministic for the same flash contents.
     pub fn scan(&mut self) -> io::Result<Scan> {
-        let mut used = Vec::new();
-        let mut copy_area_used = Vec::new();
+        let content = self.content()?;
+        let mut written = Vec::new();
         for block in 0..BLOCKS {
             if !self.block_blank(block)? {
-                if block < INDEX_BLOCK { used.push(block) } else { copy_area_used.push(block) }
+                written.push(block);
             }
         }
-        Ok(Scan { content: self.content()?, used, copy_area_used })
+        let (walked, fallback) = if content == Content::LittleFs {
+            let flash = &mut self.flash;
+            match littlefs::blocks_in_use(&mut |b, off, buf| flash.read(b * BLOCK + off, buf), BLOCK, BLOCKS) {
+                Ok(set) => (Some(set), None),
+                Err(LfsError::Io(e)) => return Err(e),
+                Err(e @ LfsError::Corrupt(_)) => (None, Some(e.to_string())),
+            }
+        } else {
+            (None, None)
+        };
+        let sonoffs = |b: &u32| walked.as_ref().is_none_or(|set| set.contains(b));
+        let used = written.iter().filter(|&&b| b < INDEX_BLOCK && sonoffs(&b)).copied().collect();
+        let copy_area_written: Vec<u32> = written.iter().filter(|&&b| b >= INDEX_BLOCK).copied().collect();
+        let copy_area_used = copy_area_written.iter().filter(|b| sonoffs(b)).copied().collect();
+        let method = if walked.is_some() { ScanMethod::LittleFs } else { ScanMethod::NonErased };
+        Ok(Scan { content, used, copy_area_used, copy_area_written, written: written.len(), method, fallback })
     }
 
     fn crcs(&mut self, blocks: &[u32]) -> io::Result<Vec<(u32, u32)>> {
@@ -472,14 +519,16 @@ impl<F: Flash> FilesRegion<F> {
         Ok(true)
     }
 
-    /// The blocks outside `stock_copy` are SONOFF's as copied: the listed
-    /// ones match their CRC, the others are erased; blocks in `skip` are
-    /// not looked at.
+    /// The blocks outside `stock_copy` are SONOFF's as copied (blocks in
+    /// `skip` not looked at): the copied ones hold what was copied, and,
+    /// unless the copy came from the LittleFS walk, the others are erased.
+    /// (After a walk the others may be free blocks of SONOFF's; any change
+    /// of its file system rewrites a metadata block, which is copied.)
     fn matches(&mut self, ix: &Index, skip: &[u32]) -> io::Result<bool> {
         for block in (0..INDEX_BLOCK).filter(|b| !skip.contains(b)) {
             let ok = match ix.crc_of(block) {
                 Some(crc) => crc32c(&self.read_block(block)?) == crc,
-                None => self.block_blank(block)?,
+                None => ix.walked || self.block_blank(block)?,
             };
             if !ok {
                 return Ok(false);
@@ -550,6 +599,8 @@ impl<F: Flash> FilesRegion<F> {
         match copy {
             CopyState::Hub(ix) if ix.done && self.slots_verify(&ix)? => {
                 if self.matches(&ix, &[0, 1])? {
+                    // Not begun, or the commit began (block 0 is being made
+                    // the record): commit.
                     return self.commit(&ix);
                 }
                 if !self.claim_blocks_intact(&ix)? {
@@ -568,12 +619,12 @@ impl<F: Flash> FilesRegion<F> {
                 self.erase_copy()?;
             }
             CopyState::Other => {
-                // The claim's first write (the index) cut short, or not ours.
+                // A block SONOFF's file system does not use (the LittleFS
+                // walk), the claim's first write (the index) cut short, or
+                // SONOFF's.
                 let scan = self.scan()?;
-                let ours = scan.used.len() <= SLOTS
-                    && partial_write_of(&raw, &Index::image(&self.crcs(&scan.used)?))
-                    && scan.copy_area_used == [INDEX_BLOCK];
-                if !ours {
+                let erasable = scan.copy_area_used.is_empty() || self.torn_index(&scan, &raw)?;
+                if !erasable {
                     return Err(FilesError::CopyAreaInUse { blocks: scan.copy_area_used });
                 }
                 self.erase(INDEX_BLOCK)?;
@@ -594,8 +645,13 @@ impl<F: Flash> FilesRegion<F> {
         if scan.used.len() > SLOTS {
             return Err(FilesError::TooManyBlocks { used: scan.used.len() });
         }
+        if !scan.copy_area_written.is_empty() {
+            // Blocks SONOFF's file system freed (the LittleFS walk).
+            self.erase_copy()?;
+        }
         let blocks = self.crcs(&scan.used)?;
-        let image = Index::image(&blocks);
+        let walked = scan.method == ScanMethod::LittleFs;
+        let image = Index::image(&blocks, walked);
         let head = INDEX_HEAD + 8 * blocks.len() + 4;
         // The body, then the magic: a valid magic means a whole index.
         self.flash.write(INDEX_BLOCK * BLOCK + 8, &image[8..head])?;
@@ -608,8 +664,17 @@ impl<F: Flash> FilesRegion<F> {
             self.program(INDEX_BLOCK + 1 + i as u32, &data)?;
         }
         self.flash.write(INDEX_BLOCK * BLOCK + 4, &image[4..8])?;
-        let ix = Index { blocks, done: true };
+        let ix = Index { blocks, done: true, walked };
         self.commit(&ix)
+    }
+
+    /// `raw` (the index block, all of `stock_copy` that is written) is the
+    /// claim's first write cut short: a partial write of the index the
+    /// claim makes of this region.
+    fn torn_index(&mut self, scan: &Scan, raw: &[u8]) -> io::Result<bool> {
+        Ok(scan.copy_area_written == [INDEX_BLOCK]
+            && scan.used.len() <= SLOTS
+            && partial_write_of(raw, &Index::image(&self.crcs(&scan.used)?, scan.method == ScanMethod::LittleFs)))
     }
 
     fn commit(&mut self, ix: &Index) -> Result<Claimed, FilesError> {
@@ -632,10 +697,7 @@ impl<F: Flash> FilesRegion<F> {
                 // A claim cut short at its first write (the index), whose
                 // blocks are SONOFF's untouched; anything else is not ours.
                 let scan = self.scan()?;
-                if scan.copy_area_used == [INDEX_BLOCK]
-                    && scan.used.len() <= SLOTS
-                    && partial_write_of(&raw, &Index::image(&self.crcs(&scan.used)?))
-                {
+                if self.torn_index(&scan, &raw)? {
                     self.erase(INDEX_BLOCK)?;
                     return Ok(Restored::Undone);
                 }
@@ -646,7 +708,7 @@ impl<F: Flash> FilesRegion<F> {
                 // writes the claim blocks back last), written back already,
                 // or SONOFF's file system changed since the copy: SONOFF's
                 // blocks are its own, only the copy goes.
-                if !ix.done || self.claim_blocks_intact(&ix)? || self.matches(&ix, &[])? {
+                if !ix.done || self.claim_blocks_intact(&ix)? {
                     self.erase_copy()?;
                     return Ok(Restored::Undone);
                 }
@@ -711,84 +773,7 @@ impl<F: Flash> FilesRegion<F> {
 mod tests {
     use super::*;
 
-    /// NOR flash whose power fails at operation `cut` (counting writes and
-    /// erases): that write programs only its first `torn` bytes, that
-    /// erase only the first `torn` bytes of the block; everything after
-    /// fails until [`CutFlash::power_on`].
-    #[derive(Clone)]
-    struct CutFlash {
-        data: Vec<u8>,
-        ops: usize,
-        cut: Option<usize>,
-        torn: usize,
-        dead: bool,
-    }
-
-    impl CutFlash {
-        fn new(data: Vec<u8>) -> Self {
-            Self { data, ops: 0, cut: None, torn: 0, dead: false }
-        }
-
-        fn cut_at(mut self, op: usize, torn: usize) -> Self {
-            self.cut = Some(op);
-            self.torn = torn;
-            self
-        }
-
-        fn power_on(&mut self) {
-            self.dead = false;
-            self.cut = None;
-        }
-
-        /// The operation fails (and the power is gone) if it is the cut.
-        fn step(&mut self) -> Option<usize> {
-            if self.dead {
-                return Some(0);
-            }
-            let n = self.ops;
-            self.ops += 1;
-            if self.cut == Some(n) {
-                self.dead = true;
-                return Some(self.torn);
-            }
-            None
-        }
-    }
-
-    fn cut() -> io::Error {
-        io::Error::other("power cut (simulated)")
-    }
-
-    impl Flash for CutFlash {
-        fn sector_size(&self) -> u32 {
-            BLOCK
-        }
-        fn sectors(&self) -> u32 {
-            BLOCKS
-        }
-        fn read(&mut self, offset: u32, buf: &mut [u8]) -> io::Result<()> {
-            if self.dead {
-                return Err(cut());
-            }
-            let o = offset as usize;
-            buf.copy_from_slice(&self.data[o..o + buf.len()]);
-            Ok(())
-        }
-        fn write(&mut self, offset: u32, data: &[u8]) -> io::Result<()> {
-            let o = offset as usize;
-            let n = self.step().unwrap_or(data.len()).min(data.len());
-            for (i, b) in data[..n].iter().enumerate() {
-                self.data[o + i] &= b;
-            }
-            if self.dead { Err(cut()) } else { Ok(()) }
-        }
-        fn erase(&mut self, sector: u32) -> io::Result<()> {
-            let s = (sector * BLOCK) as usize;
-            let n = self.step().unwrap_or(BLOCK as usize).min(BLOCK as usize);
-            self.data[s..s + n].fill(0xFF);
-            if self.dead { Err(cut()) } else { Ok(()) }
-        }
-    }
+    use crate::testutil::{CutFlash, cut_points};
 
     fn noise(seed: u32, n: usize) -> Vec<u8> {
         let mut x = seed.wrapping_mul(2_654_435_761) | 1;
@@ -936,12 +921,6 @@ mod tests {
         let mut r = region(data.to_vec());
         f(&mut r);
         r.flash.ops
-    }
-
-    /// The cut points worth a run: all of them, except inside the long
-    /// runs of block erases, which are sampled.
-    fn cut_points(total: usize) -> impl Iterator<Item = usize> {
-        (0..total).filter(move |&k| k < 48 || k + 48 > total || k % 61 == 0)
     }
 
     #[test]
