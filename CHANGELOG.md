@@ -85,7 +85,10 @@ install instructions and the list of merged pull requests. A pre-release
 ### Known limitations
 
 - The 8 MB images (and the OTA image store) have not run on an 8 MB board
-  yet; hardware tests used the 4 MB octal lab board.
+  yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
+  quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio (in-place
+  upgrade with the data kept, web UI and API under load, no crash), so
+  Zigbee on a quad-PSRAM board is still untested.
 - No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
   from the console or the browser console).
 - SONOFF Dongle Max: experimental, full hub hardware test pending
