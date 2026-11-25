@@ -28,14 +28,14 @@
 //! No Bluetooth (off in sdkconfig, its RAM stays with the heap) and no
 //! network access to the MG24 UART.
 
-#[path = "../../hub/src/alloc.rs"]
+#[path = "../../espapp/src/alloc.rs"]
 mod alloc;
 pub mod console;
-#[path = "../../hub/src/cpanic.rs"]
+#[path = "../../espapp/src/cpanic.rs"]
 mod cpanic;
 // `report` and `atomics` are used; `named` and `bench` belong to firmware/hub.
 #[allow(dead_code)]
-#[path = "../../hub/src/cpu.rs"]
+#[path = "../../espapp/src/cpu.rs"]
 mod cpu;
 pub mod esp;
 #[cfg(esp32)]

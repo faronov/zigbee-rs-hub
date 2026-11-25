@@ -21,11 +21,6 @@
 #[cfg(not(feature = "zrhp"))]
 compile_error!("tbr-hub: select exactly one coordinator backend: feature `zrhp` (the Thread BR board's H2 NCP speaks ZRHP)");
 
-mod alloc;
-#[cfg(feature = "app")]
-mod catalog;
-mod cpanic;
-mod cpu;
 mod esp;
 mod mode;
 mod resources;
@@ -35,8 +30,6 @@ mod mqtt;
 mod net;
 #[cfg(feature = "app")]
 mod platform;
-#[cfg(feature = "app")]
-mod ws;
 #[cfg(feature = "app")]
 mod usbapi;
 
@@ -52,6 +45,7 @@ use hub_ncp::zrhp::msg::system::SysEcho;
 use hub_core::layout::Verdict;
 use log::{error, info, warn};
 use tbr_bridge::{console, h2, uart, usb};
+use zrh_espapp::{alloc, cpanic, cpu};
 
 use crate::mode::Mode;
 
@@ -217,13 +211,13 @@ fn extension(words: &[&str]) -> Option<String> {
             if let Some(Some(t)) = PREV_TASKS.get() {
                 s += &format!("previous boot, last stack watch (free bytes): {t}\r\n");
             }
-            if let Some(p) = last_panic() {
+            if let Some(p) = cpanic::last_panic() {
                 s += &format!("previous boot panicked: {p}\r\n");
             }
             if let Some(p) = cpanic::last() {
                 s += &format!("last ESP-IDF panic, {p}\r\n");
             }
-            s += &alloc_failures();
+            s += &cpanic::alloc_failures();
             if let Some(hub) = hub {
                 s += &status_text(hub);
             }
@@ -357,7 +351,7 @@ fn start_hub() {
             return;
         }
         Verdict::Foreign => Store::volatile(),
-        Verdict::Ok(_) => match esp::Partition::find().map(|p| Store::open(Box::new(p))) {
+        Verdict::Ok(_) => match esp::journal().map(|p| Store::open(Box::new(p))) {
             Some(Ok(s)) => {
                 info!("host store: hubdata journal {:?}", s.stats());
                 s
@@ -421,9 +415,7 @@ fn start_app(hub: Hub, verdict: Verdict) {
         info!("{}", line.trim_end());
     }
     let token = mode::get_str("api_token").unwrap_or_else(|| {
-        let mut b = [0u8; 12];
-        (esp::rng())(&mut b);
-        let t = hex(&b).to_lowercase();
+        let t = zrh_espapp::new_token();
         if let Err(e) = mode::set_str("api_token", Some(&t)) {
             warn!("API token not stored: {e}");
         }
@@ -445,7 +437,7 @@ fn start_app(hub: Hub, verdict: Verdict) {
         ..Default::default()
     };
     // The catalog store in hubdata (banks read in place from the mapping).
-    let catalog = catalog::HubData::open().map(|f| hub_app::CatalogSetup {
+    let catalog = zrh_espapp::catalog::HubData::open().map(|f| hub_app::CatalogSetup {
         flash: std::sync::Arc::new(std::sync::Mutex::new(Box::new(f) as Box<dyn hub_app::catalog::data::DataFlash>)),
         extra_keys: Vec::new(),
     });
@@ -487,45 +479,6 @@ const APP_STACK: usize = 40 * 1024;
 /// job from internal RAM.
 #[cfg(feature = "app")]
 const ADMIN_STACK: usize = 12 * 1024;
-
-/// The last Rust panic message, kept in RTC memory across the panic reset
-/// (hub-mode logs go to UART0, which the hwlab host cannot see).
-#[unsafe(link_section = ".rtc_noinit")]
-static mut PANIC_MSG: [u8; 256] = [0; 256];
-const PANIC_MAGIC: &[u8; 4] = b"PNC1";
-
-fn record_panics() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let text = format!("{info}");
-        let n = text.len().min(250);
-        let p = &raw mut PANIC_MSG;
-        // SAFETY: written once by the panicking thread right before the reset.
-        let buf = unsafe { &mut *p };
-        buf[..4].copy_from_slice(PANIC_MAGIC);
-        buf[4] = n as u8;
-        buf[5..5 + n].copy_from_slice(&text.as_bytes()[..n]);
-        prev(info);
-    }));
-}
-
-fn last_panic() -> Option<String> {
-    static LAST: OnceLock<Option<String>> = OnceLock::new();
-    LAST.get_or_init(|| {
-        let p = &raw mut PANIC_MSG;
-        // SAFETY: read and cleared once at the first use, before any panic of this boot.
-        let buf = unsafe { &*p };
-        if &buf[..4] != PANIC_MAGIC {
-            return None;
-        }
-        let n = (buf[4] as usize).min(250);
-        let text = String::from_utf8_lossy(&buf[5..5 + n]).into_owned();
-        // Reported for the boot after the panic only.
-        unsafe { (&mut *p)[..4].fill(0) };
-        Some(text)
-    })
-    .clone()
-}
 
 /// Task stack and heap watch: the free stack of every task and the free
 /// internal heap go to RTC memory (every 20 ms while starting, then every
@@ -635,43 +588,6 @@ fn stage(n: u32) {
     }
 }
 
-/// Failed heap allocations (also ones the caller survives) in RTC memory:
-/// magic, count, last size, last caps, time (ms) of the last one. Without
-/// PSRAM a crash is often an exhausted heap, and an `abort()` from Rust's
-/// allocation error handler leaves no panic message.
-#[unsafe(link_section = ".rtc_noinit")]
-static mut ALLOC_FAIL: [u32; 5] = [0; 5];
-const ALLOC_MAGIC: u32 = 0x414C_4331;
-static PREV_ALLOC_FAIL: OnceLock<[u32; 5]> = OnceLock::new();
-
-unsafe extern "C" fn alloc_failed(size: usize, caps: u32, _function: *const core::ffi::c_char) {
-    // SAFETY: plain word stores; a lost update between threads only miscounts.
-    let a = unsafe { &mut *(&raw mut ALLOC_FAIL) };
-    a[1] = a[1].wrapping_add(1);
-    a[2] = size as u32;
-    a[3] = caps;
-    a[4] = (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000) as u32;
-}
-
-fn record_alloc_failures() {
-    let a = unsafe { &mut *(&raw mut ALLOC_FAIL) };
-    let _ = PREV_ALLOC_FAIL.set(if a[0] == ALLOC_MAGIC { *a } else { [0; 5] });
-    *a = [ALLOC_MAGIC, 0, 0, 0, 0];
-    unsafe { esp_idf_svc::sys::heap_caps_register_failed_alloc_callback(Some(alloc_failed)) };
-}
-
-fn alloc_failures() -> String {
-    let line = |what: &str, a: [u32; 5]| {
-        if a[1] == 0 {
-            String::new()
-        } else {
-            format!("{what}: {} failed allocations, last {} bytes (caps 0x{:x}) at t={}ms\r\n", a[1], a[2], a[3], a[4])
-        }
-    };
-    let now = unsafe { (&raw const ALLOC_FAIL).read_volatile() };
-    line("previous boot", PREV_ALLOC_FAIL.get().copied().unwrap_or_default()) + &line("this boot", now)
-}
-
 fn prev_stage() -> String {
     let s = *PREV_STAGE.get().unwrap_or(&0);
     let reason = unsafe { esp_idf_svc::sys::esp_reset_reason() };
@@ -705,10 +621,10 @@ fn main() {
     let _ = PREV_STAGE.set(unsafe { (&raw const STAGE).read_volatile() });
     let _ = PREV_STAGE_HEAP.set(unsafe { (&raw const STAGE_HEAP).read_volatile() });
     load_prev_tasks();
-    let _ = last_panic();
-    record_panics();
+    let _ = cpanic::last_panic();
+    cpanic::record_panics();
     cpanic::count_boot();
-    record_alloc_failures();
+    cpanic::record_alloc_failures();
     info!("tbr-hub {} starting", env!("CARGO_PKG_VERSION"));
     resources::log();
     let crashed = tbr_bridge::recovery::crashed_last_boot();

@@ -2440,6 +2440,7 @@ dependencies = [
  "log",
  "serde_json",
  "tbr-bridge",
+ "zrh-espapp",
 ]
 
 [[package]]
@@ -3218,7 +3219,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zrh-donglem"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embuild",
  "esp-idf-svc",
@@ -3227,13 +3228,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "zrh-gateway"
+name = "zrh-espapp"
 version = "0.1.0"
 dependencies = [
  "embedded-svc",
  "embuild",
  "esp-idf-svc",
+ "hub-app",
  "hub-core",
- "hub-ezsp",
+ "hub-mqtt",
+ "hub-store",
+ "hub-web",
  "log",
+ "serde_json",
+]
+
+[[package]]
+name = "zrh-gateway"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "embedded-svc",
+ "embuild",
+ "esp-idf-svc",
+ "hub-app",
+ "hub-core",
+ "hub-devices",
+ "hub-ezsp",
+ "hub-mqtt",
+ "hub-store",
+ "hub-web",
+ "log",
+ "serde_json",
+ "sha2",
+ "zrh-espapp",
 ]

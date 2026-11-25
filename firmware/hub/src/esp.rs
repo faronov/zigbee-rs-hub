@@ -1,7 +1,7 @@
 //! ESP32-S3 platform glue for the host core: UART1 to the H2 (through the
 //! bridge's UART driver: IRAM ISR, 16 KiB RX ring, RTS/CTS on the reserved
-//! lines), H2 EN/BOOT, the `hubdata` partition, the hardware RNG and the
-//! flash-size check.
+//! lines), H2 EN/BOOT, the `hubdata` journal (`zrh_espapp::flash`), the
+//! inactive app slot, the hardware RNG and the flash-size check.
 
 use std::ffi::CStr;
 use std::io;
@@ -11,7 +11,9 @@ use std::time::Duration;
 use esp_idf_svc::sys;
 use hub_core::layout::{self, Part, Verdict};
 use hub_ncp::Rng;
-use hub_ncp::store::{Flash, JOURNAL_BYTES, SECTOR};
+use hub_ncp::store::JOURNAL_BYTES;
+#[cfg(feature = "ota-store")]
+use hub_ncp::store::{Flash, SECTOR};
 use hub_ncp::transport::{Line, NcpControl, PortRx, PortTx};
 use log::{error, info, warn};
 use tbr_bridge::{h2, uart};
@@ -66,55 +68,19 @@ pub fn rng() -> Rng {
     Arc::new(|buf: &mut [u8]| unsafe { sys::esp_fill_random(buf.as_mut_ptr().cast(), buf.len()) })
 }
 
-/// The first 128 KiB of the `hubdata` data partition.
-pub struct Partition {
-    part: *const sys::esp_partition_t,
-}
-
-// The partition descriptor is a static ESP-IDF table entry.
-unsafe impl Send for Partition {}
-
-impl Partition {
-    pub fn find() -> Option<Self> {
-        let part = unsafe {
-            sys::esp_partition_find_first(
-                sys::esp_partition_type_t_ESP_PARTITION_TYPE_DATA,
-                sys::esp_partition_subtype_t_ESP_PARTITION_SUBTYPE_ANY,
-                c"hubdata".as_ptr(),
-            )
-        };
-        if part.is_null() {
-            return None;
-        }
-        let size = unsafe { (*part).size };
-        if size < JOURNAL_BYTES {
-            warn!("hubdata is {size} B, the journal needs {JOURNAL_BYTES}");
-            return None;
-        }
-        Some(Self { part })
+/// The first 128 KiB of the `hubdata` data partition: the host store
+/// journal.
+pub fn journal() -> Option<zrh_espapp::flash::Region> {
+    let r = zrh_espapp::flash::Region::find(c"hubdata", 0, JOURNAL_BYTES);
+    if r.is_none() {
+        warn!("hubdata missing or smaller than the journal ({JOURNAL_BYTES} B)");
     }
+    r
 }
 
+#[cfg(feature = "ota-store")]
 fn check(err: sys::esp_err_t) -> io::Result<()> {
     if err == sys::ESP_OK { Ok(()) } else { Err(io::Error::other(format!("esp_partition: {err}"))) }
-}
-
-impl Flash for Partition {
-    fn sector_size(&self) -> u32 {
-        SECTOR
-    }
-    fn sectors(&self) -> u32 {
-        JOURNAL_BYTES / SECTOR
-    }
-    fn read(&mut self, offset: u32, buf: &mut [u8]) -> io::Result<()> {
-        check(unsafe { sys::esp_partition_read(self.part, offset as usize, buf.as_mut_ptr().cast(), buf.len()) })
-    }
-    fn write(&mut self, offset: u32, data: &[u8]) -> io::Result<()> {
-        check(unsafe { sys::esp_partition_write(self.part, offset as usize, data.as_ptr().cast(), data.len()) })
-    }
-    fn erase(&mut self, sector: u32) -> io::Result<()> {
-        check(unsafe { sys::esp_partition_erase_range(self.part, (sector * SECTOR) as usize, SECTOR as usize) })
-    }
 }
 
 /// The inactive app slot of the 8 MB layout: the store of the devices'
