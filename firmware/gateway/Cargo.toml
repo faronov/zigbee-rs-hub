@@ -36,6 +36,9 @@ log = "0.4"
 # The MQTT bridge on its own MQTT 3.1.1 client instead of esp-mqtt (as
 # firmware/hub; in no image).
 mqtt-lite = ["zrh-espapp/mqtt-lite"]
+# The developer edition ("devtools"): the web UI's developer tools always
+# on, without the developer mode switch; `hub/info` `edition` "devtools".
+dev = ["hub-web/dev", "hub-app/dev"]
 
 [build-dependencies]
 embuild = "0.33"

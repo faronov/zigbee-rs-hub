@@ -30,6 +30,6 @@ log = "0.4"
 serialport = { version = "4.7", default-features = false }
 
 [features]
-# The developer edition's web UI (hub-web `dev`): its developer tools
-# always on, as the `-dev` 8 MB images.
-dev = ["hub-web/dev"]
+# The developer edition ("devtools", as those images): the web UI's
+# developer tools always on, `hub/info` `edition` "devtools".
+dev = ["hub-web/dev", "hub-app/dev"]

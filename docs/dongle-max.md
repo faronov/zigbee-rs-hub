@@ -61,7 +61,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0:
 | Feature | In the image |
 |---|---|
 | Hub application: devices, catalog, groups, bindings, reporting, automations | yes: `hub-app` on `Backend::ezsp` (features `ezsp`, `advanced`, `ota-store`) |
-| Web UI with the advanced console, WebSocket API | yes: the page with the gateway cards (`hub-web` feature `gateway`, 29,689 B of the 36 KiB budget; with its four tab modules 39,771 B of the 44 KiB total); the ZCL console with developer mode (Settings › Hub) |
+| Web UI with the advanced console, WebSocket API | yes: the page with the gateway cards (`hub-web` feature `gateway`, 29,730 B of the 36 KiB budget; with its four tab modules 40,008 B of the 44 KiB total); the ZCL console with developer mode (Settings › Hub); a developer edition (devtools, feature `dev`, CI-built) has it always |
 | MQTT with Home Assistant discovery | yes (esp-mqtt, plain TCP; off until enabled, settings in NVS `zrh/mqtt`) |
 | Zigbee device OTA | yes: the 1 MiB image store in the claimed `files` region (`ota_store`), larger images streamed from a client; streamed only until the claim |
 | ESP32 self-update | yes: `firmware/*` requests, Settings › Hub firmware; into the other app slot (the first one replaces SONOFF's application, after a confirmation) |

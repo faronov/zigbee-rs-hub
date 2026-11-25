@@ -109,8 +109,9 @@ jobs:
       - run: cargo test -p hub-web --features advanced
       # The gateway's page (zrh-donglem): advanced, OTA store, gateway cards.
       - run: cargo test -p hub-web --features advanced,ota-store,gateway
-      # The developer edition's page (the ZCL console module always served).
+      # The developer edition's pages (devtools: the ZCL console module always served), S3 and Dongle-M.
       - run: cargo test -p hub-web --features dev,ota-store
+      - run: cargo test -p hub-web --features dev,ota-store,gateway
 
   hub-app-ezsp:
     name: hub-app on the EZSP backend (NcpNv ownership, the suite on both backends)
@@ -239,7 +240,7 @@ jobs:
       - name: Build tbr-hub with the MQTT bridge on its own client (option mqtt-lite, in no image)
         working-directory: firmware/hub
         run: cargo build --release --features mqtt-lite
-      - name: Build tbr-hub developer edition (feature dev, as the 8 MB images; no release image yet)
+      - name: Build tbr-hub developer edition (devtools, feature dev, as the 8 MB images; its release images come with the release tooling)
         working-directory: firmware/hub
         run: cargo build --release --features mqtt,dev,ota-store
       - name: Build tbr-hub (8 MB images with MQTT, the advanced console and Zigbee OTA with its image store; 4 MB images with MQTT only; quad and octal PSRAM)
@@ -305,6 +306,9 @@ jobs:
           grep -qx 'target_feature="s32c1i"' <<<"$default"
           if grep -qx 'target_feature="s32c1i"' <<<"$flagged"; then echo "-s32c1i did not remove the feature"; exit 1; fi
           grep -q '"target-feature=-s32c1i"' firmware/donglem/.cargo/config.toml
+      - name: Build zrh-donglem developer edition (devtools, feature dev; its release image comes with the release tooling)
+        working-directory: firmware/donglem
+        run: cargo build --release --features dev
       - name: Build zrh-donglem
         working-directory: firmware/donglem
         run: cargo build --release

@@ -561,7 +561,7 @@ impl Admin {
                 Ok(()) => return vec![self.time_frame(id)],
                 Err(e) => Err(e),
             },
-            "hub/developer/set" => self.set_developer(&**ctx.records, ctx.api, v),
+            "hub/developer/set" => self.set_developer(&**ctx.records, ctx.api, &ctx.out, v),
             "hub/wifi/set" => self.wifi(v),
             "hub/token/rotate" => self.rotate_token(ctx.api),
             "hub/reboot" => self.platform().and_then(|p| p.reboot().map_err(|e| ApiError::new("failed", e))).map(|_| json!({"rebooting": true})),
@@ -723,8 +723,9 @@ impl Admin {
     }
 
     /// The kept developer mode (`hub/info` `developer_mode`, with the
-    /// advanced console only).
+    /// advanced console only) and the image's `edition`.
     pub fn load_developer(&mut self, kv: &dyn KvStore, api: &mut ApiServer) {
+        api.set_info("edition", if cfg!(feature = "dev") { "devtools" } else { "standard" }.into());
         if cfg!(feature = "advanced") {
             let on = kv::with(kv, |s| s.get(DEVELOPER_KEY).is_some());
             self.developer.store(on, Ordering::Relaxed);
@@ -732,7 +733,7 @@ impl Admin {
         }
     }
 
-    fn set_developer(&mut self, kv: &dyn KvStore, api: &mut ApiServer, v: &J) -> Result<J, ApiError> {
+    fn set_developer(&mut self, kv: &dyn KvStore, api: &mut ApiServer, out: &Out, v: &J) -> Result<J, ApiError> {
         if !cfg!(feature = "advanced") {
             return Err(ApiError::new("unsupported", "this image has no developer tools"));
         }
@@ -741,6 +742,8 @@ impl Admin {
             .map_err(|e| ApiError::new("failed", e.to_string()))?;
         self.developer.store(on, Ordering::Relaxed);
         api.set_info("developer_mode", on.into());
+        // Other pages follow without a reconnect (topic `network`).
+        out(JobOut::Event(json!({"topic": "hub_updated", "developer_mode": on})));
         info!("admin: developer mode {}", if on { "on" } else { "off" });
         Ok(json!({"developer_mode": on}))
     }

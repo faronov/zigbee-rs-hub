@@ -8,6 +8,7 @@
   "coordinator_ieee": "020100000000515a",
   "developer_mode": "<feature>",
   "devices": 1,
+  "edition": "<feature>",
   "entities": 6,
   "features": [
     "expr-v1",

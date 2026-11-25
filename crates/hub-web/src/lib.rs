@@ -34,8 +34,9 @@ pub const MODULE_BUDGETS: [(&str, usize); 4] = [("conv", 3 * 1024), ("catalog", 
 /// (each file compressed alone costs some 3 KiB more than one page).
 pub const TOTAL_BUDGET: usize = 44 * 1024;
 
-/// [`TOTAL_BUDGET`] of the developer edition (feature `dev`, the `-dev`
-/// 8 MB images), with room for its developer tools.
+/// [`TOTAL_BUDGET`] of the developer edition ("devtools": feature `dev`,
+/// the `tbr-hub-<ver>-8mb-devtools` and Dongle-M devtools images), with
+/// room for its developer tools.
 pub const DEV_TOTAL_BUDGET: usize = 64 * 1024;
 
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
@@ -292,11 +293,13 @@ mod tests {
                     assert!(zcl.unwrap().developer);
                     assert!(page.contains("data-tab=\"zcl\" data-title=\"ZCL\" data-need=\"developer_mode\" data-mod=\"zcl\""));
                     assert!(page.contains("\"hub/developer/set\"") && page.contains("id=\"dvm\""));
+                    assert!(!page.contains("Developer edition"));
                 }
                 (true, true) => {
                     assert!(!zcl.unwrap().developer);
                     assert!(page.contains("data-tab=\"zcl\" data-title=\"ZCL\" data-mod=\"zcl\""));
-                    assert!(!page.contains("developer_mode") && !page.contains("id=\"dvm\""));
+                    assert!(!page.contains("data-need=\"developer_mode\"") && !page.contains("id=\"dvm\""));
+                    assert!(page.contains("Developer edition (devtools)"));
                 }
             }
             assert!(b.modules.iter().filter(|m| m.name != "zcl").all(|m| !m.developer));

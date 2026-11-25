@@ -20,8 +20,9 @@ ota-store = ["ota"]
 # The gateway firmware's cards (SONOFF Dongle-M): the storage claim of the
 # files partition, the hub's own firmware update, Ethernet.
 gateway = []
-# The developer edition (the `-dev` 8 MB images): the developer tools
-# always on, without the developer mode switch.
+# The developer edition ("devtools": the tbr-hub-<ver>-8mb-devtools and
+# Dongle-M devtools images): the developer tools always on, without the
+# developer mode switch.
 dev = ["advanced"]
 
 [build-dependencies]

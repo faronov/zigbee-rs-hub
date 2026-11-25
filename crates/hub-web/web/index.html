@@ -180,6 +180,9 @@ progress{width:12em}
 <!-- devmode:start -->
 <div class="row hide" id="dvr"><label><input type="checkbox" id="dvm"> Developer mode: the ZCL console tab</label></div>
 <!-- devmode:end -->
+<!-- dev:start -->
+<p class="mut">Developer edition (devtools): the developer tools are always on.</p>
+<!-- dev:end -->
 <div class="row acts"><button id="tkb" class="f-token_rotate">New API token</button><button id="rbb" class="f-reboot">Reboot</button><button id="mdb" class="f-mode">Bridge mode…</button></div></section>
 <section class="card"><h2>Reporting defaults</h2><p class="mut">Generic attributes: min max change (s, s, raw units) or off; empty = built-in. Definitions and per-device settings win; devices are reconfigured.</p><table id="rpd"></table><div class="row acts"><button class="p" id="rpb">Save</button></div></section>
 <section class="card" id="mqcard"><h2>MQTT (Zigbee2MQTT-compatible)</h2>
@@ -299,6 +302,8 @@ function onEvent(e){
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
+ // hub/info fields that changed (developer_mode, from any client).
+ case"hub_updated":{const d=hub.developer_mode;for(const k in e)if(k!="topic")hub[k]=e[k];if(hub.developer_mode!==d)tabs()}break;
 // ota:start
  case"ota_device":case"ota_images":uiDo("ota",()=>otEv(e));break;
 // ota:end

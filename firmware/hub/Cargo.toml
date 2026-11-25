@@ -42,10 +42,10 @@ app = ["dep:hub-app", "dep:hub-web", "dep:embedded-svc", "dep:serde_json", "zrh-
 # tab behind the hub's developer mode, Settings › Hub), also buildable for
 # 4 MB. Every image detects PSRAM at boot (`resources`).
 advanced = ["app", "hub-app/advanced", "hub-web/advanced"]
-# The developer edition (the `-dev` 8 MB images, with `ota-store`): the
-# developer tools of the web UI always on, without the developer mode
-# switch.
-dev = ["advanced", "hub-web/dev"]
+# The developer edition ("devtools": the tbr-hub-<ver>-8mb-devtools[-opi]
+# images, with `ota-store`): the developer tools of the web UI always on,
+# without the developer mode switch; `hub/info` `edition` "devtools".
+dev = ["advanced", "hub-web/dev", "hub-app/dev"]
 # The Zigbee2MQTT-compatible MQTT bridge (esp-mqtt, plain TCP; settings in
 # NVS, off until enabled). Included in both BR flash layouts by
 # tools/build-hub-firmware.sh; a build without it answers `unsupported`.

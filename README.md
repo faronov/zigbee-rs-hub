@@ -930,14 +930,20 @@ any cluster or foundation command with a hex payload; answers are shown
 decoded. A live frame tail (topic `frames`, filter by cluster) and a Tuya
 EF00 datapoint viewer (DP, type, value; send DP) follow the device; read
 attributes and seen DPs can be copied as definition snippets
-(device-support 14.7). In the normal images (feature `advanced`: the 8 MB
+(device-support 14.7). In the standard images (feature `advanced`: the 8 MB
 ones and the gateway) it is a developer tool: the tab appears with
 **Developer mode** (Settings › Hub; `hub/developer/set`, kept by the hub,
-`developer_mode` in `hub/info`) and the hub serves its module only then
-(403 otherwise, `Cache-Control: no-cache` so a browser asks again). The
-developer edition (feature `dev`, for `-dev` 8 MB images; its further
-developer tools come later) always has it, without the switch; the 4 MB
-images have no developer tools.
+`developer_mode` in `hub/info`, a `hub_updated` event tells the other open
+pages) and the hub serves its module only then (403 otherwise,
+`Cache-Control: no-cache` so a browser asks again). Developer mode only
+shows the tab and serves its module: the console's API (`zcl/*`,
+`tuya/send`, topic `frames`) stays available with the API token, which
+already grants full control (Home Assistant services may use it). The
+**developer edition** ("devtools": cargo feature `dev`, the
+`tbr-hub-<ver>-8mb-devtools[-opi]` and Dongle-M devtools images; `edition`
+`devtools` in `hub/info`, `standard` otherwise; its further developer tools
+come later) always has it, without the switch; the 4 MB images have no
+developer tools.
 
 The **Groups** tab (`#/groups`) creates, renames and deletes Zigbee groups,
 adds and removes member endpoints (ZCL Groups, with their state: pending,
@@ -959,12 +965,12 @@ strong ETags and the build hash (in every image variant the page must stay
 within 36 KiB gzipped, `hub_web::PAGE_BUDGET`, each module within its
 `MODULE_BUDGETS` entry and the page with all its modules within
 `TOTAL_BUDGET`, 44 KiB — `DEV_TOTAL_BUDGET`, 64 KiB, in the developer
-edition —, checked by the crate's tests, which also run every module in
+edition, devtools —, checked by the crate's tests, which also run every module in
 Node in one scope with the page); the hub answers
 `Content-Encoding: gzip`, `Cache-Control: no-cache` for the page and `304` on a matching
 `If-None-Match`. `hubctl serve` serves the same page on `/` and its modules
-(the WebSocket on `/api`; `--features dev` builds the developer edition's
-page), so the UI can be tried on a desktop, also with `--sim`. API 1.1
+(the WebSocket on `/api`; `--features dev` builds the developer edition,
+devtools), so the UI can be tried on a desktop, also with `--sim`. API 1.1
 added what the page needed: `network/info`, the `network` topic
 (`permit_join`, `network_state`), `time` in it for relative times, and `nwk`
 in device records (device-support 14.2); the header and the hub facts
@@ -987,7 +993,8 @@ form with chosen channel(s), PAN ID, EPID, TX power), and the hub itself:
 `hub/system`, `hub/logs`, `hub/wifi/set`, `hub/token/rotate`, `hub/reboot`,
 `hub/mode/set`, `hub/time` / `hub/time/set` (time zone as a POSIX TZ
 string, SNTP servers), `hub/developer/set` (developer mode: the web UI's
-developer tools, images with the advanced console). `hubctl serve` implements the hub side for a desktop
+developer tools, images with the advanced console; event `hub_updated`).
+`hubctl serve` implements the hub side for a desktop
 (credentials and token in memory, its own log tail; `--wifi-channel N` for
 the scan advice); `hubctl --sim --sim-demo serve` forms a network on the
 simulated NCP with three routers that answer Mgmt_Lqi/Mgmt_Rtg, and
