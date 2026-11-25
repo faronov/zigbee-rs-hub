@@ -112,54 +112,59 @@ mod convert;
 mod tests;
 mod worker;
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::ezsp::types::*;
-use crate::host::HostConfig;
+use crate::host::{HostConfig, LinkCounters};
 
 pub use admin::EzspAdmin;
 pub use convert::{COUNTERS, capabilities, energy_of_rssi, ezsp_error, host_error};
 pub use worker::{COMMAND_CAP, EzspCoordinator};
 
 /// Configuration values set at the start of every session, before
-/// `networkInit`, in this order. The NCP may refuse a value it has no RAM
-/// for; the worker logs that, reads the values back and reports what the
-/// NCP took in the [`Capabilities`](hub_coord::Capabilities).
-/// `PACKET_BUFFER_COUNT` is not set: EmberZNet 7.4 sizes packet buffers at
-/// build time ("The NCP no longer supports configuration of packet buffer
-/// count at runtime", Gecko SDK 4.4.6 `ezsp-enum.h`).
+/// `networkInit`, in this order. The tables (capacities: the NCP's RAM)
+/// come last, by priority: what the NCP's memory does not hold is fitted
+/// (the most that fits, at least the NCP's own value; the worker logs it
+/// once and keeps it for later sessions), so the source route table, the
+/// largest and needed only by bigger networks, takes what is left. The
+/// worker reads the values back and reports what the NCP took in the
+/// [`Capabilities`](hub_coord::Capabilities). `PACKET_BUFFER_COUNT` is
+/// not set: EmberZNet 7.4 sizes packet buffers at build time ("The NCP no
+/// longer supports configuration of packet buffer count at runtime", Gecko
+/// SDK 4.4.6 `ezsp-enum.h`).
 pub const DEFAULT_CONFIG: &[(ConfigId, u16)] = &[
+    // One network: the RAM goes to the tables below.
+    (ConfigId::SUPPORTED_NETWORKS, 1),
     // ZigBee PRO, network security level 5 (the UG100 defaults, explicit).
     (ConfigId::STACK_PROFILE, 2),
     (ConfigId::SECURITY_LEVEL, 5),
-    // One network: the RAM goes to the tables below.
-    (ConfigId::SUPPORTED_NETWORKS, 1),
     // Supported ZDO requests reach the host too (device announcements);
     // the NCP still answers them.
     (
         ConfigId::APPLICATION_ZDO_FLAGS,
         zdo_flags::APP_RECEIVES_SUPPORTED_ZDO_REQUESTS,
     ),
-    // Acknowledged unicasts in flight (default 10).
-    (ConfigId::APS_UNICAST_MESSAGE_COUNT, 32),
-    (ConfigId::BROADCAST_TABLE_SIZE, 15),
-    (ConfigId::NEIGHBOR_TABLE_SIZE, 16),
-    (ConfigId::MAX_END_DEVICE_CHILDREN, 32),
-    // Source routes are kept by the NCP (high-RAM concentrator from route
-    // records); the host keeps none.
-    (ConfigId::SOURCE_ROUTE_TABLE_SIZE, 200),
-    (ConfigId::ADDRESS_TABLE_SIZE, 16),
-    // Near-simultaneous joins the trust center can process (default 2).
-    (ConfigId::TRUST_CENTER_ADDRESS_CACHE_SIZE, 4),
-    (ConfigId::MULTICAST_TABLE_SIZE, 16),
     // Spec defaults for sleepy children: 7.68 s indirect hold, 2^8 min
     // poll timeout for end devices that do not negotiate one.
     (ConfigId::INDIRECT_TRANSMISSION_TIMEOUT, 7680),
     (ConfigId::END_DEVICE_POLL_TIMEOUT, 8),
     (ConfigId::MAX_HOPS, 30),
     (ConfigId::TRANSIENT_KEY_TIMEOUT_S, 300),
+    // Tables, by priority. The hub endpoint's group memberships.
+    (ConfigId::MULTICAST_TABLE_SIZE, 16),
+    (ConfigId::ADDRESS_TABLE_SIZE, 16),
+    // Near-simultaneous joins the trust center can process (default 2).
+    (ConfigId::TRUST_CENTER_ADDRESS_CACHE_SIZE, 4),
+    (ConfigId::MAX_END_DEVICE_CHILDREN, 32),
+    // Acknowledged unicasts in flight (default 10).
+    (ConfigId::APS_UNICAST_MESSAGE_COUNT, 32),
+    (ConfigId::NEIGHBOR_TABLE_SIZE, 16),
+    (ConfigId::BROADCAST_TABLE_SIZE, 15),
+    // Source routes are kept by the NCP (high-RAM concentrator from route
+    // records); the host keeps none.
+    (ConfigId::SOURCE_ROUTE_TABLE_SIZE, 200),
 ];
 
 /// Policies set at the start of every session (`setPolicy`). The trust
@@ -192,6 +197,71 @@ pub const DEFAULT_POLICIES: &[(PolicyId, u8)] = &[
         DecisionId::MESSAGE_TAG_ONLY_IN_CALLBACK.0,
     ),
 ];
+
+/// How long a session's start took, phase by phase (ms).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionTimes {
+    /// Input discarded, RST, RSTACK.
+    pub reset_ms: u32,
+    /// The `version` exchange(s).
+    pub version_ms: u32,
+    /// `VERSION_INFO`, the configuration values set and read back.
+    pub config_ms: u32,
+    /// Policies and endpoints.
+    pub setup_ms: u32,
+    /// `networkInit` and the wait for the network.
+    pub network_ms: u32,
+    /// EUI-64, manufacturing tokens, groups, network parameters,
+    /// concentrator, TX power.
+    pub rest_ms: u32,
+    /// From the reset to the session's announcement.
+    pub total_ms: u32,
+}
+
+impl std::fmt::Display for SessionTimes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ms (reset {}, version {}, config {}, policies+endpoints {}, network {}, rest {})",
+            self.total_ms,
+            self.reset_ms,
+            self.version_ms,
+            self.config_ms,
+            self.setup_ms,
+            self.network_ms,
+            self.rest_ms
+        )
+    }
+}
+
+/// A configuration value the NCP took less of than asked
+/// ([`EzspOptions::config`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fitted {
+    pub id: ConfigId,
+    /// Asked.
+    pub asked: u16,
+    /// What the NCP took (its own value when nothing more fitted).
+    pub took: u16,
+}
+
+/// The link as the worker last reported it ([`EzspOptions::link`]):
+/// refreshed at every session start and end and about once a second.
+#[derive(Debug, Clone, Default)]
+pub struct LinkReport {
+    /// Sessions announced.
+    pub sessions: u32,
+    /// Session starts that failed (no RSTACK, link failure, refused setup).
+    pub failed_starts: u32,
+    /// The session is up.
+    pub up: bool,
+    /// The last announced session's start.
+    pub start: Option<SessionTimes>,
+    /// Configuration values that did not fit the NCP's memory.
+    pub fitted: Vec<Fitted>,
+    /// ASH, host and UART counters (since the worker started).
+    pub counters: LinkCounters,
+}
 
 /// The [`EzspOptions::traffic`] value of session `epoch`, closed; `| 1`
 /// opens it.
@@ -254,6 +324,9 @@ pub struct EzspOptions {
     /// ending `Refused(LinkDown)` at once. They go out only once it opens
     /// the flag for that session. Zero: no wait.
     pub traffic_hold: Duration,
+    /// Where the worker reports the link ([`LinkReport`]), for a console
+    /// or a status page of the firmware.
+    pub link: Option<Arc<Mutex<LinkReport>>>,
 }
 
 impl Default for EzspOptions {
@@ -274,6 +347,7 @@ impl Default for EzspOptions {
             tx_power: None,
             traffic: None,
             traffic_hold: Duration::ZERO,
+            link: None,
         }
     }
 }

@@ -212,8 +212,8 @@ pub use ezsp::{
     Callback, Command, EzspVersion, Response, Session, Status, StatusKind, VersionPolicy,
 };
 pub use host::{
-    Clock, EventReceiver, EzspHost, HostConfig, HostError, HostEvent, NcpInfo, SystemClock,
-    Transport,
+    Clock, EventReceiver, EzspHost, HostConfig, HostError, HostEvent, LineErrors, LinkCounters,
+    NcpInfo, StartTimes, SystemClock, Transport,
 };
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::ash::{
-    Ash, AshConfig, AshEvent, ConfigError, FailReason, LinkState, ResetCode, SendError,
+    Ash, AshConfig, AshEvent, AshStats, ConfigError, FailReason, LinkState, ResetCode, SendError,
 };
 use crate::ezsp::command::{Callback, Command, EncodeError, Endpoint, Response, id};
 use crate::ezsp::session::{Inbound, Session, SessionError};
@@ -64,6 +64,20 @@ pub trait Transport: Send {
         }
         Ok(())
     }
+
+    /// Receive errors the driver counted (none by default).
+    fn line_errors(&self) -> LineErrors {
+        LineErrors::default()
+    }
+}
+
+/// Receive errors of a UART driver, since it started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineErrors {
+    /// Bytes lost: receive FIFO overflows, driver buffer full.
+    pub overruns: u32,
+    /// Framing and parity errors.
+    pub errors: u32,
 }
 
 /// Quiet time that ends the default [`Transport::discard_input`].
@@ -322,6 +336,54 @@ pub struct HostStats {
     pub ncp_overflows: u32,
     pub unexpected_responses: u32,
     pub bad_frames: u32,
+    /// Callbacks with bytes after the fields this crate knows (taken,
+    /// the bytes ignored).
+    pub callbacks_trailing: u32,
+}
+
+/// How long the last [`EzspHost::start`] took, phase by phase (ms).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StartTimes {
+    /// Input discarded, RST sent, RSTACK received.
+    pub reset_ms: u32,
+    /// The `version` exchange(s).
+    pub version_ms: u32,
+}
+
+/// The link's counters: the ASH link's, the host's and the UART driver's
+/// (the probe's `host:` line, the hub's status).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkCounters {
+    pub ash: AshStats,
+    pub host: HostStats,
+    pub line: LineErrors,
+}
+
+impl std::fmt::Display for LinkCounters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (a, h, l) = (&self.ash, &self.host, &self.line);
+        write!(
+            f,
+            "{} commands, {} callbacks ({} with trailing bytes), {} bad frames, {} unexpected responses; ASH tx {} retx {} rx {} dup {} nak {}/{} bad crc {} ack timeouts {} resets {} stale RSTACK {}; UART overruns {} errors {}",
+            h.commands,
+            h.callbacks,
+            h.callbacks_trailing,
+            h.bad_frames,
+            h.unexpected_responses,
+            a.tx_data,
+            a.tx_retransmit,
+            a.rx_data,
+            a.rx_duplicate,
+            a.tx_nak,
+            a.rx_nak,
+            a.rx_bad_crc,
+            a.ack_timeouts,
+            a.resets,
+            a.rx_stale_rstack,
+            l.overruns,
+            l.errors,
+        )
+    }
 }
 
 enum Step {
@@ -343,6 +405,7 @@ pub struct EzspHost<T: Transport, C: Clock = SystemClock> {
     pending_dropped: u32,
     info: Option<NcpInfo>,
     stats: HostStats,
+    start_times: StartTimes,
     tx: Vec<u8>,
     rx: [u8; RX_CHUNK],
 }
@@ -381,6 +444,7 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
             pending_dropped: 0,
             info: None,
             stats: HostStats::default(),
+            start_times: StartTimes::default(),
             tx: Vec::new(),
             rx: [0; RX_CHUNK],
         };
@@ -394,6 +458,20 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
 
     pub fn stats(&self) -> &HostStats {
         &self.stats
+    }
+
+    /// How long the last [`start`](Self::start) took.
+    pub fn start_times(&self) -> StartTimes {
+        self.start_times
+    }
+
+    /// ASH, host and UART counters.
+    pub fn counters(&self) -> LinkCounters {
+        LinkCounters {
+            ash: self.ash.stats().clone(),
+            host: self.stats.clone(),
+            line: self.transport.line_errors(),
+        }
     }
 
     /// The host's clock, in milliseconds.
@@ -421,6 +499,8 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
     pub fn start(&mut self) -> Result<NcpInfo, HostError> {
         self.info = None;
         self.session.reset();
+        self.start_times = StartTimes::default();
+        let t0 = self.clock.now_ms();
         self.transport.discard_input()?;
         let now = self.clock.now_ms();
         self.ash.reset(now);
@@ -440,6 +520,8 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
                 Some(Step::Done(_)) => {}
             }
         };
+        let t1 = self.clock.now_ms();
+        self.start_times.reset_ms = t1.saturating_sub(t0) as u32;
 
         let desired = self.cfg.desired_version;
         let (ncp, stack_type, stack_version) = self.version_exchange(desired)?;
@@ -465,6 +547,7 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
             }
         }
         self.session.set_version(v);
+        self.start_times.version_ms = self.clock.now_ms().saturating_sub(t1) as u32;
         let info = NcpInfo {
             ash_version,
             reset_code,
@@ -673,8 +756,13 @@ impl<T: Transport, C: Clock> EzspHost<T, C> {
             Inbound::BadResponse {
                 frame_id, error, ..
             } => Some(Step::Done(Err(HostError::Decode { frame_id, error }))),
-            Inbound::Callback { callback, .. } => {
+            Inbound::Callback {
+                callback, trailing, ..
+            } => {
                 self.stats.callbacks += 1;
+                if trailing > 0 {
+                    self.stats.callbacks_trailing += 1;
+                }
                 self.deliver(HostEvent::Callback(callback));
                 None
             }

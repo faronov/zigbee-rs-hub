@@ -21,12 +21,12 @@ use hub_coord::{
 };
 use log::{debug, info, warn};
 
-use super::EzspOptions;
 use super::admin::{Answer, Job, Op, Slot};
 use super::convert::{
     CAPS_CONFIG, COUNTERS, capabilities, child_capability, energy_of_rssi, ezsp_error, host_error,
     indication, is_link_error, sent_terminal,
 };
+use super::{EzspOptions, Fitted, LinkReport, SessionTimes};
 use crate::ezsp::command::{
     BroadcastExtra, Callback, Command, Endpoint, MulticastExtra, Response, id,
 };
@@ -180,18 +180,24 @@ impl EzspCoordinator {
         let stack = opts.worker_stack;
         let confirm_timeout = opts.confirm_timeout;
         let hold_controls = opts.traffic.is_some() && !opts.traffic_hold.is_zero();
-        let worker = Worker::new(
+        // On the heap: moved by value, the worker (~1.8 KB) would sit in
+        // the spawned thread's stack several times over (the closure, its
+        // calls, `run`'s `self`).
+        let worker = Box::new(Worker::new(
             host,
             rx,
             opts,
             cfg.endpoints,
             shared.clone(),
             events.clone(),
-        );
+        ));
         let handle = thread::Builder::new()
             .name("ezsp-worker".into())
             .stack_size(stack)
-            .spawn(move || worker.run())
+            .spawn(move || {
+                let mut worker = worker;
+                worker.run()
+            })
             .map_err(HostError::Io)?;
         let admin = super::EzspAdmin {
             shared: shared.clone(),
@@ -458,7 +464,70 @@ struct Worker<T: Transport, C: Clock> {
     channel_changed: bool,
     refresh_pending: bool,
     stats: Stats,
+    // Link report.
+    /// The current start's phases; the last announced one's.
+    times: SessionTimes,
+    start: Option<SessionTimes>,
+    failed_starts: u32,
+    /// Capacities fitted to the NCP's memory, kept for the boot's later
+    /// sessions (by configuration ID).
+    fits: BTreeMap<u8, Fit>,
+    report_at: u64,
 }
+
+/// How a capacity ([`is_capacity`]) fitted the NCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fit {
+    asked: u16,
+    /// What the NCP took.
+    took: u16,
+    /// The NCP's own value (`None`: not readable).
+    own: Option<u16>,
+}
+
+/// Configuration values that size a table in the NCP's RAM: the hub asks
+/// for at least so many, keeps a larger value of the NCP's own, and takes
+/// the most that fits when the NCP's memory does not hold what it asks for
+/// (`ERROR_OUT_OF_MEMORY`).
+fn is_capacity(id: ConfigId) -> bool {
+    matches!(
+        id,
+        ConfigId::PACKET_BUFFER_COUNT
+            | ConfigId::NEIGHBOR_TABLE_SIZE
+            | ConfigId::APS_UNICAST_MESSAGE_COUNT
+            | ConfigId::BINDING_TABLE_SIZE
+            | ConfigId::ADDRESS_TABLE_SIZE
+            | ConfigId::MULTICAST_TABLE_SIZE
+            | ConfigId::ROUTE_TABLE_SIZE
+            | ConfigId::DISCOVERY_TABLE_SIZE
+            | ConfigId::MAX_END_DEVICE_CHILDREN
+            | ConfigId::TRUST_CENTER_ADDRESS_CACHE_SIZE
+            | ConfigId::SOURCE_ROUTE_TABLE_SIZE
+            | ConfigId::KEY_TABLE_SIZE
+            | ConfigId::BROADCAST_TABLE_SIZE
+            | ConfigId::GP_PROXY_TABLE_SIZE
+            | ConfigId::GP_SINK_TABLE_SIZE
+    )
+}
+
+/// The values tried after `asked` was refused, largest first, down to just
+/// above the NCP's own `own`: at most [`FIT_STEPS`]. Descending, so a
+/// refused value costs nothing and only the first accepted one takes the
+/// NCP's memory.
+fn fit_candidates(asked: u16, own: u16) -> Vec<u16> {
+    if asked <= own.saturating_add(1) {
+        return Vec::new();
+    }
+    let span = u32::from(asked - own - 1);
+    let n = span.min(FIT_STEPS);
+    (1..=n)
+        .map(|i| (u32::from(asked) - (span * i).div_ceil(n)) as u16)
+        .filter(|v| *v > own)
+        .collect()
+}
+
+/// Values tried below a refused capacity at most.
+const FIT_STEPS: u32 = 8;
 
 impl<T: Transport, C: Clock> Worker<T, C> {
     fn new(
@@ -512,6 +581,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             channel_changed: false,
             refresh_pending: false,
             stats: Stats::default(),
+            times: SessionTimes::default(),
+            start: None,
+            failed_starts: 0,
+            fits: BTreeMap::new(),
+            report_at: 0,
         }
     }
 
@@ -521,7 +595,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
 
     // ------------------------------------------------------------ loop
 
-    fn run(mut self) {
+    fn run(&mut self) {
         self.hold_requests();
         loop {
             if !self.take_inbox() || self.events.is_closed() {
@@ -597,6 +671,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// Without a session: admin jobs fail at once, a new session is
     /// started when due, time passes on the host's clock otherwise.
     fn while_down(&mut self) {
+        self.report(false);
         for job in self.jobs.drain(..) {
             job.fail(CoordError::LinkDown);
         }
@@ -617,6 +692,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
 
     /// One slice of link service, then the callbacks that came.
     fn service(&mut self) {
+        self.report(false);
         if let Err(e) = self.host.pump(self.opts.poll) {
             self.link_error(&e);
         }
@@ -626,6 +702,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// Link service only: ACKs and retransmissions, callbacks stay in the
     /// host's queue (and its not-ready flow control holds the NCP).
     fn keep_link(&mut self) {
+        self.report(false);
         if let Err(e) = self.host.pump(self.opts.poll) {
             self.link_error(&e);
         }
@@ -678,6 +755,38 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             debug!("ezsp: request {}: {e}", id.0);
         }
         self.emit(CoordEvent::Done { id, t });
+    }
+
+    /// [`EzspOptions::link`]: at once with `force`, else about once a
+    /// second.
+    #[inline(never)]
+    fn report(&mut self, force: bool) {
+        let Some(link) = &self.opts.link else { return };
+        let now = self.host.now_ms();
+        if !force && now < self.report_at {
+            return;
+        }
+        self.report_at = now + 1000;
+        let mut fitted: Vec<Fitted> = self
+            .fits
+            .iter()
+            .filter(|(_, f)| f.took < f.asked)
+            .map(|(id, f)| Fitted {
+                id: ConfigId(*id),
+                asked: f.asked,
+                took: f.took,
+            })
+            .collect();
+        fitted.sort_by_key(|f| f.id);
+        let r = LinkReport {
+            sessions: self.stats.sessions,
+            failed_starts: self.failed_starts,
+            up: self.up,
+            start: self.start,
+            fitted,
+            counters: self.host.counters(),
+        };
+        *link.lock().unwrap_or_else(|p| p.into_inner()) = r;
     }
 
     fn publish(&self) {
@@ -1002,6 +1111,8 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         while self.rx.try_recv().is_some() {}
         self.lost = false;
         self.net = NetState::None;
+        self.times = SessionTimes::default();
+        let t0 = self.now();
         let info = match self.host.start() {
             Ok(info) => info,
             Err(HostError::Version(e)) => {
@@ -1015,8 +1126,15 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 return;
             }
         };
+        let st = self.host.start_times();
+        self.times.reset_ms = st.reset_ms;
+        self.times.version_ms = st.version_ms;
         match self.configure(info) {
-            Ok(()) if !self.lost => self.announce(),
+            Ok(()) if !self.lost => {
+                self.times.total_ms = self.now().saturating_sub(t0) as u32;
+                self.start = Some(self.times);
+                self.announce();
+            }
             Ok(()) => self.retry_later(),
             Err(e) => {
                 warn!("ezsp: session setup failed: {e}");
@@ -1026,6 +1144,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     }
 
     fn retry_later(&mut self) {
+        self.failed_starts += 1;
         if self.state != SessionState::Incompatible {
             self.state = SessionState::Down;
         }
@@ -1034,6 +1153,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         let max = self.opts.retry_max.as_millis() as u64;
         self.backoff_ms = (self.backoff_ms * 2).clamp(1, max.max(1));
         self.publish();
+        self.report(true);
     }
 
     /// The NCP speaks no supported EZSP version: queued requests can never
@@ -1062,6 +1182,13 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.key_exportable = None;
         self.info = None;
         self.caps = None;
+        let mut t = self.now();
+        let mut lap = |w: &Self| {
+            let now = w.now();
+            let d = now.saturating_sub(t) as u32;
+            t = now;
+            d
+        };
         let version_info = match self.try_call(&Command::GetValue {
             id: ValueId::VERSION_INFO,
         })? {
@@ -1072,15 +1199,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             }
             _ => None,
         };
-        for (id, value) in self.opts.config.clone() {
-            match self.host.set_configuration_value(id, value) {
-                Ok(()) => {}
-                Err(HostError::Status { status, .. }) => {
-                    warn!("ezsp: configuration {id:?} = {value} refused: {status:?}")
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        self.set_config()?;
         self.config.clear();
         for id in CAPS_CONFIG {
             match self.host.get_configuration_value(*id) {
@@ -1091,6 +1210,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 Err(e) => return Err(e),
             }
         }
+        self.times.config_ms = lap(self);
         for (policy, decision) in self.opts.policies.clone() {
             match self.set_policy(policy, decision) {
                 Ok(()) | Err(HostError::Status { .. }) => {}
@@ -1115,6 +1235,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 Err(e) => return Err(e),
             }
         }
+        self.times.setup_ms = lap(self);
         let init = self.host.network_init(NetworkInitBitmask::NO_OPTIONS)?;
         self.network = None;
         // Only NOT_JOINED says the NCP stores no network: forming is
@@ -1133,6 +1254,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 warn!("ezsp: networkInit: {init:?}; the NCP's network is unknown");
             }
         }
+        self.times.network_ms = lap(self);
         self.eui64 = self.host.get_eui64()?;
         let board = self.mfg_string(MfgTokenId::BOARD_NAME)?;
         let product = self.mfg_string(MfgTokenId::STRING)?;
@@ -1157,6 +1279,82 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             flow_control: self.opts.flow_control,
         }));
         self.caps = Some(Arc::new(capabilities(&self.config, self.max_payload)));
+        self.times.rest_ms = lap(self);
+        Ok(())
+    }
+
+    /// [`EzspOptions::config`] in order: capacities fitted to the NCP's
+    /// memory ([`Self::fit`]), the other values as they are.
+    #[inline(never)]
+    fn set_config(&mut self) -> Result<(), HostError> {
+        for (id, value) in self.opts.config.clone() {
+            if is_capacity(id) {
+                self.fit(id, value)?;
+                continue;
+            }
+            match self.host.set_configuration_value(id, value) {
+                Ok(()) => {}
+                Err(HostError::Status { status, .. }) => {
+                    warn!("ezsp: configuration {id:?} = {value} refused: {status:?}")
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// `setConfigurationValue` that the NCP may refuse: `false` then.
+    fn try_set(&mut self, id: ConfigId, value: u16) -> Result<bool, HostError> {
+        match self.host.set_configuration_value(id, value) {
+            Ok(()) => Ok(true),
+            Err(HostError::Status { status, .. }) => {
+                debug!("ezsp: configuration {id:?} = {value}: {status:?}");
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A capacity: at least the NCP's own value (never lowered: SONOFF's
+    /// image has 26 neighbors, the hub asks for 16), `asked` if the NCP
+    /// takes it, else the largest of [`fit_candidates`] it accepts. The
+    /// outcome is kept: after an NCP reset the next session sets it with
+    /// one command (and fits again if that is refused). Logged once at info
+    /// when less than `asked` fitted.
+    fn fit(&mut self, id: ConfigId, asked: u16) -> Result<(), HostError> {
+        if let Some(f) = self.fits.get(&id.0).copied().filter(|f| f.asked == asked) {
+            // Nothing was set when the NCP's own value stayed.
+            if f.own == Some(f.took) || self.try_set(id, f.took)? {
+                return Ok(());
+            }
+            self.fits.remove(&id.0);
+        }
+        let own = match self.host.get_configuration_value(id) {
+            Ok(v) => Some(v),
+            Err(HostError::Status { .. }) => None,
+            Err(e) => return Err(e),
+        };
+        let took = match own {
+            Some(o) if o >= asked => o,
+            _ if self.try_set(id, asked)? => asked,
+            _ => {
+                let mut took = own.unwrap_or(0);
+                for v in fit_candidates(asked, took) {
+                    if self.try_set(id, v)? {
+                        took = v;
+                        break;
+                    }
+                }
+                match own {
+                    Some(o) if took == o => info!(
+                        "ezsp: {id:?}: {asked} does not fit the NCP's memory; its own {o} kept"
+                    ),
+                    _ => info!("ezsp: {id:?}: {asked} does not fit the NCP's memory; {took} set"),
+                }
+                took
+            }
+        };
+        self.fits.insert(id.0, Fit { asked, took, own });
         Ok(())
     }
 
@@ -1362,12 +1560,13 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.stats.sessions += 1;
         self.backoff_ms = self.opts.retry_min.as_millis() as u64;
         self.publish();
+        self.report(true);
         let (Some(info), Some(caps)) = (self.info.clone(), self.caps.clone()) else {
             unreachable!("configure sets both");
         };
         info!(
-            "ezsp: session {} up ({}, EZSP {}, network {:?})",
-            self.epoch, info.fw, info.protocol.0, self.net
+            "ezsp: session {} up ({}, EZSP {}, network {:?}) in {}",
+            self.epoch, info.fw, info.protocol.0, self.net, self.times
         );
         let o = self.ownership.clone();
         self.emit(CoordEvent::Ownership(Box::new(o)));
@@ -1423,6 +1622,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         self.drop_held_requests();
         self.hold_requests();
         self.publish();
+        self.report(true);
     }
 
     /// Requests queued from now on wait for the decision about the next
