@@ -29,7 +29,8 @@ pub enum Scope {
     Network,
     /// The hub, whatever the network: everything else (`udef/`, `usrc/`,
     /// `cfg/tz`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`,
-    /// [`OWNER_KEY`]).
+    /// [`OWNER_KEY`], `bkp/replaced`: the backup of a network the operator
+    /// replaced, written whatever the gate).
     Hub,
     /// The coordinator backend: `cfg/tx_power`, `zrhp/`, `ezsp/`, `znp/`.
     Backend,
@@ -203,7 +204,7 @@ mod tests {
         for k in ["dev/zb:1", "st/zb:1", "grp/0001", "bnd/zb:1", "auto/r1", "ota/d/zb:1", "bkp/last"] {
             assert_eq!(scope(k), Scope::Network, "{k}");
         }
-        for k in ["udef/a", "usrc/a", "cfg/tz", "cfg/ntp", "cfg/catalog", "cfg/report", "ota/cfg", OWNER_KEY, "bkp/lastx", "devx"] {
+        for k in ["udef/a", "usrc/a", "cfg/tz", "cfg/ntp", "cfg/catalog", "cfg/report", "ota/cfg", OWNER_KEY, "bkp/lastx", "bkp/replaced", "devx"] {
             assert_eq!(scope(k), Scope::Hub, "{k}");
         }
         for k in ["cfg/tx_power", "zrhp/x", "ezsp/x", "znp/x"] {

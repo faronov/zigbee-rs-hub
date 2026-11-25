@@ -1035,5 +1035,74 @@ fn ezsp_restore_over_foreign_records_returns_the_replaced_networks_backup() {
     wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
     let last = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/last"}));
     assert_ne!(ok(&last)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the closed records kept nothing of it");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["backup"], rep["backup"], "kept, whatever the gate");
+    rig.finish();
+}
+
+/// The network of EE over another backend's (foreign, closed) records, and
+/// the backup of network DD (the sims' IEEE).
+fn foreign_ee(max_tx_power: Option<i8>) -> (Rig, J) {
+    let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
+    let (sid, rx) = session(&src.app);
+    wait("owned", || info(&src.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&src.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    src.finish();
+    let mut s = Store::volatile();
+    s.kv_put(OWNER_KEY, OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes()).unwrap();
+    let mut ee = ezsp_sim(true, 0xEE);
+    ee.network_key = [0x5E; 16];
+    ee.max_tx_power = max_tx_power;
+    let rig = Rig::ezsp(ee, s);
+    (rig, backup)
+}
+
+/// A restore or reset that fails after leaving the network (the NCP forms
+/// at no TX power) over closed records: the replaced network's backup is in
+/// the error frame and kept (`network/backup/replaced`), for another
+/// session too.
+#[test]
+fn ezsp_a_replacement_that_fails_after_the_leave_keeps_the_replaced_network() {
+    for what in ["restore", "reset"] {
+        let (rig, backup) = foreign_ee(Some(-30));
+        let sim = rig.ezsp.clone().unwrap();
+        let (sid, rx) = session(&rig.app);
+        wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+        let req = if what == "restore" {
+            json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true})
+        } else {
+            json!({"type": "network/reset", "confirm": "RESET", "channel": 15})
+        };
+        let r = call(&rig.app, sid, &rx, 2, req);
+        assert_eq!(r["success"], false, "{what}: {r}");
+        assert_eq!(r["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "{what}: in the error frame");
+        assert_eq!(r["backup"]["network_key"]["key"], "5e".repeat(16));
+        assert!(sim.ncp(|n| !n.config().network_formed), "{what}: the network was left");
+        let (sid2, rx2) = session(&rig.app);
+        let kept = call(&rig.app, sid2, &rx2, 3, json!({"type": "network/backup/replaced"}));
+        assert_eq!(ok(&kept)["backup"], r["backup"], "{what}: kept");
+        rig.finish();
+    }
+}
+
+/// The session that started a restore is gone (a page reload) before the
+/// answer: the replaced network's backup is not lost with it.
+#[test]
+fn ezsp_the_replaced_networks_backup_survives_the_requesting_session() {
+    let (rig, backup) = foreign_ee(None);
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let req = json!({"id": 2, "type": "network/restore", "backup": backup, "force": true, "confirm": true});
+    rig.app.text(sid, req.to_string());
+    rig.app.disconnect(sid);
+    drop(rx);
+    let (sid, rx) = session(&rig.app);
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ext_pan_id"] == "dddddddddddddddd" && i["registry"]["state"] == "owned"
+    });
+    let kept = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/replaced"}));
+    assert_eq!(ok(&kept)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "{kept}");
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16));
     rig.finish();
 }

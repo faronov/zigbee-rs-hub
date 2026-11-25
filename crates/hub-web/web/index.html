@@ -271,7 +271,7 @@ function onMsg(m,tok){
   ]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
- if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
+ if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.backup)saveBackup(m.backup);if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
 // ota:start
  if(m.type=="ota/block_needed"){uiDo("ota",()=>otNeed(m));return}

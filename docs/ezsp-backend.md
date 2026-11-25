@@ -367,9 +367,11 @@ EmberZNet 7.4.5, a network formed; the devices in its neighbor table).
    `confirm` over records of another network than the backup's
    (`Records::may_restore`: another tag, records of unknown origin; they
    are re-tagged); the backend's `restore_check` runs before anything
-   changes, then the running network is backed up (kept, or returned in
-   the answer when the records are closed), the stored network left, the
-   records tagged and the backup restored. Every session's `Up` sets the
+   changes, then the running network is backed up and the backup kept
+   before the network is left (`bkp/replaced`, hub-scoped, so also over
+   closed records; `network/backup/replaced` with an API token, and in
+   the error frame of a restore or reset that fails after the leave), the
+   stored network left, the records tagged and the backup restored. Every session's `Up` sets the
    engine's coordinator IEEE (binds, the IAS CIE address, `hub/info`): a
    restore may change it.
 5. `foreign`: `network/info.ownership` `mismatch` and
