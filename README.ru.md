@@ -240,6 +240,14 @@ TinyUSB, драйвер UART с `CONFIG_UART_ISR_IN_IRAM`), а esp-idf-svc да�
 HTTP/WS-сервер. Поэтому практичная основа — esp-idf-svc. Тот же выбор записан
 в спецификации ZRHP (12.4).
 
+esp-idf-svc закреплён точно на `=0.53.0` во всех крейтах прошивки:
+MQTT-транспорт (`record_error` в `firmware/espapp/src/mqtt.rs`) читает сырое
+событие ошибки esp-mqtt через приватную раскладку `EspMqttEvent` версии 0.53.0,
+потому что 0.53 сообщает о любой ошибке MQTT как `ESP_FAIL`. **TODO при
+переходе на 0.54+:** использовать публичный `EventPayload::Error(&EspMqttError)`
+(`connect_return_code()`, `esp_transport_sock_errno()` …) и удалить
+`transmute_copy`, `unsafe` и проверку размера.
+
 ## Факты о плате (сверены с источниками Espressif)
 
 Источники: документация esp-thread-br «Hardware Platforms» (распределение GPIO)

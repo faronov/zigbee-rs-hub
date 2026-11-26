@@ -32,7 +32,9 @@ fn qos(q: u8) -> QoS {
 }
 
 // esp-idf-svc 0.53 turns every error event into ESP_FAIL; the cause
-// (CONNACK return code, socket error) is in the raw event it wraps.
+// (CONNACK return code, socket error) is in the raw event it wraps. Only
+// valid for the exact version pinned in Cargo.toml; with esp-idf-svc 0.54
+// read `EventPayload::Error(&EspMqttError)` instead and delete this.
 #[cfg(not(feature = "mqtt-lite"))]
 const _: () = assert!(size_of::<EspMqttEvent<'static>>() == size_of::<&sys::esp_mqtt_event_t>());
 
