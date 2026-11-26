@@ -44,9 +44,6 @@ install instructions and the list of merged pull requests. A pre-release
   version (0.3.0 said `zigbee-rs-hub 0.2.0`), and the Home Assistant
   integration reads the version from the name on every board (the Dongle
   Max's hub device had no software version).
-
-### Fixes
-
 - **Tuya TS011F plugs get their definition** (`TS011F_plug_1` and its white
   labels, e.g. NEO NAS-WR01B for `_TZ3000_gjnozsaz`): the hub implements
   the vendor template `tuya_metering_zero_debounce` they need. As in
@@ -57,9 +54,12 @@ install instructions and the list of merged pull requests. A pre-release
   `TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) use `TS011F_plug_1`
   meanwhile, marked **approx.** on the device card and page (the tooltip
   names Zigbee2MQTT's definition and what it needs; `definition_approximate`
-  in the device record and diagnostics). After
-  the update use Find definition on the device page (or Catalog › Fetch
-  missing definitions) to fetch it.
+  in the device record and diagnostics). The definitions a device could
+  not run stay with it across restarts and are checked again, shard by
+  shard, after a catalog update or a firmware that gains the feature.
+  After the update
+  use Find definition on the device page (or Catalog › Fetch missing
+  definitions) to fetch it.
 - **A removed device stays removed.** A device removed with
   `devices/remove` (with or without `force`) that the coordinator still
   listed came back at the next hub restart or NCP reset, as a partial
@@ -71,7 +71,7 @@ install instructions and the list of merged pull requests. A pre-release
   child or neighbor entries (kept until the device ages out) do not bring
   them back. A removed device that joins or announces itself again is
   added as before. Forming, resetting or restoring the network forgets
-  them.
+  them. (Hardware check pending.)
 - **Find definition no longer says "the catalog has no definition" for a
   definition the firmware cannot run.** Catalog definitions that need a
   feature the hub lacks (a vendor template, e.g. every Tuya TS011F plug
@@ -81,6 +81,9 @@ install instructions and the list of merged pull requests. A pre-release
   diagnostics list it (`catalog_refused`).
 - A definition fetched from one catalog shard no longer keeps a better one
   from a later shard out (a device's keys span several shards).
+- A catalog shard or definition shared by several devices is no longer
+  checked or fetched for the first of them only: uploading it for one
+  device does not end the check of the others.
 
 ### Other changes
 
@@ -102,7 +105,9 @@ install instructions and the list of merged pull requests. A pre-release
   record, entities, states and `devices/diagnostics`, as Home Assistant's
   "Download diagnostics"). A module loaded on the first click.
 - Internal: every firmware crate pins esp-idf-svc 0.53.0 (the MQTT error
-  reporting reads its event layout).
+  reporting reads its event layout). The zigbee-herdsman-converters parity
+  test also resolves the definitions that need features the hub lacks,
+  with every feature, and lists them by feature.
 
 ### Upgrading from 0.3.0
 
@@ -134,8 +139,10 @@ install instructions and the list of merged pull requests. A pre-release
   external converters are not imported (`docs/migration.md`, Limits).
 - No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
   from the console or the browser console).
-- A device removed with `force` can come back after a reboot, because the
-  radio still lists it (fix in progress).
+- Definitions that need the vendor template `tuya` are not run yet
+  (TS011F devices for which Zigbee2MQTT picks `TS011F_plug_2`/`_3`,
+  multi-gang strips, DIN relays): they use `TS011F_plug_1`, marked
+  **approx.**, and the device's diagnostics name Zigbee2MQTT's definition.
 - SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
   joining and interviews, reports, a network backup export and restore
   onto the same network (0.3.0; the joined sensor kept working), the hub
