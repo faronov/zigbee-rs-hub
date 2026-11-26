@@ -300,7 +300,7 @@ impl Bridge {
         match v["type"].as_str() {
             Some("auth_ok") => {
                 if let Some(h) = v["hub"].as_str() {
-                    self.version = h.rsplit(' ').next().unwrap_or(h).to_string();
+                    self.version = hub_version(h);
                 }
                 self.request(Obj::new().with("type", "hub/info").j(), Pending::HubInfo);
                 self.request(
@@ -448,7 +448,7 @@ impl Bridge {
                 if self.version.is_empty()
                     && let Some(n) = r["name"].as_str()
                 {
-                    self.version = n.rsplit(' ').next().unwrap_or(n).to_string();
+                    self.version = hub_version(n);
                 }
                 self.info_dirty = true;
             }
@@ -1424,6 +1424,15 @@ impl Bridge {
             retain: true,
         }
     }
+}
+
+/// Firmware version in a hub name (`zigbee-rs-hub 0.3.0 (board)`): the
+/// first word that starts with a digit, else empty.
+pub(crate) fn hub_version(name: &str) -> String {
+    name.split_whitespace()
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or("")
+        .to_string()
 }
 
 fn wall_ms() -> u64 {

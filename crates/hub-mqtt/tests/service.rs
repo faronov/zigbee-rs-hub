@@ -217,16 +217,32 @@ fn settings_lwt_reconnect_credentials_and_disable() {
 fn low_memory_keeps_the_bridge_waiting() {
     let broker = Broker::start("127.0.0.1:0", None).unwrap();
     let (ncp, sim) = ncp();
-    let app = App::start(ncp.clone(), AppConfig { api_token: "secret".into(), ..AppConfig::default() });
+    let app = App::start(
+        ncp.clone(),
+        AppConfig {
+            api_token: "secret".into(),
+            ..AppConfig::default()
+        },
+    );
     let store = Arc::new(MemoryStore::default());
-    let cfg = MqttConfig { enabled: true, host: "127.0.0.1".into(), port: broker.addr().port(), ..MqttConfig::default() };
+    let cfg = MqttConfig {
+        enabled: true,
+        host: "127.0.0.1".into(),
+        port: broker.addr().port(),
+        ..MqttConfig::default()
+    };
     store.save(&cfg.to_store()).unwrap();
-    let factory: TransportFactory = Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn Transport>);
+    let factory: TransportFactory =
+        Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn Transport>);
     let svc = MqttService::start(
         &app,
         store,
         factory,
-        ServiceConfig { heap_free: Some(|| 10_000), min_free: 64 * 1024, ..ServiceConfig::default() },
+        ServiceConfig {
+            heap_free: Some(|| 10_000),
+            min_free: 64 * 1024,
+            ..ServiceConfig::default()
+        },
     );
     until("low_memory", || svc.status().state == "low_memory");
     assert!(svc.status().last_error.unwrap().contains("9 KB free heap"));
