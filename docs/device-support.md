@@ -296,8 +296,11 @@ Precedence rules:
   find none. Vectors whose definition needs features this hub lacks are
   resolved again as a hub with every feature would (same shards, index and
   scoring, no feature gate): they must pick zhc's definition too, so a
-  feature gap cannot hide an index or selection difference (the test
-  counts them apart and lists them by missing feature).
+  feature gap cannot hide an index or selection difference. Only those
+  this hub resolves generic only are a tolerated feature gap (counted
+  apart, by missing feature); where it runs another definition meanwhile
+  they count as mismatches. `ZHC_PARITY_MAX` tolerates mismatches,
+  `ZHC_PARITY_SAME` sets the minimum of identical choices.
   `hub-devices/tests/catalog_lookup.rs` checks the same on the shard path
   (`fingerprint_keys` → shard → `shard_matches`) for Tuya TS011F plugs,
   white-label and unknown manufacturer names included, without a built
@@ -308,12 +311,14 @@ Precedence rules:
   label MOT-C2Z10 to the model ID `"MOT-C2Z10\0\0…"` but not to
   `"MOT-C2Z10"`, and the interview stores both without the trailing NULs.
   Against the published catalog-2026.11.24 and the vectors of the same
-  definitions commit: 5,733 of 7,574 the same, 8 white-label differences
-  (Paulmann software builds and the like, which the generator changes
-  merged after that release address), and all 1,833 that need features
-  (`template.hue_light` 952, `template.tuya` 667, `template.lumi` 198,
-  `template.tuya_metering_zero_debounce` 16) pick zhc's definition with
-  them.
+  definitions commit: 5,733 of 7,574 the same; 1,774 need features and
+  resolve generic only (`template.hue_light` 952, `template.tuya` 608,
+  `template.lumi` 198, `template.tuya_metering_zero_debounce` 16); 67
+  mismatches: 59 where zhc's definition needs `template.tuya` and the hub
+  runs another Tuya definition meanwhile (e.g. `TS0001` for zhc's `WHD02`),
+  and 8 white-label differences (Paulmann software builds and the like,
+  which the generator changes merged after that release address). Every
+  vector that needs features picks zhc's definition with them.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
@@ -1397,7 +1402,8 @@ without that device class or unit) and is reported in diagnostics.
   level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
   that uses a feature it does not list. A hub lacking any listed feature
-  treats the definition as non-matching (3.3).
+  treats the definition as non-matching (3.3); a code it does not know at
+  all (a newer catalog's) is missing as well and named `feature N`.
 - `revision` orders versions of one `id`. The catalog index keeps only the
   newest revision per `id` that this hub can run (a catalog may carry an
   older revision for older hubs, selected by `requires`).

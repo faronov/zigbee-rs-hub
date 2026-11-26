@@ -26,7 +26,6 @@ use hub_devices::bankcat::{StoreCatalog, fingerprint_keys};
 use hub_devices::device::{Device, InterviewStep, Millis, Refused};
 use hub_devices::hub::{ApiError, Hub};
 use hub_devices::model::LayerSource;
-use hub_devices::resolve::Catalog;
 use hub_devices::transport::ZigbeeTransport;
 use log::{info, warn};
 use serde_json::Value as J;
@@ -548,7 +547,16 @@ impl CatalogService {
             .devices()
             .flat_map(|d| d.resolution.layers.iter().filter(|l| l.source == LayerSource::Fetched).map(|l| l.id.clone()))
             .collect();
-        let mut have: Vec<String> = self.store.local.catalog().all().iter().map(|d| d.id.clone()).collect();
+        // Every stored record by id, loadable or not: a record must not be
+        // appended again with each install of its shard.
+        let mut have: Vec<String> = self
+            .store
+            .local
+            .catalog()
+            .defs
+            .iter()
+            .filter_map(|f| zdef::codec::peek_summary(f.cbor, &Default::default()).ok()?.id)
+            .collect();
         let (mut stored, mut skipped) = (Vec::new(), Vec::new());
         let mut refused: Vec<(String, Refused)> = Vec::new();
         let mut affected = BTreeMap::new();

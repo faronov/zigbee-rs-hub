@@ -563,11 +563,16 @@ pub fn adapt(
             },
         })
         .collect();
+    // A code this build does not know stays, as `feature N`: no hub has a
+    // feature by that name, so the definition is refused (8.5) wherever it
+    // is checked (shard install, bank and fetched candidates) instead of
+    // being run without it.
     d.requires = zd
         .requires
         .iter()
-        .filter_map(|f| {
-            zdef::enums::Feature::from_code(u64::from(*f)).map(|x| x.as_str().to_string())
+        .map(|f| match zdef::enums::Feature::from_code(u64::from(*f)) {
+            Some(x) => x.as_str().to_string(),
+            None => format!("feature {f}"),
         })
         .collect();
     d.priority = zd.priority.unwrap_or(0) as i32;
@@ -852,5 +857,26 @@ entities:
         assert_eq!(c.def.templates[0].name, zdef::enums::TemplateName::Tuya);
         let e = load_cbor(&c.cbor, LayerSource::Catalog).unwrap_err();
         assert!(e.0.contains("template.tuya"), "{}", e.0);
+    }
+
+    /// A feature code this build does not know is kept (`feature N`), so
+    /// the definition is skipped where `adapt` alone decodes it (bank
+    /// candidates, the shard install) as `load_cbor` would refuse it.
+    #[test]
+    fn unknown_feature_codes_are_required_features() {
+        let c = zdefc::compile_str(TRV, zdefc::Format::Yaml, &zdefc::Options::default()).unwrap();
+        let mut zd = c.def.clone();
+        zd.requires.push(13);
+        assert!(load_cbor(&zd.encode().unwrap(), LayerSource::Catalog).is_err());
+        let d = adapt(zd, LayerSource::Catalog, None).unwrap();
+        assert!(
+            d.requires.contains(&"feature 13".to_string()),
+            "{:?}",
+            d.requires
+        );
+        assert_eq!(
+            crate::resolve::missing_features(&d, crate::resolve::HUB_FEATURES),
+            ["feature 13"]
+        );
     }
 }

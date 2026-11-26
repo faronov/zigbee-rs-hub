@@ -11,7 +11,13 @@
 //!   cargo test -p hub-devices --test zhc_parity -- --ignored --nocapture
 //! ```
 //!
-//! `ZHC_PARITY_MAX` (default 0) is the number of mismatches tolerated.
+//! `ZHC_PARITY_MAX` (default 0) is the number of mismatches tolerated;
+//! `ZHC_PARITY_SAME` (default 0) the number of vectors that must resolve
+//! exactly like zhc (set it to the last result, so that a regression shows).
+//! A vector whose definition needs features this hub lacks is tolerated
+//! only while the hub resolves it generic only and a hub with the features
+//! would pick zhc's definition; picking another definition meanwhile is a
+//! mismatch.
 
 use std::collections::BTreeMap;
 
@@ -150,10 +156,10 @@ impl Catalog for Every {
 }
 
 /// Vectors whose definition needs features this hub lacks (vendor
-/// templates, ...) and that a hub with them picks like zhc: a feature gap,
-/// not a parity difference (the device resolves generic only, and the
-/// catalog service names the definition, `catalog_refused`).
-const NEEDS_FEATURES: &str = "needs features the hub lacks (zhc's choice with them)";
+/// templates, ...), that this hub resolves generic only and a hub with the
+/// features like zhc: a feature gap, not a parity difference (the catalog
+/// service names the definition, `catalog_refused`).
+const NEEDS_FEATURES: &str = "needs features the hub lacks: generic only (zhc's choice with them)";
 
 #[test]
 #[ignore = "needs ZHC_VECTORS and ZDEF_SHARDS"]
@@ -220,13 +226,18 @@ fn hub_picks_the_definition_zhc_picks() {
                 pinned: None,
                 features: &all_features,
             });
-            if with.def_model.as_deref() == Some(want_base) && with.model.as_deref() == Some(want) {
+            if with.def_model.as_deref() != Some(want_base) || with.model.as_deref() != Some(want) {
+                "needs features, and picks another definition with them"
+            } else if !got_base.is_empty() {
+                // Meanwhile the hub runs another definition (e.g. TS011F
+                // with application version 69: TS011F_plug_1 while zhc's
+                // TS011F_plug_3 needs template.tuya).
+                "needs features, another definition meanwhile"
+            } else {
                 for f in &models[want_base] {
                     *lacking.entry(f.clone()).or_default() += 1;
                 }
                 NEEDS_FEATURES
-            } else {
-                "needs features, and picks another definition with them"
             }
         } else if got_base.is_empty() {
             "generic only"
@@ -266,5 +277,14 @@ fn hub_picks_the_definition_zhc_picks() {
     assert!(
         bad <= max,
         "{bad} vectors differ from zhc (tolerated {max})"
+    );
+    let same = counts.get("same").copied().unwrap_or(0);
+    let min: usize = std::env::var("ZHC_PARITY_SAME")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        same >= min,
+        "{same} vectors resolve like zhc, {min} expected (ZHC_PARITY_SAME)"
     );
 }
