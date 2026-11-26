@@ -1,0 +1,26 @@
+<style>.kv.dg dd{word-break:normal;overflow-wrap:anywhere}@media(max-width:600px){.kv.dg{display:block}.kv.dg dd{margin-bottom:.4em}}</style>
+<script>
+// ---- Device diagnostics: the device page's Diagnostics ----
+// A module in the page's scope (index.html ui()): devices/diagnostics as a
+// summary — what the device told the hub (Basic, node descriptor,
+// endpoints) and what the hub made of it (definition layers, definitions
+// it cannot run, unknown attributes, Tuya DPs) — and the JSON to copy or
+// save: the record, its entities and states and the hub's diagnostics, as
+// Home Assistant's "Download diagnostics". Its markup: values wrap between
+// words (cluster lists), not inside them; on a phone each under its name.
+const dgX=n=>n==null?null:hex(n,4),dgL=a=>(a||[]).map(dgX).join(" ")||"–";
+// Copy: the Clipboard API (secure contexts only), else the JSON selected
+// in its text field (a hub on http://<ip>/).
+const dgCopy=(j,ta,dt)=>(navigator.clipboard?navigator.clipboard.writeText(j):Promise.reject()).catch(()=>{dt.open=true;ta.select();if(!document.execCommand("copy"))throw 0}).then(()=>toast("Diagnostics copied"),()=>toast("Copy failed: select the JSON below"));
+function dgPanel(id){const box=el("div",{id:"dg-"+id},el("h3",{},"Diagnostics"));
+ call("devices/diagnostics",{device:id}).then(r=>{const d=devs[id]||{},f=r.fingerprint||{},l=r.layers||[],t=l[l.length-1]||{},es=dEnts(id),dl=el("dl",{class:"kv dg"}),
+  j=JSON.stringify({device:d,entities:es,states:es.map(e=>states[e.uid]).filter(Boolean),hub_diagnostics:r},null,1),ta=el("textarea",{rows:12,readonly:"",spellcheck:"false"},j),dt=el("details",{},el("summary",{class:"mut"},"JSON"),ta);
+  kv(dl,[["Manufacturer",f.manufacturer_name!=null&&f.manufacturer_name+(f.mfr_code!=null?" ("+dgX(f.mfr_code)+")":"")],["Model ID",f.model_id],["Application version",f.app_version],["Stack version",f.stack_version],["HW version",f.hw_version],["SW build ID",f.sw_build_id],["Date code",f.date_code],["ZCL version",f.zcl_version],
+   ["Power source",[d.power,f.power_source!=null&&"ZCL "+f.power_source].filter(Boolean).join(" · ")],["Logical type",f.logical_type&&f.logical_type.replace("_"," ")+(f.rx_on_when_idle===false?", sleepy":"")],
+   ...(f.endpoints||[]).map(e=>["Endpoint "+e.ep,"profile "+dgX(e.profile)+" · device "+dgX(e.device_id)+" · in "+dgL(e.in_clusters)+" · out "+dgL(e.out_clusters)]),
+   ["Definition",t.id&&t.id+(d.definition_model?" ("+[d.manufacturer,d.definition_model].filter(Boolean).join(" ")+")":"")],["Layers",l.map(x=>x.id+" ("+x.source+", rev "+x.revision+(x.score!=null?", score "+x.score:"")+")").join(" + ")],
+   // PR #94's catalog definitions this firmware cannot run (absent before it).
+   ["Not supported by this firmware",(r.catalog_refused||[]).join("; ")],["Unknown attributes",(r.unknown_attributes||[]).length],["Tuya data points",(r.tuya_dps||[]).length],["Interview",r.interview_partial&&"partial"],["Schema error",r.schema_error]]);
+  box.append(dl,el("div",{class:"row acts"},el("button",{onclick:()=>dgCopy(j,ta,dt)},"Copy JSON"),el("button",{onclick:()=>save("zigbee-rs-hub-diagnostics-"+(d.ieee||id).replace(/[^\w.-]/g,"_")+".json",j)},"Download JSON")),dt)}).catch(e=>box.append(el("p",{class:"warn"},e.message)));
+ return box}
+</script>

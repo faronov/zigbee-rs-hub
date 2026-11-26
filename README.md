@@ -929,7 +929,13 @@ remote's last action and when — with their live states; subscription to `devic
 definition — its model and source, partial when the catalog could not
 translate all of it —, every entity under a section header: sensors,
 controls, events, configuration and diagnostic; rename, re-interview, find definition, bindings, reporting per
-attribute — min and max in seconds, the change in the entity's units — and
+attribute — min and max in seconds, the change in the entity's units —,
+diagnostics — what the device reported (Basic: manufacturer, model ID,
+application/stack/HW version, SW build ID, date code, ZCL version, power
+source; logical type, endpoints and clusters) and what the hub made of it
+(definition and layers, catalog definitions this firmware cannot run,
+unknown attributes, Tuya DPs), with the JSON of `devices/diagnostics`,
+the record, entities and states to copy or download — and
 remove with confirmation; back returns to the list where it was), controls for switches and lights (on/off, brightness), numbers,
 selects and buttons, connection status with automatic reconnect; mobile
 layout, light/dark from `prefers-color-scheme`. The page is split into
@@ -938,8 +944,9 @@ and, on narrower ones, in a menu that the button ☰ (with the open tab's
 title) opens over the page: each `<div class="tab" data-tab="id" data-title="…">`
 in `<main>` becomes one, in document order, and `onTab[id]` runs when it is
 shown, so a feature adds its own tab without touching the others. The
-rarely used tabs — Converters, Catalog, the ZCL console and Updates — are
-modules (`crates/hub-web/web/ui/<name>.html`: the tab's markup, then its
+rarely used tabs — Converters, Catalog, the ZCL console and Updates — and
+rarely used parts of others — Settings' migration wizard, the device page's
+Diagnostics — are modules (`crates/hub-web/web/ui/<name>.html`: the tab's markup, then its
 script; the tab's `data-mod`) that the page loads when the tab is first
 opened, or when it needs one: the device page's Find definition and a
 `definition_needed` event with fetching for new devices on load the
