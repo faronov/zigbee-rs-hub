@@ -98,6 +98,7 @@ progress{width:12em}
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
 </div>
 <section class="devs" id="devs"></section>
+<div data-mod="diag" hidden></div>
 </div>
 <div data-tab="groups" data-title="Groups" class="tab">
 <section class="card"><h2>Groups</h2><form id="gcf" class="row"><input id="gcn" placeholder="name" required><input id="gci" class="num" placeholder="ID: auto"><button class="p">Create</button></form>
@@ -416,7 +417,7 @@ function defLn(d){const l=dL(d),pa=l.some(x=>x.partial),S={fetched:"catalog",sel
   " ("+[...new Set(l.map(x=>S[x.source]||x.source))].join(" + ")+(pa?", partial: generic support for the rest":"")+")":"generic only"))}
 // f: the device page (everything, entities grouped), else the card.
 function devCard(id,f){
- const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),c=[];let ul,k;
+ const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),dg=document.getElementById("dg-"+id),c=[];let ul,k;
  for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{class:"gh"},["Sensors","Controls","Events","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
  return el("article",{class:"card dev",id:"d-"+id,onclick:f?null:x=>{x=x.target;if(!x.closest("button,input,select")){sy=scrollY;if(!x.closest("a"))location.hash=h}}},
   el("div",{class:"top"},f?el("button",{"aria-label":"Back",onclick:()=>sy!=null?history.back():location.hash="#/devices"},"←"):"",pic(d),f?el("b",{},d.name||id):el("a",{href:h},el("b",{},d.name||id)),...bdg(d)),f?"":netLine(id),...f?[
@@ -429,7 +430,10 @@ function devCard(id,f){
    gn(d)?bt("Find definition",async()=>findDef(id)):"",
    d.ieee?bt("Bindings",()=>{bOpen.delete(id)||bOpen.add(id);return gEps().then(()=>renderDev(id))}):"",
    d.ieee?bt("Reporting",async()=>{rOpen.delete(id)||rOpen.add(id);renderDev(id)}):"",
-   bt("Remove",()=>confirm("Remove "+(d.name||id)+" from the network?")?act("devices/remove",{device:id}):Promise.resolve(),"d"))]:[],
+   // What the device reported and the hub made of it (module diag),
+   // under these buttons.
+   bt("Diagnostics",()=>ui("diag").then(()=>{dgOpen.delete(id)||dgOpen.add(id);renderDev(id)})),
+   bt("Remove",()=>confirm("Remove "+(d.name||id)+" from the network?")?act("devices/remove",{device:id}):Promise.resolve(),"d")),dgOpen.has(id)?dg||dgPanel(id):""]:[],
   ...c,f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
 }
 onTab.devices=()=>{const p=pgId(),o=pgOn;pgOn=p;renderAll();if(p!=o)scrollTo(0,p?0:sy)};
@@ -476,7 +480,7 @@ function entRow(e){
 // device applied; inputs min and max (both; change only for analog types,
 // optional), off, or none = default; saved when the row is left. ⇄: the
 // attribute (and its setting) is shared with other entities.
-const rOpen=new Set,rTxt=r=>r==null?"–":r=="off"?r:r.join(" "),rVal=v=>(v=v.trim())?v=="off"?v:v.split(/[\s,]+/).map(Number):"default";
+const rOpen=new Set,dgOpen=new Set,rTxt=r=>r==null?"–":r=="off"?r:r.join(" "),rVal=v=>(v=v.trim())?v=="off"?v:v.split(/[\s,]+/).map(Number):"default";
 // The change raw ⇄ in the entity's units (`scale`: entity units per raw
 // unit, 14.3); entered ones round to a whole raw unit, f: float types keep it.
 const chU=(c,k)=>+(c*k).toFixed(9),chR=(v,k,f)=>(v=+v.replace(",",".")/k,f?+v.toFixed(9):Math.round(v));

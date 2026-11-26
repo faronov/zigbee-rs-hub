@@ -18,6 +18,15 @@ install instructions and the list of merged pull requests. A pre-release
 - **Device cards: status at the top.** Battery, LQI, RSSI, last seen and
   power source sit right under the card's title, in the device page's
   order, in the same place on every card (they were under the entities).
+- **Device diagnostics in the web UI.** The device page's **Diagnostics**
+  button shows what the device reported (manufacturer, model ID,
+  application, stack and HW version, SW build ID, date code, ZCL version,
+  power source, logical type, endpoints with their clusters) and what the
+  hub made of it (definition and its layers, catalog definitions this
+  firmware cannot run, unknown attributes, Tuya DPs), with **Copy JSON**
+  and **Download JSON** (`zigbee-rs-hub-diagnostics-<IEEE>.json`: the
+  record, entities, states and `devices/diagnostics`, as Home Assistant's
+  "Download diagnostics"). A module loaded on the first click.
 
 ## 0.3.0
 

@@ -26,9 +26,16 @@ pub const INDEX_HTML_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index
 pub const PAGE_BUDGET: usize = 36 * 1024;
 
 /// Budgets of the compressed modules (in any variant): Converters,
-/// Catalog, the ZCL console, Updates, the migration wizard.
-pub const MODULE_BUDGETS: [(&str, usize); 5] =
-    [("conv", 3 * 1024), ("catalog", 4 * 1024), ("zcl", 4 * 1024), ("ota", 3 * 1024), ("mig", 4 * 1024)];
+/// Catalog, the ZCL console, Updates, the migration wizard, the device
+/// page's diagnostics.
+pub const MODULE_BUDGETS: [(&str, usize); 6] = [
+    ("conv", 3 * 1024),
+    ("catalog", 4 * 1024),
+    ("zcl", 4 * 1024),
+    ("ota", 3 * 1024),
+    ("mig", 4 * 1024),
+    ("diag", 2 * 1024),
+];
 
 /// Budget of the page and all its modules, compressed, in every variant
 /// but the developer edition: what the web UI takes of the firmware image
@@ -78,7 +85,8 @@ pub enum Gate {
 #[derive(Debug)]
 pub struct Module {
     /// The `data-mod` of its tab: `conv`, `catalog`, `zcl`, `ota`, `mig`
-    /// (the migration wizard in Settings).
+    /// (the migration wizard in Settings), `diag` (the device page's
+    /// diagnostics; its markup is empty, the panel is built per device).
     pub name: &'static str,
     /// `/ui/<BUILD>/<name>.js`: of this build only, so a browser's cache
     /// never mixes builds; another build's path is not found (404) and the
@@ -142,6 +150,7 @@ mod tests {
             "ui/zcl.html" => include_str!("../web/ui/zcl.html"),
             "ui/ota.html" => include_str!("../web/ui/ota.html"),
             "ui/mig.html" => include_str!("../web/ui/mig.html"),
+            "ui/diag.html" => include_str!("../web/ui/diag.html"),
             _ => panic!("no web/{name}"),
         }
         .to_string()
@@ -376,6 +385,7 @@ for(const order of [S.modules,S.modules.slice().reverse()]){
                     "catalog" => "onTab.catalog",
                     "zcl" => "zFrame",
                     "mig" => "mgRead",
+                    "diag" => "dgPanel",
                     _ => "otEv",
                 });
             }
