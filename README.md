@@ -649,6 +649,11 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   `hub-core` parts it uses. Rebuilt with the release, its bytes differ
   from the 0.2.4 asset of hub release 0.2.0 (build metadata, dependency
   versions), so it gets its own version: one name, one image.
+- **0.2.6** (hub release 0.4.0): esp-idf-svc pinned to 0.53.0, as in every
+  firmware crate; no functional change. Each release build carries its
+  commit's build time in the app description, so a rebuilt bridge differs
+  from the previous release's file in a few bytes even without code
+  changes.
 
 ## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
 
@@ -682,7 +687,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.5) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.6) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
 | **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,

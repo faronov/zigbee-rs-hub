@@ -6,7 +6,44 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
-## Unreleased
+## 0.4.0
+
+### Highlights
+
+- **Migration from Zigbee2MQTT and ZHA without pairing again.** The hub
+  restores the network (key, PAN, channel, frame counters) from the
+  source's backup and takes the devices from its records: they appear at
+  once with their names, areas and entities, and nothing is sent to them
+  until they are heard from (with the same coordinator IEEE their
+  configuration is kept; on another radio they are configured again).
+  Three ways in, each with a preview first (`network/import/preview`; the
+  running network's backup is kept before an apply):
+  - web UI: Settings › *Migrate from Zigbee2MQTT or ZHA* (reads Z2M's
+    `database.db`, `coordinator_backup.json` and names in the browser);
+  - Home Assistant: the admin services `zigbee_rs_hub.import_from_zha`
+    (ZHA's `zigbee.db` with HA's names and areas; apply refused while ZHA
+    runs) and `zigbee_rs_hub.copy_names_areas` (names and areas from ZHA or
+    Zigbee2MQTT devices);
+  - `hubctl import z2m DIR` / `hubctl import zha zigbee.db`.
+
+  Both backends (the Thread BR board's zigbee-rs NCP and the Dongle Max's
+  EmberZNet NCP). Never run the old coordinator again on that network.
+  What carries over and the limits: `docs/migration.md`.
+
+### Fixes
+
+- **MQTT: why the broker refused the bridge.** `mqtt/status` `last_error`
+  now says `connection refused: not authorized`, `bad user name or
+  password` or `the broker closed the connection after CONNECT (it may
+  require a user name and password)` instead of `disconnected`, and the
+  web UI points to a Home Assistant user or the Mosquitto add-on's logins
+  when an anonymous client is refused (the add-on does not accept
+  anonymous clients). A password without a user name is no longer sent
+  (MQTT 3.1.1 forbids it).
+- **Dongle Max: hub version.** `hub/info` `name` carries the image's
+  version (0.3.0 said `zigbee-rs-hub 0.2.0`), and the Home Assistant
+  integration reads the version from the name on every board (the Dongle
+  Max's hub device had no software version).
 
 ### Fixes
 
@@ -64,6 +101,46 @@ install instructions and the list of merged pull requests. A pre-release
   and **Download JSON** (`zigbee-rs-hub-diagnostics-<IEEE>.json`: the
   record, entities, states and `devices/diagnostics`, as Home Assistant's
   "Download diagnostics"). A module loaded on the first click.
+- Internal: every firmware crate pins esp-idf-svc 0.53.0 (the MQTT error
+  reporting reads its event layout).
+
+### Upgrading from 0.3.0
+
+- **Data:** an update keeps `nvs` (Wi-Fi, mode, API token) and `hubdata`
+  (devices, settings, network backup), as from 0.2.0 to 0.3.0. The web
+  flasher has the same entries as for 0.3.0 (standard images, the
+  Developer edition, the Dongle Max listed without an install button).
+- **Home Assistant:** integration **0.6.0** (`integrations/home-assistant`):
+  the migration services above and the hub version read from the name.
+- **tbr-bridge 0.2.6** (the S3 app for bridge mode on Espressif's stock
+  layout): no functional change (esp-idf-svc pinned); a new version
+  because the rebuilt image differs from 0.2.5.
+
+### Known limitations
+
+- The 8 MB images (and the OTA image store) have not run on an 8 MB board
+  yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
+  quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio, so Zigbee
+  on a quad-PSRAM board is still untested.
+- Migration: host-tested on both simulated backends (ZRHP and EZSP) and
+  against Zigbee2MQTT and ZHA files; not yet run on hardware. Green Power
+  devices are not imported (commission them again); after a change of the
+  coordinator IEEE some devices keep the old trust center address (prefer
+  a radio that takes the backup's IEEE); Z2M/ZHA per-device settings and
+  external converters are not imported (`docs/migration.md`, Limits).
+- No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
+  from the console or the browser console).
+- SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
+  joining and interviews, reports, and a network backup export and
+  restore onto the same network (0.3.0; the joined sensor kept working).
+  Not yet run: Ethernet, `stock confirm`, the self-update, installation
+  through SONOFF's web console, a restore onto another radio, a
+  migration import. No Green Power, no MG24 firmware update; at most 8
+  groups on the hub's endpoint (the NCP's multicast table); if the first
+  boot cannot claim SONOFF's `files` partition the hub keeps its data in
+  RAM only (a banner says so). Not offered by the web flasher (its erase
+  option would wipe SONOFF's firmware): use SONOFF's web console or
+  esptool with the two USB parts, after the otadata check.
 
 ## 0.3.0
 

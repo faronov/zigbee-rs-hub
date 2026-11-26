@@ -11,7 +11,9 @@ Dongle Max" below). The hub app runs on it (hub-app feature `ezsp`,
 `Backend::ezsp`, PR H1; "In the hub app" below), on the desktop with
 `hubctl --backend ezsp --sim`, and in the SONOFF Dongle Max image
 `zrh-donglem` (PR H2, `docs/dongle-max.md`). Backup and restore ("Backup
-and restore") are host-tested only, not run against hardware yet.
+and restore"): a backup export and a restore onto the same network ran on
+the lab Dongle Max (hub 0.3.0; the joined sensor kept working); a restore
+onto another radio or IEEE and the migration import are host-tested only.
 
 ## Target
 
@@ -535,7 +537,9 @@ firmware console: `hub` on the Dongle Max.
   destination with `setExtendedTimeout`).
 - Beacons of an active scan carry no sender address (0xFFFF).
 - Child table entries have no time since the last poll (0).
-- Backup and restore (simulator only): whether the stock "1.0.0" image has
+- Backup and restore (an export and a same-network restore ran on the
+  lab unit, not checked frame by frame; the rest from the simulator):
+  whether the stock "1.0.0" image has
   the token interface (`getTokenData`) and which key it takes (creator or
   NVM3 key); whether `getValue(APS_FRAME_COUNTER)` answers (else backups
   have no TCLK section); the statuses for a key table index without an
