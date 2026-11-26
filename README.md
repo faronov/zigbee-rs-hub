@@ -912,9 +912,10 @@ upload service ~50 KB), static RAM +32 B.
 HTML, CSS and JS, no framework, no CDN) that talks only to the WebSocket API
 on `/api`: network (state, PAN ID, channel, extended PAN ID, NCP firmware,
 IEEE and link), permit join with a countdown, compact device cards (picture,
-name, availability, the main sensors, controls and events — a remote's last
-action and when — with their live states, battery and a signal indicator
-from LQI/RSSI; subscription to `devices`,
+name, availability; right under the title, in the same place on every card
+and in the device page's order, battery, a signal dot and LQI, RSSI, last
+seen and power source; then the main sensors, controls and events — a
+remote's last action and when — with their live states; subscription to `devices`,
 `entities` and `network`) and, one click on a card away, the device page
 `#device/<id>` (model, IEEE, NWK, LQI/RSSI, last seen, power source,
 definition — its model and source, partial when the catalog could not
@@ -924,7 +925,9 @@ attribute — min and max in seconds, the change in the entity's units — and
 remove with confirmation; back returns to the list where it was), controls for switches and lights (on/off, brightness), numbers,
 selects and buttons, connection status with automatic reconnect; mobile
 layout, light/dark from `prefers-color-scheme`. The page is split into
-tabs (`#/devices`, …): each `<div class="tab" data-tab="id" data-title="…">`
+tabs (`#/devices`, …), listed in a sidebar on screens 900 px wide or more
+and, on narrower ones, in a menu that the button ☰ (with the open tab's
+title) opens over the page: each `<div class="tab" data-tab="id" data-title="…">`
 in `<main>` becomes one, in document order, and `onTab[id]` runs when it is
 shown, so a feature adds its own tab without touching the others. The
 rarely used tabs — Converters, Catalog, the ZCL console and Updates — are
