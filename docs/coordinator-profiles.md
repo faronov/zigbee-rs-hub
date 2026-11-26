@@ -52,7 +52,7 @@ features. Order of work: ZRHP (existing), then EZSP, then ZNP.
 | Thread BR + H2, early sample | ESP32-S3, 4 MB flash: development layout, one app slot, no hub OTA | zigbee-rs / ZRHP | as above | Released as `…-4mb-dev` (0.3.0: MQTT, no console). Octal image: Zigbee on the N4R8 lab board. Quad image (main 002658d, 2,797,888 B): ran on a bare S3 devkit with 4 MB flash and 2 MB Quad PSRAM, no radio (in-place upgrade from 0.1.3 with `hubdata`, Wi-Fi and token kept; PSRAM detected; web page and WebSocket API under 4 parallel clients; internal heap min 121,351 B; clean restart, no crash). Zigbee on a 4 MB board still ran only on the N4R8 lab board |
 | S3 + MG24 | ESP32-S3; actual board/memory to be identified | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM | **First external backend.** Not implemented; UART and reset/boot wiring unspecified |
 | S3 + CC2652P7 | ESP32-S3; actual board/memory to be identified | TI Z-Stack ZNP / ZNP-MT | TI ROM serial bootloader | After EZSP. Not implemented; updater blocked until reset and bootloader-backdoor lines are specified |
-| Dongle-M + MG24, stock NCP | Classic ESP32-D0WDR2-V3, 16 MB flash / 2 MB PSRAM | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM (later) | Hub image `zrh-donglem` 0.3.0 (experimental asset of hub release 0.3.0): the app on `Backend::ezsp`, data on SONOFF's `files` after a claim, self-update; SONOFF's stock partition table kept (install through SONOFF's web console). Runs on one lab unit (network formed, a sleepy device joined, interviewed and reporting); the rest of its HIL checklist pending (`docs/dongle-max.md`) |
+| Dongle-M + MG24, stock NCP | Classic ESP32-D0WDR2-V3, 16 MB flash / 2 MB PSRAM | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM (later) | Hub image `zrh-donglem` (experimental asset of the hub releases since 0.3.0): the app on `Backend::ezsp`, data on SONOFF's `files` after a claim, self-update; SONOFF's stock partition table kept (install through SONOFF's web console). Runs on one lab unit (network formed, a sleepy device joined, interviewed and reporting; network backup export and same-network restore); the rest of its HIL checklist pending (`docs/dongle-max.md`) |
 | Dongle-M + MG24, zigbee-rs NCP | Same Dongle-M host | zigbee-rs / ZRHP | Gecko bootloader / XMODEM, not H2 `FW_*` | Blocked: zigbee-rs MG24 radio is `SUPPORTED=false` |
 
 PSRAM: Thread BR modules seen so far are N4R8 (lab, 8 MB Octal), N4R2
@@ -238,6 +238,12 @@ about 259 KB of headroom (the hand-written API request parser saved
 93,760 B against the derived one). An EZSP or ZNP image replaces `hub-ncp`
 and `zigbee-zrhp` (about 109 KB), so size is not on the backends' critical
 path. These are build results, not hardware results.
+
+Release 0.4.0 (CI, quad / octal): 4 MB 2,876,096 / 2,877,280 B (95.4 % of
+the 2,944 KiB slot, ~137 KB left); 8 MB 3,026,304 / 3,027,488 B and its
+developer edition 3,027,056 / 3,028,240 B (96.3 % of the 3 MiB slot,
+~117 KB left); `zrh-donglem` 3,095,776 B of its 6 MiB slot. The 8 MB
+headroom is the tightest; a size pass is planned after 0.4.0.
 
 Every image detects PSRAM at boot. Without it the application is not
 started (hardware run on the N4R8 lab board with a Quad image: ~35 KB of

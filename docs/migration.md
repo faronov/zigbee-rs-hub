@@ -8,6 +8,13 @@ same radio or another radio, the same chip family or another
 (Z-Stack/EmberZNet/deCONZ/ZBOSS → the hub's EZSP or ZRHP backend): the
 devices only ever see the same network.
 
+**Status:** host-tested on both simulated backends (ZRHP and EZSP) with
+Zigbee2MQTT and ZHA files. On hardware (main 21354727, the lab SONOFF Dongle
+Max): a Zigbee2MQTT-format import of the dongle's own network — preview
+`action: same`, apply `stored: true`, the names from `devices.yaml`
+applied, the devices `complete` and available. An import onto another
+radio or network and a ZHA import have not run on hardware yet.
+
 **Never run the old coordinator again on this network** once the hub runs it:
 two coordinators with one network key break frame-counter safety and
 address resolution. Stop Zigbee2MQTT, or disable ZHA, before you import.

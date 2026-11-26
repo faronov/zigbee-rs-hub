@@ -6,10 +6,44 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
-## Unreleased
+## 0.4.0
+
+### Highlights
+
+- **Migration from Zigbee2MQTT and ZHA without pairing again.** The hub
+  restores the network (key, PAN, channel, frame counters) from the
+  source's backup and takes the devices from its records: they appear at
+  once with their names, areas and entities, and nothing is sent to them
+  until they are heard from (with the same coordinator IEEE their
+  configuration is kept; on another radio they are configured again).
+  Three ways in, each with a preview first (`network/import/preview`; the
+  running network's backup is kept before an apply):
+  - web UI: Settings › *Migrate from Zigbee2MQTT or ZHA* (reads Z2M's
+    `database.db`, `coordinator_backup.json` and names in the browser);
+  - Home Assistant: the admin services `zigbee_rs_hub.import_from_zha`
+    (ZHA's `zigbee.db` with HA's names and areas; apply refused while ZHA
+    runs) and `zigbee_rs_hub.copy_names_areas` (names and areas from ZHA or
+    Zigbee2MQTT devices);
+  - `hubctl import z2m DIR` / `hubctl import zha zigbee.db`.
+
+  Both backends (the Thread BR board's zigbee-rs NCP and the Dongle Max's
+  EmberZNet NCP). Never run the old coordinator again on that network.
+  What carries over and the limits: `docs/migration.md`.
 
 ### Fixes
 
+- **MQTT: why the broker refused the bridge.** `mqtt/status` `last_error`
+  now says `connection refused: not authorized`, `bad user name or
+  password` or `the broker closed the connection after CONNECT (it may
+  require a user name and password)` instead of `disconnected`, and the
+  web UI points to a Home Assistant user or the Mosquitto add-on's logins
+  when an anonymous client is refused (the add-on does not accept
+  anonymous clients; checked against it). A password without a user name
+  is no longer sent (MQTT 3.1.1 forbids it).
+- **Dongle Max: hub version.** `hub/info` `name` carries the image's
+  version (0.3.0 said `zigbee-rs-hub 0.2.0`), and the Home Assistant
+  integration reads the version from the name on every board (the Dongle
+  Max's hub device had no software version).
 - **Tuya TS011F plugs get their definition** (`TS011F_plug_1` and its white
   labels, e.g. NEO NAS-WR01B for `_TZ3000_gjnozsaz`): the hub implements
   the vendor template `tuya_metering_zero_debounce` they need. As in
@@ -20,9 +54,12 @@ install instructions and the list of merged pull requests. A pre-release
   `TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) use `TS011F_plug_1`
   meanwhile, marked **approx.** on the device card and page (the tooltip
   names Zigbee2MQTT's definition and what it needs; `definition_approximate`
-  in the device record and diagnostics). After
-  the update use Find definition on the device page (or Catalog › Fetch
-  missing definitions) to fetch it.
+  in the device record and diagnostics). The definitions a device could
+  not run stay with it across restarts and are checked again, shard by
+  shard, after a catalog update or a firmware that gains the feature.
+  After the update
+  use Find definition on the device page (or Catalog › Fetch missing
+  definitions) to fetch it.
 - **A removed device stays removed.** A device removed with
   `devices/remove` (with or without `force`) that the coordinator still
   listed came back at the next hub restart or NCP reset, as a partial
@@ -34,7 +71,8 @@ install instructions and the list of merged pull requests. A pre-release
   child or neighbor entries (kept until the device ages out) do not bring
   them back. A removed device that joins or announces itself again is
   added as before. Forming, resetting or restoring the network forgets
-  them.
+  them. Checked on hardware: a force-removed sensor stayed removed after
+  an NCP hard reset and a hub reboot.
 - **Find definition no longer says "the catalog has no definition" for a
   definition the firmware cannot run.** Catalog definitions that need a
   feature the hub lacks (a vendor template, e.g. every Tuya TS011F plug
@@ -44,6 +82,9 @@ install instructions and the list of merged pull requests. A pre-release
   diagnostics list it (`catalog_refused`).
 - A definition fetched from one catalog shard no longer keeps a better one
   from a later shard out (a device's keys span several shards).
+- A catalog shard or definition shared by several devices is no longer
+  checked or fetched for the first of them only: uploading it for one
+  device does not end the check of the others.
 
 ### Other changes
 
@@ -64,6 +105,66 @@ install instructions and the list of merged pull requests. A pre-release
   and **Download JSON** (`zigbee-rs-hub-diagnostics-<IEEE>.json`: the
   record, entities, states and `devices/diagnostics`, as Home Assistant's
   "Download diagnostics"). A module loaded on the first click.
+- Internal: every firmware crate pins esp-idf-svc 0.53.0 (the MQTT error
+  reporting reads its event layout). The zigbee-herdsman-converters parity
+  test also resolves the definitions that need features the hub lacks,
+  with every feature, and lists them by feature.
+
+### Upgrading from 0.3.0
+
+- **Data:** an update keeps `nvs` (Wi-Fi, mode, API token) and `hubdata`
+  (devices, settings, network backup), as from 0.2.0 to 0.3.0. The web
+  flasher has the same entries as for 0.3.0 (standard images, the
+  Developer edition, the Dongle Max listed without an install button).
+- **Home Assistant:** integration **0.6.0** (`integrations/home-assistant`):
+  the migration services above and the hub version read from the name.
+- **tbr-bridge 0.2.6** (the S3 app for bridge mode on Espressif's stock
+  layout): no functional change (esp-idf-svc pinned). Its image no longer
+  carries a build time, so later releases rebuild it byte for byte and it
+  keeps its version until its code changes.
+
+### Known limitations
+
+- The 8 MB images (and the OTA image store) have not run on an 8 MB board
+  yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
+  quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio, so Zigbee
+  on a quad-PSRAM board is still untested.
+- Migration: host-tested on both simulated backends (ZRHP and EZSP) with
+  Zigbee2MQTT and ZHA files. On hardware a Zigbee2MQTT-format import of
+  the Dongle Max's own network ran (preview `same`, names applied, devices
+  complete); an import onto another radio or network and a ZHA import
+  have not. Green Power
+  devices are not imported (commission them again); after a change of the
+  coordinator IEEE some devices keep the old trust center address (prefer
+  a radio that takes the backup's IEEE); Z2M/ZHA per-device settings and
+  external converters are not imported (`docs/migration.md`, Limits).
+- No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
+  from the console or the browser console).
+- Definitions that need the vendor template `tuya` are not run yet
+  (TS011F devices for which Zigbee2MQTT picks `TS011F_plug_2`/`_3`,
+  multi-gang strips, DIN relays): they use `TS011F_plug_1`, marked
+  **approx.**, and the device's diagnostics name Zigbee2MQTT's definition.
+- SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
+  joining and interviews, reports, a network backup export and restore
+  onto the same network (0.3.0; the joined sensor kept working), the hub
+  name and version, a Zigbee2MQTT-format import of its own network. Not
+  yet run: Ethernet, `stock confirm`, the self-update, installation
+  through SONOFF's web console, a restore or import onto another radio.
+  No Green Power, no MG24 firmware update; at most 8
+  groups on the hub's endpoint (the NCP's multicast table); if the first
+  boot cannot claim SONOFF's `files` partition the hub keeps its data in
+  RAM only (a banner says so). Not offered by the web flasher (its erase
+  option would wipe SONOFF's firmware): use SONOFF's web console or
+  esptool with the two USB parts, after the otadata check.
+- SONOFF Dongle Max, while SONOFF's firmware is still in `ota_0` (USB or
+  web-console install): a hub image in `ota_1` that fails to boot (e.g. an
+  interrupted USB write) makes the bootloader start SONOFF's firmware,
+  which reformats the `files` partition. The hub's devices, names,
+  automations and settings are lost (the Zigbee network stays in the MG24
+  and the devices come back through the NCP import, unnamed). Download a
+  hub backup (Settings › Backup) before updating over USB; after a hub
+  self-update the fallback is the previous hub image. Re-claiming after
+  such a reformat can be refused (fix in progress).
 
 ## 0.3.0
 

@@ -1,8 +1,8 @@
 # SONOFF Dongle Max (Dongle-M)
 
-**Status: the hub image (`zrh-donglem` 0.2.0; 0.3.0 is the first one
-published, as an experimental asset of hub release 0.3.0) runs on one lab
-unit** (results below; the rest of the HIL checklist at the end). It runs the hub
+**Status: the hub image (`zrh-donglem`; published as an experimental
+asset of the hub releases since 0.3.0, with the release's version) runs on
+one lab unit** (results below; the rest of the HIL checklist at the end). It runs the hub
 application on SONOFF's stock EmberZNet NCP through
 the EZSP backend (`docs/ezsp-backend.md`), with its data on SONOFF's
 `files` partition once claimed, on SONOFF's unchanged partition table.
@@ -54,6 +54,12 @@ flashed over USB with hwlab esprom, SONOFF's bootloader and `ota_0` kept):
   NCP appends a byte to the incoming messages of a device that joined in
   its session, and the backend refused them (`docs/ezsp-backend.md`, "On
   the Dongle Max").
+- Network backup export and a restore onto the same network (hub 0.3.0):
+  OK, the joined sensor kept working.
+- On main 21354727 (2026-11-26): the hub name carries the image version
+  (#91); a Zigbee2MQTT-format import of its own network
+  (`docs/migration.md`): preview `action: same`, apply `stored: true`, the
+  names from `devices.yaml` applied, the devices `complete` and available.
 
 ## Features
 
@@ -67,7 +73,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 | Zigbee device OTA | yes: the 1 MiB image store in the claimed `files` region (`ota_store`), larger images streamed from a client; streamed only until the claim |
 | ESP32 self-update | yes: `firmware/*` requests, Settings › Hub firmware; into the other app slot (the first one replaces SONOFF's application, after a confirmation) |
 | Ethernet (also PoE-powered) and Wi-Fi | yes: Ethernet first, the Wi-Fi station after 10 s without an Ethernet address |
-| Network backup/restore (Open Coordinator Backup) | yes: `network/backup` and `network/restore` on the EZSP backend, in the format zigpy/ZHA and Zigbee2MQTT use (`docs/ezsp-backend.md`, "Backup and restore"); host-tested against the simulated NCP (EZSP 13–18), not yet run on a Dongle Max |
+| Network backup/restore (Open Coordinator Backup) | yes: `network/backup` and `network/restore` on the EZSP backend, in the format zigpy/ZHA and Zigbee2MQTT use (`docs/ezsp-backend.md`, "Backup and restore"); host-tested against the simulated NCP (EZSP 13–18); an export and a restore onto the same network ran on the lab unit (0.3.0, the joined sensor kept working) |
 | Green Power through EZSP | later |
 | MG24 firmware update through the Gecko bootloader | later; the `radio` area is reserved, no code |
 | Installation through SONOFF's web console | yes: **SONOFF's partition table and bootloader never change** |
@@ -197,14 +203,32 @@ rollback: its `esp_ota_ops` carries the error strings that every build has
 (e.g. "OTA image has invalid magic byte") but not the one only a rollback
 build has ("Running app has not confirmed state"). The bootloader comes
 from the same ESP-IDF v5.2.1 build, so it very likely has no rollback
-either (its log is silent; **to verify**). An image installed through the
-web console is therefore selected for good: an image that does not start
-cannot fall back to SONOFF's, and recovery needs USB (SONOFF Dongle
-Flasher, or esprom with the backup). The hub's sdkconfig has no rollback
+either (its log is silent; **to verify**). An image that starts and then
+fails is therefore not reverted, and recovery needs USB (SONOFF Dongle
+Flasher, or esprom with the backup). An image the bootloader finds
+**invalid** at boot (an interrupted write: bad checksum or hash) is a
+different case: the bootloader skips it and boots the other slot. The hub's sdkconfig has no rollback
 either, so the entries it writes (`stock confirm`, self-update) are
 "undefined", which every bootloader boots and never reverts; it still
 confirms itself once its core runs (`esp_ota_mark_app_valid_cancel_rollback`),
 which only matters if a rollback bootloader ever put it on trial.
+
+**A hub image that fails to boot while SONOFF's firmware is in `ota_0`
+loses the hub's data** (found on the lab unit, 2026-11-26, main
+d179c4c). After a USB or web-console install, `ota_0` still holds
+SONOFF's application. If the image in `ota_1` does not boot (e.g. an
+interrupted USB write), the bootloader starts SONOFF's firmware, which
+reformats the `files` partition, the hub's data region since the claim:
+the hub's devices, names, automations and settings are gone. The Zigbee
+network stays in the MG24, so once a hub image runs again the devices
+come back through the NCP import, without their names. So:
+
+- **before updating over USB, download a hub backup** (Settings ›
+  Backup), and write the app before the `otadata` sector as above;
+- after a hub self-update (`ota_0` replaced by a hub image) the fallback
+  is the previous hub image instead, which keeps the region;
+- after such a reformat the claim can be refused (fix in progress): the
+  hub then runs with its data in RAM only (banner).
 
 ### Self-update
 
@@ -578,10 +602,11 @@ stored network (the hub's backend calls it at every session start).
 
 ## Not in this image, limits
 
-- **Network backup/restore through EZSP**: host-tested only (the
-  simulated NCP); not yet run on a Dongle Max, so whether SONOFF's stock
-  NCP image answers every frame it uses (the token interface, the APS frame
-  counter) is open (`docs/ezsp-backend.md`).
+- **Network backup/restore through EZSP**: an export and a restore onto
+  the same network, and a Zigbee2MQTT-format import of the same network,
+  ran on the lab unit; a restore or import onto another radio or IEEE (the
+  token interface, a one-time custom EUI-64) and a ZHA import are
+  host-tested only (`docs/ezsp-backend.md`, `docs/migration.md`).
 - **Green Power through EZSP**: GP frames are ignored.
 - **MG24 firmware updates** through the Gecko bootloader: the `donglem`
   branch's updater (radio banks in its own `hubdata`, ZRHP-based

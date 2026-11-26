@@ -163,8 +163,8 @@ DONGLE = {
     "note": "Experimental: the hub application on SONOFF's stock EmberZNet NCP (EZSP backend), with "
     "SONOFF's partition table, bootloader and application (ota_0) kept. The hub runs on one lab unit "
     "(network formed, a sleepy device joined, interviewed and reporting); the rest of its hardware "
-    "checklist is pending. Network backup/restore through EZSP host-tested only (not yet run on a "
-    "Dongle Max); no Green Power, no MG24 firmware update, at most 8 groups on the hub's endpoint. "
+    "checklist is pending (a network backup and same-network restore ran on it; a migration import "
+    "has not). No Green Power, no MG24 firmware update, at most 8 groups on the hub's endpoint. "
     "Not installable through the web flasher: "
     "ESP Web Tools could erase the whole chip, which destroys SONOFF's firmware and factory data.",
     "connect": "Plug the dongle into USB (CP2102N, \"SONOFF Dongle Max MG24\"); its DTR/RTS reset the ESP32 "
@@ -269,6 +269,12 @@ def app_version(image: bytes) -> str:
     if image[0] != 0xE9 or int.from_bytes(image[desc:desc + 4], "little") != APP_DESC_MAGIC:
         raise ReleaseError("no esp_app_desc_t in the app image")
     return image[desc + 16:desc + 48].split(b"\0", 1)[0].decode()
+
+
+def app_build_time(image: bytes) -> str:
+    """esp_app_desc_t time and date (empty with CONFIG_APP_COMPILE_TIME_DATE=n)."""
+    desc = 24 + 8
+    return " ".join(image[desc + o:desc + o + 16].split(b"\0", 1)[0].decode() for o in (80, 96)).strip()
 
 
 BUILD_MARKER = re.compile(rb"tbr-hub-build:features=([a-z0-9,-]*);psram=(quad|octal);")
@@ -588,6 +594,10 @@ def main() -> None:
             run("tools/make-app-image.sh", "release", str(bridge), "tbr-bridge", env={"FLASH_SIZE": "4MB"})
             if app_version(bridge.read_bytes()) != f"tbr-bridge-{bridge_version}":
                 raise ReleaseError(f"tbr-bridge reports {app_version(bridge.read_bytes())!r}, Cargo.toml {bridge_version}")
+            # Reproducible: one name, one image across releases (firmware/bridge/sdkconfig.defaults).
+            if app_build_time(bridge.read_bytes()):
+                raise ReleaseError(f"tbr-bridge carries a build time ({app_build_time(bridge.read_bytes())}): "
+                                   "CONFIG_APP_COMPILE_TIME_DATE must stay off")
             components["tbr-bridge (bridge mode)"] = bridge_version
             extra_files.append({"role": "tbr-bridge app (stock Espressif layout, ota_0 at 0x20000)",
                                 **file_entry(bridge, None)})

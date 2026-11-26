@@ -649,6 +649,13 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   `hub-core` parts it uses. Rebuilt with the release, its bytes differ
   from the 0.2.4 asset of hub release 0.2.0 (build metadata, dependency
   versions), so it gets its own version: one name, one image.
+- **0.2.6** (hub release 0.4.0): esp-idf-svc pinned to 0.53.0, as in every
+  firmware crate; no functional change. The image no longer carries a
+  build time (`CONFIG_APP_COMPILE_TIME_DATE=n`; until 0.2.5 every release
+  build stamped its commit time, so the file changed with each release):
+  two clean builds with different `SOURCE_DATE_EPOCH` gave byte-identical
+  images and ELFs, and `tools/release-images.py` refuses a bridge image
+  with a build time. The bridge now changes version only with its code.
 
 ## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
 
@@ -682,7 +689,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.5) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.6) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
 | **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
@@ -1274,7 +1281,9 @@ UI and the HA integration see.
   `connection refused: bad user name or password` (CONNACK 4), `the broker
   closed the connection after CONNECT (it may require a user name and
   password)` (closed without a CONNACK); the web UI adds a hint when an
-  anonymous client is refused.
+  anonymous client is refused. Checked on the lab S3 (main 21354727): an
+  anonymous connect to the Home Assistant add-on shows `connection
+  refused: not authorized`.
 - **Topics**: `<base>/<friendly_name>` (JSON state, keys = Zigbee2MQTT
   expose names: `temperature`, `humidity`, `battery`, `voltage` (mV),
   `state` `ON`/`OFF`, `brightness` 0–254, `color_temp` (mired), `color`,
