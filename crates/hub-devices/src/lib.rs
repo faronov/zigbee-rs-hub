@@ -35,6 +35,7 @@ pub mod model;
 pub mod persist;
 pub mod reporting;
 pub mod resolve;
+pub mod templates;
 pub mod transport;
 pub mod tuya;
 mod tuya_rt;

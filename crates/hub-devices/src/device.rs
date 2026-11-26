@@ -176,6 +176,9 @@ pub struct EntityState {
     pub pending: Option<J>,
     /// Auto-reset deadline.
     pub reset_at: Option<Millis>,
+    /// A zero reading held back until then (template
+    /// `tuya_metering_zero_debounce`).
+    pub held: Option<(Millis, Value)>,
     /// Previous event type.
     pub last_event: Option<String>,
     /// Expression errors and map misses.

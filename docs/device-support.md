@@ -311,14 +311,17 @@ Precedence rules:
   label MOT-C2Z10 to the model ID `"MOT-C2Z10\0\0…"` but not to
   `"MOT-C2Z10"`, and the interview stores both without the trailing NULs.
   Against the published catalog-2026.11.24 and the vectors of the same
-  definitions commit: 5,733 of 7,574 the same; 1,774 need features and
-  resolve generic only (`template.hue_light` 952, `template.tuya` 608,
-  `template.lumi` 198, `template.tuya_metering_zero_debounce` 16); 67
-  mismatches: 59 where zhc's definition needs `template.tuya` and the hub
-  runs another Tuya definition meanwhile (e.g. `TS0001` for zhc's `WHD02`),
-  and 8 white-label differences (Paulmann software builds and the like,
-  which the generator changes merged after that release address). Every
-  vector that needs features picks zhc's definition with them.
+  definitions commit: 5,749 of 7,574 the same (5,733 before the template
+  `tuya_metering_zero_debounce`); 1,707 need features and resolve generic
+  only (`template.hue_light` 952, `template.tuya` 557, `template.lumi`
+  198); 118 mismatches: 110 where zhc's definition needs `template.tuya`
+  and the hub runs another definition meanwhile — 51 of them TS011F
+  devices (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) that get
+  `TS011F_plug_1`, zhc's `zigbeeModel` definition, 59 other Tuya models
+  (e.g. `TS0001` for zhc's `WHD02`) — and 8 white-label differences
+  (Paulmann software builds and the like, which the generator changes
+  merged after that release address). Every vector that needs features
+  picks zhc's definition with them.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
@@ -345,7 +348,11 @@ Precedence rules:
   chosen over what the device resolves to), and the web UI's Find
   definition says so rather than "no definition". (Hub 0.3.0 kept Tuya
   TS011F plugs generic this way: their zhc definitions need the vendor
-  templates `tuya` and `tuya_metering_zero_debounce`, 17.4.)
+  templates `tuya` and `tuya_metering_zero_debounce`, 17.4. The hub now
+  implements the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
+  resolves; where zhc picks a TS011F definition that needs `tuya`
+  (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays), the hub uses
+  `TS011F_plug_1`, the `zigbeeModel` match, and names the other.)
 
 ### 3.4 Materialization and stability
 
@@ -1397,7 +1404,8 @@ without that device class or unit) and is reported in diagnostics.
   `12 match.date_code` (a match clause with `date_code`: hubs before it skip
   the definition instead of matching it without the date),
   `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
-  `23 template.tuya_metering_zero_debounce` (vendor templates, C tier 17.4:
+  `23 template.tuya_metering_zero_debounce` (implemented by the hub after
+  0.3.0) (vendor templates, C tier 17.4:
   `templates: [{name, params}]`, `params` free-form, key 21 at the top
   level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
@@ -3455,6 +3463,18 @@ A template is hub code (like a named codec) parametrised by definition data
 
 After that, the coverage report's ranking decides (Ledvance light 105,
 IKEA 89 + 66 are next).
+
+Implemented: **`tuya_metering_zero_debounce`** (`hub-devices`
+`templates.rs`; zhc `tuya.fz.TS011F_electrical_measurement`, used by
+`TS011F_plug_1` — zhc's choice for any TS011F without a more specific
+fingerprint — and `TS011F_with_threshold`; no parameters). A zero power,
+current or voltage reading (Electrical Measurement 0x050B, 0x0508, 0x0505
+on the entity's endpoint) is held for twice the attribute's minimum
+reporting interval plus one second (5 s without a reporting record, so
+11 s) and published only if no other reading of that attribute came
+meanwhile; a held zero current also sets the power to 0 when it is
+published; while the endpoint's On/Off is off, every Electrical
+Measurement report sets the power to 0 at once.
 
 ### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
 

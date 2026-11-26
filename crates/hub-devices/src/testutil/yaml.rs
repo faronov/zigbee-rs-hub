@@ -532,6 +532,13 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
     if let Some(Y::Sequence(r)) = get(&v, "requires") {
         d.requires = r.iter().map(s).collect::<R<_>>()?;
     }
+    // Vendor templates are required features (8.5), as on the hub.
+    if let Some(Y::Sequence(t)) = get(&v, "templates") {
+        d.templates = t
+            .iter()
+            .map(|x| opt_s(x, "name")?.ok_or_else(|| "templates: name".to_string()))
+            .collect::<R<_>>()?;
+    }
     if let Some(dev) = get(&v, "device") {
         d.device = DeviceFields {
             power: opt_s(dev, "power")?.and_then(|p| PowerKind::parse(&p)),

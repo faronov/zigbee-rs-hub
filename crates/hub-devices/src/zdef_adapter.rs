@@ -651,16 +651,22 @@ pub fn adapt(
         security_min: g.security_min,
         ignore_commands: g.ignore_commands.clone(),
     });
+    d.templates = zd
+        .templates
+        .iter()
+        .map(|t| t.name.as_str().to_string())
+        .collect();
     d.mfr = zd.mfr;
     d.content_hash = content_hash;
     d.zdef = Some(def.clone());
     Ok(d)
 }
 
-/// The `zdef` features this engine implements: all of v1 (not `wasm` and
-/// not the vendor templates, which v1 does not include either).
+/// The `zdef` features this engine implements: all of v1 (not `wasm`) and
+/// of the vendor templates (17.4) only `tuya_metering_zero_debounce`
+/// ([`crate::templates`]).
 pub fn hub_features() -> zdef::HubFeatures {
-    zdef::HubFeatures::v1()
+    zdef::HubFeatures::v1().with(zdef::enums::TemplateName::TuyaMeteringZeroDebounce.feature())
 }
 
 /// The hub's load path for CBOR (catalog, uploads, fetched definitions,

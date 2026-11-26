@@ -2266,6 +2266,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
         }
         let d = self.devices.get_mut(id).unwrap();
+        if d.resolution.metering_zero_debounce {
+            crate::templates::zero_debounce(d, &mut decoded, now);
+        }
         let mut touched = BTreeSet::new();
         for (i, p, v, flags) in decoded {
             if flags.map_miss || flags.expr_error {
@@ -2602,6 +2605,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                 set_value(d, i, None, Value::Bool(false), now);
                 touched.push(d.entities[i].uid.clone());
             }
+        }
+        // Held zero readings (template tuya_metering_zero_debounce).
+        for (i, v) in crate::templates::due(d, now) {
+            set_value(d, i, None, v, now);
+            touched.push(d.entities[i].uid.clone());
         }
         for u in touched {
             self.publish_state(&u);

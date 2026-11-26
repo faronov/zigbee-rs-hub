@@ -40,7 +40,8 @@ fn joined() -> (Hub<MockTransport>, Sim) {
     let mut hub = hub_with(&[]);
     let mut cat = MemoryCatalog::default();
     // Generated catalog entries for this plug; `ts011f_plug_3` needs the
-    // `tuya` vendor template, which the hub skips (generic + plug_1 win).
+    // `tuya` vendor template, which the hub skips (generic + plug_1 win);
+    // `ts011f_plug_1` needs `tuya_metering_zero_debounce`, which it has.
     for src in [
         include_str!("fixtures/ts011f_plug_1.yaml"),
         include_str!("fixtures/ts011f_plug_3.yaml"),
@@ -229,4 +230,101 @@ fn stale_failure_of_an_identical_request_spares_its_retry() {
         e.message,
         "not delivered: no route to the device (zb_status 0xD0)"
     );
+}
+
+fn electrical(sim: &mut Sim, attr: u16, v: i64, ty: ZclType) -> crate::transport::ApsIndication {
+    let tv = if ty == ZclType::I16 {
+        TypedValue::int(ty, v)
+    } else {
+        TypedValue::uint(ty, v as u64)
+    };
+    sim.dev(IEEE).clone().report(1, 0x0b04, None, &[(attr, tv)])
+}
+
+/// Template `tuya_metering_zero_debounce` (zhc
+/// `tuya.fz.TS011F_electrical_measurement`): zero readings wait twice the
+/// minimum reporting interval plus a second (generic power, current and
+/// voltage: 5 s, so 11 s) and only stand if nothing else came; a zero
+/// current also zeroes the power; while off the power is 0 at once.
+#[test]
+fn plug_metering_zero_readings_are_debounced() {
+    let (mut hub, mut sim) = joined();
+    let d = hub.device(ID).unwrap();
+    assert!(d.resolution.metering_zero_debounce);
+    assert!(
+        d.resolution
+            .diagnostics
+            .iter()
+            .any(|x| x.contains("ts011f_plug_3 requires template.tuya"))
+    );
+    let uid = |k: &str| format!("{ID}:1:{k}");
+    let on = sim.dev(IEEE).clone().report(
+        1,
+        0x0006,
+        None,
+        &[(
+            0,
+            TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+        )],
+    );
+    hub.on_aps_indication(on, T0 + 1000);
+    let t = T0 + 10_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 120, ZclType::I16), t);
+    hub.on_aps_indication(electrical(&mut sim, 0x0508, 500, ZclType::U16), t);
+    assert_eq!(state(&hub, &uid("power")), json!(120.0));
+    // A zero power is held back for 11 s ...
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), t + 1000);
+    assert_eq!(state(&hub, &uid("power")), json!(120.0));
+    hub.tick(t + 11_999);
+    assert_eq!(state(&hub, &uid("power")), json!(120.0));
+    hub.tick(t + 12_000);
+    assert_eq!(state(&hub, &uid("power")), json!(0.0));
+    // ... and dropped when another reading comes first.
+    let t = t + 20_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 50, ZclType::I16), t);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), t + 1000);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 60, ZclType::I16), t + 2000);
+    hub.tick(t + 30_000);
+    assert_eq!(state(&hub, &uid("power")), json!(60.0));
+    // A zero current, once due, zeroes the power as well.
+    let t = t + 40_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x0508, 0, ZclType::U16), t);
+    assert_eq!(state(&hub, &uid("current")), json!(500.0));
+    hub.tick(t + 11_000);
+    assert_eq!(
+        (state(&hub, &uid("current")), state(&hub, &uid("power"))),
+        (json!(0.0), json!(0.0))
+    );
+    // Switched off: any Electrical Measurement report sets power 0 at once.
+    let t = t + 20_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 75, ZclType::I16), t);
+    let off = sim.dev(IEEE).clone().report(
+        1,
+        0x0006,
+        None,
+        &[(
+            0,
+            TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(false))),
+        )],
+    );
+    hub.on_aps_indication(off, t + 100);
+    hub.on_aps_indication(electrical(&mut sim, 0x0505, 231, ZclType::U16), t + 200);
+    assert_eq!(
+        (state(&hub, &uid("power")), state(&hub, &uid("voltage"))),
+        (json!(0.0), json!(231.0))
+    );
+}
+
+/// Without the template (a definition that does not ask for it) zeros are
+/// published at once, as before.
+#[test]
+fn zero_readings_without_the_template_are_immediate() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(plug());
+    sim.join(&mut hub, IEEE, T0);
+    assert!(!hub.device(ID).unwrap().resolution.metering_zero_debounce);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 120, ZclType::I16), T0 + 1000);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), T0 + 2000);
+    assert_eq!(state(&hub, &format!("{ID}:1:power")), json!(0.0));
 }
