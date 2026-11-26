@@ -355,12 +355,17 @@ fn ts011f_snapshot(manufacturer: &str, app: u32) -> DeviceSnapshot {
 /// A release of the TS011F fixtures whose file name contains one of
 /// `names`: signed manifest and shards (no bank: shard-only definitions).
 fn ts011f_release(names: &[&str], serial: u16) -> BTreeMap<String, Vec<u8>> {
+    ts011f_release_edited(names, serial, |s| s.to_string())
+}
+
+/// [`ts011f_release`] with each source passed through `edit`.
+fn ts011f_release_edited(names: &[&str], serial: u16, edit: fn(&str) -> String) -> BTreeMap<String, Vec<u8>> {
     let dir = format!("{}/../hub-devices/tests/fixtures/ts011f", env!("CARGO_MANIFEST_DIR"));
     let mut items = Vec::new();
     for n in names {
         let p = format!("{dir}/{n}.yaml");
-        let c = zdefc::compile_str(&std::fs::read_to_string(&p).unwrap(), zdefc::Format::Yaml, &Default::default())
-            .unwrap();
+        let src = edit(&std::fs::read_to_string(&p).unwrap());
+        let c = zdefc::compile_str(&src, zdefc::Format::Yaml, &Default::default()).unwrap();
         items.push(Item::new(&p, c.cbor).unwrap());
     }
     let (shards, digest) = zdefc::bank::build_shards(&items.iter().collect::<Vec<_>>()).unwrap();
@@ -434,6 +439,50 @@ fn published_catalog_names_what_a_ts011f_plug_needs() {
         r.ncp.shutdown();
         r.sim.stop();
     }
+}
+
+/// A device's keys span several shards (TS011F `_TZ3000_gjnozsaz`: its
+/// white-label match in shard b0, the model and version match in d9), and
+/// clients upload them in turn. A definition from an earlier shard must
+/// not keep a better one of a later shard out: with application version
+/// 69 zhc picks TS011F_plug_3 (d9) over TS011F_plug_1 (b0). Both runnable
+/// here (the fixtures without their vendor templates).
+#[test]
+fn a_later_shard_can_still_improve_a_fetched_definition() {
+    // The `templates:` entry (and its indented lines) left out.
+    let files = ts011f_release_edited(&["ts011f_plug_1", "ts011f_plug_3"], 1, |s| {
+        let mut skip = false;
+        let keep = |l: &&str| {
+            skip = l.starts_with("templates:") || (skip && l.starts_with(' '));
+            !skip
+        };
+        s.lines().filter(keep).collect::<Vec<_>>().join("\n")
+    });
+    let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    r.ncp.with_store(|s| s.kv_put(&format!("dev/{PLUG}"), &ts011f_snapshot("_TZ3000_gjnozsaz", 69).to_bytes())).unwrap();
+    let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    let m = upload(&app, sid, &rx, &mut id, "manifest", &files["manifest.cose"], 0, json!({}));
+    assert_eq!(m["success"], true, "{m}");
+    let st = call(&app, sid, &rx, 900, json!({"type": "catalog/status"}));
+    let shards: Vec<u64> =
+        st["result"]["missing"][0]["shards"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).collect();
+    assert_eq!(shards, [0xb0, 0xd9], "{st}");
+    let mut stored = Vec::new();
+    for n in shards {
+        let c = upload(&app, sid, &rx, &mut id, "shard", &files[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+        stored.extend(c["result"]["definitions"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()));
+    }
+    assert_eq!(stored, ["tuya/ts011f_plug_1", "tuya/ts011f_plug_3"]);
+    let l = call(&app, sid, &rx, 901, json!({"type": "devices/get", "device": PLUG}))["result"]["resolution"]["layers"]
+        .clone();
+    assert_eq!(l.as_array().unwrap().last().unwrap()["id"], "tuya/ts011f_plug_3", "{l}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
 }
 
 /// The first `n` bytes of an upload, no commit (a dropped connection).

@@ -157,10 +157,19 @@ fn asset_json(a: &ManifestAsset) -> J {
 
 /// Devices that need a definition: interviewed, identified, generic only.
 fn generic_only<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &Device> {
+    shard_targets(hub).filter(|d| d.resolution.layers.iter().all(|l| l.source == LayerSource::Generic))
+}
+
+/// Devices an uploaded shard is matched against: those generic only and
+/// those that got their definition from a shard. A device's index keys
+/// span several shards, and a later one may hold a better definition (the
+/// zhc choice for a TS011F with application version 69 is in shard d9, a
+/// white-label match in b0): matching only generic devices kept the first.
+fn shard_targets<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &Device> {
     hub.devices().filter(|d| {
         d.interview == InterviewStep::Done
             && (d.fp.model_id.is_some() || d.fp.gp.is_some())
-            && d.resolution.layers.iter().all(|l| l.source == LayerSource::Generic)
+            && d.resolution.layers.iter().all(|l| matches!(l.source, LayerSource::Generic | LayerSource::Fetched))
     })
 }
 
@@ -504,8 +513,9 @@ impl CatalogService {
     }
 
     /// Takes the records of a checked shard that match devices resolving to
-    /// generic only (or `device`), keeps those that score and that the hub
-    /// can run, re-resolves those devices.
+    /// generic only (or `device`), or that would outrank the fetched
+    /// definition of a device, keeps those the hub can run, re-resolves
+    /// those devices.
     #[inline(never)]
     fn install_shard<T: ZigbeeTransport>(
         &mut self,
@@ -514,16 +524,24 @@ impl CatalogService {
         device: Option<&str>,
         now: Millis,
     ) -> Result<J, ApiError> {
-        let targets: Vec<(String, hub_devices::fingerprint::Fingerprint)> = match device {
+        // (device, fingerprint, the (score, priority) a record must beat).
+        type Target = (String, hub_devices::fingerprint::Fingerprint, Option<(u32, i32)>);
+        let targets: Vec<Target> = match device {
             Some(id) => {
                 vec![(
                     id.to_string(),
                     hub.device(id).ok_or_else(|| err("not_found", format!("no device {id}")))?.fp.clone(),
+                    None,
                 )]
             }
-            None => generic_only(hub).map(|d| (d.id.clone(), d.fp.clone())).collect(),
+            None => shard_targets(hub)
+                .map(|d| {
+                    let bar = d.resolution.layers.iter().rev().find(|l| l.source == LayerSource::Fetched);
+                    (d.id.clone(), d.fp.clone(), bar.map(|l| (l.score.unwrap_or(u32::MAX), l.priority)))
+                })
+                .collect(),
         };
-        let keys: Vec<u64> = targets.iter().flat_map(|(_, fp)| fingerprint_keys(fp)).collect();
+        let keys: Vec<u64> = targets.iter().flat_map(|(_, fp, _)| fingerprint_keys(fp)).collect();
         let recs =
             zdef::bank::shard_matches(shard, &keys).map_err(|e| err("verification_failed", format!("shard: {e}")))?;
         let used: Vec<String> = hub
@@ -550,7 +568,10 @@ impl CatalogService {
             };
             let hits: Vec<(&String, &hub_devices::fingerprint::Fingerprint, u32)> = targets
                 .iter()
-                .filter_map(|(id, fp)| hub_devices::resolve::score(&d, fp).map(|s| (id, fp, s)))
+                .filter_map(|(id, fp, bar)| {
+                    let s = hub_devices::resolve::score(&d, fp)?;
+                    bar.is_none_or(|b| (s, d.priority) > b).then_some((id, fp, s))
+                })
                 .collect();
             if hits.is_empty() || have.contains(&d.id) {
                 continue;
@@ -620,7 +641,7 @@ impl CatalogService {
         }
         // Per target device, what it would use if this hub could run it.
         let mut why = serde_json::Map::new();
-        for (id, _) in &targets {
+        for (id, _, _) in &targets {
             if let Some(m) = hub.device(id).map(refused_messages).filter(|m| !m.is_empty()) {
                 why.insert(id.clone(), m.into());
             }

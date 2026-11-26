@@ -1603,7 +1603,11 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   the event `definition_needed`). From an uploaded shard the hub keeps the
   records with those devices' keys that score against their fingerprints
   and need no feature it lacks, appends them to the local area and
-  re-resolves the devices. Records that score but need a feature it lacks
+  re-resolves the devices. Devices whose definition came from a shard are
+  matched as well, against records that outrank it (score, then priority):
+  a device's keys span several shards that clients upload in turn, and a
+  later shard may hold the better definition (hub 0.3.0 kept the first).
+  Records that score but need a feature it lacks
   are decoded anyway (all features) to be named: the device keeps them as
   `refused` (id, vendor, model, missing features, score, priority) until a
   new manifest is installed, and `missing`, `definitions/fetch` and
