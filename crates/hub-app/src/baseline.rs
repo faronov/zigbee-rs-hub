@@ -203,6 +203,7 @@ pub fn msg_name(id: u16) -> &'static str {
         ids::SEC_GET_FRAME_COUNTERS => "SEC_GET_FRAME_COUNTERS",
         ids::TBL_SYNC => "TBL_SYNC",
         ids::TBL_READ => "TBL_READ",
+        ids::TBL_INVALIDATE => "TBL_INVALIDATE",
         ids::BKP_EXPORT_BEGIN => "BKP_EXPORT_BEGIN",
         ids::BKP_EXPORT_READ => "BKP_EXPORT_READ",
         ids::BKP_EXPORT_END => "BKP_EXPORT_END",
@@ -290,6 +291,7 @@ pub fn is_barrier(r: &Req) -> bool {
             | ids::NWK_PERMIT_JOIN
             | ids::NWK_GROUP_MEMBERSHIP
             | ids::NWK_REMOVE_DEVICE
+            | ids::TBL_INVALIDATE
             | ids::TBL_READ
             | ids::DIAG_GET_CHILDREN
             | ids::DIAG_GET_NEIGHBORS

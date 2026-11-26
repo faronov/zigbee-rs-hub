@@ -1646,3 +1646,53 @@ fn leave_reset_clears_the_network_and_a_new_one_can_be_formed() {
     assert_eq!(p.map(|p| p.channel), Ok(11));
     rig.finish();
 }
+
+/// A removal forgets the address; a router in the neighbor table gets an
+/// APS Remove-Device (to itself) asking it to leave and keeps its key table
+/// entry (the command is encrypted with it); another device's entry is
+/// erased. The NCP's statuses do not fail the request.
+#[test]
+fn a_removal_asks_a_router_to_leave_and_erases_other_keys() {
+    for version in [13, 14] {
+        let (router, other) = (Eui64::from_u64(0x11), Eui64::from_u64(0x22));
+        let mut cfg = sim(version);
+        cfg.key_table_size = 4;
+        cfg.neighbors = vec![NeighborTableEntry {
+            short_id: 0x1111,
+            long_id: router,
+            average_lqi: 200,
+            ..NeighborTableEntry::default()
+        }];
+        cfg.key_table = vec![
+            Some((router, [1; 16], ApsKeyMetadata::default())),
+            Some((other, [2; 16], ApsKeyMetadata::default())),
+        ];
+        let mut rig = Rig::new(cfg);
+        rig.next_up();
+        for (ieee, nwk) in [(0x11, 0x1111), (0x22, 0x2222), (0x33, 0x3333)] {
+            let id = rig.submit(Request::RemoveDevice {
+                ieee,
+                nwk: Some(nwk),
+            });
+            assert_eq!(
+                rig.outcome(id),
+                Terminal::Done(Reply::None),
+                "EZSP {version}"
+            );
+        }
+        assert_eq!(
+            rig.sim.ncp(|n| n.removals().to_vec()),
+            [(0x1111, router, router)],
+            "EZSP {version}"
+        );
+        let keys: Vec<Option<Eui64>> = rig.sim.ncp(|n| {
+            n.config()
+                .key_table
+                .iter()
+                .map(|k| k.map(|(e, ..)| e))
+                .collect()
+        });
+        assert_eq!(keys, [Some(router), None], "EZSP {version}");
+        rig.finish();
+    }
+}

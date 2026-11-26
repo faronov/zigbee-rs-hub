@@ -244,6 +244,8 @@ struct Rig {
     link: Arc<dyn SimLink>,
     kv: Arc<dyn KvStore>,
     zrhp: Option<hub_ncp::Hub>,
+    /// The simulated ZRHP NCP.
+    zsim: Option<hub_ncp::sim::SimNcp>,
     ezsp: Option<hub_ezsp::sim::Sim>,
     stop: Arc<AtomicBool>,
     pump: Option<JoinHandle<()>>,
@@ -285,8 +287,11 @@ impl Rig {
         }
         // Every request, for the permit-join checks.
         r.sim.with(|s| s.trace = Some(Vec::new()));
+        let zsim = r.sim.clone();
         let link = Arc::new(Zrhp { sim: r.sim });
-        Rig::start(Backend::zrhp(r.ncp.clone()), link, Some(r.ncp))
+        let mut rig = Rig::start(Backend::zrhp(r.ncp.clone()), link, Some(r.ncp));
+        rig.zsim = Some(zsim);
+        rig
     }
 
     fn ezsp(sim_cfg: hub_ezsp::sim::SimConfig, store: Store) -> Rig {
@@ -306,7 +311,18 @@ impl Rig {
         let kv: Arc<dyn KvStore> = backend.kv.clone();
         let app = App::start_backend(backend, cfg(), None);
         assert!(app.wait(T, |s| s.endpoint_registered), "the first NCP session");
-        Rig { app, link, kv, zrhp, ezsp: None, stop: Arc::new(AtomicBool::new(false)), pump: None }
+        Rig { app, link, kv, zrhp, zsim: None, ezsp: None, stop: Arc::new(AtomicBool::new(false)), pump: None }
+    }
+
+    /// ZRHP: a new app on the same host core and simulated NCP (a hub
+    /// restart that keeps the NCP's state).
+    fn restart_zrhp(mut self) -> Rig {
+        let (ncp, zsim, link) = (self.zrhp.take().unwrap(), self.zsim.take(), self.link.clone());
+        crate::tests::stop(&self.app);
+        self.finish();
+        let mut rig = Rig::start(Backend::zrhp(ncp.clone()), link, Some(ncp));
+        rig.zsim = zsim;
+        rig
     }
 
     /// `devs` answer the hub's requests, as `answered` counts.
@@ -1233,3 +1249,141 @@ fn ezsp_an_incomplete_backup_of_the_same_extended_pan_id_is_refused() {
 // Migration from Zigbee2MQTT or ZHA, on both backends.
 #[path = "tests_import.rs"]
 mod import;
+
+/// The plug as the NCP keeps it after its removal: a router neighbor (it
+/// ignored its leave, or its entry has not aged out yet); ZRHP: also in the
+/// `DEVICE` table, until `TBL_INVALIDATE`.
+fn plug_neighbor() -> hub_ezsp::ezsp::NeighborTableEntry {
+    hub_ezsp::ezsp::NeighborTableEntry {
+        short_id: PLUG_NWK,
+        long_id: Eui64::from_u64(PLUG),
+        average_lqi: 200,
+        ..Default::default()
+    }
+}
+
+fn ezsp_with_plug() -> hub_ezsp::sim::SimConfig {
+    let mut c = ezsp_sim(true, 0xDD);
+    c.neighbors = vec![plug_neighbor()];
+    c
+}
+
+fn devices_list(app: &App, sid: u64, rx: &Receiver<String>) -> Vec<String> {
+    let l = call(app, sid, rx, 80, json!({"type": "devices/list"}));
+    ok(&l).as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap().to_string()).collect()
+}
+
+/// A removed device stays removed while the NCP's tables still list it:
+/// neither a new NCP session nor a hub restart imports it again. The NCP
+/// purges what it can (ZRHP: `TBL_INVALIDATE` and the host store's device
+/// record, `NWK_REMOVE_DEVICE` answered `UNSUPPORTED_COMMAND` as by the
+/// zigbee-rs NCP; EZSP: an APS Remove-Device to the router), whether the
+/// device was reachable (Mgmt_Leave_req) or not (`force`). Once it joins
+/// again it is back as any device, and stays after a restart.
+#[test]
+fn a_removed_device_is_not_imported_again_until_it_joins() {
+    for kind in BOTH {
+        for force in [true, false] {
+            removed_device_stays_removed(kind, force);
+        }
+    }
+}
+
+fn removed_device_stays_removed(kind: Kind, force: bool) {
+    use zigbee_zrhp::msg::ids;
+    let what = format!("{kind:?} force {force}");
+    let flash = SharedFlash::new();
+    let plug_id = "zb:5a52530000000001";
+    let mut rig = match kind {
+        Kind::Zrhp => Rig::zrhp(true),
+        Kind::Ezsp => Rig::ezsp(ezsp_sim(true, 0xDD), flash.store()),
+    };
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered.clone());
+    let (sid, rx) = session(&rig.app);
+    rig.link.join(PLUG, PLUG_NWK);
+    wait(&format!("{what}: the plug interviewed"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+    match kind {
+        Kind::Zrhp => {
+            let ncp = rig.zrhp.as_ref().unwrap();
+            assert!(ncp.store_state().devices.contains_key(&PLUG.to_le_bytes()), "{what}: the joined device's record");
+            rig.zsim.as_ref().unwrap().with(|s| {
+                s.neighbors = Some(vec![(PLUG.to_le_bytes(), PLUG_NWK, 1, 2)]);
+                s.table_devices = vec![(PLUG.to_le_bytes(), PLUG_NWK, None)];
+                s.unsupported.push(ids::NWK_REMOVE_DEVICE);
+            });
+        }
+        Kind::Ezsp => rig.ezsp.as_ref().unwrap().ncp(|n| n.config_mut().neighbors = vec![plug_neighbor()]),
+    }
+
+    ok(&call(&rig.app, sid, &rx, 1, json!({"type": "devices/remove", "device": plug_id, "force": force})));
+    assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}");
+    match kind {
+        Kind::Zrhp => {
+            let (ncp, zsim) = (rig.zrhp.clone().unwrap(), rig.zsim.clone().unwrap());
+            wait(&format!("{what}: TBL_INVALIDATE"), || zsim.state().log.iter().any(|(id, _)| *id == ids::TBL_INVALIDATE));
+            let invalidated = zsim.state().log.into_iter().find(|(id, _)| *id == ids::TBL_INVALIDATE).unwrap().1;
+            assert_eq!(invalidated, [&[5u8, 1][..], &PLUG.to_le_bytes()].concat(), "{what}: DEVICE table, by IEEE");
+            assert!(zsim.state().table_devices.is_empty(), "{what}");
+            wait(&format!("{what}: the host store's record"), || !ncp.store_state().devices.contains_key(&PLUG.to_le_bytes()));
+        }
+        Kind::Ezsp => {
+            let sim = rig.ezsp.clone().unwrap();
+            wait(&format!("{what}: Remove-Device"), || !sim.ncp(|n| n.removals().is_empty()));
+            let eui = Eui64::from_u64(PLUG);
+            assert_eq!(sim.ncp(|n| n.removals().to_vec()), [(PLUG_NWK, eui, eui)], "{what}");
+        }
+    }
+    let leave = || answered.lock().unwrap().iter().any(|r| r.profile == 0 && r.cluster == 0x0034);
+    if force {
+        assert!(!leave(), "{what}: no Mgmt_Leave_req");
+    } else {
+        wait(&format!("{what}: Mgmt_Leave_req"), leave);
+    }
+    let kv = rig.kv.clone();
+    let stored = move || kv::with(&*kv, |s| s.get(crate::removed::KEY).map(<[u8]>::to_vec));
+    wait(&format!("{what}: remembered"), || stored().is_some());
+
+    // A new NCP session: the NCP lists the plug, the hub does not take it.
+    match kind {
+        Kind::Zrhp => rig.zsim.as_ref().unwrap().reboot(),
+        Kind::Ezsp => rig.ezsp.as_ref().unwrap().ncp(|n| n.spontaneous_reset(hub_ezsp::ResetCode::WATCHDOG)),
+    }
+    wait(&format!("{what}: skipped after the NCP reset"), || rig.app.status().removed_skipped >= 1);
+    assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}");
+
+    // A hub restart, the NCP unchanged: still not imported.
+    let mut rig = match kind {
+        Kind::Zrhp => rig.restart_zrhp(),
+        Kind::Ezsp => {
+            rig.finish();
+            Rig::ezsp(ezsp_with_plug(), flash.store())
+        }
+    };
+    let (sid, rx) = session(&rig.app);
+    wait(&format!("{what}: skipped after the restart"), || rig.app.status().removed_skipped >= 1);
+    assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}");
+    assert_eq!(rig.app.status().imported, 0, "{what}");
+
+    // It joins again: back, interviewed, and no longer remembered.
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered);
+    rig.link.join(PLUG, PLUG_NWK);
+    wait(&format!("{what}: the plug back"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+    let kv = rig.kv.clone();
+    wait(&format!("{what}: forgotten as removed"), || kv::with(&*kv, |s| s.get(crate::removed::KEY).is_none()));
+    crate::tests::stop(&rig.app);
+
+    // Restarted once more: restored as any device.
+    let rig = match kind {
+        Kind::Zrhp => rig.restart_zrhp(),
+        Kind::Ezsp => {
+            rig.finish();
+            Rig::ezsp(ezsp_with_plug(), flash.store())
+        }
+    };
+    let (sid, rx) = session(&rig.app);
+    wait(&format!("{what}: restored"), || rig.app.status().restored == 1);
+    assert_eq!(devices_list(&rig.app, sid, &rx), [plug_id], "{what}");
+    rig.finish();
+}

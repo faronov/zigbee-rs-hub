@@ -294,6 +294,8 @@ pub struct SimNcp {
     early: Vec<Callback>,
     /// The last `permitJoining` duration.
     permit: u8,
+    /// `removeDevice` calls: `(dest_short, dest_long, target_long)`.
+    removals: Vec<(NodeId, Eui64, Eui64)>,
 }
 
 fn default_config(key_table_size: u16) -> BTreeMap<u8, u16> {
@@ -360,6 +362,7 @@ impl SimNcp {
             random: 0x1234,
             early: Vec::new(),
             permit: 0,
+            removals: Vec::new(),
         };
         n.reset_ezsp();
         n
@@ -420,6 +423,12 @@ impl SimNcp {
     }
 
     /// Transient link keys imported and not cleared.
+    /// The APS Remove-Device commands sent (`removeDevice`):
+    /// `(dest_short, dest_long, target_long)`.
+    pub fn removals(&self) -> &[(NodeId, Eui64, Eui64)] {
+        &self.removals
+    }
+
     pub fn transient_keys(&self) -> &[(Eui64, KeyData)] {
         &self.transient_keys
     }
@@ -1264,6 +1273,41 @@ impl SimNcp {
             Command::ClearKeyTable => {
                 self.cfg.key_table.clear();
                 Response::ClearKeyTable { status: ok }
+            }
+            Command::FindKeyTableEntry { address, link_key } => Response::FindKeyTableEntry {
+                index: self
+                    .cfg
+                    .key_table
+                    .iter()
+                    .position(|e| link_key && e.is_some_and(|(eui, ..)| eui == address))
+                    .map_or(0xFF, |i| i as u8),
+            },
+            Command::EraseKeyTableEntry { index } => {
+                let size = self.configuration(ConfigId::KEY_TABLE_SIZE).unwrap_or(0);
+                let status = if u16::from(index) < size {
+                    if let Some(e) = self.cfg.key_table.get_mut(usize::from(index)) {
+                        *e = None;
+                    }
+                    ok
+                } else {
+                    Self::ember(v, E::INDEX_OUT_OF_RANGE)
+                };
+                Response::EraseKeyTableEntry { status }
+            }
+            // The message itself is not modelled (a router that obeys
+            // leaves later, as after a Mgmt_Leave_req).
+            Command::RemoveDevice {
+                dest_short,
+                dest_long,
+                target_long,
+            } => {
+                let status = if self.network_up {
+                    self.removals.push((dest_short, dest_long, target_long));
+                    ok
+                } else {
+                    Self::ember(v, E::NETWORK_DOWN)
+                };
+                Response::RemoveDevice { status }
             }
             cmd @ (Command::GetTokenData { .. } | Command::SetTokenData { .. })
                 if !self.cfg.token_interface =>

@@ -887,7 +887,7 @@ fn coordinator_boundary_scenario() {
     });
 
     api.ok(json!({"type": "devices/remove", "device": light_id}));
-    rec.wait_for(ids::NWK_REMOVE_DEVICE, 1);
+    rec.wait_for(ids::TBL_INVALIDATE, 1);
     rec.end("remove: the light", Some(&mut api));
 
     // Read-only answers, once the engine counted the confirms of all its

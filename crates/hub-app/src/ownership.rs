@@ -43,6 +43,8 @@ impl Runner {
             self.forget_network(now).and_then(|forgotten| {
                 let deleted = self.records.clear(report).map_err(failed)?;
                 self.registry.loaded = true;
+                // Its record went with the others: read again, empty.
+                self.removed = crate::removed::Removed::default();
                 #[cfg(feature = "ota")]
                 self.ota.forget_devices();
                 self.imported_in = None;
@@ -111,17 +113,20 @@ impl Runner {
         if !self.ota.loaded() {
             return false;
         }
-        self.registry.loaded && self.last.loaded && self.automations.loaded
+        self.registry.loaded && self.last.loaded && self.automations.loaded && self.removed.loaded
     }
 
     /// The network records not loaded yet, unless the gate hides them (at
     /// the start, and once they are adopted, cleared or readable): devices
     /// (the stored ones replace those the engine has made since the start),
-    /// groups and bindings; then, once the devices are in, their last
-    /// values; then the rules and the OTA device states. Loaded ones are
-    /// not read again. How many devices.
+    /// groups and bindings, then the removed devices; then, once the
+    /// devices are in, their last values; then the rules and the OTA
+    /// device states. Loaded ones are not read again. How many devices.
     pub(super) fn load_network(&mut self, now: Millis) -> usize {
         let n = if self.registry.loaded { 0 } else { self.registry.load_network(&*self.records, &mut self.engine, now) };
+        if self.registry.loaded {
+            self.load_removed();
+        }
         // A value of a device not restored yet would be dropped.
         if self.registry.loaded && !self.last.loaded {
             self.last.load(&*self.records, &mut self.engine, now);

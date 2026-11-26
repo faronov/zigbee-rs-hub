@@ -475,6 +475,16 @@ fn coordinator_commands() -> Vec<Command> {
             key: [7; 16],
         },
         Command::ClearKeyTable,
+        Command::FindKeyTableEntry {
+            address: Eui64::from_u64(6),
+            link_key: true,
+        },
+        Command::EraseKeyTableEntry { index: 1 },
+        Command::RemoveDevice {
+            dest_short: 0x5A01,
+            dest_long: Eui64::from_u64(6),
+            target_long: Eui64::from_u64(6),
+        },
         Command::GetTokenData {
             token: token::CREATOR_STACK_RESTORED_EUI64,
             index: 0,
@@ -636,6 +646,13 @@ fn coordinator_frames_round_trip_for_every_verified_version() {
             },
             Response::ImportLinkKey { status: sl_ok },
             Response::ClearKeyTable {
+                status: ok(ver, Ember),
+            },
+            Response::FindKeyTableEntry { index: 0xFF },
+            Response::EraseKeyTableEntry {
+                status: ok(ver, Ember),
+            },
+            Response::RemoveDevice {
                 status: ok(ver, Ember),
             },
             Response::GetTokenData {

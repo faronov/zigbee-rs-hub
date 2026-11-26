@@ -652,7 +652,7 @@ impl Pump {
                 group,
                 endpoint,
             } => control_outcome(hub.group_membership(op, group, endpoint)),
-            Cmd::Remove { nwk, ieee } => control_outcome(hub.remove_device(nwk, ieee, 0)),
+            Cmd::Remove { nwk, ieee } => control_outcome(hub.purge_device(nwk, ieee)),
             Cmd::PermitJoin { secs, target } => control_outcome(hub.permit_join_on(secs, target)),
             Cmd::Inventory => match hub.ncp_devices() {
                 Ok(inv) => Terminal::Done(Reply::Inventory(Box::new(inventory(inv)))),
@@ -769,6 +769,88 @@ mod tests {
         // Still usable.
         assert!(inbox.send(PumpMsg::Stop));
         assert!(matches!(inbox.recv_timeout(short), Some(PumpMsg::Stop)));
+    }
+
+    /// A removal purges the device from the NCP's `DEVICE` table
+    /// (`TBL_INVALIDATE`) and the host store's records even when the NCP
+    /// does not implement `NWK_REMOVE_DEVICE` (the zigbee-rs NCP): the
+    /// inventory no longer lists it; a child entry the NCP keeps does.
+    #[test]
+    fn a_removal_purges_the_ncps_table_and_the_store_record() {
+        use zigbee_zrhp::msg::network::EvtDeviceJoined;
+        let (hub, sim, mut coord, q) = rig();
+        events_until(
+            &q,
+            |e| matches!(e, CoordEvent::Session(s) if matches!(**s, SessionEvent::Up { .. })),
+        );
+        let (gone, child) = (0x00158d0001a2b3c4u64, 0x00158d0001a2b3c5u64);
+        for (ieee, nwk) in [(gone, 0x1234), (child, 0x2345)] {
+            let ev = EvtDeviceJoined {
+                nwk,
+                ieee: Ieee::from_u64(ieee),
+                parent_nwk: 0,
+                join_type: 0,
+                capability: 0x80,
+                decision: 0,
+            };
+            sim.inject_event(
+                ids::EVT_DEVICE_JOINED,
+                crate::driver::encode_body(&ev).unwrap(),
+            );
+        }
+        let t = Instant::now();
+        while hub.store_state().devices.len() < 2 {
+            assert!(t.elapsed() < T);
+            thread::sleep(Duration::from_millis(5));
+        }
+        sim.with(|s| {
+            s.table_devices = vec![
+                (gone.to_le_bytes(), 0x1234, None),
+                (child.to_le_bytes(), 0x2345, Some(0x80)),
+            ];
+            s.children = Some(vec![(child.to_le_bytes(), 0x2345, 0x80)]);
+            s.unsupported.push(ids::NWK_REMOVE_DEVICE);
+        });
+        let ieees = |coord: &mut ZrhpCoordinator, q: &EventQueue| {
+            let id = coord.submit(Request::DeviceInventory, None).unwrap();
+            let evs = events_until(q, |e| done(e, id));
+            match evs.into_iter().find(|e| done(e, id)) {
+                Some(CoordEvent::Done {
+                    t: Terminal::Done(Reply::Inventory(inv)),
+                    ..
+                }) => inv.devices.iter().map(|d| d.ieee).collect::<Vec<_>>(),
+                e => panic!("{e:?}"),
+            }
+        };
+        assert_eq!(ieees(&mut coord, &q), [gone, child]);
+        for (ieee, nwk) in [(gone, 0x1234), (child, 0x2345)] {
+            let id = coord
+                .submit(
+                    Request::RemoveDevice {
+                        ieee,
+                        nwk: Some(nwk),
+                    },
+                    None,
+                )
+                .unwrap();
+            let evs = events_until(&q, |e| done(e, id));
+            assert!(
+                evs.iter().any(|e| matches!(e, CoordEvent::Done { id: i, t: Terminal::Done(Reply::None) } if *i == id)),
+                "{evs:?}"
+            );
+        }
+        assert_eq!(sent(&sim, ids::NWK_REMOVE_DEVICE), 2);
+        assert_eq!(sent(&sim, ids::TBL_INVALIDATE), 2);
+        assert!(hub.store_state().devices.is_empty());
+        assert_eq!(
+            sim.state().table_devices,
+            [(child.to_le_bytes(), 0x2345, Some(0x80))],
+            "the child entry stays"
+        );
+        assert_eq!(ieees(&mut coord, &q), [child]);
+        drop(coord);
+        hub.shutdown();
+        sim.stop();
     }
 
     #[test]

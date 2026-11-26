@@ -8,6 +8,21 @@ install instructions and the list of merged pull requests. A pre-release
 
 ## Unreleased
 
+### Fixes
+
+- **A removed device stays removed.** A device removed with
+  `devices/remove` (with or without `force`) that the coordinator still
+  listed came back at the next hub restart or NCP reset, as a partial
+  device without a name (the hub imports the devices the NCP knows). The
+  removal now purges the NCP's tables (ZRHP: the NCP's Trust Center record
+  and link key, `TBL_INVALIDATE`, and the host store's device record;
+  EZSP: an APS Remove-Device to a router, the device's key table entry),
+  and the hub remembers the last 64 removed devices so that the NCP's
+  child or neighbor entries (kept until the device ages out) do not bring
+  them back. A removed device that joins or announces itself again is
+  added as before. Forming, resetting or restoring the network forgets
+  them.
+
 ### Other changes
 
 - **Web UI: tabs in a sidebar.** On screens 900 px wide or more the tabs

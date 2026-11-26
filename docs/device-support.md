@@ -2366,7 +2366,7 @@ code feels familiar:
 | `devices/list` | — | device records (4.1) |
 | `devices/get` | `id` | device record + endpoints + resolution summary |
 | `devices/update` | `id`, `name`, `disabled` | device record |
-| `devices/remove` | `id`, `force` (skip Mgmt_Leave) | — (ZDO Mgmt_Leave, then `NWK_REMOVE_DEVICE`; GP: 13.7) |
+| `devices/remove` | `id`, `force` (skip Mgmt_Leave: the device is unreachable) | — (ZDO Mgmt_Leave_req unless `force`, then the coordinator purges the device either way: ZRHP `NWK_REMOVE_DEVICE` and `TBL_INVALIDATE` of its `DEVICE` entry, the host store's device record; EZSP an APS Remove-Device to a router of the neighbor table, else its key table entry is erased. The hub remembers the device as removed (network record `removed`, the last 64): the import of the NCP's devices skips it while the NCP still lists it (a child until it ages out, a router that ignored the leave), until it joins or announces itself again; forming, resetting or restoring the network forgets the list. GP: 13.7) |
 | `devices/reinterview` | `id` | progress events `interview_progress` |
 | `devices/reconfigure` | `id` | per-step results (binds, reporting, reads) |
 | `devices/diagnostics` | `id` | fingerprint, layers and their hashes, configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload |
@@ -2555,8 +2555,9 @@ Events (topic `network`, API 1.2): `network_updated` {`reason`:
 `hub_updated` {the `hub/info` fields that changed: `developer_mode`}.
 
 **Network records and their owner.** The device registry, last values,
-groups, bindings, automations, per-device OTA state and the last backup
-(`dev/`, `st/`, `grp/`, `bnd/`, `auto/`, `ota/d/`, `bkp/last`) belong to one
+groups, bindings, automations, per-device OTA state, the last backup and
+the removed devices (`dev/`, `st/`, `grp/`, `bnd/`, `auto/`, `ota/d/`,
+`bkp/last`, `removed`) belong to one
 network; user definitions and the hub's settings do not. The host store
 tags them with the coordinator backend and network they belong to
 (`hub/owner`: extended PAN ID and a key ID, a hash of the network key;

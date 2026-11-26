@@ -8,6 +8,7 @@
 //! | [`backend`] | the backend the app runs on ([`Backend`]: coordinator, administration, the hub's records and whose they are) |
 //! | [`transport`] | the engine's `ZigbeeTransport` on a `hub_coord::Coordinator` (ZRHP: `hub_ncp::coord::ZrhpCoordinator`, EZSP: `hub_ezsp::coord::EzspCoordinator`) |
 //! | [`registry`] | device registry and user definitions in the host store journal (`hubdata`) |
+//! | [`removed`] | the devices the operator removed: the NCP device import does not bring them back |
 //! | [`app`] | the app thread: engine, `ApiServer` sessions, registry, 1 s tick |
 //! | [`catalog`] | the definitions catalog: trusted keys (slot 0, slot 1 for rotation), bank/manifest verification, the store in `hubdata` (bank slots A/B, active-bank record, manifest, local definitions) and the service (update checks, downloads, on-demand fetch, uploads, `catalog/*` API) |
 //! | [`automations`] | local automations: rules (triggers → conditions → actions) and schedules evaluated on the app thread, `automations/*` API, rules in the host store journal (`auto/<id>`) |
@@ -40,6 +41,7 @@ pub mod ota;
 pub mod ota_store;
 pub mod platform;
 pub mod registry;
+pub mod removed;
 pub mod topology;
 pub mod transport;
 

@@ -14,7 +14,7 @@
 //! [`App::start`] and [`App::start_with`] (feature `zrhp`) start the app on
 //! a running ZRHP host core.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,7 @@ use crate::catalog::store::CatalogStore;
 use crate::catalog::web::SharedWeb;
 use crate::platform::Platform;
 use crate::registry::Registry;
+use crate::removed::Removed;
 use crate::transport::{ApsCounters, CoordTransport};
 
 #[path = "ownership.rs"]
@@ -300,6 +301,9 @@ pub struct AppStatus {
     /// Devices imported from the NCP's tables (see
     /// [`AppConfig::import_ncp_devices`]).
     pub imported: usize,
+    /// Devices the operator removed that the NCP's tables still listed:
+    /// not imported (counted at every import).
+    pub removed_skipped: usize,
     /// The backend's session is ready (requests flow); for a status LED.
     pub session_up: bool,
     /// The NCP's network is up.
@@ -516,6 +520,11 @@ struct Runner {
     /// in flight then does not count).
     import_gen: u32,
     imported: usize,
+    removed_skipped: usize,
+    /// The devices the operator removed (not imported again).
+    removed: Removed,
+    /// Devices the NCP device import added in this process.
+    ncp_imported: BTreeSet<u64>,
     /// Unknown states of restored mains devices have been read.
     refreshed: bool,
     /// Permit-join seconds left at the last look.
@@ -760,6 +769,9 @@ impl Runner {
             import: None,
             import_gen: 0,
             imported: 0,
+            removed_skipped: 0,
+            removed: Removed::default(),
+            ncp_imported: BTreeSet::new(),
             refreshed: false,
             permit_left: 0,
             admin,
@@ -893,6 +905,7 @@ impl Runner {
         let now = self.now();
         self.registry.flush(&*self.records, &self.engine, now, true);
         self.last.flush(&*self.records, &self.engine, now, true);
+        self.removed.flush(&*self.records, now);
         // The coordinator (its pump) stops with the engine.
         drop(self);
         stopped.store(true, Ordering::SeqCst);
@@ -918,6 +931,9 @@ impl Runner {
                 self.engine.on_aps_indication(i, now);
             }
             CoordEvent::DeviceJoined { ieee, nwk } => {
+                if self.removed.clear(ieee) {
+                    info!("app: removed device {ieee:016x} joined again");
+                }
                 self.engine.transport.nwk.insert(ieee, nwk);
                 self.engine.on_device_joined(ieee, nwk, now);
             }
@@ -1053,6 +1069,7 @@ impl Runner {
                     if matches!(head.ty.as_str(), "hub/reboot" | "hub/mode/set") {
                         self.registry.flush(&*self.records, &self.engine, now, true);
                         self.last.flush(&*self.records, &self.engine, now, true);
+                        self.removed.flush(&*self.records, now);
                     }
                     for frame in self.admin_request(sid, &head, now) {
                         self.send(sid, &frame);
@@ -1106,10 +1123,13 @@ impl Runner {
                     self.engine.zg_replace_groups(&list, now);
                     info!("app: {} groups from the restored backup", self.engine.zg.groups.len());
                 }
+                // A network formed, reset or restored: the removed devices
+                // are forgotten with the state the operator replaced.
                 JobOut::Reimport => {
                     self.imported_in = None;
                     self.import_retry = None;
                     self.import_gen = self.import_gen.wrapping_add(1);
+                    self.removed.clear_all();
                 }
                 JobOut::Import(b) => self.apply_import(*b, now),
             },
@@ -1525,23 +1545,79 @@ impl Runner {
         if generation == self.import_gen {
             self.imported_in = Some(cookie);
         }
-        let mut added = 0;
+        let (mut added, mut removed) = (0, 0);
         for d in &inv.devices {
             let Some(nwk) = d.nwk.filter(|n| *n < 0xFFF8) else { continue };
             if self.engine.devices().any(|x| x.ieee() == Some(d.ieee)) {
                 continue;
             }
+            // Removed by the operator: back only when it joins.
+            if self.removed.contains(d.ieee) {
+                removed += 1;
+                continue;
+            }
             self.engine.transport.nwk.insert(d.ieee, nwk);
             self.engine.on_device_joined(d.ieee, nwk, now);
+            self.ncp_imported.insert(d.ieee);
             added += 1;
         }
         self.imported += added;
-        if added > 0 || !inv.unsupported.is_empty() {
+        self.removed_skipped += removed;
+        if added > 0 || removed > 0 || !inv.unsupported.is_empty() {
             info!(
-                "app: imported {added} of {} NCP devices (not answered by the NCP: {:04X?})",
+                "app: imported {added} of {} NCP devices, {removed} removed ones skipped (not answered by the NCP: {:04X?})",
                 inv.devices.len(),
                 inv.unsupported
             );
+        }
+    }
+
+    /// The Zigbee devices `devices/remove` removed: remembered, so that the
+    /// coordinator's tables do not bring them back.
+    fn note_removed(&mut self) {
+        for ieee in self.engine.take_removed() {
+            info!("app: device {ieee:016x} removed: not imported from the NCP again unless it joins");
+            self.removed.add(ieee);
+            // Created again, it is no longer the import's.
+            self.ncp_imported.remove(&ieee);
+        }
+    }
+
+    /// A device created other than by the NCP device import (a device
+    /// announcement, a migration import, the registry) is no longer
+    /// removed.
+    fn note_added(&mut self, events: &[hub_devices::hub::HubEvent]) {
+        for e in events {
+            if let hub_devices::hub::HubEvent::DeviceAdded(id) = e
+                && let Some(ieee) = id.strip_prefix("zb:").and_then(|h| u64::from_str_radix(h, 16).ok())
+                && !self.ncp_imported.contains(&ieee)
+                && self.removed.clear(ieee)
+            {
+                info!("app: removed device {ieee:016x} is back");
+            }
+        }
+    }
+
+    /// The removed devices, once their record is readable; devices the
+    /// NCP device import added before (the records were hidden) and that
+    /// the registry does not hold go again.
+    pub(super) fn load_removed(&mut self) {
+        if !self.removed.load(&*self.records) {
+            return;
+        }
+        for ieee in self.removed.list().to_vec() {
+            let id = hub_devices::hub::zigbee_id(ieee);
+            if self.engine.device(&id).is_none() {
+                continue;
+            }
+            let stored = kv::with(&*self.records, |s| s.get(&format!("{}{id}", crate::registry::DEV)).is_some());
+            if self.ncp_imported.contains(&ieee) && !stored {
+                info!("app: {id} was removed: dropped");
+                self.engine.forget_device(&id);
+                self.engine.transport.nwk.remove(&ieee);
+            } else {
+                self.removed.clear(ieee);
+            }
         }
     }
 
@@ -1625,6 +1701,7 @@ impl Runner {
                 break;
             }
             self.registry.note(&events, now);
+            self.note_added(&events);
             self.last.note(&events, &self.engine);
             self.with_automations(|a, w, clk| a.observe(&events, w, clk));
             for (sid, frame) in self.api.pump_events(&mut self.engine, events) {
@@ -1632,8 +1709,10 @@ impl Runner {
             }
         }
         self.pump_automations();
+        self.note_removed();
         self.registry.flush(&*self.records, &self.engine, now, false);
         self.last.flush(&*self.records, &self.engine, now, false);
+        self.removed.flush(&*self.records, now);
         let mut st = self.status.lock().unwrap();
         st.last_values = (self.last.restored, self.last.writes, self.last.bytes, self.last.errors);
         st.devices = self.engine.devices().count();
@@ -1644,6 +1723,7 @@ impl Runner {
         st.aps = self.engine.transport.counters;
         st.endpoint_registered = self.registered;
         st.imported = self.imported;
+        st.removed_skipped = self.removed_skipped;
         st.permit_join_s = self.permit_left;
         st.jobs = self.admin.jobs_running();
     }

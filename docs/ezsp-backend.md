@@ -242,10 +242,20 @@ hub app sets it: ends them `Refused(LinkDown)` instead, see "In the hub
 app"). Without a session, control requests are refused `LinkDown`; APS
 requests, and with `EzspOptions::traffic_hold` control requests too, are
 queued. Control requests are barriers.
-`RemoveDevice` only forgets the address: the engine's ZDO Mgmt_Leave_req
-stays the primary removal path, and with hashed link keys the trust center
-keeps no key for the device. An EZSP `removeDevice` to the parent, as an
-explicit force removal of unreachable or sleepy children, is a follow-up.
+`RemoveDevice` (reachable or `force`) forgets the address; a router in
+the neighbor table gets `removeDevice(its short address, its EUI64, its
+EUI64)` (an APS Remove-Device encrypted with its link key, asking it to
+leave), any other device's key table entry (an imported or install-code
+key) is erased (`findKeyTableEntry` + `eraseKeyTableEntry`; with hashed
+link keys there is usually none). The router keeps its entry: the
+Remove-Device is encrypted with it. The engine's ZDO Mgmt_Leave_req stays
+the primary path for reachable devices. A child entry stays until the
+child leaves or ages out: EZSP 13 has no `removeChild` (EZSP ≥ 14), and
+dropping a sleepy child before it polled would lose the Mgmt_Leave_req
+queued for it (it would rejoin); the app does not import a removed device
+again (`hub_app::removed`). Statuses of these frames are logged, not
+errors. Same layouts in EZSP 13–18 (Gecko SDK 4.4.6, zigbee-herdsman's
+`ezsp.ts`); not run on a Dongle Max yet.
 
 ## Flow control
 
@@ -556,9 +566,11 @@ firmware console: `hub` on the Dongle Max.
    host).
 3. NCP firmware update: `launchStandaloneBootloader` + XMODEM GBL
    (`FwUpdateMethod::GeckoXmodem`).
-4. Force removal: `removeDevice(parent short address, parent EUI64, target
-   EUI64)` (APS Remove Device to the parent) for unreachable or sleepy
-   children, as an explicit fallback behind the engine's Mgmt_Leave_req.
+4. Force removal: done for routers of the neighbor table
+   (`removeDevice` to the router itself) and key table entries; an APS
+   Remove-Device to the parent of another router's sleepy child (the
+   parent from `trustCenterJoinHandler`) and `removeChild` on EZSP ≥ 14
+   for an unreachable child of the coordinator are still open.
 5. Done in H2: the Dongle-M firmware on this backend (`firmware/gateway`:
    the UART transport on the ESP32, the hub app, its records in the
    claimed `files` region; `docs/dongle-max.md`). Done in H1: the hub-app

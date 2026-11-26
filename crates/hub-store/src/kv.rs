@@ -25,7 +25,8 @@ pub const OWNER_KEY: &str = "hub/owner";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// The network of the ownership tag: `dev/`, `st/`, `grp/`, `bnd/`,
-    /// `auto/` (rules name device IDs), `ota/d/`, `bkp/last`.
+    /// `auto/` (rules name device IDs), `ota/d/`, `bkp/last`, `removed`
+    /// (devices the operator removed).
     Network,
     /// The hub, whatever the network: everything else (`udef/`, `usrc/`,
     /// `cfg/tz`, `cfg/tz_name`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`,
@@ -38,7 +39,7 @@ pub enum Scope {
 }
 
 /// Network-scoped prefixes (a trailing `/`) and keys.
-const NETWORK: &[&str] = &["dev/", "st/", "grp/", "bnd/", "auto/", "ota/d/", "bkp/last"];
+const NETWORK: &[&str] = &["dev/", "st/", "grp/", "bnd/", "auto/", "ota/d/", "bkp/last", "removed"];
 const BACKEND: &[&str] = &["cfg/tx_power", "zrhp/", "ezsp/", "znp/"];
 
 fn listed(key: &str, list: &[&str]) -> bool {
@@ -202,7 +203,7 @@ mod tests {
 
     #[test]
     fn key_scopes_follow_the_design_table() {
-        for k in ["dev/zb:1", "st/zb:1", "grp/0001", "bnd/zb:1", "auto/r1", "ota/d/zb:1", "bkp/last"] {
+        for k in ["dev/zb:1", "st/zb:1", "grp/0001", "bnd/zb:1", "auto/r1", "ota/d/zb:1", "bkp/last", "removed"] {
             assert_eq!(scope(k), Scope::Network, "{k}");
         }
         for k in ["udef/a", "usrc/a", "cfg/tz", "cfg/tz_name", "cfg/ntp", "cfg/catalog", "cfg/report", "ota/cfg", OWNER_KEY, "bkp/lastx", "bkp/replaced", "bkp/replaced/eeeeeeeeeeeeeeee", "devx"] {

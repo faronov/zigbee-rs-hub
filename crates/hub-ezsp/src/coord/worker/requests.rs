@@ -372,18 +372,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 group,
                 add,
             } => self.group(endpoint, group, add),
-            Cmd::Remove { ieee, nwk } => {
-                // The engine sends Mgmt_Leave_req itself. With hashed link
-                // keys the trust center keeps no key for the device, and
-                // the stack drops a child that leaves; the address is
-                // forgotten here.
-                self.nwk_cache.retain(|(i, _)| *i != ieee);
-                debug!(
-                    "ezsp: {ieee:016X} (0x{:04X}) removed",
-                    nwk.unwrap_or(0xFFFF)
-                );
-                Ok(Terminal::Done(Reply::None))
-            }
+            Cmd::Remove { ieee, nwk } => self.remove_device(ieee, nwk),
             Cmd::PermitJoin { secs, target } => self.permit_join(secs, target),
             Cmd::Inventory => self
                 .inventory()
@@ -683,6 +672,66 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             }),
             None => Err(HostError::UnexpectedResponse(r)),
         }
+    }
+
+    /// The coordinator's part of a removal, reachable or not (the engine
+    /// sends Mgmt_Leave_req itself unless forced): the address is
+    /// forgotten; a router in the neighbor table gets an APS Remove-Device
+    /// (`removeDevice` to itself, encrypted with its link key) asking it
+    /// to leave; otherwise the device's key table entry (an imported or
+    /// install-code key) is erased. A router asked to leave keeps that
+    /// entry: the Remove-Device is encrypted with it. EZSP 13 cannot drop
+    /// a child entry (`removeChild` is EZSP ≥ 14, and dropping a child
+    /// before it polled would lose the Mgmt_Leave_req queued for it): the
+    /// stack drops a child that leaves or ages out, and the application
+    /// does not import a removed device again. Statuses are logged, not
+    /// errors.
+    pub(super) fn remove_device(
+        &mut self,
+        ieee: u64,
+        nwk: Option<u16>,
+    ) -> Result<Terminal, HostError> {
+        self.nwk_cache.retain(|(i, _)| *i != ieee);
+        let eui = Eui64::from_u64(ieee);
+        let router = self.neighbors()?.into_iter().find(|n| n.ieee == eui.0);
+        if let Some(n) = &router {
+            let cmd = Command::RemoveDevice {
+                dest_short: n.nwk,
+                dest_long: eui,
+                target_long: eui,
+            };
+            match self.try_call(&cmd)?.and_then(|r| r.status()) {
+                Some(s) if s.is_success() => {}
+                s => warn!(
+                    "ezsp: Remove-Device to {ieee:016X} (0x{:04X}): {s:?}",
+                    n.nwk
+                ),
+            }
+        } else if let Some(Response::FindKeyTableEntry { index }) =
+            self.try_call(&Command::FindKeyTableEntry {
+                address: eui,
+                link_key: true,
+            })?
+            && index != 0xFF
+        {
+            match self
+                .try_call(&Command::EraseKeyTableEntry { index })?
+                .and_then(|r| r.status())
+            {
+                Some(s) if s.is_success() => {}
+                s => warn!("ezsp: erasing key table entry {index} of {ieee:016X}: {s:?}"),
+            }
+        }
+        debug!(
+            "ezsp: {ieee:016X} (0x{:04X}) removed{}",
+            nwk.unwrap_or(0xFFFF),
+            if router.is_some() {
+                ", asked to leave"
+            } else {
+                ""
+            }
+        );
+        Ok(Terminal::Done(Reply::None))
     }
 
     /// The coordinator's children and router neighbors.

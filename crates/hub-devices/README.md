@@ -67,7 +67,7 @@ incoming is a method call with the current time.
 | `Request::Aps` | `APS_DATA_REQUEST` through `Client::start` (non-blocking); `Hub::send_aps` blocks on the confirm, so an adapter must run it off the engine thread or use `start` |
 | `Request::Gp`, `Accepted { zcl_tsn }` | `Client::call(&GpPairingConfiguration / GpTranslationUpdate / GpTranslationRequest / GpRemoteSinkTableRequest / GpRemoteProxyTableRequest / GpSinkCommissioning / GpSinkRemove / GpSinkConfig)`, `zcl_tsn` from `GpRemoteRsp` (0x0A08–0x0A0D are in the pinned `zigbee-zrhp`) |
 | `Request::Group { add }` | `NWK_GROUP_MEMBERSHIP` op 1 / 2 (`Hub::group_membership`) |
-| `Request::RemoveDevice` | `NWK_REMOVE_DEVICE` (`Hub::remove_device`) |
+| `Request::RemoveDevice` | `NWK_REMOVE_DEVICE`, `TBL_INVALIDATE` of the `DEVICE` entry, the store's device record (`Hub::purge_device`) |
 | `Request::PermitJoin` | `Hub::permit_join_on(secs, target)` |
 | `Hub::on_aps_indication` | `EVT_APS_DATA_INDICATION` from `Hub::subscribe()` |
 | `Hub::on_device_joined` | `EVT_DEVICE_JOINED` with an admitted decision |

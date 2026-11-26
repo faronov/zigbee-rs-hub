@@ -27,7 +27,7 @@ use zigbee_zrhp::msg::network::{
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKeyRsp};
 use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysGetStatusRsp, SysNegotiateRsp, caps};
-use zigbee_zrhp::msg::tables::{TblRead, TblReadEntry, TblReadRsp, TblSyncRsp};
+use zigbee_zrhp::msg::tables::{TableKey, TblInvalidate, TblRead, TblReadEntry, TblReadRsp, TblSyncRsp};
 use zigbee_zrhp::msg::{Batch, Kind, RawMessage, ids};
 use zigbee_zrhp::queue::EndpointQueues;
 use zigbee_zrhp::records::{ChildInfo, DeviceRecord, LinkBlock, Record, device_flags};
@@ -937,6 +937,26 @@ impl SimNcp {
             ids::NWK_GROUP_MEMBERSHIP | ids::NWK_REMOVE_DEVICE | ids::GP_SINK_CONFIG | ids::GP_SINK_COMMISSIONING | ids::GP_SINK_REMOVE => {
                 s.log.push((m.header.msg_id, m.payload.to_vec()));
                 status(Status::Success)
+            }
+            // As the zigbee-rs NCP: the Trust Center record and key go; a
+            // child (an entry with a capability) stays in the table, as do
+            // child and neighbor entries; an unknown device is no error.
+            ids::TBL_INVALIDATE => {
+                s.log.push((m.header.msg_id, m.payload.to_vec()));
+                let r: TblInvalidate = m.decode().unwrap();
+                let ieee = match r.key {
+                    TableKey::Ieee(ieee) => Some(ieee.0),
+                    TableKey::Nwk(nwk) => s.table_devices.iter().find(|d| d.1 == nwk).map(|d| d.0),
+                };
+                if r.table != 5 {
+                    status(Status::UnsupportedCommand)
+                } else {
+                    if let Some(ieee) = ieee {
+                        s.table_devices.retain(|d| d.0 != ieee || d.2.is_some());
+                        s.link_keys.retain(|k| k.0 != ieee);
+                    }
+                    status(Status::Success)
+                }
             }
             ids::GP_PAIRING_CONFIGURATION..=ids::GP_REMOTE_PROXY_TABLE_REQUEST => {
                 s.log.push((m.header.msg_id, m.payload.to_vec()));
