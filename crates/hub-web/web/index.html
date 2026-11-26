@@ -10,17 +10,17 @@
 @media (prefers-color-scheme:dark){:root{--bg:#121417;--fg:#e6e8eb;--card:#1c1f24;--mut:#9aa3ae;--line:#2d3239;--acc:#60a5fa;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;align-items:center;gap:.6em;padding:.7em 1em;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:1}
-header h1{font-size:1.1em;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+header{display:flex;align-items:center;gap:.6em;padding:0 1em;height:3em;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:3}
+header h1{font-size:1.1em;margin:0;flex:1}header *{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 main{max-width:1100px;margin:0 auto;padding:1em;display:grid;gap:1em}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.9em 1em}
 .card h2{font-size:1em;margin:0 0 .6em}
-.dot{width:.7em;height:.7em;border-radius:50%;background:var(--bad);display:inline-block}
+.dot{width:.7em;height:.7em;border-radius:50%;background:var(--bad);display:inline-block;flex:none}
 .dot.on{background:var(--ok)}.dot.wait{background:var(--warn)}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:.2em .9em;margin:0}
 .kv dt{color:var(--mut)}.kv dd{margin:0;word-break:break-all}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:.5em}
-.devs{display:grid;gap:1em;grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.devs{display:grid;gap:1em;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr))}
 .dev .top{display:flex;gap:.5em;align-items:baseline;overflow-wrap:anywhere}
 .dev .top b{flex:1;font-size:1.05em}.top a{flex:1;color:inherit;text-decoration:none}
 .devs .dev[id]{cursor:pointer}
@@ -51,17 +51,21 @@ input{max-width:calc(100vw - 6em)}
 .acts{margin-top:.6em}
 #login{max-width:420px;margin:3em auto}
 #login input{width:100%;margin:.5em 0}
-#toast{position:fixed;bottom:1em;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5em 1em;border-radius:8px;display:none;max-width:90vw}
+#toast{position:fixed;z-index:4;bottom:1em;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5em 1em;border-radius:8px;display:none;max-width:90vw}
 .row label{display:inline-flex;flex-wrap:wrap;align-items:center;gap:.3em}
 table{border-collapse:collapse;font-size:.9em}td,th{padding:.15em .6em .15em 0;text-align:left;font-variant-numeric:tabular-nums}
 pre{white-space:pre-wrap;font-size:.8em;max-height:24em;overflow:auto;background:var(--bg);padding:.5em;border-radius:7px}
 .rs .v,.rs input,.rs select{opacity:.6;font-style:italic}svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:11px}svg .h{paint-order:stroke;stroke:var(--card);stroke-width:3px}
 .warn{color:var(--warn)}
 .hide{display:none!important}
-nav#tabs{display:flex;gap:.2em;padding:0 1em;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
+#tabs{display:flex;flex-direction:column;position:fixed;z-index:2;top:3em;bottom:0;left:0;width:11em;padding:.5em 0;background:var(--card);border-right:1px solid var(--line);overflow-y:auto}
 .tab{display:grid;gap:1em;min-width:0}
-nav#tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:.5em .8em;color:var(--mut);white-space:nowrap}
-nav#tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+#tabs button{border:0;border-left:3px solid transparent;border-radius:0;background:none;padding:.55em 1em;color:var(--mut);text-align:left}
+#tabs button.on{color:var(--fg);border-left-color:var(--acc);background:var(--bg)}
+#mnb,body:not(.in) #tabs{display:none}
+@media(min-width:900px){body.in{padding-left:11em}body.in header{margin-left:-11em}}
+#mnx{display:none;position:fixed;inset:0;z-index:1;background:#0006}
+@media(max-width:899.9px){body.in #mnb{display:block}body:not(.mn) #tabs{display:none}#tabs{width:min(16em,85vw)}body.in.mn #mnx{display:block}}
 .card h3{font-size:.9em;margin:.8em 0 0;color:var(--mut)}
 .dev .gh{font-size:.75em;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin:1.6em 0 .3em;cursor:default}.gh+.ents{margin:0;border-top:0}
 #gcw{display:inline-block;margin:.6em 0 0}
@@ -71,13 +75,13 @@ progress{width:12em}
 </style>
 </head>
 <body>
-<header><span id="dot" class="dot" title="disconnected"></span><h1 id="hub">zigbee-rs-hub</h1><span id="conn" class="mut">connecting…</span></header>
+<header><button id="mnb" aria-controls="tabs" aria-expanded="false">☰</button><span id="dot" class="dot" title="disconnected"></span><h1 id="hub">zigbee-rs-hub</h1><span id="conn" class="mut">connecting…</span></header>
 <div id="login" class="card hide">
 <h2>API token</h2>
 <p class="mut">The hub's console prints it with <code>token</code>; a link ending in <code>#token=…</code> also works.</p>
 <form id="lf"><input id="tok" type="password" autocomplete="current-password" placeholder="token" required><button class="p">Connect</button></form>
 </div>
-<nav id="tabs" class="hide"></nav>
+<nav id="tabs"></nav><div id="mnx"></div>
 <main id="app" class="hide">
 <!-- gateway:start -->
 <p id="gsban" class="card hide" style="color:var(--bad)"></p>
@@ -212,7 +216,16 @@ let ws,rid=0,pend={},devs={},ents={},states={},net={},hub={},pjEnd=0,retry=1000,
 // `data-need` (if any) is set; `onTab[id]` runs when it is shown, after its
 // module `data-mod` (if any) is loaded. tabs(u): u when the user asked
 // (a tab clicked, a link followed), else for the hub (connect, hub/info).
-const onTab={};
+// The tabs are a sidebar; on a narrow screen a menu that the button ☰ (with
+// the tab's title) opens over the page; a tab, Escape, ☰ again or a tap on
+// the backdrop #mnx closes it (an element with its own click handler: iOS
+// sends no click to a bare <body>). A tab focused keeps the focus when they
+// are rebuilt.
+const onTab={},mnb=$("#mnb"),mn=o=>{document.body.classList.toggle("mn",o);mnb.setAttribute("aria-expanded",!!o);if(o)$("#tabs .on").focus()};
+mnb.onclick=()=>mn(!document.body.classList.contains("mn"));
+$("#mnx").onclick=()=>mn(0);
+addEventListener("keydown",e=>{if(e.key=="Escape"&&document.body.classList.contains("mn")){mn(0);mnb.focus()}});
+$("#tabs").addEventListener("focusout",e=>{const r=e.relatedTarget;if(r&&!r.closest("#tabs,#mnb"))mn(0)});
 // Modules: the rarely used tabs, loaded on demand from the hub (never from
 // the internet), /ui/<build>/<name>.js (crates/hub-web). A classic script
 // run in this page's scope: it uses these helpers and state, its functions
@@ -229,12 +242,14 @@ function ui(n,bg){return UI[n]||(UI[n]=fetch("/ui/"+UIB+"/"+n+".js").then(r=>{if
 function uiMod(b,n,h){const t=$("[data-mod="+n+"]");if(b!=UIB||!t)throw uiOld(1);t.innerHTML=h}
 const uiDo=(n,f)=>UI[n]&&UI[n].then(f,()=>{});
 function tabs(u){
- const nav=$("#tabs");nav.textContent="";
+ const nav=$("#tabs"),a=document.activeElement,fo=nav.contains(a)&&a.textContent;nav.textContent="";
  const want=(/^#\/(\w+)/.exec(location.hash)||[])[1];
  const tabsAll=[...document.querySelectorAll("main>.tab")],all=tabsAll.filter(t=>!t.dataset.need||hub[t.dataset.need]);
  for(const t of tabsAll)t.classList.add("hide");
  const cur=all.find(t=>t.dataset.tab==want)||all[0];
- for(const t of all){t.classList.toggle("hide",t!=cur);nav.append(el("button",{class:t==cur?"on":null,onclick:()=>{const h="#/"+t.dataset.tab;if(location.hash==h)tabs(1);else location.hash=h}},t.dataset.title))}
+ for(const t of all){t.classList.toggle("hide",t!=cur);nav.append(el("button",{class:t==cur?"on":null,"aria-current":t==cur?"page":null,onclick:()=>{const h="#/"+t.dataset.tab;if(mnb.offsetParent){mn(0);mnb.focus()}if(location.hash==h)tabs(1);else location.hash=h}},t.dataset.title))}
+ for(const b of nav.children)if(b.textContent==fo)b.focus();
+ mnb.textContent="☰ "+cur.dataset.title;
  // A module that did not load: why, and Retry (or its tab again).
  const id=cur.dataset.tab,m=cur.dataset.mod,f=()=>{if(onTab[id]&&!cur.classList.contains("hide"))onTab[id]()};
  if(m)ui(m,!u).then(f,e=>{cur.textContent="";cur.append(el("p",{class:"card mut"},e.message+" ",el("button",{onclick:()=>tabs(1)},"Retry")))});else f();
@@ -253,12 +268,12 @@ function connect(){
  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch{return}onMsg(m,tok)};
  ws.onclose=()=>{for(const k in pend)pend[k].no(new Error("connection closed"));pend={};authed=false;status("disconnected, retrying…","");setTimeout(connect,retry);retry=Math.min(retry*2,15000)};
 }
-function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");$("#tabs").classList.add("hide");status("no token","")}
+function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");document.body.classList.remove("in");mn(0);status("no token","")}
 $("#lf").onsubmit=e=>{e.preventDefault();localStorage.setItem("zrhToken",$("#tok").value.trim());$("#login").classList.add("hide");connect()};
 function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
  if(m.type=="auth_invalid"){localStorage.removeItem("zrhToken");ws.onclose=null;ws.close();toast("Wrong token");showLogin();return}
- if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");$("#tabs").classList.remove("hide");tabs();
+ if(m.type=="auth_ok"){authed=true;retry=1000;status("connected","on");$("#hub").textContent=m.hub||"zigbee-rs-hub";$("#app").classList.remove("hide");document.body.classList.add("in");tabs();
   call("hub/info").then(h=>{hub=h||{};if(hub.name)$("#hub").textContent=hub.name;renderNet();gate();tabs();
 // gateway:start
   gwBan();
@@ -365,7 +380,8 @@ function pic(d,c){const us=picL(d),i=el("img",{class:"pic"+(c?" "+c:""),alt:"",l
 // A device without a definition: fetch the catalog shard that may hold one
 // (after the mirror's newer manifest, if any), with the Catalog module.
 function findDef(id){ui("catalog").then(()=>ctSerial(async()=>{try{toast(await ctFind(id))}catch(e){toast(e.message)}}),()=>{})}
-// Device cards (#/devices): sensors, controls, battery and signal; a click
+// Device cards (#/devices): battery, signal and last seen under the title
+// (in the same place on every card), then sensors and controls; a click
 // outside the controls opens the device page (#device/<id>) with the rest.
 // Entity groups (HA's categories, and events): 0 sensors, 1 controls,
 // 2 events, 3 config, 4 diagnostic; the card shows the first three.
@@ -386,11 +402,12 @@ let sy,pgOn,snap;
 function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen};
  for(const e of dEnts(id)){const s=states[e.uid]||{};v.t=Math.max(v.t||0,s.last_reported||0);if(s.state!=null)v[e.device_class=="battery"?e.platform[0]:e.key]=s.state}
  return v}
-// Battery, signal (a dot coloured by LQI as on the map: ≥ 150, ≥ 80, below)
-// and on the page last seen and power source.
-function netLine(id,f){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.s<20;
- return el("div",{class:"row mut acts",id:"n-"+id},v.s!=null||v.b!=null?el("span",{class:lo?"warn":null},"🔋"+(v.s!=null?" "+Math.round(v.s)+" %":"")+(lo?" low":"")):"",
-  el("span",{class:"dot "+(q>=150?"on":q>=80?"wait":"")}),"LQI "+(q??"–")+(v.rssi!=null?" · RSSI "+v.rssi+" dBm":"")+(f?" · seen "+ago(v.t)+" · "+d.power:""))}
+// Battery, signal (a dot coloured by LQI as on the map: ≥ 150, ≥ 80, below),
+// last seen and power source: under the card's title, on the page under the
+// device's facts; a line that wraps between its items only.
+function netLine(id){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.s<20,b=v.s!=null||v.b!=null,n=s=>s.replace(/ /g,"\xa0");
+ return el("div",{class:"mut acts",id:"n-"+id},b?el("span",{class:lo?"warn":null},n("🔋"+(v.s!=null?" "+Math.round(v.s)+" %":"")+(lo?" low":""))):"",b?" · ":"",
+  el("span",{class:"dot "+(q>=150?"on":q>=80?"wait":"")})," "+[n("LQI "+(q??"–")),v.rssi!=null&&n("RSSI "+v.rssi+" dBm"),n("seen "+ago(v.t)),d.power].filter(Boolean).join(" · "))}
 // The definition (vendor and model, else its id) and its source, over the
 // generic layer; partial (17.2): the catalog could not translate all of
 // it, generic support gives the rest.
@@ -402,18 +419,18 @@ function devCard(id,f){
  const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),c=[];let ul,k;
  for(const e of dEnts(id))if(f||onCard(e)){if(!ul||f&&eg(e)!==k){k=eg(e);c.push(f?el("h3",{class:"gh"},["Sensors","Controls","Events","Configuration","Diagnostic"][k]):"",ul=el("ul",{class:"ents"}))}ul.append(entRow(e))}
  return el("article",{class:"card dev",id:"d-"+id,onclick:f?null:x=>{x=x.target;if(!x.closest("button,input,select")){sy=scrollY;if(!x.closest("a"))location.hash=h}}},
-  el("div",{class:"top"},f?el("button",{"aria-label":"Back",onclick:()=>sy!=null?history.back():location.hash="#/devices"},"←"):"",pic(d),f?el("b",{},d.name||id):el("a",{href:h},el("b",{},d.name||id)),...bdg(d)),...f?[
+  el("div",{class:"top"},f?el("button",{"aria-label":"Back",onclick:()=>sy!=null?history.back():location.hash="#/devices"},"←"):"",pic(d),f?el("b",{},d.name||id):el("a",{href:h},el("b",{},d.name||id)),...bdg(d)),f?"":netLine(id),...f?[
    // Definition vendor/model (white label first), then the device's own Basic model ID.
    el("div",{class:"mut"},[d.manufacturer,d.model,d.model_id&&d.model_id!=d.model?"("+d.model_id+")":""].filter(Boolean).join(" · ")||"unknown model"),
    el("div",{class:"mut"},(d.ieee||d.src_id||d.id)+(d.nwk!=null?" · NWK "+hex(d.nwk,4):"")),defLn(d),
-   netLine(id,f),el("div",{class:"row acts"},
+   netLine(id),el("div",{class:"row acts"},
    bt("Rename",()=>{const n=prompt("Device name",d.name||"");return n!=null?act("devices/update",{device:id,name:n.trim()}):Promise.resolve()}),
    bt("Re-interview",()=>act("devices/reinterview",{device:id})),
    gn(d)?bt("Find definition",async()=>findDef(id)):"",
    d.ieee?bt("Bindings",()=>{bOpen.delete(id)||bOpen.add(id);return gEps().then(()=>renderDev(id))}):"",
    d.ieee?bt("Reporting",async()=>{rOpen.delete(id)||rOpen.add(id);renderDev(id)}):"",
    bt("Remove",()=>confirm("Remove "+(d.name||id)+" from the network?")?act("devices/remove",{device:id}):Promise.resolve(),"d"))]:[],
-  ...c,f?"":netLine(id),f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
+  ...c,f&&bOpen.has(id)?bindPanel(id):"",f&&rOpen.has(id)?rp||repPanel(id):"");
 }
 onTab.devices=()=>{const p=pgId(),o=pgOn;pgOn=p;renderAll();if(p!=o)scrollTo(0,p?0:sy)};
 // Events: the last one and when (the state is its time), — before any.
@@ -483,7 +500,7 @@ function repPanel(id,read,data){const box=el("div",{id:"rp-"+id,class:"rp"},el("
 // or the facts (page) follow every state.
 function renderEnt(e){const o=document.getElementById("e-"+e.uid),n=document.getElementById("n-"+e.device),p=pgId();
  if(o)keep(o,()=>entRow(e));else if(p||onCard(e))renderDev(e.device);
- if(n){const x=netLine(e.device,p);if(x.textContent!=n.textContent)n.replaceWith(x)}}
+ if(n){const x=netLine(e.device);if(x.textContent!=n.textContent)n.replaceWith(x)}}
 setInterval(()=>{if(authed)for(const id in devs){const c=document.getElementById("d-"+id);if(c&&!c.contains(document.activeElement))renderDev(id)}},30000);
 // ── Views: map and settings (API 1.2, device-support 14.6) ──
 const has=f=>(hub.maintenance||[]).includes(f);
