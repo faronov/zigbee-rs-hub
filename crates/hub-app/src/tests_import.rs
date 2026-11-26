@@ -1076,3 +1076,81 @@ fn imports_beyond_the_limits_are_refused() {
     );
     rig.finish();
 }
+
+/// The NCP's child entry for `ieee`: its capability (EZSP: 0x8C rx-on,
+/// 0x80 sleepy), or `None` without one.
+fn ncp_child(rig: &Rig, ieee: u64) -> Option<u8> {
+    if let Some(z) = &rig.zsim {
+        return z.with(|s| {
+            s.table_devices
+                .iter()
+                .find(|d| d.0 == ieee.to_le_bytes())
+                .and_then(|d| d.2)
+        });
+    }
+    rig.ezsp.as_ref().unwrap().ncp(|n| {
+        n.config()
+            .children
+            .iter()
+            .find(|c| c.eui64 == Eui64::from_u64(ieee))
+            .map(|c| {
+                if c.node_type.0 == hub_ezsp::ezsp::NodeType::END_DEVICE.0 {
+                    0x8C
+                } else {
+                    0x80
+                }
+            })
+    })
+}
+
+/// A router that joined through the coordinator, written with
+/// `is_child: true` (zigbee-rs-hub 0.4.0 and earlier, Z-Stack files), is
+/// restored without a child entry when it is known to be a router: by the
+/// import document's device type, and on `network/restore` by the
+/// registry. Restored as a sleepy child, its frames would wait for polls it
+/// never sends. End devices stay children.
+#[test]
+fn a_router_marked_as_a_child_is_not_restored_as_one() {
+    const SENSOR: u64 = 0x5A52_5300_0000_0002;
+    for kind in BOTH {
+        let mut rig = rig(kind);
+        rig.devices(vec![plug()], Arc::new(Mutex::new(Vec::new())));
+        let (sid, rx) = session(&rig.app);
+        wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+        let mut doc = document(sim_ieee(kind));
+        doc["network"]["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"nwk_address": "5a02", "ieee_address": "5a52530000000002", "is_child": true}));
+        let net = doc["network"].clone();
+
+        // The import: the plug's `type: "router"` wins over `is_child`.
+        let r = call(
+            &rig.app,
+            sid,
+            &rx,
+            1,
+            json!({"type": "network/import", "document": doc, "force": true, "confirm": true}),
+        );
+        assert_eq!(ok(&r)["network"]["children"], 1, "{kind:?}: {r}");
+        assert_eq!(ncp_child(&rig, PLUG), None, "{kind:?}: the router");
+        assert_eq!(ncp_child(&rig, SENSOR), Some(0x80), "{kind:?}: the end device");
+        wait("the imported network owned", || {
+            info(&rig.app, sid, &rx)["registry"]["state"] == "owned"
+        });
+
+        // A 0.4.0-style backup of the same network, restored: the registry
+        // knows the plug as a router.
+        let r = call(
+            &rig.app,
+            sid,
+            &rx,
+            2,
+            json!({"type": "network/restore", "backup": net, "force": true}),
+        );
+        assert_eq!(ok(&r)["children"], 1, "{kind:?}: {r}");
+        assert_eq!(ncp_child(&rig, PLUG), None, "{kind:?}: the router");
+        assert_eq!(ncp_child(&rig, SENSOR), Some(0x80), "{kind:?}: the end device");
+        rig.finish();
+    }
+}

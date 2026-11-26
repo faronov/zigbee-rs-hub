@@ -276,6 +276,9 @@ impl Stage {
                             ));
                             continue;
                         }
+                        if d.fp.logical_type == Some(hub_devices::zdo::LogicalType::Router) {
+                            self.restore.routers.insert(d.ieee.to_le_bytes());
+                        }
                         let p = preview(&d);
                         self.counts.add(p.action);
                         rows.push(migrate::row(&d, &p));
@@ -424,9 +427,13 @@ impl Admin {
             }
             return vec![frame(id, Ok(r))];
         }
-        let Some(stage) = self.import_stage.take() else {
+        let Some(mut stage) = self.import_stage.take() else {
             return fail(bad("no import staged"));
         };
+        // Every device type is known now: write the network devices.
+        if let Err(e) = stage.restore.flush_devices() {
+            return fail(bad(e));
+        }
         if dry_run {
             self.import_preview(ctx, sid, id, *stage, rows, same, may_restore)
         } else {
@@ -451,7 +458,15 @@ impl Admin {
             .net
             .restore_encoder()
             .map_err(|e| ncp_error("import", e))?;
-        let restore = ocb::to_restore(network, encoder)
+        // The device items wait for the document's device types (later
+        // requests may carry them): a router gets no child entry, whatever
+        // the network part's `is_child` says. The registry's routers count
+        // too.
+        let policy = ocb::DevicePolicy {
+            routers: super::known_routers(&(ctx.known)()),
+            defer: true,
+        };
+        let restore = ocb::to_restore(network, encoder, policy)
             .map_err(|e| ApiError::new("invalid_value", format!("network: {e}")))?;
         let mut addresses = Vec::new();
         let nd = network.get("devices").cloned().unwrap_or(J::Null);

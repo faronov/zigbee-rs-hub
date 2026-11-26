@@ -208,7 +208,7 @@ pub(crate) mod tests {
                 hub_coord::RestoreBlob::default()
             }
         }
-        let r = hub_app::ocb::to_restore(&o, Box::new(Keep)).unwrap();
+        let r = hub_app::ocb::to_restore(&o, Box::new(Keep), hub_app::ocb::DevicePolicy::default()).unwrap();
         assert_eq!((r.pan_id, r.channel, r.devices.len()), (0x0F3A, 20, 2));
         assert!(r.tclk_counter_known);
         // OCB passes through.
