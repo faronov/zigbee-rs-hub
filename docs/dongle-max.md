@@ -203,14 +203,32 @@ rollback: its `esp_ota_ops` carries the error strings that every build has
 (e.g. "OTA image has invalid magic byte") but not the one only a rollback
 build has ("Running app has not confirmed state"). The bootloader comes
 from the same ESP-IDF v5.2.1 build, so it very likely has no rollback
-either (its log is silent; **to verify**). An image installed through the
-web console is therefore selected for good: an image that does not start
-cannot fall back to SONOFF's, and recovery needs USB (SONOFF Dongle
-Flasher, or esprom with the backup). The hub's sdkconfig has no rollback
+either (its log is silent; **to verify**). An image that starts and then
+fails is therefore not reverted, and recovery needs USB (SONOFF Dongle
+Flasher, or esprom with the backup). An image the bootloader finds
+**invalid** at boot (an interrupted write: bad checksum or hash) is a
+different case: the bootloader skips it and boots the other slot. The hub's sdkconfig has no rollback
 either, so the entries it writes (`stock confirm`, self-update) are
 "undefined", which every bootloader boots and never reverts; it still
 confirms itself once its core runs (`esp_ota_mark_app_valid_cancel_rollback`),
 which only matters if a rollback bootloader ever put it on trial.
+
+**A hub image that fails to boot while SONOFF's firmware is in `ota_0`
+loses the hub's data** (found on the lab unit, 2026-11-26, main
+d179c4c). After a USB or web-console install, `ota_0` still holds
+SONOFF's application. If the image in `ota_1` does not boot (e.g. an
+interrupted USB write), the bootloader starts SONOFF's firmware, which
+reformats the `files` partition, the hub's data region since the claim:
+the hub's devices, names, automations and settings are gone. The Zigbee
+network stays in the MG24, so once a hub image runs again the devices
+come back through the NCP import, without their names. So:
+
+- **before updating over USB, download a hub backup** (Settings ›
+  Backup), and write the app before the `otadata` sector as above;
+- after a hub self-update (`ota_0` replaced by a hub image) the fallback
+  is the previous hub image instead, which keeps the region;
+- after such a reformat the claim can be refused (fix in progress): the
+  hub then runs with its data in RAM only (banner).
 
 ### Self-update
 

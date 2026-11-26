@@ -71,7 +71,8 @@ install instructions and the list of merged pull requests. A pre-release
   child or neighbor entries (kept until the device ages out) do not bring
   them back. A removed device that joins or announces itself again is
   added as before. Forming, resetting or restoring the network forgets
-  them. (Hardware check pending.)
+  them. Checked on hardware: a force-removed sensor stayed removed after
+  an NCP hard reset and a hub reboot.
 - **Find definition no longer says "the catalog has no definition" for a
   definition the firmware cannot run.** Catalog definitions that need a
   feature the hub lacks (a vendor template, e.g. every Tuya TS011F plug
@@ -155,6 +156,15 @@ install instructions and the list of merged pull requests. A pre-release
   RAM only (a banner says so). Not offered by the web flasher (its erase
   option would wipe SONOFF's firmware): use SONOFF's web console or
   esptool with the two USB parts, after the otadata check.
+- SONOFF Dongle Max, while SONOFF's firmware is still in `ota_0` (USB or
+  web-console install): a hub image in `ota_1` that fails to boot (e.g. an
+  interrupted USB write) makes the bootloader start SONOFF's firmware,
+  which reformats the `files` partition. The hub's devices, names,
+  automations and settings are lost (the Zigbee network stays in the MG24
+  and the devices come back through the NCP import, unnamed). Download a
+  hub backup (Settings › Backup) before updating over USB; after a hub
+  self-update the fallback is the previous hub image. Re-claiming after
+  such a reformat can be refused (fix in progress).
 
 ## 0.3.0
 
