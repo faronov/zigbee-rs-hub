@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine as _;
 use hub_devices::api::ApiExtension;
 use hub_devices::bankcat::{StoreCatalog, fingerprint_keys};
-use hub_devices::device::{Device, InterviewStep, Millis, REFUSED_RECHECK, Refused};
+use hub_devices::device::{Device, InterviewStep, Millis, Refused};
 use hub_devices::hub::{ApiError, Hub};
 use hub_devices::model::LayerSource;
 use hub_devices::transport::ZigbeeTransport;
@@ -204,12 +204,13 @@ fn shard_targets<'a, T: ZigbeeTransport>(
 }
 
 /// A device that ran into definitions this firmware cannot run (or, after
-/// an update, can run some now: [`REFUSED_RECHECK`]) is checked again
+/// an update, can run some now: [`Device::refused_recheck`], which only a
+/// check of all its shards clears) is checked again
 /// under a newer catalog until every one of its shards is (a shard
 /// uploaded for another device checks only that shard), so `missing`
 /// lists it (`recheck`) also while it has a definition.
 fn recheck(store: &CatalogStore, d: &Device, version: u64) -> bool {
-    (d.refused_version == REFUSED_RECHECK || !d.refused.is_empty()) && !unchecked(store, d, version).is_empty()
+    (d.refused_recheck || !d.refused.is_empty()) && !unchecked(store, d, version).is_empty()
 }
 
 /// [`Device::refused_better`] as messages (`catalog/status` `missing`,

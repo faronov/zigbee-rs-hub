@@ -151,6 +151,7 @@ fn sml001_snapshot() -> DeviceSnapshot {
         refused: vec![],
         refused_version: 0,
         refused_checked: vec![],
+        refused_recheck: false,
     }
 }
 
@@ -629,6 +630,89 @@ fn a_shard_of_another_device_does_not_end_a_recheck() {
     }
     assert_eq!(missing(905), json!([]));
     assert_eq!(approx(906), plug_3);
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// After a firmware update that gained what a refused definition needs,
+/// the device is restored without it and to be checked again on all its
+/// shards: a shard checked for another device sharing it (A, same
+/// manufacturer) must not end that. P (TS011F, version 69) runs
+/// TS011F_plug_1 with TS011F_plug_3 refused (d9); the saved refusal is
+/// made to need a feature this build has (the update), and the newer
+/// catalog's plug_3 runs. After A's shared shard alone P stays listed with
+/// its own shard, and after that one it resolves to TS011F_plug_3.
+#[test]
+fn an_update_recheck_survives_a_shared_shard() {
+    let any = "zdef: 1\nid: test/zzzzzzzz_switch\nrevision: 1\nvendor: Tuya\nmodel: TS0001_test\nmatch: [{manufacturer: _TZ3000_zzzzzzzz}]\n";
+    let release = |serial: u16, edit: fn(&str) -> String| {
+        let mut items: Vec<Item> =
+            ["ts011f_plug_1", "ts011f_plug_3"].iter().map(|n| Item::new(n, ts011f_fixture(n, edit)).unwrap()).collect();
+        items.push(Item::new("any", zdefc::compile_str(any, zdefc::Format::Yaml, &Default::default()).unwrap().cbor).unwrap());
+        release_of(items, serial)
+    };
+    let (v1, v2) = (release(1, |s| s.to_string()), release(2, without_templates));
+    let (p, a) = (
+        tuya_device(0xa4c1380000000031, "_TZ3000_zzzzzzzz", "TS011F", 69, 1),
+        tuya_device(0xa4c1380000000032, "_TZ3000_zzzzzzzz", "TS0001", 69, 1),
+    );
+    let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    for s in [&p, &a] {
+        r.ncp.with_store(|st| st.kv_put(&format!("dev/{}", s.id), &s.to_bytes())).unwrap();
+    }
+    let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+    let shards = |e: &J| e["shards"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).collect::<Vec<_>>();
+    let entry = |m: &J, dev: &str| m.as_array().unwrap().iter().find(|e| e["device"] == dev).cloned();
+    // Catalog 1, every shard of both: P on TS011F_plug_1, plug_3 refused.
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    upload(&app, sid, &rx, &mut id, "manifest", &v1["manifest.cose"], 0, json!({}));
+    let st = call(&app, sid, &rx, 900, json!({"type": "catalog/status"}));
+    let mut all: Vec<u64> = st["result"]["missing"].as_array().unwrap().iter().flat_map(&shards).collect();
+    all.sort();
+    all.dedup();
+    for n in all {
+        upload(&app, sid, &rx, &mut id, "shard", &v1[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+    }
+    let d = call(&app, sid, &rx, 901, json!({"type": "devices/get", "device": p.id}))["result"].clone();
+    assert_eq!(d["definition_approximate"]["better"], "tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", "{d}");
+    app.shutdown();
+    // The update: the saved refusal needs a feature this build has.
+    let key = format!("dev/{}", p.id);
+    let mut snap = DeviceSnapshot::from_bytes(&r.ncp.with_store(|s| s.kv_get(&key).unwrap().to_vec())).unwrap();
+    assert!(!snap.refused.is_empty());
+    for x in &mut snap.refused {
+        x.requires = vec!["tuya".into()];
+    }
+    r.ncp.with_store(|s| s.kv_put(&key, &snap.to_bytes())).unwrap();
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    upload(&app, sid, &rx, &mut id, "manifest", &v2["manifest.cose"], 0, json!({}));
+    let st = call(&app, sid, &rx, 902, json!({"type": "catalog/status"}));
+    let m = st["result"]["missing"].clone();
+    let ep = entry(&m, &p.id).expect("P to be checked again");
+    assert!(entry(&m, &a.id).is_none(), "{m}");
+    let sp = shards(&ep);
+    // A's shard: the one of the manufacturer key, shared with P.
+    let shared = zdef::bank::shard_of(zdef::matching::IndexKey::Manufacturer("_TZ3000_zzzzzzzz").hash()) as u64;
+    assert!(ep["recheck"] == true && sp.contains(&shared) && sp.len() > 1, "{m}");
+    upload(&app, sid, &rx, &mut id, "shard", &v2[&format!("shard-{shared:02x}.cbor")], 0, json!({"shard": shared}));
+    let st = call(&app, sid, &rx, 903, json!({"type": "catalog/status"}));
+    let m = st["result"]["missing"].clone();
+    let ep = entry(&m, &p.id).expect("P still to be checked");
+    let rest: Vec<u64> = sp.iter().copied().filter(|n| *n != shared).collect();
+    assert_eq!(shards(&ep), rest, "{m}");
+    for n in rest {
+        upload(&app, sid, &rx, &mut id, "shard", &v2[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+    }
+    let l = call(&app, sid, &rx, 904, json!({"type": "devices/get", "device": p.id}))["result"]["resolution"]["layers"]
+        .clone();
+    assert_eq!(l.as_array().unwrap().last().unwrap()["id"], "tuya/ts011f_plug_3", "{l}");
+    let st = call(&app, sid, &rx, 905, json!({"type": "catalog/status"}));
+    assert_eq!(st["result"]["missing"], json!([]), "{st}");
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

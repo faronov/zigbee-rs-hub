@@ -457,7 +457,24 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
         ["future/x"]
     );
     assert_eq!(
-        (d.refused_version, d.refused_checked.len()),
-        (crate::device::REFUSED_RECHECK, 0)
+        (
+            d.refused_version,
+            d.refused_checked.len(),
+            d.refused_recheck
+        ),
+        (0, 0, true)
     );
+    // The flag stays until every shard of the device is checked (a shard
+    // checked for another device sharing it does not end the recheck).
+    newer.note_refused(ID, 9, 0x10, &both, true, vec![]);
+    assert!(newer.device(ID).unwrap().refused_recheck);
+    newer.note_refused(ID, 9, 0x20, &both, true, vec![]);
+    assert!(!newer.device(ID).unwrap().refused_recheck);
+    // A new fingerprint (re-interview): no shard counts as checked.
+    assert_eq!(hub.device(ID).unwrap().refused_checked, [0x20]);
+    hub.device_mut(ID).unwrap().fp.app_version = Some(70);
+    hub.resolve_device(ID, T0 + 1);
+    let d = hub.device(ID).unwrap();
+    assert_eq!((d.refused_version, d.refused_checked.len()), (0, 0));
+    assert_eq!(d.refused.len(), 1, "what was found stays until checked");
 }

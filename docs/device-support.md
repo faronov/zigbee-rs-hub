@@ -1646,7 +1646,10 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   definition (the web UI does not count those as "without definition").
   `missing` lists a device's shards not yet checked under the installed
   catalog (a generic device whose shards are all checked stays listed,
-  without shards); `definitions/fetch` lists all of them. `missing`,
+  without shards; a new fingerprint, after a re-interview, has none
+  checked); `definitions/fetch` lists all of them. The recheck after a
+  firmware update is a flag of its own in the record, cleared only once
+  every shard of the device is checked. `missing`,
   `definitions/fetch` and `devices/diagnostics` (`catalog_refused`) list
   those that would be chosen over its current definition (all of them
   while it is generic only; none while a definition is pinned); when the
