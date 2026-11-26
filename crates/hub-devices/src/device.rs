@@ -364,6 +364,11 @@ pub struct Device {
     pub interview: InterviewStep,
     /// The interview could not complete some step.
     pub interview_partial: bool,
+    /// Partial interviews resumed on a rejoin this run (at most
+    /// `INTERVIEW_RESUMES` in `hub.rs`); not persisted.
+    pub interview_resumes: u8,
+    /// The next resumption is not before this time; not persisted.
+    pub interview_resume_at: Millis,
     /// Attribute knowledge.
     pub attrs: AttrCache,
     /// Current resolution.
@@ -470,6 +475,8 @@ impl Device {
             active_eps: Vec::new(),
             interview: InterviewStep::NodeDesc,
             interview_partial: false,
+            interview_resumes: 0,
+            interview_resume_at: 0,
             attrs: AttrCache::default(),
             resolution: Resolution::default(),
             entities: Vec::new(),

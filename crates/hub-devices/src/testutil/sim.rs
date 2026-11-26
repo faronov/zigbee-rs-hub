@@ -40,6 +40,9 @@ pub struct SimDevice {
     pub tuya_rx: Vec<(u8, Vec<u8>)>,
     /// Answers at all.
     pub responsive: bool,
+    /// ZDO requests (by cluster) it answers with status NOT_SUPPORTED: an
+    /// interview step that fails at once.
+    pub zdo_failing: BTreeSet<u16>,
     /// Answer Default Responses for cluster commands with this status.
     pub cmd_status: Status,
     /// Group table `(ep, group)` (Groups cluster).
@@ -84,6 +87,7 @@ impl SimDevice {
             tuya: BTreeMap::new(),
             tuya_rx: Vec::new(),
             responsive: true,
+            zdo_failing: BTreeSet::new(),
             cmd_status: Status::SUCCESS,
             groups: BTreeSet::new(),
             group_capacity: 8,
@@ -232,6 +236,11 @@ impl SimDevice {
         let mut out = Vec::new();
         if req.profile == 0 {
             let tsn = req.payload[0];
+            if self.zdo_failing.contains(&req.cluster) {
+                let mut p = vec![tsn, 0x84];
+                p.extend_from_slice(&self.nwk.to_le_bytes());
+                return vec![self.ind(0, 0, req.cluster | 0x8000, p)];
+            }
             let p = match req.cluster {
                 zdo::cluster::NODE_DESC_REQ => Some((
                     zdo::cluster::NODE_DESC_RSP,
