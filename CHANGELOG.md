@@ -26,6 +26,22 @@ install instructions and the list of merged pull requests. A pre-release
   longer send each interview request twice, and an Active_EP_rsp with an
   error status now makes the interview partial (it was taken as a device
   without endpoints).
+- **Dongle Max: a refused storage claim says why, and the hub's region
+  can be claimed again after SONOFF's firmware reformatted it.** Every
+  refusal of `storage/claim` (and of the first boot's claim) now has a
+  code and a message, in the request's error and in `storage/status`
+  `last` (now `{"code", "message"}`); 0.4.0 refused the claim after such
+  a reformat without a word. That state (the hub's claim recorded in NVS,
+  SONOFF's new file system over the hub's data, the claim's copy of
+  SONOFF's files intact) is shown as `reformatted` in `storage/status`
+  and in the RAM-only banner, and `storage/claim` with `"recover": true`
+  (console `files recover confirm`; Settings › Storage asks for it)
+  claims the region again, keeping the copy of SONOFF's original files
+  for `stock confirm`. The hub restarts with an empty store, takes the
+  MG24's network and imports its devices; the hub backup brings back the
+  rest it holds (`docs/dongle-max.md`, "Recovery after SONOFF's firmware
+  reformatted `files`"). Make the first update a self-update: the
+  bootloader's fallback is then a hub image, not SONOFF's firmware.
 
 ## 0.4.0
 
@@ -185,7 +201,7 @@ install instructions and the list of merged pull requests. A pre-release
   and the devices come back through the NCP import, unnamed). Download a
   hub backup (Settings › Backup) before updating over USB; after a hub
   self-update the fallback is the previous hub image. Re-claiming after
-  such a reformat can be refused (fix in progress).
+  such a reformat is refused without a reason (fixed in 0.4.1: `recover`).
 
 ## 0.3.0
 

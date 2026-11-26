@@ -21,7 +21,17 @@
 //! and a banner of the web UI say why. The claim can then be made by hand
 //! once the cause is gone (console `files claim confirm`, API
 //! `storage/claim` with `"confirm": true`, Settings › Storage): it runs on
-//! its own thread and restarts the hub.
+//! its own thread and restarts the hub. Every refusal of a claim by hand
+//! has a code and a message: the request's error and `storage/status`
+//! `last`.
+//!
+//! **SONOFF's firmware may reformat the claimed region** (the bootloader
+//! starts it from `ota_0` when the hub's image in `ota_1` does not boot):
+//! the hub's data are gone, `stock_copy` stays. With `zrh/files_auto` =
+//! `claimed` the boot names that state (`storage/status` `reformatted`)
+//! and a claim by hand with `"recover": true` (console `files recover
+//! confirm`) makes the region the hub's again, keeping the first claim's
+//! copy of SONOFF's original files (`hub_store::files`, `recover`).
 //!
 //! Once claimed: the host store journal and the catalog in the `hubdata`
 //! area, the Zigbee device OTA image store in `ota_store`; `radio` is
@@ -36,7 +46,7 @@ use std::time::Duration;
 
 use hub_core::layout::dongle_files::{self as layout, Content};
 use hub_devices::hub::ApiError;
-use hub_store::files::{BootAction, Claimed, CopyState, FilesError, FilesRegion, Restored, SLOTS, ScanMethod, Status};
+use hub_store::files::{BootAction, Claimed, CopyState, FilesError, FilesRegion, Need, Restored, SLOTS, ScanMethod, Status};
 use hub_store::{Gated, WriteGate};
 use log::{error, info, warn};
 use serde_json::{Value as J, json};
@@ -48,10 +58,13 @@ const LABEL: &CStr = c"files";
 
 /// A claim or return to stock running now.
 static BUSY: Mutex<Option<&'static str>> = Mutex::new(None);
-/// How the last claim ended (refusals included).
-static LAST: Mutex<Option<String>> = Mutex::new(None);
+/// How the last claim ended (refusals included): code, message.
+static LAST: Mutex<Option<(&'static str, String)>> = Mutex::new(None);
 /// The hub uses the region in this boot.
 static IN_USE: AtomicBool = AtomicBool::new(false);
+/// SONOFF's firmware reformatted the region after the hub's claim (found at
+/// boot).
+static REFORMATTED: AtomicBool = AtomicBool::new(false);
 /// The gate of every window handed to the hub.
 static GATE: std::sync::LazyLock<WriteGate> = std::sync::LazyLock::new(WriteGate::new);
 /// NVS key of the first boot's claim.
@@ -78,10 +91,26 @@ fn auto() -> Option<String> {
     settings::get(AUTO_KEY)
 }
 
+/// The hub claimed the region (and has not given it back since).
+fn claimed_before() -> bool {
+    auto().as_deref() == Some("claimed")
+}
+
+fn set_last(code: &'static str, msg: String) {
+    *LAST.lock().unwrap() = Some((code, msg));
+}
+
 /// Why the hub's data are in RAM (`None`: on the region), for banners.
 pub fn ram_only_reason() -> Option<String> {
     if in_use() {
         return None;
+    }
+    if REFORMATTED.load(Ordering::Relaxed) {
+        return Some(
+            "SONOFF's firmware reformatted the files partition after the hub's claim (the hub's data are gone): \
+             claim it with recover, then restore a backup"
+                .into(),
+        );
     }
     Some(match auto() {
         Some(a) if a.starts_with("refused") => format!("the first boot's claim of SONOFF's files partition was {a}"),
@@ -105,10 +134,11 @@ pub fn boot() -> bool {
         BootAction::Use => true,
         BootAction::Finish => {
             info!("files: finishing the claim (erasing the hub's areas)");
-            match region().and_then(|mut r| r.claim().map_err(|e| e.to_string())) {
+            match region().map_err(|e| ("no_partition", e)).and_then(|mut r| r.claim().map_err(|e| (e.code(), e.to_string()))) {
                 Ok(_) => true,
-                Err(e) => {
-                    error!("files: finishing the claim: {e}");
+                Err((code, msg)) => {
+                    error!("files: finishing the claim: {msg}");
+                    set_last(code, msg);
                     false
                 }
             }
@@ -124,34 +154,47 @@ pub fn boot() -> bool {
             };
             match r.claim() {
                 Ok(c) => {
-                    let text = match c {
-                        Claimed::Now { copied } => format!("claimed; {copied} blocks of SONOFF's data copied"),
-                        Claimed::Already => "claimed already".into(),
-                    };
+                    let text = claimed_text(c);
                     info!("files: {text}");
-                    *LAST.lock().unwrap() = Some(text);
+                    set_last("claimed", text);
                     remember("claimed");
                     true
                 }
                 // A flash error: the next boot tries again.
                 Err(e @ FilesError::Io(_)) => {
                     error!("files: first boot's claim: {e}");
+                    set_last(e.code(), e.to_string());
                     false
                 }
                 Err(e) => {
-                    *LAST.lock().unwrap() = Some(format!("refused: {e}"));
+                    set_last(e.code(), e.to_string());
                     remember(&format!("refused: {e}"));
                     false
                 }
             }
         }
-        BootAction::RamOnly => false,
+        BootAction::RamOnly => {
+            // SONOFF's firmware ran on the claimed region (the hub's image
+            // did not boot): its file system over the hub's data.
+            if st.record.is_none() && claimed_before() {
+                let need = region().and_then(|mut r| r.assess().map_err(|e| e.to_string()));
+                REFORMATTED.store(matches!(need, Ok(Need::Changed { .. })), Ordering::Relaxed);
+            }
+            false
+        }
     };
     IN_USE.store(ready, Ordering::Relaxed);
     if let Some(why) = ram_only_reason() {
         warn!("files: !!! the hub's data stay in RAM, lost at every restart: {why} (`files claim` on the console, Settings › Storage)");
     }
     ready
+}
+
+fn claimed_text(c: Claimed) -> String {
+    match c {
+        Claimed::Now { copied } => format!("claimed; {copied} blocks of SONOFF's data copied"),
+        Claimed::Already => "claimed already".into(),
+    }
 }
 
 fn remember(what: &str) {
@@ -206,26 +249,32 @@ pub fn describe() -> String {
     if let Some(b) = *BUSY.lock().unwrap() {
         s += &format!("running: {b}\r\n");
     }
-    if let Some(l) = LAST.lock().unwrap().as_ref() {
-        s += &format!("last claim: {l}\r\n");
+    if let Some((code, msg)) = LAST.lock().unwrap().as_ref() {
+        s += &format!("last claim: {code}: {msg}\r\n");
     }
     s
 }
 
-/// `files claim`: what the claim would copy, or why it is refused
-/// (reads the whole region).
-pub fn plan() -> String {
+/// `files claim` (`recover`: `files recover`): what the claim would do,
+/// or why it is refused (reads the whole region).
+pub fn plan(recover: bool) -> String {
     let mut r = match region() {
         Ok(r) => r,
         Err(e) => return format!("{e}\r\n"),
     };
+    let checked = r.assess().map_err(FilesError::Io).and_then(|n| hub_store::files::claim_check(n, recover, claimed_before()));
+    if let Err(e) = checked {
+        return format!("refused ({}): {e}\r\n", e.code());
+    }
+    if recover {
+        return "`files recover confirm` makes the region the hub's again, keeping the copy of SONOFF's original files in stock_copy \
+                (SONOFF's new file system and what is left of the hub's data are erased), and restarts\r\n"
+            .into();
+    }
     let st = match r.status() {
         Ok(s) => s,
         Err(e) => return format!("files: {e}\r\n"),
     };
-    if st.ready() {
-        return "the files region is the hub's already\r\n".into();
-    }
     if st.record.is_some() || matches!(st.copy, CopyState::Hub(_)) {
         return format!("{}\r\n`files claim confirm` finishes it.\r\n", st.describe());
     }
@@ -264,42 +313,63 @@ pub fn plan() -> String {
     s
 }
 
-/// Starts the claim on its own thread; the hub restarts when it is done.
-pub fn start_claim() -> Result<(), String> {
-    let st = status()?;
-    if st.ready() {
-        return Err("the files region is the hub's already".into());
-    }
+/// A refused claim by hand: code, message.
+type Refusal = (&'static str, String);
+
+/// Starts the claim (`recover`: of a region SONOFF's firmware reformatted)
+/// on its own thread; the hub restarts when it is done. Every refusal, now
+/// or after the scan, is kept for `storage/status` (`last`).
+pub fn start_claim(recover: bool) -> Result<(), Refusal> {
     {
         let mut busy = BUSY.lock().unwrap();
         if let Some(b) = *busy {
-            return Err(format!("{b} is running"));
+            return Err(refused("busy", format!("{b} is running")));
         }
-        *busy = Some("claim");
+        *busy = Some(if recover { "recovery" } else { "claim" });
     }
-    let spawned = std::thread::Builder::new().name("files-claim".into()).stack_size(8192).spawn(|| {
-        info!("files: claiming");
-        let result = region().and_then(|mut r| r.claim().map_err(|e| e.to_string()));
-        let text = match &result {
-            Ok(Claimed::Now { copied }) => format!("claimed; {copied} blocks of SONOFF's data copied"),
-            Ok(Claimed::Already) => "claimed already".into(),
-            Err(e) => format!("refused: {e}"),
-        };
-        info!("files: {text}");
-        *LAST.lock().unwrap() = Some(text);
-        if result.is_ok() {
-            remember("claimed");
-            info!("files: restarting to use the region");
-            std::thread::sleep(Duration::from_secs(2));
-            crate::restart();
+    let r = spawn_claim(recover);
+    if r.is_err() {
+        *BUSY.lock().unwrap() = None;
+    }
+    r
+}
+
+fn refused(code: &'static str, msg: String) -> Refusal {
+    warn!("files: claim refused: {code}: {msg}");
+    set_last(code, msg.clone());
+    (code, msg)
+}
+
+fn spawn_claim(recover: bool) -> Result<(), Refusal> {
+    let need = region().map_err(|e| refused("no_partition", e))?.assess().map_err(|e| refused("flash_error", format!("flash: {e}")))?;
+    hub_store::files::claim_check(need, recover, claimed_before()).map_err(|e| refused(e.code(), e.to_string()))?;
+    *LAST.lock().unwrap() = None;
+    let spawned = std::thread::Builder::new().name("files-claim".into()).stack_size(8192).spawn(move || {
+        info!("files: claiming{}", if recover { " again, keeping the copy" } else { "" });
+        let result = region().map_err(|e| ("no_partition", e)).and_then(|mut r| {
+            let c = if recover { r.recover() } else { r.claim() };
+            c.map_err(|e| (e.code(), e.to_string()))
+        });
+        match result {
+            Ok(c) => {
+                let text = match c {
+                    Claimed::Now { copied } if recover => format!("claimed again; the copy of SONOFF's data ({copied} blocks) kept"),
+                    c => claimed_text(c),
+                };
+                info!("files: {text}");
+                set_last(if recover { "recovered" } else { "claimed" }, text);
+                remember("claimed");
+                info!("files: restarting to use the region");
+                std::thread::sleep(Duration::from_secs(2));
+                crate::restart();
+            }
+            Err((code, msg)) => {
+                refused(code, msg);
+            }
         }
         *BUSY.lock().unwrap() = None;
     });
-    if let Err(e) = spawned {
-        *BUSY.lock().unwrap() = None;
-        return Err(format!("thread: {e}"));
-    }
-    Ok(())
+    spawned.map(drop).map_err(|e| refused("thread", format!("thread: {e}")))
 }
 
 /// What `stock confirm` does with the region, or why it cannot.
@@ -364,7 +434,8 @@ pub fn status_json() -> J {
     v["first_boot_claim"] = auto().into();
     v["max_blocks"] = SLOTS.into();
     v["busy"] = (*BUSY.lock().unwrap()).into();
-    v["last"] = LAST.lock().unwrap().clone().into();
+    v["reformatted"] = REFORMATTED.load(Ordering::Relaxed).into();
+    v["last"] = LAST.lock().unwrap().as_ref().map_or(J::Null, |(code, msg)| json!({"code": code, "message": msg}));
     v
 }
 
@@ -381,12 +452,19 @@ impl hub_app::RequestHook for StorageHook {
     fn request(&mut self, ty: &str, req: &J) -> Result<J, ApiError> {
         match ty {
             "storage/status" => Ok(status_json()),
-            "storage/claim" if req["confirm"] != J::Bool(true) => Err(ApiError::new(
-                "confirm_required",
-                "Claiming the files partition saves SONOFF's files into it, then makes it the hub's data region and restarts the hub; \
-                 data kept in RAM until now are lost. Send again with \"confirm\": true.",
-            )),
-            "storage/claim" => start_claim().map(|()| json!({"state": "claiming"})).map_err(|e| ApiError::new("refused", e)),
+            "storage/claim" if req["confirm"] != J::Bool(true) => {
+                let (code, msg) = refused(
+                    "confirm_required",
+                    "Claiming the files partition saves SONOFF's files into it, then makes it the hub's data region and restarts the hub; \
+                     data kept in RAM until now are lost. Send again with \"confirm\": true."
+                        .into(),
+                );
+                Err(ApiError::new(code, msg))
+            }
+            "storage/claim" => {
+                let recover = req["recover"] == J::Bool(true);
+                start_claim(recover).map(|()| json!({"state": if recover { "recovering" } else { "claiming" }})).map_err(|(code, msg)| ApiError::new(code, msg))
+            }
             _ => Err(ApiError::new("invalid_format", format!("unknown request {ty}"))),
         }
     }
