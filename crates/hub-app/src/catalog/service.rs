@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine as _;
 use hub_devices::api::ApiExtension;
 use hub_devices::bankcat::{StoreCatalog, fingerprint_keys};
-use hub_devices::device::{Device, InterviewStep, Millis, Refused};
+use hub_devices::device::{Device, InterviewStep, Millis, REFUSED_RECHECK, Refused};
 use hub_devices::hub::{ApiError, Hub};
 use hub_devices::model::LayerSource;
 use hub_devices::transport::ZigbeeTransport;
@@ -154,22 +154,62 @@ fn asset_json(a: &ManifestAsset) -> J {
     obj!({"name": a.name.clone(), "size": a.size, "sha256": hex(&a.sha256)})
 }
 
-/// Devices that need a definition: interviewed, identified, generic only.
-fn generic_only<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &Device> {
-    shard_targets(hub).filter(|d| d.resolution.layers.iter().all(|l| l.source == LayerSource::Generic))
+/// Devices whose shards clients are to fetch, with the shards not checked
+/// yet under catalog `version`: those generic only (listed also once every
+/// shard is checked: they have no definition, `refused` says why), and
+/// those to check again ([`recheck`], with whether it is that).
+fn to_fetch<'a, T: ZigbeeTransport>(
+    hub: &'a Hub<T>,
+    store: &'a CatalogStore,
+    version: u64,
+) -> impl Iterator<Item = (&'a Device, Vec<u8>, bool)> + 'a {
+    shard_targets(hub, store, version).filter_map(move |d| {
+        let generic = d.resolution.layers.iter().all(|l| l.source == LayerSource::Generic);
+        (generic || recheck(store, d, version)).then(|| (d, unchecked(store, d, version), !generic))
+    })
 }
 
-/// Devices an uploaded shard is matched against: those generic only and
-/// those that got their definition from a shard. A device's index keys
-/// span several shards, and a later one may hold a better definition (the
-/// zhc choice for a TS011F with application version 69 is in shard d9, a
-/// white-label match in b0): matching only generic devices kept the first.
-fn shard_targets<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &Device> {
-    hub.devices().filter(|d| {
+/// The device's shards (those the manifest lists) not checked yet under
+/// catalog `version`: all of them under an older one.
+fn unchecked(store: &CatalogStore, d: &Device, version: u64) -> Vec<u8> {
+    let all = shards_of(store, &fingerprint_keys(&d.fp));
+    if d.refused_version != version {
+        return all;
+    }
+    all.into_iter().filter(|n| !d.refused_checked.contains(n)).collect()
+}
+
+/// The version of the installed manifest.
+fn manifest_version(store: &CatalogStore) -> u64 {
+    store.manifest.as_ref().map_or(0, |m| m.version())
+}
+
+/// Devices an uploaded shard is matched against: those generic only, those
+/// that got their definition from a shard, and those to check again
+/// ([`recheck`]). A device's index keys span several shards, and a later
+/// one may hold a better definition (the zhc choice for a TS011F with
+/// application version 69 is in shard d9, a white-label match in b0):
+/// matching only generic devices kept the first.
+fn shard_targets<'a, T: ZigbeeTransport>(
+    hub: &'a Hub<T>,
+    store: &'a CatalogStore,
+    version: u64,
+) -> impl Iterator<Item = &'a Device> + 'a {
+    hub.devices().filter(move |d| {
         d.interview == InterviewStep::Done
             && (d.fp.model_id.is_some() || d.fp.gp.is_some())
-            && d.resolution.layers.iter().all(|l| matches!(l.source, LayerSource::Generic | LayerSource::Fetched))
+            && (d.resolution.layers.iter().all(|l| matches!(l.source, LayerSource::Generic | LayerSource::Fetched))
+                || recheck(store, d, version))
     })
+}
+
+/// A device that ran into definitions this firmware cannot run (or, after
+/// an update, can run some now: [`REFUSED_RECHECK`]) is checked again
+/// under a newer catalog until every one of its shards is (a shard
+/// uploaded for another device checks only that shard), so `missing`
+/// lists it (`recheck`) also while it has a definition.
+fn recheck(store: &CatalogStore, d: &Device, version: u64) -> bool {
+    (d.refused_version == REFUSED_RECHECK || !d.refused.is_empty()) && !unchecked(store, d, version).is_empty()
 }
 
 /// [`Device::refused_better`] as messages (`catalog/status` `missing`,
@@ -178,10 +218,10 @@ fn refused_messages(d: &Device) -> Vec<String> {
     d.refused_better().iter().map(|r| r.message()).collect()
 }
 
-/// A device's entry of `missing` or `definitions/fetch`: the shards that
-/// hold its keys and, once fetched, what matched that it cannot run.
-fn fetch_entry(store: &CatalogStore, d: &Device) -> J {
-    let mut e = obj!({"device": d.id.clone(), "shards": shards_of(store, &fingerprint_keys(&d.fp))});
+/// A device's entry of `missing` or `definitions/fetch`: shards that hold
+/// its keys and, once fetched, what matched that it cannot run.
+fn fetch_entry(d: &Device, shards: Vec<u8>) -> J {
+    let mut e = obj!({"device": d.id.clone(), "shards": shards});
     let why = refused_messages(d);
     if !why.is_empty() {
         e["refused"] = why.into();
@@ -256,13 +296,22 @@ impl CatalogService {
         obj!({"bank": bank.map(asset_json), "web": web.map(asset_json)})
     }
 
-    /// `[{device, shards}]` for devices that resolve to generic only.
+    /// `[{device, shards, refused?, recheck?}]` for devices that resolve
+    /// to generic only or whose refused definitions are to be checked again.
     #[inline(never)]
     fn missing<T: ZigbeeTransport>(&self, hub: &Hub<T>) -> J {
         if self.store.manifest.is_none() {
             return J::Array(Vec::new());
         }
-        generic_only(hub).map(|d| fetch_entry(&self.store, d)).collect()
+        to_fetch(hub, &self.store, manifest_version(&self.store))
+            .map(|(d, shards, again)| {
+                let mut e = fetch_entry(d, shards);
+                if again {
+                    e["recheck"] = true.into();
+                }
+                e
+            })
+            .collect()
     }
 
     /// Announces devices that newly need a definition (event
@@ -272,9 +321,9 @@ impl CatalogService {
         if self.store.manifest.is_none() {
             return;
         }
-        let new: Vec<(String, Vec<u8>)> = generic_only(hub)
-            .filter(|d| !self.announced.contains(&d.id))
-            .map(|d| (d.id.clone(), shards_of(&self.store, &fingerprint_keys(&d.fp))))
+        let new: Vec<(String, Vec<u8>)> = to_fetch(hub, &self.store, manifest_version(&self.store))
+            .filter(|(d, _, _)| !self.announced.contains(&d.id))
+            .map(|(d, shards, _)| (d.id.clone(), shards))
             .collect();
         for (id, shards) in new {
             self.announced.insert(id.clone());
@@ -436,14 +485,9 @@ impl CatalogService {
                     let f = &mut **self.flash.lock().unwrap();
                     self.store.install_manifest(f, writer.len()).map_err(vf)?
                 };
+                // Devices with refused definitions are listed in `missing`
+                // again: the new release's shards decide.
                 self.announced.clear();
-                // The new release's shards decide again.
-                let ids: Vec<String> = hub.devices().filter(|d| !d.diag.refused.is_empty()).map(|d| d.id.clone()).collect();
-                for id in ids {
-                    if let Some(d) = hub.device_mut(&id) {
-                        d.diag.refused.clear();
-                    }
-                }
                 let r = obj!({"version": m.version(), "catalog_date": m.catalog_date, "catalog_serial": m.catalog_serial, "wants": self.wants()});
                 self.event("catalog_manifest", r.clone());
                 Ok(r)
@@ -456,7 +500,7 @@ impl CatalogService {
                     return Err(vf(format!("shard {n:02x}: SHA-256 differs from the installed manifest")));
                 }
                 let bytes = self.flash.lock().unwrap().map(self.store.map.scratch.offset, writer.len());
-                self.install_shard(hub, bytes, req["device"].as_str(), now)
+                self.install_shard(hub, n as u8, bytes, req["device"].as_str(), now)
             }
             Upload::Bank(ins) => {
                 let installed = {
@@ -519,6 +563,7 @@ impl CatalogService {
     fn install_shard<T: ZigbeeTransport>(
         &mut self,
         hub: &mut Hub<T>,
+        number: u8,
         shard: &[u8],
         device: Option<&str>,
         now: Millis,
@@ -533,10 +578,12 @@ impl CatalogService {
                     None,
                 )]
             }
-            None => shard_targets(hub)
+            None => shard_targets(hub, &self.store, manifest_version(&self.store))
                 .map(|d| {
-                    let bar = d.resolution.layers.iter().rev().find(|l| l.source == LayerSource::Fetched);
-                    (d.id.clone(), d.fp.clone(), bar.map(|l| (l.score.unwrap_or(u32::MAX), l.priority)))
+                    let top = d.resolution.layers.iter().rev().find(|l| {
+                        matches!(l.source, LayerSource::Catalog | LayerSource::Fetched | LayerSource::User)
+                    });
+                    (d.id.clone(), d.fp.clone(), top.map(|l| (l.score.unwrap_or(u32::MAX), l.priority)))
                 })
                 .collect(),
         };
@@ -547,19 +594,23 @@ impl CatalogService {
             .devices()
             .flat_map(|d| d.resolution.layers.iter().filter(|l| l.source == LayerSource::Fetched).map(|l| l.id.clone()))
             .collect();
-        // Every stored record by id, loadable or not: a record must not be
-        // appended again with each install of its shard.
-        let mut have: Vec<String> = self
-            .store
-            .local
-            .catalog()
-            .defs
-            .iter()
-            .filter_map(|f| zdef::codec::peek_summary(f.cbor, &Default::default()).ok()?.id)
-            .collect();
+        // The keys every stored definition is found under, loadable or not:
+        // a record adds to them only with keys of its own. A shard record
+        // carries the definition's keys in that shard only (TS011F_plug_1
+        // stored from b0 for `_TZ3000_gjnozsaz` lacked the model key in d9
+        // that every other TS011F is found by).
+        let mut have: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for f in &self.store.local.catalog().defs {
+            if let Some(id) = zdef::codec::peek_summary(f.cbor, &Default::default()).ok().and_then(|s| s.id) {
+                have.entry(id).or_default().extend(&f.keys);
+            }
+        }
         let (mut stored, mut skipped) = (Vec::new(), Vec::new());
-        let mut refused: Vec<(String, Refused)> = Vec::new();
+        let mut refused: BTreeMap<String, Vec<Refused>> = BTreeMap::new();
         let mut affected = BTreeMap::new();
+        // Devices a definition could not be stored for: their shard is not
+        // checked (fetched again).
+        let mut failed: BTreeSet<String> = BTreeSet::new();
         // Decoded whatever features they need, so that a definition this
         // hub cannot run is still matched and named (not silently dropped).
         let every = zdef::HubFeatures(u128::MAX);
@@ -581,7 +632,8 @@ impl CatalogService {
                     bar.is_none_or(|b| (s, d.priority) > b).then_some((id, fp, s))
                 })
                 .collect();
-            if hits.is_empty() || have.contains(&d.id) {
+            let known = have.get(&d.id);
+            if hits.is_empty() || known.is_some_and(|k| rk.iter().all(|h| k.contains(h))) {
                 continue;
             }
             let missing = hub_devices::resolve::missing_features(&d, &hub.features);
@@ -596,6 +648,7 @@ impl CatalogService {
                         .find(|w| w.selects(&zfp))
                         .map_or((&d.vendor, &d.model), |w| (&w.vendor, &w.model));
                     let r = Refused {
+                        shard: number,
                         id: d.id.clone(),
                         vendor: vendor.clone(),
                         model: model.clone(),
@@ -603,7 +656,7 @@ impl CatalogService {
                         score,
                         priority: d.priority,
                     };
-                    refused.push((h.clone(), r));
+                    refused.entry(h.clone()).or_default().push(r);
                 }
                 continue;
             }
@@ -613,19 +666,29 @@ impl CatalogService {
                     .and_then(|s| s.id)
                     .is_some_and(|id| used.contains(&id) || id == d.id)
             };
+            // Stored again with every key it is known under (the newest
+            // record of a definition is the one read).
+            let mut keys: Vec<u64> = known.cloned().unwrap_or_default();
+            keys.extend(&rk);
+            keys.sort_unstable();
+            keys.dedup();
+            keys.truncate(255);
             let r = {
                 let f = &mut **self.flash.lock().unwrap();
-                self.store.local.append(f, &rk, cbor, &keep)
+                self.store.local.append(f, &keys, cbor, &keep)
             };
             match r {
                 Ok(()) => {
                     for (h, _, _) in hits {
                         affected.insert(h.clone(), ());
                     }
-                    have.push(d.id.clone());
+                    have.insert(d.id.clone(), keys);
                     stored.push(d.id);
                 }
-                Err(e) => skipped.push(format!("{}: {e}", d.id)),
+                Err(e) => {
+                    failed.extend(hits.iter().map(|h| h.0.clone()));
+                    skipped.push(format!("{}: {e}", d.id))
+                }
             }
         }
         let fetched = self.store.local.catalog();
@@ -640,12 +703,20 @@ impl CatalogService {
         if !stored.is_empty() {
             info!("catalog: {} fetched definitions stored", stored.len());
         }
-        for (id, r) in refused {
-            if let Some(d) = hub.device_mut(&id) {
-                info!("catalog: {id} matches {}, which this firmware cannot run", r.message());
-                d.diag.refused.retain(|x| x.id != r.id);
-                d.diag.refused.push(r);
+        // Kept with each device whose keys this shard holds, as this shard's
+        // findings (they replace what it found before).
+        let version = manifest_version(&self.store);
+        for (id, fp, _) in &targets {
+            let keys = fingerprint_keys(fp);
+            if !keys.iter().any(|k| zdef::bank::shard_of(*k) == number) {
+                continue;
             }
+            let found = refused.remove(id).unwrap_or_default();
+            for r in &found {
+                info!("catalog: {id} matches {}, which this firmware cannot run", r.message());
+            }
+            let all = shards_of(&self.store, &keys);
+            hub.note_refused(id, version, number, &all, !failed.contains(id), found);
         }
         // Per target device, what it would use if this hub could run it.
         let mut why = serde_json::Map::new();
@@ -705,7 +776,7 @@ impl<T: ZigbeeTransport> ApiExtension<T> for CatalogService {
                 match (hub.device(id), &self.store.manifest) {
                     (None, _) => Err(err("not_found", format!("no device {id}"))),
                     (Some(_), None) => Err(err("not_found", "no catalog manifest installed")),
-                    (Some(d), Some(_)) => Ok(fetch_entry(&self.store, d)),
+                    (Some(d), Some(_)) => Ok(fetch_entry(d, shards_of(&self.store, &fingerprint_keys(&d.fp)))),
                 }
             }
             _ => return None,

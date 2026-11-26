@@ -1174,6 +1174,8 @@ pub struct Definition {
     pub tuya: Option<TuyaFlags>,
     /// GP flags.
     pub gp: Option<GpFlags>,
+    /// Vendor templates by name (17.4).
+    pub templates: Vec<String>,
     /// `mfr` of a fragment.
     pub mfr: Option<u16>,
     /// Source.
@@ -1206,6 +1208,7 @@ impl Definition {
             entities: Vec::new(),
             tuya: None,
             gp: None,
+            templates: Vec::new(),
             mfr: None,
             source,
             content_hash: None,
@@ -1236,6 +1239,9 @@ impl Definition {
         }
         if self.gp.is_some() || self.matches.iter().any(|m| m.gp.is_some()) {
             add("gp");
+        }
+        for t in &self.templates {
+            add(&format!("template.{t}"));
         }
         for e in &self.entities {
             for (_, v) in e.values() {

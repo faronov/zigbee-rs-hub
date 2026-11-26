@@ -176,6 +176,9 @@ pub struct EntityState {
     pub pending: Option<J>,
     /// Auto-reset deadline.
     pub reset_at: Option<Millis>,
+    /// A zero reading held back until then (template
+    /// `tuya_metering_zero_debounce`).
+    pub held: Option<(Millis, Value)>,
     /// Previous event type.
     pub last_event: Option<String>,
     /// Expression errors and map misses.
@@ -216,17 +219,19 @@ pub struct Diagnostics {
     pub configure: BTreeMap<String, String>,
     /// Dropped / counted events.
     pub counters: BTreeMap<String, u64>,
-    /// Catalog definitions that match but need features this hub lacks
-    /// (recorded by the catalog service when it installs a shard; cleared
-    /// with a new manifest).
-    pub refused: Vec<Refused>,
 }
+
+/// [`Device::refused_version`] of a device whose refused definitions this
+/// firmware can run now (set when it is restored after an update that
+/// gained their features): the catalog service checks its shards again.
+/// No catalog has this version (`date << 16 | serial`).
+pub const REFUSED_RECHECK: u64 = 1;
 
 /// A catalog definition a device matches that this hub cannot run: it
 /// requires features (vendor templates, codecs) the firmware lacks, so it
 /// is neither stored nor resolved (3.3), and without this record the device
 /// would just stay generic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Refused {
     /// Definition ID.
     pub id: String,
@@ -240,6 +245,9 @@ pub struct Refused {
     pub score: u32,
     /// Its priority (3.3 ties).
     pub priority: i32,
+    /// The shard it was found in (a shard check replaces that shard's).
+    #[serde(default)]
+    pub shard: u8,
 }
 
 impl Refused {
@@ -402,6 +410,18 @@ pub struct Device {
     pub warnings: Vec<String>,
     /// Diagnostics.
     pub diag: Diagnostics,
+    /// Catalog definitions the device matches that this firmware cannot
+    /// run (they need features it lacks), recorded when the catalog
+    /// service checks a shard for the device; kept with the device.
+    pub refused: Vec<Refused>,
+    /// The catalog version (`date << 16 | serial`) under which
+    /// `refused_checked` were checked (0: never; [`REFUSED_RECHECK`]: to
+    /// check again).
+    pub refused_version: u64,
+    /// The device's shards checked under `refused_version`; `refused`
+    /// holds what each of them found (until a newer catalog checks it
+    /// again, an older catalog's findings stay).
+    pub refused_checked: Vec<u8>,
     /// Tuya sequence number.
     pub tuya_seq: u16,
     /// Tuya last time push, ms.
@@ -472,6 +492,9 @@ impl Device {
             options: BTreeMap::new(),
             warnings: Vec::new(),
             diag: Diagnostics::default(),
+            refused: Vec::new(),
+            refused_version: 0,
+            refused_checked: Vec::new(),
             tuya_seq: 0,
             tuya_time_at: None,
             dedup: VecDeque::new(),
@@ -516,6 +539,9 @@ impl Device {
     /// catalog definition (score, then priority) otherwise, none while a
     /// definition is pinned.
     pub fn refused_better(&self) -> Vec<&Refused> {
+        if self.refused.is_empty() {
+            return Vec::new();
+        }
         let chosen = self.resolution.layers.iter().rev().find(|l| {
             matches!(
                 l.source,
@@ -528,13 +554,45 @@ impl Device {
             Some(l) => Some((l.score.unwrap_or(0), l.priority)),
         };
         let mut v: Vec<&Refused> = self
-            .diag
             .refused
             .iter()
             .filter(|r| bar.is_none_or(|b| (r.score, r.priority) > b))
             .collect();
         v.sort_by_key(|r| std::cmp::Reverse((r.score, r.priority)));
+        // Once per definition (found in several shards).
+        let mut seen: Vec<&str> = Vec::new();
+        v.retain(|r| {
+            let new = !seen.contains(&r.id.as_str());
+            seen.push(&r.id);
+            new
+        });
         v
+    }
+
+    /// The definition the device would use if this firmware had its
+    /// features, while it runs a lower-scoring catalog definition instead
+    /// (`definition_approximate`): the best refused one that outranks its
+    /// catalog or fetched definition. None for a device that is generic
+    /// only (Find definition names those), pinned or on a user definition.
+    pub fn approximate(&self) -> Option<&Refused> {
+        let top = self.resolution.layers.iter().rev().find(|l| {
+            matches!(
+                l.source,
+                LayerSource::Catalog | LayerSource::Fetched | LayerSource::User
+            )
+        })?;
+        if top.source == LayerSource::User {
+            return None;
+        }
+        self.refused_better().into_iter().next()
+    }
+
+    /// [`Self::approximate`] as the API shows it (device record,
+    /// diagnostics).
+    pub fn approximate_json(&self) -> Option<J> {
+        self.approximate().map(|r| {
+            json!({"better": format!("{} ({} {})", r.id, r.vendor, r.model), "needs": r.requires})
+        })
     }
 
     /// Sleepy (RxOnWhenIdle = 0 or `device.sleepy`).
@@ -652,6 +710,9 @@ impl Device {
         // their fields.
         if self.left {
             v["unavailable_reason"] = "left".into();
+        }
+        if let Some(a) = self.approximate_json() {
+            v["definition_approximate"] = a;
         }
         v
     }

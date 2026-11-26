@@ -40,7 +40,8 @@ fn joined() -> (Hub<MockTransport>, Sim) {
     let mut hub = hub_with(&[]);
     let mut cat = MemoryCatalog::default();
     // Generated catalog entries for this plug; `ts011f_plug_3` needs the
-    // `tuya` vendor template, which the hub skips (generic + plug_1 win).
+    // `tuya` vendor template, which the hub skips (generic + plug_1 win);
+    // `ts011f_plug_1` needs `tuya_metering_zero_debounce`, which it has.
     for src in [
         include_str!("fixtures/ts011f_plug_1.yaml"),
         include_str!("fixtures/ts011f_plug_3.yaml"),
@@ -228,5 +229,235 @@ fn stale_failure_of_an_identical_request_spares_its_retry() {
     assert_eq!(
         e.message,
         "not delivered: no route to the device (zb_status 0xD0)"
+    );
+}
+
+fn electrical(sim: &mut Sim, attr: u16, v: i64, ty: ZclType) -> crate::transport::ApsIndication {
+    let tv = if ty == ZclType::I16 {
+        TypedValue::int(ty, v)
+    } else {
+        TypedValue::uint(ty, v as u64)
+    };
+    sim.dev(IEEE).clone().report(1, 0x0b04, None, &[(attr, tv)])
+}
+
+/// Template `tuya_metering_zero_debounce` (zhc
+/// `tuya.fz.TS011F_electrical_measurement`): zero readings wait twice the
+/// minimum reporting interval plus a second (generic power, current and
+/// voltage: 5 s, so 11 s) and only stand if nothing else came; a zero
+/// current also zeroes the power; while off the power is 0 at once.
+#[test]
+fn plug_metering_zero_readings_are_debounced() {
+    let (mut hub, mut sim) = joined();
+    let d = hub.device(ID).unwrap();
+    assert!(d.resolution.metering_zero_debounce);
+    assert!(
+        d.resolution
+            .diagnostics
+            .iter()
+            .any(|x| x.contains("ts011f_plug_3 requires template.tuya"))
+    );
+    let uid = |k: &str| format!("{ID}:1:{k}");
+    let on = sim.dev(IEEE).clone().report(
+        1,
+        0x0006,
+        None,
+        &[(
+            0,
+            TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+        )],
+    );
+    hub.on_aps_indication(on, T0 + 1000);
+    let t = T0 + 10_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 120, ZclType::I16), t);
+    hub.on_aps_indication(electrical(&mut sim, 0x0508, 500, ZclType::U16), t);
+    assert_eq!(state(&hub, &uid("power")), json!(120.0));
+    // A zero power is held back for 11 s ...
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), t + 1000);
+    assert_eq!(state(&hub, &uid("power")), json!(120.0));
+    hub.tick(t + 11_999);
+    assert_eq!(state(&hub, &uid("power")), json!(120.0));
+    hub.tick(t + 12_000);
+    assert_eq!(state(&hub, &uid("power")), json!(0.0));
+    // ... and dropped when another reading comes first.
+    let t = t + 20_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 50, ZclType::I16), t);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), t + 1000);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 60, ZclType::I16), t + 2000);
+    hub.tick(t + 30_000);
+    assert_eq!(state(&hub, &uid("power")), json!(60.0));
+    // A zero current, once due, zeroes the power as well.
+    let t = t + 40_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x0508, 0, ZclType::U16), t);
+    assert_eq!(state(&hub, &uid("current")), json!(500.0));
+    hub.tick(t + 11_000);
+    assert_eq!(
+        (state(&hub, &uid("current")), state(&hub, &uid("power"))),
+        (json!(0.0), json!(0.0))
+    );
+    // Switched off: any Electrical Measurement report sets power 0 at once.
+    let t = t + 20_000;
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 75, ZclType::I16), t);
+    let off = sim.dev(IEEE).clone().report(
+        1,
+        0x0006,
+        None,
+        &[(
+            0,
+            TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(false))),
+        )],
+    );
+    hub.on_aps_indication(off, t + 100);
+    hub.on_aps_indication(electrical(&mut sim, 0x0505, 231, ZclType::U16), t + 200);
+    assert_eq!(
+        (state(&hub, &uid("power")), state(&hub, &uid("voltage"))),
+        (json!(0.0), json!(231.0))
+    );
+}
+
+/// Without the template (a definition that does not ask for it) zeros are
+/// published at once, as before.
+#[test]
+fn zero_readings_without_the_template_are_immediate() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(plug());
+    sim.join(&mut hub, IEEE, T0);
+    assert!(!hub.device(ID).unwrap().resolution.metering_zero_debounce);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 120, ZclType::I16), T0 + 1000);
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), T0 + 2000);
+    assert_eq!(state(&hub, &format!("{ID}:1:power")), json!(0.0));
+}
+
+fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::Refused {
+    crate::device::Refused {
+        id: id.into(),
+        vendor: "Tuya".into(),
+        model: model.into(),
+        requires: vec![requires.into()],
+        score,
+        priority: 0,
+        shard: 0,
+    }
+}
+
+/// `definition_approximate`: the plug runs TS011F_plug_1 while a catalog
+/// definition that outranks it needs a feature this firmware lacks. What a
+/// shard found is replaced only by that shard's next check (a shard checked
+/// for another device does not clear the others'), kept in the snapshot;
+/// a firmware that gained the feature drops it on restore and marks the
+/// device for the catalog service to check again.
+#[test]
+fn approximate_definition_is_recorded_kept_and_rechecked() {
+    let (mut hub, _sim) = joined();
+    let d = hub.device(ID).unwrap();
+    let s = d.resolution.layers.last().unwrap().score.unwrap();
+    assert!(d.record().get("definition_approximate").is_none());
+    let both = [0x10, 0x20];
+    let approx = |hub: &Hub<MockTransport>| {
+        hub.device(ID)
+            .unwrap()
+            .record()
+            .get("definition_approximate")
+            .cloned()
+    };
+    // A lower-scoring refusal is no better: not approximate.
+    hub.note_refused(
+        ID,
+        7,
+        0x10,
+        &both,
+        true,
+        vec![refused("tuya/x", "X", "template.tuya", s)],
+    );
+    assert_eq!(approx(&hub), None);
+    hub.drain_events();
+    let plug_3 = || refused("tuya/ts011f_plug_3", "JR-ZPM03", "template.tuya", s + 10);
+    hub.note_refused(ID, 7, 0x20, &both, true, vec![plug_3()]);
+    assert!(
+        hub.drain_events()
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == ID))
+    );
+    let want = json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.tuya"]});
+    assert_eq!(approx(&hub), Some(want.clone()));
+    assert_eq!(hub.diagnostics(ID).unwrap()["definition_approximate"], want);
+    // A newer catalog: shard 0x10 checked (e.g. for another device sharing
+    // it) replaces only its own findings; plug_3 (0x20) stays.
+    hub.note_refused(
+        ID,
+        8,
+        0x10,
+        &both,
+        true,
+        vec![refused("future/x", "Y", "feature 13", s + 5)],
+    );
+    let d = hub.device(ID).unwrap();
+    let ids = |d: &crate::device::Device| {
+        d.refused
+            .iter()
+            .map(|r| (r.id.clone(), r.shard))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(d),
+        [
+            ("tuya/ts011f_plug_3".to_string(), 0x20),
+            ("future/x".to_string(), 0x10)
+        ]
+    );
+    assert_eq!(
+        (d.refused_version, d.refused_checked.clone()),
+        (8, vec![0x10])
+    );
+    assert_eq!(approx(&hub), Some(want.clone()));
+    // A failed store does not count as checked.
+    hub.note_refused(ID, 8, 0x20, &both, false, vec![plug_3()]);
+    assert_eq!(hub.device(ID).unwrap().refused_checked, [0x10]);
+    hub.note_refused(ID, 8, 0x20, &both, true, vec![plug_3()]);
+    assert_eq!(hub.device(ID).unwrap().refused_checked, [0x10, 0x20]);
+    let snap = hub.snapshot_device(ID).unwrap();
+    let mut snap = crate::persist::DeviceSnapshot::from_bytes(&snap.to_bytes()).unwrap();
+    assert_eq!(
+        (
+            snap.refused.len(),
+            snap.refused_version,
+            snap.refused_checked.clone()
+        ),
+        (2, 8, vec![0x10, 0x20])
+    );
+    // Once every shard of the device is checked, findings of shards no
+    // longer its own go.
+    hub.note_refused(ID, 9, 0x20, &[0x20], true, vec![plug_3()]);
+    assert_eq!(
+        ids(hub.device(ID).unwrap()),
+        [("tuya/ts011f_plug_3".to_string(), 0x20)]
+    );
+    // Saved by a build that named code 22 `feature 22`.
+    let p3 = snap
+        .refused
+        .iter()
+        .position(|r| r.id == "tuya/ts011f_plug_3")
+        .unwrap();
+    snap.refused[p3].requires = vec!["feature 22".into()];
+    // Restored by a firmware without template.tuya: unchanged.
+    let mut same = hub_with(&[]);
+    same.restore_device(snap.clone(), None, T0).unwrap();
+    let d = same.device(ID).unwrap();
+    assert_eq!((d.refused.len(), d.refused_version), (2, 8));
+    assert_eq!(d.refused[p3].requires, ["template.tuya"]);
+    // By one that has it: plug_3 is dropped (to be fetched now), every
+    // shard is checked again.
+    let mut newer = hub_with(&[]);
+    newer.features.push("template.tuya");
+    newer.restore_device(snap, None, T0).unwrap();
+    let d = newer.device(ID).unwrap();
+    assert_eq!(
+        d.refused.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["future/x"]
+    );
+    assert_eq!(
+        (d.refused_version, d.refused_checked.len()),
+        (crate::device::REFUSED_RECHECK, 0)
     );
 }

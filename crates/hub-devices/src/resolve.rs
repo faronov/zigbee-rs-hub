@@ -25,6 +25,7 @@ pub const HUB_FEATURES: &[&str] = &[
     "codec.utf16be_hex",
     "codec.bitmap_flags",
     "match.date_code",
+    "template.tuya_metering_zero_debounce",
 ];
 
 /// A source of definitions (bank + fetched cache, or user uploads). The
@@ -472,6 +473,8 @@ pub struct Resolution {
     pub def_model: Option<String>,
     /// Diagnostics (`definition_skipped: …`).
     pub diagnostics: Vec<String>,
+    /// Template `tuya_metering_zero_debounce` ([`crate::templates`]).
+    pub metering_zero_debounce: bool,
 }
 
 impl Resolution {
@@ -801,6 +804,10 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         if d.gp.is_some() {
             res.gp.clone_from(&d.gp);
         }
+        res.metering_zero_debounce |= d
+            .templates
+            .iter()
+            .any(|t| t == crate::templates::METERING_ZERO_DEBOUNCE);
         if !d.vendor.is_empty() {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());

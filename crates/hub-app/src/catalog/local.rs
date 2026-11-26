@@ -167,14 +167,16 @@ impl LocalDefs {
     }
 
     /// Copies the records `keep` accepts into the other half and makes it
-    /// live.
+    /// live; records superseded by a later one of the same definition
+    /// (stored again under more keys) are dropped.
     #[inline(never)]
     pub fn compact(&mut self, f: &mut dyn DataFlash, keep: &dyn Fn(&Fetched) -> bool) -> io::Result<()> {
         let to = 1 - self.live;
         let base = self.base(to);
         f.erase(base, self.half)?;
         let mut at = HEADER;
-        for d in self.defs.iter().filter(|d| keep(d)) {
+        let gone = FetchedCatalog::superseded(&self.defs);
+        for (d, _) in self.defs.iter().zip(gone).filter(|(d, g)| !g && keep(d)) {
             let r = record(&d.keys, d.cbor)?;
             f.write(base + at, &r)?;
             at += r.len() as u32;
@@ -277,5 +279,27 @@ mod tests {
         let l = LocalDefs::open(&mut f, OFF, SIZE).unwrap();
         assert_eq!(l.live, 0);
         assert_eq!(l.defs()[0].cbor, b"old");
+    }
+
+    /// A definition stored again under more keys supersedes its earlier
+    /// record: compaction drops that one (the catalog reads only the
+    /// newest), records of it with other keys stay.
+    #[test]
+    fn compaction_drops_superseded_records() {
+        use hub_devices::resolve::Catalog as _;
+        let def = |id: &str| {
+            let src = format!("zdef: 1\nid: {id}\nrevision: 1\nvendor: V\nmodel: M\nmatch: [{{model: M}}]\n");
+            zdefc::compile_str(&src, zdefc::Format::Yaml, &Default::default()).unwrap().cbor
+        };
+        let (x, y) = (def("v/x"), def("v/y"));
+        let mut f = MemData::new(OFF + SIZE);
+        let mut l = LocalDefs::open(&mut f, OFF, SIZE).unwrap();
+        for (keys, cbor) in [(&[1u64][..], &x), (&[9][..], &x), (&[1, 2][..], &x), (&[3][..], &y)] {
+            l.append(&mut f, keys, cbor, &keep_all).unwrap();
+        }
+        assert_eq!(l.catalog().all().len(), 3, "x under [9], x under [1, 2], y");
+        l.compact(&mut f, &keep_all).unwrap();
+        let keys: Vec<Vec<u64>> = l.defs().iter().map(|d| d.keys.clone()).collect();
+        assert_eq!(keys, [vec![9], vec![1, 2], vec![3]]);
     }
 }

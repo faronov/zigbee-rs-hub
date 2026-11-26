@@ -2266,6 +2266,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
         }
         let d = self.devices.get_mut(id).unwrap();
+        if d.resolution.metering_zero_debounce {
+            crate::templates::zero_debounce(d, &mut decoded, now);
+        }
         let mut touched = BTreeSet::new();
         for (i, p, v, flags) in decoded {
             if flags.map_miss || flags.expr_error {
@@ -2602,6 +2605,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                 set_value(d, i, None, Value::Bool(false), now);
                 touched.push(d.entities[i].uid.clone());
             }
+        }
+        // Held zero readings (template tuya_metering_zero_debounce).
+        for (i, v) in crate::templates::due(d, now) {
+            set_value(d, i, None, v, now);
+            touched.push(d.entities[i].uid.clone());
         }
         for u in touched {
             self.publish_state(&u);
@@ -3260,6 +3268,52 @@ pub(crate) fn build_dispatch(d: &Device) -> BTreeMap<DKey, Vec<(usize, Option<us
 }
 
 impl<T: ZigbeeTransport> Hub<T> {
+    /// Records what the catalog service found for device `id` in its
+    /// shard `shard` of catalog `version` (9.3): the definitions it matches
+    /// that this firmware cannot run. They replace what that shard found
+    /// before; the other shards' findings stay. `checked`: the shard counts
+    /// as checked under `version` (not when storing a definition for the
+    /// device failed). Once all of `device_shards` are checked, findings of
+    /// other shards (no longer the device's) are dropped. A change emits
+    /// `device_updated` (the record's `definition_approximate`; the
+    /// registry keeps it).
+    pub fn note_refused(
+        &mut self,
+        id: &str,
+        version: u64,
+        shard: u8,
+        device_shards: &[u8],
+        checked: bool,
+        found: Vec<crate::device::Refused>,
+    ) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let old = (
+            d.refused.clone(),
+            d.refused_version,
+            d.refused_checked.clone(),
+        );
+        if d.refused_version != version {
+            d.refused_version = version;
+            d.refused_checked.clear();
+        }
+        d.refused.retain(|r| r.shard != shard);
+        for mut r in found {
+            r.shard = shard;
+            d.refused.push(r);
+        }
+        if checked && !d.refused_checked.contains(&shard) {
+            d.refused_checked.push(shard);
+        }
+        if device_shards.iter().all(|n| d.refused_checked.contains(n)) {
+            d.refused.retain(|r| device_shards.contains(&r.shard));
+        }
+        if (&d.refused, d.refused_version, &d.refused_checked) != (&old.0, old.1, &old.2) {
+            self.emit(HubEvent::DeviceUpdated(id.to_string()));
+        }
+    }
+
     /// Helper for tests and the API: the state message of an entity.
     pub fn state_of(&self, uid: &str) -> Option<J> {
         self.entity(uid).map(|(d, e)| e.state_msg(d.available))
@@ -3274,6 +3328,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             "layers": d.resolution.layers,
             "resolution_diagnostics": d.resolution.diagnostics,
             "catalog_refused": d.refused_better().iter().map(|r| r.message()).collect::<Vec<_>>(),
+            "definition_approximate": d.approximate_json(),
             "configure_hash": d.configure.hash,
             "configure": d.diag.configure,
             "unknown_attributes": d.diag.unknown_attrs.iter().map(|((ep, c, a), v)| json!({"ep": ep, "cluster": format!("0x{c:04x}"), "attr": format!("0x{a:04x}"), "value": v})).collect::<Vec<_>>(),

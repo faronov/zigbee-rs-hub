@@ -591,6 +591,51 @@ let rec;const call=async()=>rec,act=async(t,p)=>{sent=p;return rec};
     /// waits for a manual update (automatic runs of the page skip it). The
     /// Catalog module's code (uploads included) runs in Node against a mock
     /// of the hub's upload rules and a mirror (when Node is installed).
+    /// Device pictures from the device record (`model`: white label first,
+    /// then `definition_model`), Zigbee2MQTT's file names: the Tuya TS011F
+    /// `_TZ3000_gjnozsaz` that hub 0.3.0 kept generic (no definition: the
+    /// generic icon, no request), resolved from the catalog (NEO
+    /// NAS-WR01B.png, then TS011F_plug_1.png), and as the user definition
+    /// of the 0.3.0 workaround (vendor NEO, model NAS-WR01B: one URL).
+    #[test]
+    fn device_pictures_follow_the_resolved_definition() {
+        let page = include_str!("../web/index.html");
+        let line = |p: &str| page.lines().find(|l| l.starts_with(p)).unwrap_or_else(|| panic!("{p}"));
+        let js = format!(
+            "const localStorage={{getItem:()=>null}};\n{}\n{}\n{}\n{}",
+            line("const PICI="),
+            line("const Z2MI="),
+            line("const picL="),
+            r#"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+const I="https://www.zigbee2mqtt.io/images/devices/";
+eq(picL({model:"TS011F",definition_model:null}),[]);
+eq(picL({manufacturer:"NEO",model:"NAS-WR01B",definition_model:"TS011F_plug_1"}),[I+"NAS-WR01B.png",I+"TS011F_plug_1.png"]);
+eq(picL({manufacturer:"NEO",model:"NAS-WR01B",definition_model:"NAS-WR01B"}),[I+"NAS-WR01B.png"]);
+eq(picL({model:"EIGHTREE Socket",definition_model:"TS011F_plug_1"})[0],I+"EIGHTREE-Socket.png");
+"#
+        );
+        assert!(node(&js, ""), "device picture URLs");
+    }
+
+    /// The "approx." badge's text: a TS011F strip on TS011F_plug_1 while
+    /// Zigbee2MQTT's TS011F_3_gang needs template `tuya`; none otherwise.
+    #[test]
+    fn approximate_definition_is_explained() {
+        let page = include_str!("../web/index.html");
+        let apx = page.lines().find(|l| l.starts_with(" apx=")).expect("apx").trim().trim_end_matches(',');
+        let js = format!(
+            "const {apx};\n{}",
+            r#"
+const eq=(a,b)=>{a=JSON.stringify(a);b=JSON.stringify(b);if(a!==b)throw new Error(a+" != "+b)};
+eq(apx({definition_model:"TS011F_plug_1",definition_approximate:{better:"tuya/ts011f_3_gang (Tuya TS011F_3_gang)",needs:["template.tuya"]}}),
+ "Zigbee2MQTT uses tuya/ts011f_3_gang (Tuya TS011F_3_gang), which needs template.tuya; this hub uses TS011F_plug_1 until it is supported");
+eq(apx({definition_model:"TS011F_plug_1"}),"");
+"#
+        );
+        assert!(node(&js, ""), "approximate definition text");
+    }
+
     #[test]
     fn shards_follow_a_newer_catalog_manifest_once() {
         let src = include_str!("../web/ui/catalog.html");

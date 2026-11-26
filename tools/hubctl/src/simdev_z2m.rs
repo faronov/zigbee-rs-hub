@@ -30,12 +30,29 @@ pub const LIGHT: u64 = 0x00158d0001000002;
 pub const PLUG: u64 = 0x00158d0001000003;
 /// The remote (IKEA E2001/E2002, STYRBAR).
 pub const REMOTE: u64 = 0x00158d0001000004;
+/// The Tuya TS011F plug of `--sim-ts011f`.
+pub const TS011F: u64 = 0xa4c1380000000001;
 
 /// What the remote sends, in turn: On/Off toggle, on, Level step up
 /// (with on/off), off.
 const PRESSES: [(u16, u8, &[u8]); 4] = [(0x0006, 0x02, &[]), (0x0006, 0x01, &[]), (0x0008, 0x06, &[0, 43, 5, 0]), (0x0006, 0x00, &[])];
 
-fn devices() -> Vec<SimDevice> {
+/// A Tuya TS011F smart plug with metering, `_TZ3000_gjnozsaz` (white label
+/// NEO NAS-WR01B; zigbee-rs-hub 0.3.0 kept it generic): its definition
+/// comes from the catalog's shards (`hubctl catalog-push`).
+fn ts011f() -> SimDevice {
+    SimDevice::new(TS011F, 0x1005, LogicalType::Router, true, 0x1002)
+        .endpoint(1, 0x0104, 0x0051, &[0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0B04, 0xE000, 0xE001], &[0x000A, 0x0019])
+        .basic("_TZ3000_gjnozsaz", "TS011F", 1)
+        .attr(1, 0x0000, 0x0001, TypedValue::uint(ZclType::U8, 77))
+        .attr(1, 0x0006, 0x0000, TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))))
+        .attr(1, 0x0B04, 0x0505, TypedValue::uint(ZclType::U16, 231))
+        .attr(1, 0x0B04, 0x0508, TypedValue::uint(ZclType::U16, 120))
+        .attr(1, 0x0B04, 0x050B, TypedValue::int(ZclType::I16, 25))
+        .attr(1, 0x0702, 0x0000, TypedValue::uint(ZclType::U48, 1234))
+}
+
+fn devices(with_ts011f: bool) -> Vec<SimDevice> {
     let u16v = |v: u64| TypedValue::uint(ZclType::U16, v);
     let sensor = SimDevice::new(SENSOR, 0x1001, LogicalType::EndDevice, true, 0x115F)
         .endpoint(1, 0x0104, 0x0302, &[0x0000, 0x0001, 0x0003, 0x0402, 0x0405], &[0x0003])
@@ -63,7 +80,11 @@ fn devices() -> Vec<SimDevice> {
         .basic("IKEA of Sweden", "Remote Control N2", 3)
         .attr(1, 0x0001, 0x0020, TypedValue::uint(ZclType::U8, 30))
         .attr(1, 0x0001, 0x0021, TypedValue::uint(ZclType::U8, 174));
-    vec![sensor, light, plug, remote]
+    let mut v = vec![sensor, light, plug, remote];
+    if with_ts011f {
+        v.push(ts011f());
+    }
+    v
 }
 
 fn inject(sim: &SimNcp, i: &ApsIndication) {
@@ -138,7 +159,7 @@ fn after_command(d: &mut SimDevice, req: &ApsRequest) -> Option<ApsIndication> {
 
 /// Forms the network if needed and runs the devices: they join once the
 /// hub application registered its endpoint.
-pub fn start(hub: &Hub, sim: &SimNcp) -> Result<(), String> {
+pub fn start(hub: &Hub, sim: &SimNcp, with_ts011f: bool) -> Result<(), String> {
     if !hub.wait_ready(Duration::from_secs(10)) {
         return Err("simulated NCP not ready".into());
     }
@@ -148,13 +169,13 @@ pub fn start(hub: &Hub, sim: &SimNcp) -> Result<(), String> {
     let sim = sim.clone();
     thread::Builder::new()
         .name("sim-devices".into())
-        .spawn(move || run(sim))
+        .spawn(move || run(sim, with_ts011f))
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn run(sim: SimNcp) {
-    let mut devs = devices();
+fn run(sim: SimNcp, with_ts011f: bool) {
+    let mut devs = devices(with_ts011f);
     // The app registers its endpoint when it starts.
     let t = Instant::now();
     while sim.with(|s| s.endpoints.is_empty()) && t.elapsed() < Duration::from_secs(30) {

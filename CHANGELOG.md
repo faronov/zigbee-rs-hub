@@ -10,6 +10,19 @@ install instructions and the list of merged pull requests. A pre-release
 
 ### Fixes
 
+- **Tuya TS011F plugs get their definition** (`TS011F_plug_1` and its white
+  labels, e.g. NEO NAS-WR01B for `_TZ3000_gjnozsaz`): the hub implements
+  the vendor template `tuya_metering_zero_debounce` they need. As in
+  Zigbee2MQTT, a zero power, current or voltage reading is published only
+  if it stands for about 11 s (spurious zeros are dropped), and power is 0
+  while the plug is off. TS011F devices for which Zigbee2MQTT picks a
+  definition that needs template `tuya` (not implemented yet:
+  `TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) use `TS011F_plug_1`
+  meanwhile, marked **approx.** on the device card and page (the tooltip
+  names Zigbee2MQTT's definition and what it needs; `definition_approximate`
+  in the device record and diagnostics). After
+  the update use Find definition on the device page (or Catalog › Fetch
+  missing definitions) to fetch it.
 - **A removed device stays removed.** A device removed with
   `devices/remove` (with or without `force`) that the coordinator still
   listed came back at the next hub restart or NCP reset, as a partial

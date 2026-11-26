@@ -311,14 +311,17 @@ Precedence rules:
   label MOT-C2Z10 to the model ID `"MOT-C2Z10\0\0…"` but not to
   `"MOT-C2Z10"`, and the interview stores both without the trailing NULs.
   Against the published catalog-2026.11.24 and the vectors of the same
-  definitions commit: 5,733 of 7,574 the same; 1,774 need features and
-  resolve generic only (`template.hue_light` 952, `template.tuya` 608,
-  `template.lumi` 198, `template.tuya_metering_zero_debounce` 16); 67
-  mismatches: 59 where zhc's definition needs `template.tuya` and the hub
-  runs another Tuya definition meanwhile (e.g. `TS0001` for zhc's `WHD02`),
-  and 8 white-label differences (Paulmann software builds and the like,
-  which the generator changes merged after that release address). Every
-  vector that needs features picks zhc's definition with them.
+  definitions commit: 5,749 of 7,574 the same (5,733 before the template
+  `tuya_metering_zero_debounce`); 1,707 need features and resolve generic
+  only (`template.hue_light` 952, `template.tuya` 557, `template.lumi`
+  198); 118 mismatches: 110 where zhc's definition needs `template.tuya`
+  and the hub runs another definition meanwhile — 51 of them TS011F
+  devices (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) that get
+  `TS011F_plug_1`, zhc's `zigbeeModel` definition, 59 other Tuya models
+  (e.g. `TS0001` for zhc's `WHD02`) — and 8 white-label differences
+  (Paulmann software builds and the like, which the generator changes
+  merged after that release address). Every vector that needs features
+  picks zhc's definition with them.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
@@ -345,7 +348,21 @@ Precedence rules:
   chosen over what the device resolves to), and the web UI's Find
   definition says so rather than "no definition". (Hub 0.3.0 kept Tuya
   TS011F plugs generic this way: their zhc definitions need the vendor
-  templates `tuya` and `tuya_metering_zero_debounce`, 17.4.)
+  templates `tuya` and `tuya_metering_zero_debounce`, 17.4. The hub now
+  implements the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
+  resolves; where zhc picks a TS011F definition that needs `tuya`
+  (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays), the hub uses
+  `TS011F_plug_1`, the `zigbeeModel` match, and names the other. Such a
+  fallback is marked: the device record's `definition_approximate`
+  `{better: "<id> (<vendor> <model>)", needs: [features]}` (also in
+  `devices/diagnostics`; the web UI shows an "approx." badge explaining
+  that Zigbee2MQTT uses the other definition, which needs the feature,
+  until it is supported). To
+  replay it: `hubctl --sim --sim-ts011f serve --token T` (a simulated
+  `_TZ3000_gjnozsaz` joins), then `hubctl catalog-push
+  ws://127.0.0.1:8099/api --token T --dir <release>`: the plug becomes NEO
+  NAS-WR01B, `definition_model` TS011F_plug_1, the two pictures the web UI
+  tries.)
 
 ### 3.4 Materialization and stability
 
@@ -387,6 +404,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `model` | definition `model`, else Basic 0x0005 | definition `model`, else "GPD 0x<device id>" | `model` |
 | `model_id` | Basic 0x0005 | `0x<mfr>/0x<model>` | `model_id` |
 | `definition_model` | `model` of the resolved definition (the white label's base model when `model` is a white label); null without a definition | same | — (web UI device pictures: `https://www.zigbee2mqtt.io/images/devices/<model>.png`, `/`, `:`, `'` and space replaced by `-`, tried for `model`, then `definition_model`) |
+| `definition_approximate` | only while the device runs a catalog definition and a better-scoring one it matches needs features this firmware lacks (3.3, 9.3): `{better: "<id> (<vendor> <model>)", needs: [features]}` | same | — (web UI "approx." badge) |
 | `sw_version` / `hw_version` | Basic 0x4000 / 0x0003 | — | `sw_version` / `hw_version` |
 | `name` | user name, else `model` | same | `name` (user-editable in HA) |
 | `via` | the hub | the hub | `via_device` |
@@ -1397,7 +1415,8 @@ without that device class or unit) and is reported in diagnostics.
   `12 match.date_code` (a match clause with `date_code`: hubs before it skip
   the definition instead of matching it without the date),
   `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
-  `23 template.tuya_metering_zero_debounce` (vendor templates, C tier 17.4:
+  `23 template.tuya_metering_zero_debounce` (implemented by the hub after
+  0.3.0) (vendor templates, C tier 17.4:
   `templates: [{name, params}]`, `params` free-form, key 21 at the top
   level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
@@ -1615,11 +1634,28 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   later shard may hold the better definition (hub 0.3.0 kept the first).
   Records that score but need a feature it lacks
   are decoded anyway (all features) to be named: the device keeps them as
-  `refused` (id, vendor, model, missing features, score, priority) until a
-  new manifest is installed, and `missing`, `definitions/fetch` and
-  `devices/diagnostics` (`catalog_refused`) list those that would be chosen
-  over its current definition (all of them while it is generic only; none
-  while a definition is pinned). Uploads survive a dropped connection
+  `refused` (id, white-label vendor and model, missing features, score,
+  priority, the shard it was found in) in its registry record (they
+  survive a restart), with the catalog version and the device's shards
+  checked under it. A shard check replaces that shard's findings only (a
+  shard uploaded for another device that shares a key checks that shard
+  only); a device with refusals is checked again under a newer catalog —
+  and after a restart on a firmware that gained their features, which
+  drops those (what it can run now is fetched) — until every one of its
+  shards is: `missing` lists it with `recheck: true` also while it has a
+  definition (the web UI does not count those as "without definition").
+  `missing` lists a device's shards not yet checked under the installed
+  catalog (a generic device whose shards are all checked stays listed,
+  without shards); `definitions/fetch` lists all of them. `missing`,
+  `definitions/fetch` and `devices/diagnostics` (`catalog_refused`) list
+  those that would be chosen over its current definition (all of them
+  while it is generic only; none while a definition is pinned); when the
+  device runs a catalog definition, the best of them is its record's
+  `definition_approximate`. A definition already stored is stored again
+  when a shard has keys it was not stored under (a shard record carries
+  the definition's keys in that shard only); the new record supersedes the
+  older ones whose keys it has (they are not read, and compaction drops
+  them). Uploads survive a dropped connection
   (`catalog/status` `upload.written`). Shards are checked against the
   *installed* manifest, so after the mirror moved to a newer release a
   client installs its manifest (and what it then `wants`) first: the web
@@ -3455,6 +3491,18 @@ A template is hub code (like a named codec) parametrised by definition data
 
 After that, the coverage report's ranking decides (Ledvance light 105,
 IKEA 89 + 66 are next).
+
+Implemented: **`tuya_metering_zero_debounce`** (`hub-devices`
+`templates.rs`; zhc `tuya.fz.TS011F_electrical_measurement`, used by
+`TS011F_plug_1` — zhc's choice for any TS011F without a more specific
+fingerprint — and `TS011F_with_threshold`; no parameters). A zero power,
+current or voltage reading (Electrical Measurement 0x050B, 0x0508, 0x0505
+on the entity's endpoint) is held for twice the attribute's minimum
+reporting interval plus one second (5 s without a reporting record, so
+11 s) and published only if no other reading of that attribute came
+meanwhile; a held zero current also sets the power to 0 when it is
+published; while the endpoint's On/Off is off, every Electrical
+Measurement report sets the power to 0 at once.
 
 ### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
 

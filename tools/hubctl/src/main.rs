@@ -39,7 +39,7 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices] [--sim-ota] [--sim-unsupported ID,…]) [--store FILE] [--ota-store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices | --sim-ts011f] [--sim-ota] [--sim-unsupported ID,…]) [--store FILE] [--ota-store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
        hubctl --backend ezsp --sim [--sim-devices] [--store FILE] [--ota-store FILE] [-v|-vv] serve …
 commands:
   status                    session, NCP, network, slots, counters (default)
@@ -88,6 +88,9 @@ simulated NCP:
                             the interview and commands and report; the remote
                             presses a button every 10 s (Zigbee2MQTT names,
                             for the MQTT bridge)
+  --sim-ts011f              --sim-z2m-devices and a Tuya TS011F plug
+                            (_TZ3000_gjnozsaz, metering) whose definition is
+                            in the catalog's shards only (catalog-push)
   --sim-ota                 a device with an OTA client (0x6D6B/0x0102,
                             version 0x00010000) joins and queries
   --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.
@@ -913,7 +916,8 @@ fn main() -> ExitCode {
     let sim = args.flag("--sim");
     let demo = args.flag("--sim-demo");
     let sim_devices = args.flag("--sim-devices");
-    let sim_z2m_devices = args.flag("--sim-z2m-devices");
+    let sim_ts011f = args.flag("--sim-ts011f");
+    let sim_z2m_devices = args.flag("--sim-z2m-devices") || sim_ts011f;
     let sim_ota = args.flag("--sim-ota");
     let _ = OTA_STORE.set(args.value("--ota-store"));
     match args.value("--backend").as_deref() {
@@ -1005,7 +1009,7 @@ fn main() -> ExitCode {
     };
     if let Some(sim) = sim_ncp.as_ref().filter(|_| result.is_ok()) {
         if sim_z2m_devices {
-            result = simdev_z2m::start(&hub, sim);
+            result = simdev_z2m::start(&hub, sim, sim_ts011f);
         } else if sim_devices {
             result = simdev::start(&hub, sim);
         }
