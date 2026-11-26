@@ -27,6 +27,7 @@
 //! hundred devices would otherwise need tens of kilobytes of heap on a hub
 //! without PSRAM. Nothing here logs a key.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use hub_coord::{BackupChild, BackupDevice, BackupItem, BackupLinkKey, BackupSink, CoordError, NetworkIdentity, RestoreEncoder};
@@ -59,6 +60,54 @@ pub struct Restore {
     pub channel: u8,
     /// Devices: IEEE (wire order) and NWK address.
     pub devices: Vec<([u8; 8], Option<u16>)>,
+    /// Devices the hub knows to be routers (wire order): restored without a
+    /// child entry whatever `is_child` says (see [`DevicePolicy`]).
+    pub routers: BTreeSet<[u8; 8]>,
+    /// Device items held back until [`Restore::flush_devices`].
+    pending: Option<Vec<BackupDevice>>,
+}
+
+/// How [`to_restore`] places the backup's devices.
+///
+/// OCB has no capability: `is_child` (true when absent) becomes an rx-off
+/// end-device child (capability 0x80, 256 min, spec 9.3). That is wrong
+/// for a router that joined through the coordinator, which zigbee-rs-hub
+/// 0.4.0 and earlier exported as `is_child: true` (a zigbee-rs NCP lists it
+/// as a child): restored as a sleepy child, every unicast to it waits for
+/// a data poll it never sends. A device in `routers` is therefore restored
+/// as a plain device (key and address kept, no child entry); it finds the
+/// coordinator again by Link Status. End devices, rx-on ones included,
+/// stay children.
+#[derive(Debug, Default)]
+pub struct DevicePolicy {
+    /// Routers the hub knows (wire order): the registry's node descriptors
+    /// (`network/restore`), an import document's device types.
+    pub routers: BTreeSet<[u8; 8]>,
+    /// Hold the device items until [`Restore::flush_devices`]: an import's
+    /// device types may come with later requests than its network part.
+    pub defer: bool,
+}
+
+impl Restore {
+    /// Write the held-back device items (no-op without [`DevicePolicy::defer`]
+    /// or when done already). Call before the encoder is finished.
+    pub fn flush_devices(&mut self) -> Result<(), String> {
+        let pending = self.pending.take().unwrap_or_default();
+        for d in pending {
+            let d = place(&self.routers, d);
+            push(&mut *self.encoder, BackupItem::Device(d))?;
+        }
+        Ok(())
+    }
+}
+
+/// A known router keeps no child entry.
+fn place(routers: &BTreeSet<[u8; 8]>, d: BackupDevice) -> BackupDevice {
+    if routers.contains(&d.ieee) {
+        BackupDevice { is_child: false, child: None, ..d }
+    } else {
+        d
+    }
 }
 
 fn unhex(s: &str) -> Result<Vec<u8>, String> {
@@ -117,8 +166,8 @@ fn push(enc: &mut dyn RestoreEncoder, item: BackupItem) -> Result<(), String> {
 /// Validate a backup (OCB JSON value, spec 9.1/9.2) and convert it into
 /// restore items, encoded by `encoder`. `devices` may be absent: a large
 /// backup's devices can follow in batches ([`add_devices`]), so no request
-/// needs the whole file in RAM.
-pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>) -> Result<Restore, String> {
+/// needs the whole file in RAM. `policy` decides the children.
+pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>, policy: DevicePolicy) -> Result<Restore, String> {
     let meta = o.get("metadata").ok_or("not an open coordinator backup (no metadata)")?;
     let (format, version) = (meta.get("format").and_then(J::as_str).unwrap_or(""), uint(meta, "version", 0)?);
     if format != FORMAT || version != 1 {
@@ -163,7 +212,18 @@ pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>) -> Result<Restore, St
         .get("channel_mask")
         .and_then(J::as_array)
         .map_or(0, |a| a.iter().filter_map(J::as_u64).filter(|c| (11..=26).contains(c)).fold(0u32, |m, c| m | 1 << c));
-    let mut r = Restore { encoder, tclk_counter_known: tclk_counter.is_some(), coordinator_ieee: ieee, pan_id, ext_pan_id: epid, key_id: NetworkIdentity::key_id_for(&key), channel, devices: Vec::new() };
+    let mut r = Restore {
+        encoder,
+        tclk_counter_known: tclk_counter.is_some(),
+        coordinator_ieee: ieee,
+        pan_id,
+        ext_pan_id: epid,
+        key_id: NetworkIdentity::key_id_for(&key),
+        channel,
+        devices: Vec::new(),
+        routers: policy.routers,
+        pending: policy.defer.then(Vec::new),
+    };
     push(&mut *r.encoder, BackupItem::Node { ieee, ieee_override: true })?;
     push(
         &mut *r.encoder,
@@ -212,7 +272,8 @@ pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>) -> Result<Restore, St
 }
 
 /// Append a batch of `devices[]` entries (spec 9.1: `nwk_address` may be
-/// null, `is_child` defaults to true).
+/// null, `is_child` defaults to true; a known router is no child,
+/// [`DevicePolicy`]).
 pub fn add_devices(r: &mut Restore, devices: &J) -> Result<(), String> {
     let list = devices.as_array().ok_or("devices: not a list")?;
     for d in list {
@@ -230,17 +291,21 @@ pub fn add_devices(r: &mut Restore, devices: &J) -> Result<(), String> {
             }),
             None => None,
         };
-        push(
-            &mut *r.encoder,
-            BackupItem::Device(BackupDevice {
-                ieee: dev_ieee,
-                nwk,
-                is_child,
-                // OCB has no capability: rx-off end device, 256 min (spec 9.3).
-                child: is_child.then_some(BackupChild { capability: 0x80, timeout_exp: 8 }),
-                link,
-            }),
-        )?;
+        let d = BackupDevice {
+            ieee: dev_ieee,
+            nwk,
+            is_child,
+            // OCB has no capability: rx-off end device, 256 min (spec 9.3).
+            child: is_child.then_some(BackupChild { capability: 0x80, timeout_exp: 8 }),
+            link,
+        };
+        match &mut r.pending {
+            Some(pending) => {
+                pending.try_reserve(1).map_err(|_| "out of memory".to_string())?;
+                pending.push(d);
+            }
+            None => push(&mut *r.encoder, BackupItem::Device(place(&r.routers, d)))?,
+        }
         r.devices.try_reserve(1).map_err(|_| "out of memory".to_string())?;
         r.devices.push((dev_ieee, nwk));
     }
@@ -569,7 +634,7 @@ mod tests {
 
     fn import(o: &J) -> Result<(Restore, Vec<BackupItem>), String> {
         let items = Items::default();
-        let r = to_restore(o, Box::new(items.clone()))?;
+        let r = to_restore(o, Box::new(items.clone()), DevicePolicy::default())?;
         let list = items.0.lock().unwrap().clone();
         Ok((r, list))
     }
@@ -690,6 +755,34 @@ mod tests {
                 link: None,
             }),
         ]
+    }
+
+    #[test]
+    fn deferred_devices_take_router_types_that_come_later() {
+        let mut o: J = serde_json::from_str(ZIGPY).unwrap();
+        let devices = o["devices"].take();
+        let items = Items::default();
+        let policy = DevicePolicy { routers: BTreeSet::new(), defer: true };
+        let mut r = to_restore(&o, Box::new(items.clone()), policy).unwrap();
+        add_devices(&mut r, &devices).unwrap();
+        let is_device = |i: &BackupItem| matches!(i, BackupItem::Device(_));
+        assert!(!items.0.lock().unwrap().iter().any(is_device), "held back");
+        // The first device's type arrives with a later request.
+        let router = r.devices[0].0;
+        r.routers.insert(router);
+        r.flush_devices().unwrap();
+        r.flush_devices().unwrap();
+        let list = items.0.lock().unwrap().clone();
+        let placed: Vec<_> = list
+            .iter()
+            .filter_map(|i| match i {
+                BackupItem::Device(d) => Some(*d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(placed.len(), r.devices.len(), "written once");
+        assert_eq!((placed[0].ieee, placed[0].is_child, placed[0].child), (router, false, None));
+        assert!(placed[1..].iter().all(|d| d.ieee != router));
     }
 
     #[test]

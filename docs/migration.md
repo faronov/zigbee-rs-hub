@@ -117,7 +117,7 @@ ZHA's database schemas v12 to v17 are read (zigpy 0.5x to 2.5, November
 | NWK frame counter | backup + 2²⁰ | backup + 2²⁰ | the files may be days old: a large margin costs nothing in 32 bits |
 | APS (trust center) frame counter | unknown in Z2M's files: + 2²⁰ | backup + 2¹⁶ | |
 | Unique trust center link keys | Z-Stack backups list them; EmberZNet backups carry the hashed root (`stack_specific.ezsp.hashed_tclk`) | bellows: hashed root and key table; zigpy-znp: the key table | per backend below |
-| Children of the coordinator | the backup's `is_child` | the backup's children | restored into the NCP's child table |
+| Children of the coordinator | the backup's `is_child` | the backup's children | restored into the NCP's child table as sleepy end devices (the files have no capability), except devices the document lists as routers (`type`, node descriptor) or the registry knows as routers: those get no child entry |
 | Devices: endpoints, clusters, Basic identity, power source, manufacturer code | `database.db` | `zigbee.db` | the hub resolves the same definitions an interview would |
 | Node descriptor (rx-on, mains) | not kept by Z2M: routers listen, battery end devices sleep | `node_descriptors` | |
 | Cached values the definitions read (colour capabilities, metering and electrical scaling, thermostat limits, battery) | `database.db` cluster caches | `attributes_cache` | |

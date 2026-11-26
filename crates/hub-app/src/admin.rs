@@ -644,6 +644,11 @@ fn failed_with_backup(id: u64, e: ApiError, b: Option<&Backup>, keys_out: bool) 
 /// Export (keys optional) and write the OCB file straight into a result
 /// frame (one buffer, reserved fallibly); complete backups are also kept in
 /// the host store.
+/// The registry's routers (node descriptor), wire-order IEEEs.
+pub(crate) fn known_routers(known: &[Known]) -> std::collections::BTreeSet<[u8; 8]> {
+    known.iter().filter(|k| k.router).map(|k| k.ieee.to_le_bytes()).collect()
+}
+
 fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Known], source: &str, now_s: f64, id: u64) -> Result<Backup, ApiError> {
     let mut export = ocb::Export::default();
     net.backup_export(keys, &mut export).map_err(|e| ncp_error("backup export", e))?;
@@ -1290,7 +1295,10 @@ impl Admin {
                 Ok(e) => e,
                 Err(e) => return fail(ncp_error("restore", e)),
             };
-            match ocb::to_restore(b, encoder) {
+            // Routers the registry knows (node descriptor) get no child
+            // entry, whatever an older backup's `is_child` says.
+            let policy = ocb::DevicePolicy { routers: known_routers(&(ctx.known)()), defer: false };
+            match ocb::to_restore(b, encoder, policy) {
                 Ok(restore) => self.staged = Some(Staged { restore, groups, allow_ieee_change, ieee_write_once, force, confirm, skip_backup }),
                 Err(e) => return fail(bad(e)),
             }
