@@ -37,13 +37,15 @@ kv_put st/zb:6d6b00000000c0b0 0/1 186 B
 @ topology: network map
 kv_put st/zb:6d6b00000000c0b0 0/1 186 B
 @ remove: the light
+device_del b0c0000000006b6d
 kv_del dev/zb:6d6b00000000c0b0
 kv_del st/zb:6d6b00000000c0b0
+kv_put removed 0/1 9 B
 @ api: network/info, hub/info, hub/system, network/diagnostics
 @ backup: export
 kv_put bkp/last 0/1 1055 B
 @ reset: backup, leave, form, NCP device import
-device_del b0c0000000006b6d
+kv_del removed
 kv_put bkp/last 0/1 895 B
 kv_put bkp/replaced 0/1 16 B
 kv_put bkp/replaced/00124b0001020304 0/1 895 B

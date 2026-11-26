@@ -290,7 +290,7 @@ Keys are classified by exact key:
 
 | Class | Keys |
 |---|---|
-| network-scoped | `dev/`, `st/`, `grp/`, `bnd/`, `auto/` (rules name device IDs), `ota/d/`, `bkp/last` |
+| network-scoped | `dev/`, `st/`, `grp/`, `bnd/`, `auto/` (rules name device IDs), `ota/d/`, `bkp/last`, `removed` (the devices the operator removed) |
 | hub-scoped | `udef/`, `usrc/`, `cfg/tz`, `cfg/tz_name`, `cfg/ntp`, `cfg/catalog`, `cfg/report`, `ota/cfg`, `bkp/replaced/<ext_pan_id>` and their order `bkp/replaced` (the backups of the last 3 networks a reset/restore replaced, written whatever the gate) |
 | backend-scoped | `cfg/tx_power`, kept as is; future keys go under `zrhp/`, `ezsp/`, `znp/` |
 
@@ -513,6 +513,22 @@ admin job threads ─► NetworkAdmin (blocking allowed)
   (`CoordTransport::submit_own`); its outcome imports the devices. The
   unknown states of restored devices are read after that outcome, so the
   imported devices' interviews go first, as before.
+- Removed devices (`hub_app::removed`): `devices/remove` purges the device
+  on the NCP (`Request::RemoveDevice`; ZRHP: `NWK_REMOVE_DEVICE`, which
+  the zigbee-rs NCP answers `UNSUPPORTED_COMMAND`, then `TBL_INVALIDATE`
+  of its `DEVICE` entry, spec 8.3 I5, and the host store's device record;
+  EZSP: below) and the app remembers its IEEE in the network record
+  `removed` (format byte 1, then IEEE addresses, the newest 64; written
+  at once). The import skips a remembered device the inventory still
+  lists (a child entry until it ages out, a router neighbor that ignored
+  its leave, a removal while the session was down; logged and counted,
+  `AppStatus::removed_skipped`). `CoordEvent::DeviceJoined` and a device
+  created any other way (a device announcement, a migration import, the
+  registry) end the entry; `JobOut::Reimport` (form, reset, restore)
+  drops them all, `network/registry/clear` with the record. Read with the
+  other network records: removals and joins while the records are hidden
+  apply on top of the stored list, and a device the import added
+  meanwhile that is remembered and not in the registry goes again.
 - `CoordEvent::NetworkState` carries `NetChange` (down, forming, up,
   leaving: the `network_state` API event); `NetState` stays the snapshot.
 - `network/info` is rendered from `CoordStatus` plus

@@ -475,6 +475,9 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) import_queue: std::collections::VecDeque<String>,
     /// Last probe of an imported mains device.
     pub(crate) import_probe_last: Option<Millis>,
+    /// IEEE addresses of the Zigbee devices `devices/remove` removed, for
+    /// the application ([`Hub::take_removed`]).
+    removed: Vec<u64>,
 }
 
 /// A cluster command for the application (see [`Hub::app_clusters`]).
@@ -608,7 +611,15 @@ impl<T: ZigbeeTransport> Hub<T> {
             app_snapshots: BTreeMap::new(),
             import_queue: std::collections::VecDeque::new(),
             import_probe_last: None,
+            removed: Vec::new(),
         }
+    }
+
+    /// The IEEE addresses of the Zigbee devices `devices/remove` removed
+    /// since the last call (the application remembers them, so that the
+    /// coordinator's tables do not bring them back).
+    pub fn take_removed(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.removed)
     }
 
     /// Takes the frames of [`Hub::app_clusters`].
@@ -2923,7 +2934,10 @@ impl<T: ZigbeeTransport> Hub<T> {
     // ------------------------------------------------------------------
     // Registry operations used by the API.
 
-    /// Removes a device (`devices/remove`).
+    /// Removes a device (`devices/remove`): a Zigbee device is asked to
+    /// leave (ZDO Mgmt_Leave_req, unless `force`), then the coordinator
+    /// purges it from its tables ([`Request::RemoveDevice`], whatever
+    /// `force`) and its IEEE goes to [`Self::take_removed`].
     pub fn remove_device(&mut self, id: &str, force: bool, now: Millis) -> Result<(), ApiError> {
         let d = self
             .devices
@@ -2947,6 +2961,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 };
                 self.control(req, control::Then::Nothing, None, now);
                 self.nwk_index.remove(&nwk);
+                self.removed.push(ieee);
             }
             DeviceKind::Gp { gpd_id } => {
                 let removed = control::GpRemoved::Device(id.to_string());

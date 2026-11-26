@@ -76,6 +76,8 @@ pub mod id {
     pub const SET_INITIAL_SECURITY_STATE: u16 = 0x0068;
     pub const GET_CURRENT_SECURITY_STATE: u16 = 0x0069;
     pub const CLEAR_TRANSIENT_LINK_KEYS: u16 = 0x006B;
+    pub const FIND_KEY_TABLE_ENTRY: u16 = 0x0075;
+    pub const ERASE_KEY_TABLE_ENTRY: u16 = 0x0076;
     pub const GET_NEIGHBOR: u16 = 0x0079;
     pub const NEIGHBOR_COUNT: u16 = 0x007A;
     pub const GET_ROUTE_TABLE_ENTRY: u16 = 0x007B;
@@ -84,6 +86,7 @@ pub mod id {
     pub const SET_RADIO_POWER: u16 = 0x0099;
     pub const ZIGBEE_KEY_ESTABLISHMENT_HANDLER: u16 = 0x009B;
     pub const ENERGY_SCAN_REQUEST: u16 = 0x009C;
+    pub const REMOVE_DEVICE: u16 = 0x00A8;
     pub const GET_VALUE: u16 = 0x00AA;
     pub const SET_VALUE: u16 = 0x00AB;
     pub const SET_CHILD_DATA: u16 = 0x00AC;
@@ -371,6 +374,24 @@ pub enum Command {
         key: KeyData,
     },
     ClearKeyTable,
+    /// `findKeyTableEntry`: the key table index of `address`'s link key
+    /// (`link_key`) or master key; same layout in 13–18.
+    FindKeyTableEntry {
+        address: Eui64,
+        link_key: bool,
+    },
+    /// `eraseKeyTableEntry`: same layout in 13–18.
+    EraseKeyTableEntry {
+        index: u8,
+    },
+    /// `removeDevice`: an APS Remove-Device (encrypted with the
+    /// destination's link key) asking `dest` to remove `target`, itself
+    /// for a router (Trust Center frames; same layout in 13–18).
+    RemoveDevice {
+        dest_short: NodeId,
+        dest_long: Eui64,
+        target_long: Eui64,
+    },
     /// `getTokenData` (token interface): `token` is a creator or NVM3 key
     /// ([`token`]).
     GetTokenData {
@@ -485,6 +506,9 @@ impl Command {
             Command::ExportLinkKeyByIndex { .. } => id::EXPORT_LINK_KEY_BY_INDEX,
             Command::ImportLinkKey { .. } => id::IMPORT_LINK_KEY,
             Command::ClearKeyTable => id::CLEAR_KEY_TABLE,
+            Command::FindKeyTableEntry { .. } => id::FIND_KEY_TABLE_ENTRY,
+            Command::EraseKeyTableEntry { .. } => id::ERASE_KEY_TABLE_ENTRY,
+            Command::RemoveDevice { .. } => id::REMOVE_DEVICE,
             Command::GetTokenData { .. } => id::GET_TOKEN_DATA,
             Command::SetTokenData { .. } => id::SET_TOKEN_DATA,
             Command::SetChildData { .. } => id::SET_CHILD_DATA,
@@ -613,6 +637,20 @@ impl Command {
                 w.u8(*index);
                 w.bytes(&eui64.0);
                 w.bytes(key);
+            }
+            Command::FindKeyTableEntry { address, link_key } => {
+                w.bytes(&address.0);
+                w.bool(*link_key);
+            }
+            Command::EraseKeyTableEntry { index } => w.u8(*index),
+            Command::RemoveDevice {
+                dest_short,
+                dest_long,
+                target_long,
+            } => {
+                w.u16(*dest_short);
+                w.bytes(&dest_long.0);
+                w.bytes(&target_long.0);
             }
             Command::GetTokenData { token, index } => {
                 w.u32(*token);
@@ -882,6 +920,16 @@ impl Command {
                 key: r.array()?,
             },
             id::CLEAR_KEY_TABLE => Command::ClearKeyTable,
+            id::FIND_KEY_TABLE_ENTRY => Command::FindKeyTableEntry {
+                address: Eui64(r.array()?),
+                link_key: r.bool()?,
+            },
+            id::ERASE_KEY_TABLE_ENTRY => Command::EraseKeyTableEntry { index: r.u8()? },
+            id::REMOVE_DEVICE => Command::RemoveDevice {
+                dest_short: r.u16()?,
+                dest_long: Eui64(r.array()?),
+                target_long: Eui64(r.array()?),
+            },
             id::GET_TOKEN_DATA => Command::GetTokenData {
                 token: r.u32()?,
                 index: r.u32()?,
@@ -1073,6 +1121,16 @@ pub enum Response {
     ClearKeyTable {
         status: Status,
     },
+    /// 0xFF: no such entry.
+    FindKeyTableEntry {
+        index: u8,
+    },
+    EraseKeyTableEntry {
+        status: Status,
+    },
+    RemoveDevice {
+        status: Status,
+    },
     GetTokenData {
         status: Status,
         data: Vec<u8>,
@@ -1144,6 +1202,9 @@ impl Response {
             Response::ExportLinkKeyByIndex { .. } => id::EXPORT_LINK_KEY_BY_INDEX,
             Response::ImportLinkKey { .. } => id::IMPORT_LINK_KEY,
             Response::ClearKeyTable { .. } => id::CLEAR_KEY_TABLE,
+            Response::FindKeyTableEntry { .. } => id::FIND_KEY_TABLE_ENTRY,
+            Response::EraseKeyTableEntry { .. } => id::ERASE_KEY_TABLE_ENTRY,
+            Response::RemoveDevice { .. } => id::REMOVE_DEVICE,
             Response::GetTokenData { .. } => id::GET_TOKEN_DATA,
             Response::SetTokenData { .. } => id::SET_TOKEN_DATA,
             Response::SetChildData { .. } => id::SET_CHILD_DATA,
@@ -1189,6 +1250,8 @@ impl Response {
             | Response::ExportLinkKeyByIndex { status, .. }
             | Response::ImportLinkKey { status }
             | Response::ClearKeyTable { status }
+            | Response::EraseKeyTableEntry { status }
+            | Response::RemoveDevice { status }
             | Response::GetTokenData { status, .. }
             | Response::SetTokenData { status }
             | Response::SetChildData { status } => Some(*status),
@@ -1398,6 +1461,13 @@ impl Response {
             id::CLEAR_KEY_TABLE => Response::ClearKeyTable {
                 status: st(&mut r, Ember)?,
             },
+            id::FIND_KEY_TABLE_ENTRY => Response::FindKeyTableEntry { index: r.u8()? },
+            id::ERASE_KEY_TABLE_ENTRY => Response::EraseKeyTableEntry {
+                status: st(&mut r, Ember)?,
+            },
+            id::REMOVE_DEVICE => Response::RemoveDevice {
+                status: st(&mut r, Ember)?,
+            },
             id::GET_TOKEN_DATA => Response::GetTokenData {
                 status: st(&mut r, Ember)?,
                 data: read_token_data(&mut r)?,
@@ -1545,6 +1615,8 @@ impl Response {
             }
             Response::SetMfgToken { status }
             | Response::ClearKeyTable { status }
+            | Response::EraseKeyTableEntry { status }
+            | Response::RemoveDevice { status }
             | Response::SetTokenData { status }
             | Response::SetChildData { status } => st(&mut w, status, Ember)?,
             Response::GetCurrentSecurityState { status, state } => {
@@ -1577,6 +1649,7 @@ impl Response {
                 st(&mut w, status, Ember)?;
                 token_data(&mut w, data)?;
             }
+            Response::FindKeyTableEntry { index } => w.u8(*index),
             Response::InvalidCommand { reason } => w.u8(reason.0),
             Response::Raw { params, .. } => w.bytes(params),
         }

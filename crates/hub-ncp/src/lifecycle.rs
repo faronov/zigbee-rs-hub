@@ -36,7 +36,8 @@ use zigbee_zrhp::msg::network::{
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKey, SecGetNetworkKeyRsp};
 use zigbee_zrhp::msg::system::{EvtFatal, EvtIndicationsDropped, SysReset, capacity, caps};
-use zigbee_zrhp::msg::tables::{TblSync, TblSyncRsp};
+use zigbee_zrhp::msg::tables::{TableKey, TblInvalidate, TblSync, TblSyncRsp};
+use zigbee_zrhp::records::record_type;
 use zigbee_zrhp::msg::{Kind, MessageDef};
 use zigbee_zrhp::types::Status;
 
@@ -1113,6 +1114,32 @@ impl Hub {
     pub fn remove_device(&self, nwk: u16, ieee: [u8; 8], flags: u8) -> Result<(), Error> {
         let body = zigbee_zrhp::msg::network::NwkRemoveDevice { nwk, ieee: zigbee_zrhp::types::Ieee(ieee), flags };
         self.inner.client.call(&body, CallOpts::default()).map(|_| ())
+    }
+
+    /// The host's deletion of a device (spec 8.3 I5), reachable or not:
+    /// the store's device record, then `NWK_REMOVE_DEVICE` (the Trust
+    /// Center asks it to leave; the zigbee-rs NCP answers
+    /// `UNSUPPORTED_COMMAND`), then `TBL_INVALIDATE` of its `DEVICE` entry
+    /// (the NCP drops its Trust Center record and link key). Neither the
+    /// store nor the table lists it in [`Hub::ncp_devices`] afterwards; a
+    /// child entry stays on the NCP until the child ages out or rejoins. A
+    /// status of either request is logged, not an error: a link failure
+    /// is.
+    pub fn purge_device(&self, nwk: u16, ieee: [u8; 8]) -> Result<(), Error> {
+        let tolerated = |what: &str, r: Result<(), Error>| match r {
+            Ok(()) => Ok(()),
+            Err(Error::Status(s)) => {
+                if !matches!(s, Status::UnsupportedCommand | Status::NotFound) {
+                    warn!("hub: {what} of {ieee:02X?}: {s:?}");
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+        self.commit(Change::DeviceDel(ieee));
+        tolerated("NWK_REMOVE_DEVICE", self.remove_device(nwk, ieee, 0))?;
+        let body = TblInvalidate { table: record_type::DEVICE, key: TableKey::Ieee(zigbee_zrhp::types::Ieee(ieee)) };
+        tolerated("TBL_INVALIDATE", self.inner.client.call(&body, CallOpts::default()).map(|_| ()))
     }
 
     /// PTA coexistence (`coex_enable`, spec 11.5 / decision N7): the hub
