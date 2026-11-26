@@ -387,6 +387,22 @@ pub struct Device {
     pub reporting: VecMap<(u8, u16, u16), crate::reporting::Applied>,
     /// User reporting overrides by attribute (5.2, layer 5).
     pub report_overrides: VecMap<crate::reporting::AttrKey, crate::reporting::ReportSetting>,
+    /// Imported from another coordinator's records and not verified yet
+    /// ([`crate::hub::import`]): 0 no, [`IMPORT_VERIFY`] (the same
+    /// coordinator IEEE: its binds and reporting still point at the hub),
+    /// [`IMPORT_RECONFIGURE`] (another coordinator IEEE: configure again).
+    ///
+    /// [`IMPORT_VERIFY`]: crate::hub::import::IMPORT_VERIFY
+    /// [`IMPORT_RECONFIGURE`]: crate::hub::import::IMPORT_RECONFIGURE
+    pub imported: u8,
+    /// An imported device was heard from this run (its verification
+    /// started); not persisted.
+    pub import_contacted: bool,
+    /// Last probe of an imported mains device not heard from yet; not
+    /// persisted.
+    pub import_probe_at: Option<Millis>,
+    /// Probes sent to it this run (at most `IMPORT_PROBE_TRIES`).
+    pub import_probes: u8,
 }
 
 impl Device {
@@ -429,6 +445,10 @@ impl Device {
             identity_read_at: None,
             reporting: VecMap::new(),
             report_overrides: VecMap::new(),
+            imported: 0,
+            import_contacted: false,
+            import_probe_at: None,
+            import_probes: 0,
         }
     }
 
@@ -549,6 +569,8 @@ impl Device {
             "rssi": self.rssi,
             "warnings": self.warnings,
             "interview": match (self.interview, self.interview_partial) {
+                // Imported records not verified by the device yet.
+                _ if self.imported != 0 => "imported",
                 (InterviewStep::Done, false) => "complete",
                 (InterviewStep::Done, true) => "partial",
                 _ => "in_progress",

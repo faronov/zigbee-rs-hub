@@ -99,6 +99,8 @@ Dongle Max он показывает без кнопки установки (`"w
 
 Требования к платам и backend'ам, матрица функций и готовности:
 [Firmware profiles and coordinator backends](docs/coordinator-profiles.md).
+Переезд с Zigbee2MQTT или ZHA без повторного сопряжения устройств:
+[Migrating from Zigbee2MQTT or ZHA](docs/migration.md) (на английском).
 
 Образ 4 МБ сохраняет таблицу разделов, `nvs`, `hubdata` и выбор режима
 загрузки. Обычные сборки — фича `mqtt` (4 МБ) и `mqtt,advanced,ota-store`

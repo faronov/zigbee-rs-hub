@@ -916,6 +916,28 @@ impl<T: ZigbeeTransport> Hub<T> {
             .count()
     }
 
+    /// [`refresh_unknown`](Self::refresh_unknown) of one device (an
+    /// imported one when it is first heard from).
+    pub(crate) fn refresh_unknown_of(&mut self, id: &str, now: Millis) -> usize {
+        let uids: Vec<String> = self
+            .devices
+            .get(id)
+            .filter(|d| d.gp.is_none())
+            .map(|d| {
+                d.entities
+                    .iter()
+                    .filter(|e| {
+                        (e.state.last_reported.is_none() || e.state.restored) && !e.orphaned
+                    })
+                    .map(|e| e.uid.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        uids.iter()
+            .filter(|uid| self.read_entity(id, uid, now).is_ok())
+            .count()
+    }
+
     /// `entities/update`: name, enabled, value of a hub binding.
     pub fn update_entity(
         &mut self,

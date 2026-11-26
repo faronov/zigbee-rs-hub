@@ -405,6 +405,9 @@ class FakeHub:
         self.time_names = True
         self.devices, self.entities, self.states = default_model()
         self.requests: list[dict[str, Any]] = []
+        self.import_stage: dict[str, Any] = {}
+        # `stored` of the next apply's result (a registry that is not writable).
+        self.import_stored = True
         self.command_errors: dict[str, dict[str, str]] = {}
         self.sockets: list[tuple[web.WebSocketResponse, dict[int, set[str]]]] = []
         self.connections = 0
@@ -465,6 +468,80 @@ class FakeHub:
         msg = state(uid, value, **attributes)
         self.states[uid] = msg
         await self.push("entities", {"topic": "entity_state", **msg})
+
+    async def _import(self, kind: str, req: dict[str, Any], ok: Any) -> None:
+        """`network/import(/preview)`, staged like the hub: rows per batch."""
+        if "document" in req:
+            self.import_stage = {"devices": [], "groups": [], "network_devices": 0}
+            self.import_stage["network"] = req["document"]["network"]
+            for k in ("devices", "groups"):
+                self.import_stage[k] += req["document"].get(k) or []
+        stage = self.import_stage
+        stage["devices"] += req.get("devices") or []
+        stage["groups"] += req.get("groups") or []
+        stage["network_devices"] += len(req.get("network_devices") or [])
+        rows = [
+            {
+                "ieee": d["ieee"],
+                "id": f"zb:{d['ieee']}",
+                "name": d.get("name"),
+                "model": d.get("model"),
+                "status": "skip" if d.get("type") in ("coordinator", "green_power") else "new",
+            }
+            for d in req.get("devices") or []
+        ]
+        if req.get("more"):
+            await ok({"staged_devices": len(stage["devices"]), "devices": rows})
+            return
+        net = stage["network"]
+        imported = [
+            d for d in stage["devices"] if d.get("type") not in ("coordinator", "green_power")
+        ]
+        summary = {
+            "new": len(imported),
+            "replace": 0,
+            "keep": 0,
+            "skip": len(stage["devices"]) - len(imported),
+        }
+        network = {
+            "ext_pan_id": net["extended_pan_id"],
+            "action": "restore",
+            "needs": ["force"],
+            "devices": stage["network_devices"],
+        }
+        if kind == "network/import/preview":
+            await ok(
+                {
+                    "network": network,
+                    "devices": rows,
+                    "summary": summary,
+                    "restore_check": "ok",
+                    "groups": len(stage["groups"]),
+                    "not_imported": {"count": 0, "devices": []},
+                }
+            )
+            return
+        await ok(
+            {
+                "network": {**network, "action": "restored"},
+                "devices": summary,
+                "groups": len(stage["groups"]),
+                "failed": 0,
+                "removed": 0,
+                "stored": self.import_stored,
+                "backup": {"secret": "keys"},
+            }
+        )
+        for d in imported:
+            rec = device(
+                f"zb:{d['ieee']}",
+                d.get("manufacturer") or "?",
+                d.get("model") or "?",
+                name=d.get("name") or d.get("model"),
+                interview="imported",
+            )
+            self.devices[rec["id"]] = rec
+            await self.push("devices", {"topic": "device_added", "device": rec})
 
     def snapshot(self) -> dict[str, Any]:
         """The subscription snapshot."""
@@ -589,6 +666,8 @@ class FakeHub:
                 # real NCP today).
                 self.network["permit_join_s"] = min(req["duration_s"], self.permit_join_cap)
             await ok(None)
+        elif kind in ("network/import/preview", "network/import"):
+            await self._import(kind, req, ok)
         elif kind == "network/info" and self.api_version >= "1.1":
             await ok(copy.deepcopy(self.network))
         elif kind == "devices/remove":

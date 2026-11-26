@@ -468,6 +468,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             .ok_or_else(|| crate::hub::ApiError::new("not_found", id.to_string()))?;
         d.configure.done.clear();
         d.configure.hash = None;
+        // Asked for: an imported device does not wait for its turn.
+        d.imported = 0;
         self.redo_configure(id, now);
         Ok(())
     }
@@ -491,6 +493,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                     | InterviewStep::Basic(_)
             )
         {
+            return;
+        }
+        if d.imported == crate::hub::import::IMPORT_RECONFIGURE
+            && d.interview == InterviewStep::Done
+        {
+            // An imported device waits for its turn (`import_reconfigure`).
             return;
         }
         let ops = build_ops(d, coord, hub_ep, &crate::hub::DevEnv { dev: d, now, tz });
@@ -579,6 +587,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             let Some(op) = d.configure.queue.pop_front() else {
                 if d.interview == InterviewStep::Configure {
                     d.interview = InterviewStep::Done;
+                    // An imported device configured again: verified.
+                    d.imported = 0;
                     self.emit(HubEvent::InterviewProgress {
                         device: id.to_string(),
                         step: "done".into(),

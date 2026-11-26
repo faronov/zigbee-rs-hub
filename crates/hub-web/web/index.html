@@ -162,6 +162,7 @@ progress{width:12em}
 <p class="mut">Open ZigBee Coordinator Backup (zigpy/ZHA, Zigbee2MQTT). The file holds the network key: keep it private.</p>
 <div class="row acts f-backup"><button class="p" id="bkb">Download backup</button><button id="bkl">Last automatic backup</button></div>
 <div class="row acts f-restore"><label>Restore from a file <input id="rsf" type="file" accept=".json,application/json"></label></div><div id="bks" class="mut"></div></section>
+<section class="card f-restore"><h2>Migrate from Zigbee2MQTT or ZHA</h2><p class="mut">Moves their network and devices to this hub without pairing again; names and groups come along.</p><button id="mgo">Start</button><div data-mod="mig"></div></section>
 <section class="card"><h2>New network</h2>
 <p class="mut">Leaves the current network and forms a new one; every device must then be paired again. The current network is backed up and the file offered first.</p>
 <div class="row"><label>Channel <select id="nch"><option value="">quietest</option></select></label><label>PAN ID <input id="npan" placeholder="random" size="6"></label><label>Ext. PAN ID <input id="nepid" placeholder="random" size="17"></label><label>TX power <input id="ntx" type="number" class="num" placeholder="keep"></label></div>
@@ -561,6 +562,7 @@ function asShow(r){asNets=r.networks;$("#ast").textContent="took "+sec(r.duratio
  for(const n of asNets.slice().sort((a,b)=>a.channel-b.channel))t.append(el("tr",{},el("td",{},n.channel),el("td",{},hex(n.pan_id,4)),el("td",{},n.ext_pan_id),el("td",{},n.lqi),el("td",{},n.rssi+" dBm"),el("td",{},n.permit_join?"open":"closed"),el("td",{class:"mut"},n.own?"this hub":"")));
  $("#as").textContent="";$("#as").append(asNets.length?t:el("p",{class:"mut"},"No other Zigbee networks heard."));drawScan()}
 $("#bkb").onclick=e=>busy(e.target,act("network/backup",{}).then(b=>{saveBackup(b);$("#bks").textContent="Backup of PAN "+b.pan_id+": "+b.devices.length+" devices"+(b.network_key?"":" — incomplete (no keys), cannot be restored")})).catch(()=>{});
+$("#mgo").onclick=e=>{e.target.classList.add("hide");ui("mig").catch(()=>e.target.classList.remove("hide"))};
 $("#bkl").onclick=()=>act("network/backup/last").then(r=>r.backup?saveBackup(r.backup):toast("No backup yet")).catch(()=>{});
 async function upload(b,q){const d=b.devices||[],n=8;let r=await call("network/restore",{backup:Object.assign({},b,{devices:d.slice(0,n)}),...q,more:d.length>n});for(let o=n;o<d.length;o+=n)r=await call("network/restore",{devices:d.slice(o,o+n),more:o+n<d.length});return r}
 $("#rsf").onchange=async e=>{

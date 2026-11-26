@@ -48,3 +48,63 @@ update_catalog:
       selector:
         text:
           type: url
+import_from_zha:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: zigbee_rs_hub
+    apply:
+      default: false
+      selector:
+        boolean:
+    database:
+      example: "/config/zigbee.db"
+      selector:
+        text:
+    backup:
+      example: "/config/zha-backup.json"
+      selector:
+        text:
+    force:
+      default: false
+      selector:
+        boolean:
+    confirm:
+      default: false
+      selector:
+        boolean:
+    confirm_ieee_write_once:
+      default: false
+      selector:
+        boolean:
+    keep_ieee:
+      default: false
+      selector:
+        boolean:
+    skip_backup:
+      default: false
+      selector:
+        boolean:
+    remove_missing:
+      default: false
+      selector:
+        boolean:
+    reconfigure:
+      default: auto
+      selector:
+        select:
+          options:
+            - auto
+            - always
+            - never
+copy_names_areas:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: zigbee_rs_hub
+    overwrite:
+      default: false
+      selector:
+        boolean:

@@ -31,6 +31,7 @@ use crate::zcl::{
 use crate::zdo::{self, ZdoMessage};
 
 pub(crate) mod control;
+pub mod import;
 pub mod zgroups;
 
 /// Hub configuration.
@@ -469,6 +470,11 @@ pub struct Hub<T: ZigbeeTransport> {
     /// Snapshots of the topics of services outside the engine, sent on
     /// `subscribe` (kept current by the application).
     pub app_snapshots: BTreeMap<&'static str, String>,
+    /// Imported devices, heard from, waiting to be configured again
+    /// ([`import`]).
+    pub(crate) import_queue: std::collections::VecDeque<String>,
+    /// Last probe of an imported mains device.
+    pub(crate) import_probe_last: Option<Millis>,
 }
 
 /// A cluster command for the application (see [`Hub::app_clusters`]).
@@ -600,6 +606,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             app_sent: Vec::new(),
             app_outcomes: Vec::new(),
             app_snapshots: BTreeMap::new(),
+            import_queue: std::collections::VecDeque::new(),
+            import_probe_last: None,
         }
     }
 
@@ -1050,6 +1058,14 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.interview_step(id, interview, now);
             return;
         }
+        if self.devices.get(id).is_some_and(|d| d.imported != 0) {
+            self.import_contact(id, now);
+            if self.devices.get(id).is_some_and(|d| {
+                d.interview != InterviewStep::Done && d.interview != InterviewStep::Configure
+            }) {
+                return;
+            }
+        }
         if tuya_announce {
             self.tuya_query(id, now);
         }
@@ -1313,31 +1329,33 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(d) = self.devices.get(id) else {
             return;
         };
-        let fp = d.fp.clone();
-        let gp_seen = d.gp.is_some();
-        let res = {
-            let attrs = &d.attrs;
-            let defaults = &self.report_defaults;
-            let gen_zb = |power: PowerKind| {
-                let mut v = generic_entities(&fp, &GenericInput { attrs, power });
-                defaults.apply(&mut v);
-                v
-            };
-            let gen_gp = |_p: PowerKind| crate::gp::generic::gp_generic_entities(&fp, attrs);
-            let generic: &dyn Fn(PowerKind) -> Vec<EntityDef> =
-                if gp_seen { &gen_gp } else { &gen_zb };
-            let sd = d.schema.fragment.clone();
-            resolve(&ResolveInput {
-                fp: &fp,
-                generic,
-                catalog: self.catalog.as_ref(),
-                user: &self.user,
-                self_description: sd.as_deref(),
-                pinned: d.pinned.as_deref(),
-                features: &self.features,
-            })
-        };
+        let res = self.resolution_of(d);
         self.materialize(id, res, now);
+    }
+
+    /// What the definitions make of `d` now (nothing materialized).
+    pub(crate) fn resolution_of(&self, d: &Device) -> crate::resolve::Resolution {
+        let fp = &d.fp;
+        let gp_seen = d.gp.is_some();
+        let attrs = &d.attrs;
+        let defaults = &self.report_defaults;
+        let gen_zb = |power: PowerKind| {
+            let mut v = generic_entities(fp, &GenericInput { attrs, power });
+            defaults.apply(&mut v);
+            v
+        };
+        let gen_gp = |_p: PowerKind| crate::gp::generic::gp_generic_entities(fp, attrs);
+        let generic: &dyn Fn(PowerKind) -> Vec<EntityDef> = if gp_seen { &gen_gp } else { &gen_zb };
+        let sd = d.schema.fragment.clone();
+        resolve(&ResolveInput {
+            fp,
+            generic,
+            catalog: self.catalog.as_ref(),
+            user: &self.user,
+            self_description: sd.as_deref(),
+            pinned: d.pinned.as_deref(),
+            features: &self.features,
+        })
     }
 
     fn materialize(&mut self, id: &str, res: crate::resolve::Resolution, now: Millis) {
@@ -1511,6 +1529,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             d.diag.frame(now, ind.cluster, &ind.payload);
         }
         self.flush_queue(&id, now);
+        // Before the frame is handled: what it changes (a new SWBuildID)
+        // finds the imported device verified.
+        self.import_contact(&id, now);
         if ind.profile == 0 {
             self.handle_zdo(&id, &ind, now);
         } else {
@@ -2520,6 +2541,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.gp_tick(now);
         self.gp_window_tick(now);
         self.zg_tick(now);
+        self.import_tick(now);
     }
 
     fn fail_purpose(&mut self, id: &str, purpose: &Purpose, err: ApiError, now: Millis) {

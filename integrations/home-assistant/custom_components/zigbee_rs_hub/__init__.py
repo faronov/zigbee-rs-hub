@@ -8,7 +8,14 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, EVENT_CORE_CONFIG_UPDATE
-from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
+from homeassistant.core import (
+    Event,
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryNotReady,
@@ -17,8 +24,10 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
+from . import zha_import
 from .api import HubError, InvalidAuth
 from .const import (
     ATTR_BASE_URL,
@@ -29,6 +38,8 @@ from .const import (
     DOMAIN,
     PERMIT_JOIN_DEFAULT,
     PLATFORMS,
+    SERVICE_COPY_NAMES_AREAS,
+    SERVICE_IMPORT_FROM_ZHA,
     SERVICE_PERMIT_JOIN,
     SERVICE_RECONFIGURE,
     SERVICE_REINTERVIEW,
@@ -55,6 +66,27 @@ PERMIT_JOIN_SCHEMA = vol.Schema(
     }
 )
 DEVICE_SCHEMA = vol.Schema({vol.Required(ATTR_DEVICE_ID): cv.string})
+IMPORT_FROM_ZHA_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Optional("apply", default=False): cv.boolean,
+        vol.Optional("database"): cv.string,
+        vol.Optional("backup"): cv.string,
+        vol.Optional("force", default=False): cv.boolean,
+        vol.Optional("confirm", default=False): cv.boolean,
+        vol.Optional("confirm_ieee_write_once", default=False): cv.boolean,
+        vol.Optional("keep_ieee", default=False): cv.boolean,
+        vol.Optional("skip_backup", default=False): cv.boolean,
+        vol.Optional("remove_missing", default=False): cv.boolean,
+        vol.Optional("reconfigure", default="auto"): vol.In(["auto", "always", "never"]),
+    }
+)
+COPY_NAMES_AREAS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Optional("overwrite", default=False): cv.boolean,
+    }
+)
 UPDATE_CATALOG_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
@@ -131,6 +163,39 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if errors:
             raise HomeAssistantError("; ".join(errors))
 
+    def one_hub(call: ServiceCall) -> ZigbeeRsHub:
+        hubs = loaded_hubs()
+        if entry_id := call.data.get(ATTR_CONFIG_ENTRY_ID):
+            hubs = [h for h in hubs if h.entry.entry_id == entry_id]
+        if not hubs:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_hub")
+        if len(hubs) > 1:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="one_hub")
+        return hubs[0]
+
+    async def import_from_zha(call: ServiceCall) -> ServiceResponse:
+        return await zha_import.async_import_from_zha(hass, one_hub(call), dict(call.data))
+
+    async def copy_names_areas(call: ServiceCall) -> ServiceResponse:
+        return await zha_import.async_copy_names_areas(hass, one_hub(call), call.data["overwrite"])
+
+    # Both read files and use the hub's token: administrators only.
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_IMPORT_FROM_ZHA,
+        import_from_zha,
+        IMPORT_FROM_ZHA_SCHEMA,
+        SupportsResponse.OPTIONAL,
+    )
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_COPY_NAMES_AREAS,
+        copy_names_areas,
+        COPY_NAMES_AREAS_SCHEMA,
+        SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(DOMAIN, SERVICE_PERMIT_JOIN, permit_join, PERMIT_JOIN_SCHEMA)
     hass.services.async_register(
         DOMAIN, SERVICE_UPDATE_CATALOG, update_catalog, UPDATE_CATALOG_SCHEMA

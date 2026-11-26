@@ -109,6 +109,8 @@ merge); a tagged run with the Dongle Max checks that revision's
 
 Hardware/backend requirements and the feature/readiness matrix:
 [Firmware profiles and coordinator backends](docs/coordinator-profiles.md).
+Moving from Zigbee2MQTT or ZHA without pairing the devices again:
+[Migrating from Zigbee2MQTT or ZHA](docs/migration.md).
 
 The 4 MB image keeps the existing partition table, `nvs`, `hubdata` and
 boot-mode selection. Standard images use feature `mqtt` (4 MB) and

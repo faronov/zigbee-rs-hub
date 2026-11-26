@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 import itertools
+import json
 import os
 from pathlib import Path
 import socket
@@ -312,3 +313,51 @@ async def test_hubctl_automations(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
     finally:
         await hub.stop()
+
+
+async def test_hubctl_import_from_zha(hass: HomeAssistant, hubctl: Hubctl, tmp_path: Path) -> None:
+    """ZHA's zigbee.db (generated) previewed and imported on the real hub."""
+    from .test_migration import COORD, ZIGPY_BACKUP, make_db
+
+    path = tmp_path / "zigbee.db"
+    make_db(path, 17)
+    # The backup of a network whose coordinator is this radio (no IEEE write).
+    backup = json.loads(
+        json.dumps(ZIGPY_BACKUP).replace(
+            COORD, ":".join(SIM_COORDINATOR_IEEE[i : i + 2] for i in range(0, 16, 2))
+        )
+    )
+    (tmp_path / "backup.json").write_text(json.dumps(backup))
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_HOST: "127.0.0.1", CONF_PORT: hubctl.port, CONF_TOKEN: "e2e"},
+    )
+    entry: MockConfigEntry = result["result"]
+    await hass.async_block_till_done()
+    data = {"database": str(path), "backup": str(tmp_path / "backup.json")}
+    preview = await hass.services.async_call(
+        DOMAIN, "import_from_zha", data, blocking=True, return_response=True
+    )
+    assert preview["result"]["network"]["ext_pan_id"] == "a1b2c3d4e5f60718"
+    assert preview["result"]["network"]["coordinator"] == "same"
+    assert preview["result"]["summary"]["new"] == 2, preview
+    rows = {r["ieee"]: r for r in preview["rows"]}
+    assert rows["0017880100f1e2d3"]["status"] == "new"
+    assert rows["00000000017880ff"]["reason"] == "green_power"
+    applied = await hass.services.async_call(
+        DOMAIN,
+        "import_from_zha",
+        {**data, "apply": True, "force": True, "confirm": True},
+        blocking=True,
+        return_response=True,
+    )
+    res = applied["result"]
+    assert res["network"]["action"] == "restored", res
+    assert res["devices"]["new"] == 2 and not res["coordinator_changed"]
+    reg = dr.async_get(hass)
+    await _wait(hass, lambda: find_device(reg, (DOMAIN, "zb:0017880100f1e2d3"), entry.entry_id))
+    light = find_device(reg, (DOMAIN, "zb:0017880100f1e2d3"), entry.entry_id)
+    assert light.model == "LCT015"
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

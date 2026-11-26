@@ -396,7 +396,9 @@ applied in every session (`EzspOptions::tx_power`). A device leave
 `backup_restore`; hub-app writes and reads the Open Coordinator Backup
 (OCB, `crates/hub-app/src/ocb.rs`) in the form bellows (zigpy/ZHA) and
 zigbee-herdsman's ember adapter (Z2M) use, so a network moves between Z2M,
-ZHA and the hub. Frames and structs: Gecko SDK 4.4.6 (EZSP 13) and
+ZHA and the hub (with the devices' records too: `network/import`,
+[`docs/migration.md`](migration.md), restores through the same path).
+Frames and structs: Gecko SDK 4.4.6 (EZSP 13) and
 Simplicity SDK 2024.6.0, 2024.12.0, 2025.6.0, 2025.6.3 (EZSP 14–18,
 identical there), table "Versions" above.
 
@@ -452,7 +454,8 @@ checks of step 0 alone, without changing anything):
    `tclk_root_generated`; the devices' own link keys go to the key table);
    the extended security bitmask as forming.
 5. `importLinkKey` for the devices' link keys, up to `KEY_TABLE_SIZE`
-   (the rest: note `ignored`). Their frame counters cannot be set.
+   (12 on the Dongle Max's stock NCP, `network/info` `capacity.link_keys`;
+   the rest: note `ignored`). Their frame counters cannot be set.
 6. `formNetwork` with the backup's PAN ID, EPID, channel, mask, NWK
    manager and update ID (TX power: the operator's, the backup's, else
    8 dBm; a backup's power the NCP refuses, `PHY_INVALID_POWER` /

@@ -49,6 +49,21 @@ has, and the integration maps them 1:1 onto HA platforms.
 - Services: `zigbee_rs_hub.permit_join` (duration, Green Power window, a
   router to join through), `zigbee_rs_hub.reinterview_device`,
   `zigbee_rs_hub.reconfigure_device`, `zigbee_rs_hub.update_catalog`.
+- Migration from ZHA without pairing again
+  ([`docs/migration.md`](../../docs/migration.md)):
+  `zigbee_rs_hub.import_from_zha` reads ZHA's `zigbee.db` (zigpy schemas
+  v12–v17) and its newest network backup (or `backup`, a file of ZHA's
+  Download backup), with the names and areas of ZHA's devices in HA's
+  registries, and previews the import on the hub (the answer, and a
+  persistent notification); with `apply` (and `force`, `confirm`,
+  `confirm_ieee_write_once`, `keep_ieee`, `reconfigure`, `remove_missing`)
+  it imports — refused while ZHA is loaded: disable ZHA first, never run
+  both — and gives the hub's new devices ZHA's areas. Both migration
+  services are for administrators only.
+  `zigbee_rs_hub.copy_names_areas` gives the hub's devices the names set in
+  HA and the areas of the same devices in ZHA or Zigbee2MQTT (MQTT
+  discovery `zigbee2mqtt_0x…`), e.g. after an import from the web UI or
+  hubctl; `overwrite` replaces names and areas the hub's devices have.
 - Option **Sync the hub time zone from Home Assistant** (on for entries
   made since it exists, off for older ones; Configure on the entry): on
   every connection, when HA's time zone changes and when the option is
@@ -145,6 +160,7 @@ delete the entry, then the directory, then restart.
 | `devices/remove`, `devices/reinterview`, `devices/reconfigure`, `devices/diagnostics` | Delete device, services, device diagnostics |
 | group devices `grp:<id>` and their entities (14.9) | ordinary devices and entities; platform `scene` → HA `scene` (`activate`) |
 | `catalog/status`, `catalog/upload_chunk`, `catalog/commit`, events `definition_needed`, `catalog_*` | `update_catalog` service, automatic checks, **Catalog version** sensor |
+| `network/import/preview`, `network/import` | `import_from_zha` service (ZHA's `zigbee.db` read with `sqlite3` in HA), then ZHA's areas on the new devices; `copy_names_areas` service |
 | `automations/list`, topic `automations` (`automation_added`/`_updated`/`_removed`/`_run`) (API 1.3) | per rule: `switch` `<entry>_automation_<id>` (enabled), `button` `<entry>_automation_<id>_run`; `automations/enable`, `disable`, `run` |
 
 ## Development and tests

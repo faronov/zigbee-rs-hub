@@ -56,6 +56,9 @@ SERVICE_PERMIT_JOIN: Final = "permit_join"
 SERVICE_REINTERVIEW: Final = "reinterview_device"
 SERVICE_RECONFIGURE: Final = "reconfigure_device"
 SERVICE_UPDATE_CATALOG: Final = "update_catalog"
+# Migration from ZHA / Zigbee2MQTT (docs/migration.md).
+SERVICE_IMPORT_FROM_ZHA: Final = "import_from_zha"
+SERVICE_COPY_NAMES_AREAS: Final = "copy_names_areas"
 
 ATTR_DURATION: Final = "duration"
 ATTR_INCLUDE_GP: Final = "include_gp"
