@@ -356,6 +356,18 @@ impl BackupSink for Export {
     }
 }
 
+/// `is_child` as an OCB file means it: a child the coordinator keeps for
+/// an end device. OCB carries no capability, and every reader (this
+/// file's import, zigpy, Zigbee2MQTT) restores a child as an end device —
+/// here an rx-off one — so a router that joined through the coordinator,
+/// which a zigbee-rs NCP lists as a child (capability bit 1, FFD), is
+/// written as a plain device. Restored as a child it would get its frames
+/// only through polls it never sends. It finds the coordinator again by
+/// Link Status.
+fn ocb_is_child(d: &BackupDevice) -> bool {
+    d.is_child && d.child.is_none_or(|c| c.capability & 0x02 == 0)
+}
+
 /// Append the backup file for an export to `out` (its room is reserved
 /// fallibly first).
 pub fn from_export(export: Export, info: &ExportInfo, out: &mut String) -> Result<ExportSummary, ExportError> {
@@ -466,7 +478,7 @@ pub fn from_export(export: Export, info: &ExportInfo, out: &mut String) -> Resul
             out,
             "{{\"ieee_address\":\"{}\",\"nwk_address\":{nwk},\"is_child\":{}",
             be_hex(&d.ieee),
-            d.is_child
+            ocb_is_child(d)
         );
         if let Some(l) = &d.link {
             summary.link_keys += 1;
@@ -678,6 +690,52 @@ mod tests {
                 link: None,
             }),
         ]
+    }
+
+    #[test]
+    fn a_router_child_is_exported_as_a_plain_device() {
+        // A zigbee-rs NCP lists a router that joined through it as a child
+        // (FFD, rx-on); an end device child stays a child.
+        let router = [0xAE, 0x31, 0x37, 0xFE, 0xFF, 0x02, 0x38, 0x40];
+        let sleepy = [0x5B, 0x1A, 0x7C, 0x01, 0x00, 0x8D, 0x15, 0x00];
+        let link = BackupLinkKey { key: [0x49; 16], key_seq: 0, attrs: 2, origin: 2, tx_counter: 22_528, rx_floor: 0 };
+        let mut items = ezsp_items();
+        items.retain(|i| !matches!(i, BackupItem::Device(_)));
+        items.push(BackupItem::Device(BackupDevice {
+            ieee: router,
+            nwk: Some(0x4D9A),
+            is_child: true,
+            child: Some(BackupChild { capability: 0xCE, timeout_exp: 8 }),
+            link: Some(link),
+        }));
+        items.push(BackupItem::Device(BackupDevice {
+            ieee: sleepy,
+            nwk: Some(0x4D32),
+            is_child: true,
+            child: Some(BackupChild { capability: 0x80, timeout_exp: 8 }),
+            link: None,
+        }));
+        let (summary, text) = export(&items, &ExportInfo::default());
+        assert_eq!(summary.link_keys, 1);
+        let v: J = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["devices"][0]["ieee_address"], "403802fffe3731ae");
+        assert_eq!(v["devices"][0]["is_child"], false, "a router is not an end device child");
+        assert_eq!(v["devices"][1]["is_child"], true);
+        // A restore of that file: the router keeps its key and address but
+        // gets no rx-off child entry; the end device stays a child.
+        let (_, back) = import(&v).unwrap();
+        let devices: Vec<_> = back
+            .iter()
+            .filter_map(|i| match i {
+                BackupItem::Device(d) => Some(*d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            devices[0],
+            BackupDevice { ieee: router, nwk: Some(0x4D9A), is_child: false, child: None, link: Some(BackupLinkKey { origin: 3, ..link }) }
+        );
+        assert_eq!(devices[1].child, Some(BackupChild { capability: 0x80, timeout_exp: 8 }));
     }
 
     #[test]
