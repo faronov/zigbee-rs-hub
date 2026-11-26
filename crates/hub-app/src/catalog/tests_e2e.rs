@@ -437,7 +437,10 @@ fn published_catalog_resolves_a_ts011f_plug() {
         let d = call(&app_, sid, &rx, 901, json!({"type": "devices/get", "device": PLUG}))["result"].clone();
         let top = d["resolution"]["layers"].as_array().unwrap().last().unwrap().clone();
         assert_eq!((top["id"].as_str(), top["source"].as_str()), (Some("tuya/ts011f_plug_1"), Some("fetched")), "{d}");
-        assert_eq!((d["manufacturer"].as_str(), d["model"].as_str()), (Some("NEO"), Some("NAS-WR01B")), "{d}");
+        // The white label and the definition's model: the web UI's device
+        // pictures (Zigbee2MQTT's NAS-WR01B.png, then TS011F_plug_1.png).
+        let named = (d["manufacturer"].as_str(), d["model"].as_str(), d["definition_model"].as_str());
+        assert_eq!(named, (Some("NEO"), Some("NAS-WR01B"), Some("TS011F_plug_1")), "{d}");
         let st = call(&app_, sid, &rx, 902, json!({"type": "catalog/status"}));
         assert_eq!(st["result"]["missing"], json!([]), "{st}");
         let f = call(&app_, sid, &rx, 903, json!({"type": "definitions/fetch", "device": PLUG}));

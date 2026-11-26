@@ -352,7 +352,12 @@ Precedence rules:
   implements the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
   resolves; where zhc picks a TS011F definition that needs `tuya`
   (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays), the hub uses
-  `TS011F_plug_1`, the `zigbeeModel` match, and names the other.)
+  `TS011F_plug_1`, the `zigbeeModel` match, and names the other. To
+  replay it: `hubctl --sim --sim-ts011f serve --token T` (a simulated
+  `_TZ3000_gjnozsaz` joins), then `hubctl catalog-push
+  ws://127.0.0.1:8099/api --token T --dir <release>`: the plug becomes NEO
+  NAS-WR01B, `definition_model` TS011F_plug_1, the two pictures the web UI
+  tries.)
 
 ### 3.4 Materialization and stability
 
