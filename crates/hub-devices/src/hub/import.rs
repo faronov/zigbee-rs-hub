@@ -193,6 +193,8 @@ fn snapshot(d: &ImportedDevice, mode: u8) -> DeviceSnapshot {
         entities: Vec::new(),
         reporting: Vec::new(),
         imported: mode,
+        refused: Vec::new(),
+        refused_version: 0,
     }
 }
 

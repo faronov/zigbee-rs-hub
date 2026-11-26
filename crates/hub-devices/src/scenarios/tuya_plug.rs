@@ -328,3 +328,87 @@ fn zero_readings_without_the_template_are_immediate() {
     hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), T0 + 2000);
     assert_eq!(state(&hub, &format!("{ID}:1:power")), json!(0.0));
 }
+
+fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::Refused {
+    crate::device::Refused {
+        id: id.into(),
+        vendor: "Tuya".into(),
+        model: model.into(),
+        requires: vec![requires.into()],
+        score,
+        priority: 0,
+    }
+}
+
+/// `definition_approximate`: the plug runs TS011F_plug_1 while a catalog
+/// definition that outranks it needs a feature this firmware lacks; kept
+/// in the snapshot. A firmware that gained the feature drops it on restore
+/// and marks the device for the catalog service to check again.
+#[test]
+fn approximate_definition_is_recorded_kept_and_rechecked() {
+    let (mut hub, _sim) = joined();
+    let d = hub.device(ID).unwrap();
+    let s = d.resolution.layers.last().unwrap().score.unwrap();
+    assert!(d.record().get("definition_approximate").is_none());
+    // A lower-scoring refusal is no better: not approximate.
+    hub.note_refused(ID, 7, vec![refused("tuya/x", "X", "template.tuya", s)]);
+    assert!(
+        hub.device(ID)
+            .unwrap()
+            .record()
+            .get("definition_approximate")
+            .is_none()
+    );
+    hub.drain_events();
+    hub.note_refused(
+        ID,
+        7,
+        vec![
+            refused("tuya/ts011f_plug_3", "JR-ZPM03", "template.tuya", s + 10),
+            refused("future/x", "Y", "feature 13", s + 5),
+        ],
+    );
+    assert!(
+        hub.drain_events()
+            .iter()
+            .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == ID))
+    );
+    let want = json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.tuya"]});
+    assert_eq!(
+        hub.device(ID).unwrap().record()["definition_approximate"],
+        want
+    );
+    assert_eq!(hub.diagnostics(ID).unwrap()["definition_approximate"], want);
+    // A newer catalog's first shard replaces what the older one left.
+    hub.note_refused(ID, 8, vec![refused("future/x", "Y", "feature 13", s + 5)]);
+    let d = hub.device(ID).unwrap();
+    assert_eq!((d.refused.len(), d.refused_version), (1, 8));
+    hub.note_refused(
+        ID,
+        8,
+        vec![refused(
+            "tuya/ts011f_plug_3",
+            "JR-ZPM03",
+            "template.tuya",
+            s + 10,
+        )],
+    );
+    let snap = hub.snapshot_device(ID).unwrap();
+    let snap = crate::persist::DeviceSnapshot::from_bytes(&snap.to_bytes()).unwrap();
+    assert_eq!((snap.refused.len(), snap.refused_version), (2, 8));
+    // Restored by the same firmware: unchanged.
+    let mut same = hub_with(&[]);
+    same.restore_device(snap.clone(), None, T0).unwrap();
+    assert_eq!(same.device(ID).unwrap().refused_version, 8);
+    // Restored by one that has template.tuya: plug_3 is dropped (to be
+    // fetched now), the device is checked again.
+    let mut newer = hub_with(&[]);
+    newer.features.push("template.tuya");
+    newer.restore_device(snap, None, T0).unwrap();
+    let d = newer.device(ID).unwrap();
+    assert_eq!(
+        d.refused.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["future/x"]
+    );
+    assert_eq!(d.refused_version, crate::device::REFUSED_RECHECK);
+}

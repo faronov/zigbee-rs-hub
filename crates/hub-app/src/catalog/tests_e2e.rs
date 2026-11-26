@@ -148,6 +148,8 @@ fn sml001_snapshot() -> DeviceSnapshot {
         entities: vec![],
         reporting: vec![],
         imported: 0,
+        refused: vec![],
+        refused_version: 0,
     }
 }
 
@@ -328,26 +330,39 @@ const PLUG: &str = "zb:a4c1380000000001";
 
 /// A Tuya TS011F plug as the interview stores it.
 fn ts011f_snapshot(manufacturer: &str, app: u32) -> DeviceSnapshot {
+    ts011f_device(0xa4c1380000000001, manufacturer, app, 1)
+}
+
+/// A Tuya TS011F at `ieee` with `gangs` outlets (endpoints 1..=gangs; the
+/// first with metering).
+fn ts011f_device(ieee: u64, manufacturer: &str, app: u32, gangs: u8) -> DeviceSnapshot {
+    let endpoints = (1..=gangs)
+        .map(|ep| EndpointFp {
+            ep,
+            profile: 0x0104,
+            device_id: 0x0051,
+            in_clusters: if ep == 1 {
+                vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0B04, 0xE000, 0xE001]
+            } else {
+                vec![0x0004, 0x0005, 0x0006]
+            },
+            out_clusters: if ep == 1 { vec![0x000A, 0x0019] } else { vec![] },
+        })
+        .collect();
     let fp = Fingerprint {
         manufacturer_name: Some(manufacturer.into()),
         model_id: Some("TS011F".into()),
         app_version: Some(app),
         power_source: Some(1),
         mfr_code: Some(0x1002),
-        endpoints: vec![EndpointFp {
-            ep: 1,
-            profile: 0x0104,
-            device_id: 0x0051,
-            in_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0B04, 0xE000, 0xE001],
-            out_clusters: vec![0x000A, 0x0019],
-        }],
+        endpoints,
         ..Default::default()
     };
     DeviceSnapshot {
-        id: PLUG.into(),
-        kind: DeviceKind::Zigbee { ieee: 0xa4c1380000000001, nwk: 0x1234 },
+        id: format!("zb:{ieee:016x}"),
+        kind: DeviceKind::Zigbee { ieee, nwk: ieee as u16 },
         fp,
-        active_eps: vec![1],
+        active_eps: (1..=gangs).collect(),
         ..sml001_snapshot()
     }
 }
@@ -447,16 +462,98 @@ fn published_catalog_resolves_a_ts011f_plug() {
         assert_eq!(f["result"].get("refused").cloned().unwrap_or(json!([])), want, "{f}");
         let g = call(&app_, sid, &rx, 904, json!({"type": "devices/diagnostics", "device": PLUG}));
         assert_eq!(g["result"]["catalog_refused"], want, "{g}");
-        // A newer release: its shards decide again.
+        // Approximate where zhc's choice was refused (version 69), not for
+        // the reported plug (77): zhc's choice there is TS011F_plug_1.
+        let approx = (app == 69)
+            .then(|| json!({"better": "tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", "needs": ["template.tuya"]}));
+        assert_eq!(d.get("definition_approximate"), approx.as_ref(), "{d}");
+        assert_eq!(g["result"]["definition_approximate"], approx.clone().unwrap_or(J::Null), "{g}");
+        // A newer release: a device with refused definitions is to be
+        // checked again (`missing`, `recheck`), and stays approximate
+        // until its shards say otherwise.
         let newer = ts011f_release(&["ts011f_plug_2", "ts011f_plug_3"], 2);
         let m = upload(&app_, sid, &rx, &mut id, "manifest", &newer["manifest.cose"], 0, json!({}));
         assert_eq!(m["result"]["catalog_serial"], 2, "{m}");
-        let f = call(&app_, sid, &rx, 905, json!({"type": "definitions/fetch", "device": PLUG}));
-        assert_eq!(f["result"].get("refused"), None, "{f}");
+        let st = call(&app_, sid, &rx, 905, json!({"type": "catalog/status"}));
+        let miss = st["result"]["missing"].as_array().unwrap().clone();
+        assert_eq!(miss.len(), usize::from(app == 69), "{st}");
+        for e in &miss {
+            assert_eq!((e["recheck"].clone(), e["refused"].clone()), (json!(true), want.clone()), "{st}");
+            for n in e["shards"].as_array().unwrap() {
+                let n = n.as_u64().unwrap();
+                let c = upload(&app_, sid, &rx, &mut id, "shard", &newer[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+                assert_eq!(c["success"], true, "{c}");
+            }
+        }
+        let st = call(&app_, sid, &rx, 906, json!({"type": "catalog/status"}));
+        assert_eq!(st["result"]["missing"], json!([]), "{st}");
+        let d = call(&app_, sid, &rx, 907, json!({"type": "devices/get", "device": PLUG}))["result"].clone();
+        assert_eq!(d.get("definition_approximate"), approx.as_ref(), "{d}");
         app_.shutdown();
         r.ncp.shutdown();
         r.sim.stop();
     }
+}
+
+/// The fallback to TS011F_plug_1 is marked approximate where zhc picks a
+/// definition this firmware cannot run yet (template `tuya`): a
+/// TS011F_plug_3-class plug (application version 69) and a 3-gang strip
+/// (TS011F_3_gang), not the reported `_TZ3000_gjnozsaz` (77), whose zhc
+/// choice is TS011F_plug_1. The mark survives a restart (device records).
+#[test]
+fn fallbacks_to_ts011f_plug_1_are_marked_approximate() {
+    let files = ts011f_release(&["ts011f_plug_1", "ts011f_plug_3", "ts011f_3_gang"], 1);
+    let devices = [
+        (ts011f_device(0xa4c1380000000011, "_TZ3000_zzzzzzzz", 69, 1), Some(("tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", 1))),
+        (ts011f_device(0xa4c1380000000012, "_TZ3000_dlug3kbc", 77, 3), Some(("tuya/ts011f_3_gang (Tuya TS011F_3_gang)", 3))),
+        (ts011f_device(0xa4c1380000000013, "_TZ3000_gjnozsaz", 77, 1), None),
+    ];
+    let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    for (s, _) in &devices {
+        r.ncp.with_store(|st| st.kv_put(&format!("dev/{}", s.id), &s.to_bytes())).unwrap();
+    }
+    let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+    let check = |app: &App, sid: u64, rx: &Rx| {
+        for (i, (s, want)) in devices.iter().enumerate() {
+            let d = call(app, sid, rx, 950 + i as u64, json!({"type": "devices/get", "device": s.id}))["result"].clone();
+            assert_eq!(d["definition_model"], "TS011F_plug_1", "{d}");
+            let approx = want.map(|(better, _)| json!({"better": better, "needs": ["template.tuya"]}));
+            assert_eq!(d.get("definition_approximate"), approx.as_ref(), "{d}");
+            if let Some((_, gangs)) = want {
+                assert_eq!(d["endpoints"].as_array().map(Vec::len), Some(*gangs as usize), "{d}");
+            }
+        }
+    };
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    let m = upload(&app, sid, &rx, &mut id, "manifest", &files["manifest.cose"], 0, json!({}));
+    assert_eq!(m["success"], true, "{m}");
+    let st = call(&app, sid, &rx, 900, json!({"type": "catalog/status"}));
+    let mut shards: Vec<u64> = st["result"]["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|e| e["shards"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()))
+        .collect();
+    shards.sort();
+    shards.dedup();
+    for n in shards {
+        let c = upload(&app, sid, &rx, &mut id, "shard", &files[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+        assert_eq!(c["success"], true, "{c}");
+    }
+    check(&app, sid, &rx);
+    app.shutdown();
+    // Restarted: the same records, nothing to fetch again.
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    check(&app, sid, &rx);
+    let st = call(&app, sid, &rx, 901, json!({"type": "catalog/status"}));
+    assert_eq!(st["result"]["missing"], json!([]), "{st}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
 }
 
 /// A device's keys span several shards (TS011F `_TZ3000_gjnozsaz`: its

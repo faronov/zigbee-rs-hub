@@ -273,6 +273,24 @@ pub struct FetchedCatalog {
 }
 
 impl FetchedCatalog {
+    /// The newest record of each definition (a definition stored again
+    /// under more keys supersedes its earlier record).
+    fn latest(&self) -> impl Iterator<Item = &Fetched> {
+        let id = |f: &Fetched| {
+            peek_summary(f.cbor, &DecodeOptions::default())
+                .ok()
+                .and_then(|s| s.id)
+        };
+        self.defs
+            .iter()
+            .enumerate()
+            .filter(move |(i, f)| {
+                let me = id(f);
+                me.is_none() || !self.defs[i + 1..].iter().any(|g| id(g) == me)
+            })
+            .map(|(_, f)| f)
+    }
+
     fn load(f: &Fetched) -> Option<Definition> {
         let mut d = crate::zdef_adapter::load_cbor(f.cbor, LayerSource::Fetched).ok()?;
         d.source = LayerSource::Fetched;
@@ -291,8 +309,7 @@ impl FetchedCatalog {
 impl Catalog for FetchedCatalog {
     fn candidates(&self, fp: &Fingerprint) -> Vec<Arc<Definition>> {
         let keys = fingerprint_keys(fp);
-        self.defs
-            .iter()
+        self.latest()
             .filter(|f| f.keys.iter().any(|k| keys.contains(k)))
             .filter_map(Self::load)
             .map(Arc::new)
@@ -310,11 +327,7 @@ impl Catalog for FetchedCatalog {
     }
 
     fn all(&self) -> Vec<Arc<Definition>> {
-        self.defs
-            .iter()
-            .filter_map(Self::load)
-            .map(Arc::new)
-            .collect()
+        self.latest().filter_map(Self::load).map(Arc::new).collect()
     }
 }
 

@@ -18,7 +18,9 @@ install instructions and the list of merged pull requests. A pre-release
   while the plug is off. TS011F devices for which Zigbee2MQTT picks a
   definition that needs template `tuya` (not implemented yet:
   `TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) use `TS011F_plug_1`
-  meanwhile, and their diagnostics name the other definition. After
+  meanwhile, marked **approx.** on the device card and page (the tooltip
+  names Zigbee2MQTT's definition and what it needs; `definition_approximate`
+  in the device record and diagnostics). After
   the update use Find definition on the device page (or Catalog › Fetch
   missing definitions) to fetch it.
 

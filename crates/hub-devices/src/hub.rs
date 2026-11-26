@@ -3268,6 +3268,30 @@ pub(crate) fn build_dispatch(d: &Device) -> BTreeMap<DKey, Vec<(usize, Option<us
 }
 
 impl<T: ZigbeeTransport> Hub<T> {
+    /// Records what the catalog service found in a shard of catalog
+    /// `version` for device `id` (9.3): the definitions it matches that
+    /// this firmware cannot run. The first shard of a newer catalog
+    /// replaces what earlier catalogs' shards left; later ones add to it.
+    /// A change emits `device_updated` (the record's
+    /// `definition_approximate`; the registry keeps it).
+    pub fn note_refused(&mut self, id: &str, version: u64, found: Vec<crate::device::Refused>) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let old = (d.refused.clone(), d.refused_version);
+        if d.refused_version != version {
+            d.refused.clear();
+            d.refused_version = version;
+        }
+        for r in found {
+            d.refused.retain(|x| x.id != r.id);
+            d.refused.push(r);
+        }
+        if (&d.refused, d.refused_version) != (&old.0, old.1) {
+            self.emit(HubEvent::DeviceUpdated(id.to_string()));
+        }
+    }
+
     /// Helper for tests and the API: the state message of an entity.
     pub fn state_of(&self, uid: &str) -> Option<J> {
         self.entity(uid).map(|(d, e)| e.state_msg(d.available))
@@ -3282,6 +3306,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             "layers": d.resolution.layers,
             "resolution_diagnostics": d.resolution.diagnostics,
             "catalog_refused": d.refused_better().iter().map(|r| r.message()).collect::<Vec<_>>(),
+            "definition_approximate": d.approximate_json(),
             "configure_hash": d.configure.hash,
             "configure": d.diag.configure,
             "unknown_attributes": d.diag.unknown_attrs.iter().map(|((ep, c, a), v)| json!({"ep": ep, "cluster": format!("0x{c:04x}"), "attr": format!("0x{a:04x}"), "value": v})).collect::<Vec<_>>(),

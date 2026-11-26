@@ -352,7 +352,12 @@ Precedence rules:
   implements the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
   resolves; where zhc picks a TS011F definition that needs `tuya`
   (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays), the hub uses
-  `TS011F_plug_1`, the `zigbeeModel` match, and names the other. To
+  `TS011F_plug_1`, the `zigbeeModel` match, and names the other. Such a
+  fallback is marked: the device record's `definition_approximate`
+  `{better: "<id> (<vendor> <model>)", needs: [features]}` (also in
+  `devices/diagnostics`; the web UI shows an "approx." badge explaining
+  that Zigbee2MQTT uses the other definition, which needs the feature,
+  until it is supported). To
   replay it: `hubctl --sim --sim-ts011f serve --token T` (a simulated
   `_TZ3000_gjnozsaz` joins), then `hubctl catalog-push
   ws://127.0.0.1:8099/api --token T --dir <release>`: the plug becomes NEO
@@ -399,6 +404,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `model` | definition `model`, else Basic 0x0005 | definition `model`, else "GPD 0x<device id>" | `model` |
 | `model_id` | Basic 0x0005 | `0x<mfr>/0x<model>` | `model_id` |
 | `definition_model` | `model` of the resolved definition (the white label's base model when `model` is a white label); null without a definition | same | — (web UI device pictures: `https://www.zigbee2mqtt.io/images/devices/<model>.png`, `/`, `:`, `'` and space replaced by `-`, tried for `model`, then `definition_model`) |
+| `definition_approximate` | only while the device runs a catalog definition and a better-scoring one it matches needs features this firmware lacks (3.3, 9.3): `{better: "<id> (<vendor> <model>)", needs: [features]}` | same | — (web UI "approx." badge) |
 | `sw_version` / `hw_version` | Basic 0x4000 / 0x0003 | — | `sw_version` / `hw_version` |
 | `name` | user name, else `model` | same | `name` (user-editable in HA) |
 | `via` | the hub | the hub | `via_device` |
@@ -1628,11 +1634,20 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   later shard may hold the better definition (hub 0.3.0 kept the first).
   Records that score but need a feature it lacks
   are decoded anyway (all features) to be named: the device keeps them as
-  `refused` (id, vendor, model, missing features, score, priority) until a
-  new manifest is installed, and `missing`, `definitions/fetch` and
-  `devices/diagnostics` (`catalog_refused`) list those that would be chosen
-  over its current definition (all of them while it is generic only; none
-  while a definition is pinned). Uploads survive a dropped connection
+  `refused` (id, white-label vendor and model, missing features, score,
+  priority) with the catalog version they are from, in its registry record
+  (they survive a restart). The first shard of a newer catalog checked for
+  the device replaces them; until then `missing` lists it with `recheck:
+  true` also while it has a definition (the web UI does not count those as
+  "without definition"), and so does a restart on a firmware that gained
+  their features (what it can run now is fetched). `missing`,
+  `definitions/fetch` and `devices/diagnostics` (`catalog_refused`) list
+  those that would be chosen over its current definition (all of them
+  while it is generic only; none while a definition is pinned); when the
+  device runs a catalog definition, the best of them is its record's
+  `definition_approximate`. A definition already stored is stored again
+  when a shard has keys it was not stored under (a shard record carries
+  the definition's keys in that shard only); the newest record is read. Uploads survive a dropped connection
   (`catalog/status` `upload.written`). Shards are checked against the
   *installed* manifest, so after the mirror moved to a newer release a
   client installs its manifest (and what it then `wants`) first: the web

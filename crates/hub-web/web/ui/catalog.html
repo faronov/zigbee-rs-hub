@@ -17,7 +17,7 @@ const ctLoad=()=>call("catalog/status").then(s=>{ct=s;const kv=$("#ctl"),i=s.ins
  kvAdd(kv,"To install",[w.bank&&w.bank.name,w.web&&w.web.name].filter(Boolean).join(", "));
  kvAdd(kv,"Compiler",s.web_tools.installed?Math.round(s.web_tools.size/1024)+" KiB":"not installed");
  kvAdd(kv,"Fetched",s.local.definitions+" definitions, "+Math.round(s.local.used/1024)+" of "+Math.round(s.local.size/1024)+" KiB");
- kvAdd(kv,"Without definition",(s.missing||[]).map(x=>devs[x.device]&&devs[x.device].name||x.device).join(", "));
+ kvAdd(kv,"Without definition",(s.missing||[]).filter(x=>!x.recheck).map(x=>devs[x.device]&&devs[x.device].name||x.device).join(", "));
  for(const x of s.warnings||[])kvAdd(kv,"Warning",x);
  V("ctb",s.config.base_url);$("#cta").checked=s.config.auto_update;$("#ctx").checked=s.config.auto_fetch}).catch(()=>{});
 // With daily updates on, opening the tab installs the mirror's newer

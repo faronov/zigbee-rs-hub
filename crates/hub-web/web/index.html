@@ -393,8 +393,11 @@ const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/senso
  dL=d=>(d.definition||[]).filter(l=>l.source!="generic"),
  // No definition matched: generic ZCL support only.
  gn=d=>d.interview=="complete"&&!dL(d).length,
+ // A lower-scoring definition while Zigbee2MQTT's needs what this firmware lacks.
+ apx=d=>{const a=d.definition_approximate;return a?"Zigbee2MQTT uses "+a.better+", which needs "+a.needs.join(", ")+"; this hub uses "+(d.definition_model||"another definition")+" until it is supported":""},
  bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
   gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
+  apx(d)?el("span",{class:"badge",title:apx(d)},"approx."):"",
   el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
  pgId=()=>(/^#device\/(.+)/.exec(location.hash)||[])[1];
 let sy,pgOn,snap;
@@ -414,7 +417,7 @@ function netLine(id){const d=devs[id],v=lv(id),q=v.linkquality,lo=v.b===true||v.
 // it, generic support gives the rest.
 function defLn(d){const l=dL(d),pa=l.some(x=>x.partial),S={fetched:"catalog",self_description:"self-description"};
  return el("div",{class:"mut",title:(d.definition||[]).map(x=>x.id+" ("+x.source+", rev "+x.revision+")").join(" + ")},"definition: "+(l.length?(d.definition_model?(d.model==d.definition_model?d.manufacturer+" ":"")+d.definition_model:l[l.length-1].id)+
-  " ("+[...new Set(l.map(x=>S[x.source]||x.source))].join(" + ")+(pa?", partial: generic support for the rest":"")+")":"generic only"))}
+  " ("+[...new Set(l.map(x=>S[x.source]||x.source))].join(" + ")+(pa?", partial: generic support for the rest":"")+")"+(apx(d)?" · approx.: "+apx(d):""):"generic only"))}
 // f: the device page (everything, entities grouped), else the card.
 function devCard(id,f){
  const d=devs[id],h="#device/"+id,rp=document.getElementById("rp-"+id),dg=document.getElementById("dg-"+id),c=[];let ul,k;
