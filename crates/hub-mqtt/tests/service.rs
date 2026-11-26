@@ -2,13 +2,16 @@
 //! simulated NCP, the bridge thread with the TCP client, the test broker.
 //! Settings over the API, LWT and reconnect, credentials, disable.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hub_app::{App, AppConfig};
 use hub_mqtt::broker::Broker;
+use hub_mqtt::codec::Packet;
 use hub_mqtt::{
     MemoryStore, MqttConfig, MqttService, ServiceConfig, SettingsStore, Transport, TransportFactory,
 };
@@ -250,6 +253,95 @@ fn low_memory_keeps_the_bridge_waiting() {
     assert_eq!(broker.connects(), 0);
     svc.stop();
     assert_eq!(svc.status().state, "disabled");
+    app.shutdown();
+    ncp.shutdown();
+    sim.stop();
+}
+
+/// Each CONNECT's user name and whether it had a password.
+type Connects = Arc<Mutex<Vec<(Option<String>, bool)>>>;
+
+/// A broker refusing anonymous clients like Mosquitto with an auth plugin
+/// (Home Assistant's add-on): CONNACK 5 and the close in one go, or (mode
+/// 2) a close without a CONNACK.
+fn refusing_broker(mode: Arc<AtomicU8>) -> (u16, Connects) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 512];
+            let connect = loop {
+                match s.read(&mut chunk) {
+                    Ok(0) | Err(_) => break None,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+                if let Ok(Some((p, _))) = Packet::decode(&buf, 4096) {
+                    break Some(p);
+                }
+            };
+            if let Some(Packet::Connect {
+                username, password, ..
+            }) = connect
+            {
+                log.lock().unwrap().push((username, password.is_some()));
+                if mode.load(Ordering::SeqCst) == 1 {
+                    let _ = s.write_all(&[0x20, 2, 0, 5]);
+                }
+            }
+            let _ = s.shutdown(Shutdown::Both);
+        }
+    });
+    (port, seen)
+}
+
+#[test]
+fn refusals_of_anonymous_clients_are_reported() {
+    let mode = Arc::new(AtomicU8::new(1));
+    let (port, seen) = refusing_broker(mode.clone());
+    let (ncp, sim) = ncp();
+    let app = App::start(
+        ncp.clone(),
+        AppConfig {
+            api_token: "secret".into(),
+            ..AppConfig::default()
+        },
+    );
+    // A password left from an earlier user name: not sent without one.
+    let store = Arc::new(MemoryStore::default());
+    let cfg = MqttConfig {
+        enabled: true,
+        host: "127.0.0.1".into(),
+        port,
+        password: "stale".into(),
+        ..MqttConfig::default()
+    };
+    store.save(&cfg.to_store()).unwrap();
+    let factory: TransportFactory =
+        Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn Transport>);
+    let svc = MqttService::start(&app, store, factory, ServiceConfig::default());
+    let error = || svc.status().last_error.unwrap_or_default();
+    until("CONNACK 5 reported", || {
+        error() == "connection refused: not authorized"
+    });
+    mode.store(2, Ordering::SeqCst);
+    until("the close reported", || {
+        error()
+            == "the broker closed the connection after CONNECT \
+                (it may require a user name and password)"
+    });
+    assert_eq!(svc.status().state, "retrying");
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 2, "{seen:?}");
+    assert!(
+        seen.iter().all(|c| *c == (None, false)),
+        "anonymous CONNECTs: {seen:?}"
+    );
+    drop(seen);
+    svc.stop();
     app.shutdown();
     ncp.shutdown();
     sim.stop();

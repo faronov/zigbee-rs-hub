@@ -32,7 +32,8 @@ pub mod z2m;
 pub use bridge::{Bridge, Limits, Msg};
 pub use config::{FileStore, MemoryStore, MqttConfig, SettingsStore};
 pub use service::{
-    ConnectOptions, Event, EventFn, MqttService, ServiceConfig, Status, Transport, TransportFactory,
+    ConnDiag, ConnectOptions, Event, EventFn, MqttService, ServiceConfig, Status, Transport,
+    TransportFactory,
 };
 
 #[cfg(test)]

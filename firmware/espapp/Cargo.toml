@@ -15,7 +15,16 @@ test = false
 doctest = false
 
 [dependencies]
-esp-idf-svc = "0.53"
+# Exact: `record_error` in src/mqtt.rs reads esp-idf-svc 0.53.0's private
+# `EspMqttEvent(&esp_mqtt_event_t)` layout (transmute_copy; the size assert
+# cannot tell what the field is), so no semver-compatible release may slip
+# in through `cargo update`. esp-idf-svc 0.54 has the public
+# `EventPayload::Error(&EspMqttError)` (`error_type()`,
+# `connect_return_code()`, `esp_tls_last_esp_err()`,
+# `esp_transport_sock_errno()`): when upgrading, use it and delete the
+# transmute_copy, the unsafe and the assert. All firmware crates pin the
+# same version.
+esp-idf-svc = "=0.53.0"
 hub-core = { workspace = true }
 hub-store = { workspace = true }
 log = "0.4"

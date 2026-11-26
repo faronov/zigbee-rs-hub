@@ -242,6 +242,14 @@ TinyUSB, драйвер UART с `CONFIG_UART_ISR_IN_IRAM`), а esp-idf-svc да�
 HTTP/WS-сервер. Поэтому практичная основа — esp-idf-svc. Тот же выбор записан
 в спецификации ZRHP (12.4).
 
+esp-idf-svc закреплён точно на `=0.53.0` во всех крейтах прошивки:
+MQTT-транспорт (`record_error` в `firmware/espapp/src/mqtt.rs`) читает сырое
+событие ошибки esp-mqtt через приватную раскладку `EspMqttEvent` версии 0.53.0,
+потому что 0.53 сообщает о любой ошибке MQTT как `ESP_FAIL`. **TODO при
+переходе на 0.54+:** использовать публичный `EventPayload::Error(&EspMqttError)`
+(`connect_return_code()`, `esp_transport_sock_errno()` …) и удалить
+`transmute_copy`, `unsafe` и проверку размера.
+
 ## Факты о плате (сверены с источниками Espressif)
 
 Источники: документация esp-thread-br «Hardware Platforms» (распределение GPIO)
@@ -1224,6 +1232,20 @@ openHAB, MQTT discovery Home Assistant, скрипты. `crates/hub-mqtt` —
   client ID (по умолчанию `zigbee-rs-hub-<6 hex IEEE координатора>`),
   логин/пароль, базовый топик (`zigbee2mqtt`), keepalive, discovery HA и
   его префикс (`homeassistant`), retain состояний/доступности, QoS.
+- **Анонимно или с логином**: пустые поля логина и пароля — анонимное
+  подключение (в CONNECT нет ни того, ни другого; пароль без логина не
+  отправляется). Многие брокеры не пускают анонимных клиентов: Mosquitto
+  2.x без `allow_anonymous true` и **аддон Mosquitto в Home Assistant
+  всегда** — в его логе тогда `received null username or password for
+  unpwd check` и `… disconnected: not authorised.` Для аддона создайте
+  пользователя Home Assistant (Настройки → Люди → Пользователи; не
+  `homeassistant` и не `addons`) или запись в `logins` аддона и введите
+  его в хабе. `last_error` в `mqtt/status` объясняет причину:
+  `connection refused: not authorized` (CONNACK 5), `connection refused:
+  bad user name or password` (CONNACK 4), `the broker closed the
+  connection after CONNECT (it may require a user name and password)`
+  (закрыл без CONNACK); веб-интерфейс тогда показывает подсказку для
+  анонимного клиента.
 - **Топики**: `<base>/<friendly_name>` (состояние JSON, ключи — имена
   exposes Zigbee2MQTT: `temperature`, `humidity`, `battery`, `voltage` (мВ),
   `state` `ON`/`OFF`, `brightness` 0–254, `color_temp` (майред), `color`,

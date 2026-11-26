@@ -15,7 +15,8 @@ test = false
 doctest = false
 
 [dependencies]
-esp-idf-svc = "0.53"
+# Exact, like firmware/espapp (its `record_error` depends on 0.53.0's layout).
+esp-idf-svc = "=0.53.0"
 embedded-svc = "0.29"
 hub-core = { workspace = true }
 hub-store = { workspace = true }

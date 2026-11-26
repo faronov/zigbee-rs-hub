@@ -282,6 +282,14 @@ attractive (no C, async), but the WebSocket hub would have to assemble Wi-Fi
 younger crates, so esp-idf-svc is the practical base. The same choice is
 already recorded in the ZRHP spec (12.4).
 
+esp-idf-svc is pinned to exactly `=0.53.0` in every firmware crate: the MQTT
+transport (`record_error` in `firmware/espapp/src/mqtt.rs`) reads the raw
+esp-mqtt error event through 0.53.0's private `EspMqttEvent` layout, because
+0.53 reports every MQTT error event as `ESP_FAIL`. **TODO on upgrading to
+0.54+:** use its public `EventPayload::Error(&EspMqttError)`
+(`connect_return_code()`, `esp_transport_sock_errno()` …) and delete the
+`transmute_copy`, the `unsafe` and the size assert.
+
 ## Board facts (checked against Espressif sources)
 
 Sources: esp-thread-br docs "Hardware Platforms" (GPIO allocation) and the
@@ -1243,6 +1251,20 @@ UI and the HA integration see.
   `zigbee-rs-hub-<6 hex of the coordinator IEEE>`), credentials, base
   topic (`zigbee2mqtt`), keepalive, HA discovery and its prefix
   (`homeassistant`), retained states/availability, QoS.
+- **Anonymous or with a login**: empty user name and password fields
+  connect anonymously (the CONNECT carries neither; a password without a
+  user name is not sent). Many brokers refuse anonymous clients:
+  Mosquitto 2.x unless `allow_anonymous true`, and **Home Assistant's
+  Mosquitto add-on always** — its log then shows `received null username
+  or password for unpwd check` and `… disconnected: not authorised.` For
+  the add-on, create a Home Assistant user (Settings → People → Users;
+  not `homeassistant` or `addons`) or an entry in the add-on's `logins`,
+  and enter it in the hub. `mqtt/status` `last_error` says why a
+  connection failed: `connection refused: not authorized` (CONNACK 5),
+  `connection refused: bad user name or password` (CONNACK 4), `the broker
+  closed the connection after CONNECT (it may require a user name and
+  password)` (closed without a CONNACK); the web UI adds a hint when an
+  anonymous client is refused.
 - **Topics**: `<base>/<friendly_name>` (JSON state, keys = Zigbee2MQTT
   expose names: `temperature`, `humidity`, `battery`, `voltage` (mV),
   `state` `ON`/`OFF`, `brightness` 0–254, `color_temp` (mired), `color`,

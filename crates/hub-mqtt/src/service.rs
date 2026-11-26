@@ -75,6 +75,74 @@ pub trait Transport: Send {
 /// Makes a client for each connection.
 pub type TransportFactory = Arc<dyn Fn() -> Box<dyn Transport> + Send + Sync>;
 
+/// Why a connection ended, in the words of `mqtt/status` `last_error`:
+/// the transports record what they saw (esp-mqtt reports the cause in an
+/// error event before its `disconnected`) and take the text when the
+/// connection ends.
+#[derive(Debug, Clone, Default)]
+pub struct ConnDiag {
+    anonymous: bool,
+    connected: bool,
+    why: Option<String>,
+}
+
+impl ConnDiag {
+    /// A connection attempt; `anonymous`: without a user name.
+    pub fn new(anonymous: bool) -> Self {
+        Self {
+            anonymous,
+            ..Self::default()
+        }
+    }
+
+    /// The broker accepted the connection (CONNACK 0).
+    pub fn connected(&mut self) {
+        self.connected = true;
+        self.why = None;
+    }
+
+    /// The broker refused the connection with CONNACK return `code`.
+    pub fn refused(&mut self, code: u8) {
+        let why = match code {
+            1 => "unacceptable protocol version",
+            2 => "client identifier rejected",
+            3 => "server unavailable",
+            4 => "bad user name or password",
+            5 => "not authorized",
+            _ => "refused",
+        };
+        self.why = Some(format!("connection refused: {why}"));
+    }
+
+    /// The broker closed the TCP connection (FIN or reset). Before a
+    /// CONNACK that is usually a broker refusing the client without saying
+    /// why; anonymous clients most often.
+    pub fn closed(&mut self) {
+        let why = match (self.connected, self.anonymous) {
+            (true, _) => "the broker closed the connection",
+            (false, false) => "the broker closed the connection after CONNECT",
+            (false, true) => {
+                "the broker closed the connection after CONNECT \
+                 (it may require a user name and password)"
+            }
+        };
+        self.error(why);
+    }
+
+    /// Any other failure (an earlier cause wins).
+    pub fn error(&mut self, e: impl Into<String>) {
+        if self.why.is_none() {
+            self.why = Some(e.into());
+        }
+    }
+
+    /// The connection ended: its cause, else `disconnected`.
+    pub fn ended(&mut self) -> String {
+        self.connected = false;
+        self.why.take().unwrap_or_else(|| "disconnected".into())
+    }
+}
+
 /// Platform facts for the service.
 #[derive(Clone)]
 pub struct ServiceConfig {
@@ -534,12 +602,17 @@ impl Runner {
                 flag.store(fallback, Ordering::SeqCst);
             }
         });
+        // Empty fields are absent: an anonymous CONNECT, no zero-length
+        // user name; MQTT 3.1.1 sends a password only with a user name.
+        let username = (!self.cfg.username.is_empty()).then(|| self.cfg.username.clone());
+        let password = (username.is_some() && !self.cfg.password.is_empty())
+            .then(|| self.cfg.password.clone());
         let opts = ConnectOptions {
             host: self.cfg.host.clone(),
             port: self.cfg.port,
             client_id: self.client_id(),
-            username: (!self.cfg.username.is_empty()).then(|| self.cfg.username.clone()),
-            password: (!self.cfg.password.is_empty()).then(|| self.cfg.password.clone()),
+            username,
+            password,
             keepalive_s: self.cfg.keepalive_s,
             will: self.bridge.will(),
         };
@@ -638,5 +711,34 @@ impl Runner {
         }
         self.sh.status.lock().unwrap().state = "disabled";
         info!("mqtt: bridge stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnDiag;
+
+    // esp-mqtt reports the cause in an error event, then `disconnected`.
+    #[test]
+    fn the_cause_outlives_the_disconnection() {
+        let mut d = ConnDiag::new(true);
+        d.refused(5);
+        d.closed();
+        assert_eq!(d.ended(), "connection refused: not authorized");
+        d.refused(4);
+        assert_eq!(d.ended(), "connection refused: bad user name or password");
+        d.closed();
+        assert_eq!(
+            d.ended(),
+            "the broker closed the connection after CONNECT \
+             (it may require a user name and password)"
+        );
+        let mut d = ConnDiag::new(false);
+        d.closed();
+        assert_eq!(d.ended(), "the broker closed the connection after CONNECT");
+        d.connected();
+        d.closed();
+        assert_eq!(d.ended(), "the broker closed the connection");
+        assert_eq!(d.ended(), "disconnected");
     }
 }

@@ -14,14 +14,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(not(feature = "mqtt-lite"))]
-use esp_idf_svc::mqtt::client::{Details, EspMqttClient, EventPayload, LwtConfiguration, MqttClientConfiguration, QoS};
+use esp_idf_svc::mqtt::client::{
+    Details, EspMqttClient, EspMqttEvent, EventPayload, LwtConfiguration, MqttClientConfiguration, QoS,
+};
 use esp_idf_svc::sys;
 #[cfg(not(feature = "mqtt-lite"))]
-use hub_mqtt::{ConnectOptions, Event, EventFn, Msg};
+use hub_mqtt::{ConnDiag, ConnectOptions, Event, EventFn, Msg};
 pub use hub_mqtt::SettingsStore;
 use hub_mqtt::{Limits, ServiceConfig, Transport};
-#[cfg(not(feature = "mqtt-lite"))]
-use log::warn;
 
 /// Settings JSON stored at most (NVS strings take up to 4000 B).
 pub const SETTINGS_MAX: usize = 1024;
@@ -29,6 +29,43 @@ pub const SETTINGS_MAX: usize = 1024;
 #[cfg(not(feature = "mqtt-lite"))]
 fn qos(q: u8) -> QoS {
     if q == 0 { QoS::AtMostOnce } else { QoS::AtLeastOnce }
+}
+
+// esp-idf-svc 0.53 turns every error event into ESP_FAIL; the cause
+// (CONNACK return code, socket error) is in the raw event it wraps. Only
+// valid for the exact version pinned in Cargo.toml; with esp-idf-svc 0.54
+// read `EventPayload::Error(&EspMqttError)` instead and delete this.
+#[cfg(not(feature = "mqtt-lite"))]
+const _: () = assert!(size_of::<EspMqttEvent<'static>>() == size_of::<&sys::esp_mqtt_event_t>());
+
+/// Records the cause of an esp-mqtt error event for the `disconnected`
+/// that follows it.
+#[cfg(not(feature = "mqtt-lite"))]
+fn record_error(e: &EspMqttEvent<'_>, diag: &mut ConnDiag) {
+    // SAFETY: EspMqttEvent is a newtype over `&esp_mqtt_event_t` (its size
+    // is checked above), valid for the callback.
+    let raw: &sys::esp_mqtt_event_t = unsafe { core::mem::transmute_copy(e) };
+    let Some(h) = (unsafe { raw.error_handle.as_ref() }) else { return };
+    match h.error_type {
+        sys::esp_mqtt_error_type_t_MQTT_ERROR_TYPE_CONNECTION_REFUSED => diag.refused(h.connect_return_code as u8),
+        sys::esp_mqtt_error_type_t_MQTT_ERROR_TYPE_TCP_TRANSPORT => {
+            let errno = h.esp_transport_sock_errno;
+            let sock = std::io::Error::from_raw_os_error(errno);
+            match h.esp_tls_last_esp_err {
+                sys::ESP_ERR_ESP_TLS_TCP_CLOSED_FIN => diag.closed(),
+                sys::ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME => diag.error("cannot resolve the host name"),
+                sys::ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT => diag.error("connection timed out"),
+                sys::ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST if errno != 0 => diag.error(format!("cannot connect: {sock}")),
+                sys::ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST => diag.error("cannot connect"),
+                _ if matches!(sock.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {
+                    diag.closed()
+                }
+                _ if errno != 0 => diag.error(sock.to_string()),
+                e => diag.error(format!("transport error 0x{e:x}")),
+            }
+        }
+        _ => {}
+    }
 }
 
 /// esp-mqtt, one client per connection (no automatic reconnect: the
@@ -59,10 +96,15 @@ impl Transport for Esp {
             outbox_limit: Some(8 * 1024),
             ..Default::default()
         };
+        let mut diag = ConnDiag::new(o.username.is_none());
         let client = EspMqttClient::new_cb(&url, &conf, move |e| match e.payload() {
-            EventPayload::Connected(_) => events(Event::Connected),
-            EventPayload::Disconnected => events(Event::Disconnected("disconnected".into())),
-            EventPayload::Error(e) => warn!("mqtt: esp-mqtt: {e}"),
+            EventPayload::Connected(_) => {
+                diag.connected();
+                events(Event::Connected)
+            }
+            EventPayload::Disconnected => events(Event::Disconnected(diag.ended())),
+            // The bridge logs the cause with the disconnection.
+            EventPayload::Error(_) => record_error(&e, &mut diag),
             // Messages larger than the input buffer arrive in chunks: a
             // command is never that large; dropped.
             EventPayload::Received { topic: Some(t), data, details: Details::Complete, .. } => {
