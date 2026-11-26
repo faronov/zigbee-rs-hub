@@ -72,8 +72,11 @@ async function ctGo(get,upd,auto){let m=0,er;if(upd)m=await ctNewer(auto).catch(
   try{await ctShards(sh);return{n:sh.length,m}}catch(e){if(m||!upd||!/differs/.test(e.message))throw e;if(er||!(m=await ctNewer(auto)))throw er||e;ctSay(ctTxt(m)+", retrying…")}}}
 // Find definition: then what the device resolves to (a bank the update
 // installed may hold its definition: no shard needed); by the name it had.
-async function ctFind(id){const n=devs[id]&&devs[id].name||id,r=await ctGo(()=>ctMiss(id),1),l=dL(await call("devices/get",{device:id}));
- return(r.m?ctTxt(r.m)+"; ":"")+(l.length?n+" now uses "+l[l.length-1].id:"the catalog has no definition for "+n)}
+// Still generic: the best catalog definition it matches that needs
+// features this firmware lacks (the hub's `refused`), else none at all.
+async function ctFind(id){const n=devs[id]&&devs[id].name||id,r=await ctGo(()=>ctMiss(id),1),l=dL(await call("devices/get",{device:id})),
+ f=l.length?0:(((await call("catalog/status")).missing||[]).find(x=>x.device==id)||{}).refused;
+ return(r.m?ctTxt(r.m)+"; ":"")+(l.length?n+" now uses "+l[l.length-1].id:f&&f.length?n+": the catalog's "+f[0]+", which this hub firmware does not support yet":"the catalog has no definition for "+n)}
 const ctFetch=()=>ctGo(()=>ctMiss(),1);
 $("#ctu").onclick=()=>ctSerial(async()=>{try{const m=await ctNewer();await ctGo(()=>ctMiss(),0);ctMsg(m?ctTxt(m):"nothing newer on the mirror")}catch(e){ctMsg(e.message)}ctLoad()});
 $("#ctf").onclick=()=>ctSerial(ctFetch).then(()=>ctMsg("done"),e=>ctMsg(e.message)).then(ctLoad);

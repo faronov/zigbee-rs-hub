@@ -216,6 +216,43 @@ pub struct Diagnostics {
     pub configure: BTreeMap<String, String>,
     /// Dropped / counted events.
     pub counters: BTreeMap<String, u64>,
+    /// Catalog definitions that match but need features this hub lacks
+    /// (recorded by the catalog service when it installs a shard; cleared
+    /// with a new manifest).
+    pub refused: Vec<Refused>,
+}
+
+/// A catalog definition a device matches that this hub cannot run: it
+/// requires features (vendor templates, codecs) the firmware lacks, so it
+/// is neither stored nor resolved (3.3), and without this record the device
+/// would just stay generic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// Definition ID.
+    pub id: String,
+    /// Vendor.
+    pub vendor: String,
+    /// Model.
+    pub model: String,
+    /// The features this hub lacks.
+    pub requires: Vec<String>,
+    /// Its match score for the device.
+    pub score: u32,
+    /// Its priority (3.3 ties).
+    pub priority: i32,
+}
+
+impl Refused {
+    /// `id (vendor model) requires features`.
+    pub fn message(&self) -> String {
+        format!(
+            "{} ({} {}) requires {}",
+            self.id,
+            self.vendor,
+            self.model,
+            self.requires.join(", ")
+        )
+    }
 }
 
 impl Diagnostics {
@@ -471,6 +508,33 @@ impl Device {
     /// Effective power.
     pub fn power(&self) -> PowerKind {
         self.resolution.power.unwrap_or_else(|| self.fp.power())
+    }
+
+    /// The refused catalog definitions (best first) that would be chosen
+    /// over the device's own definition if the hub had their features: all
+    /// of them while it resolves to generic only, those that outrank its
+    /// catalog definition (score, then priority) otherwise, none while a
+    /// definition is pinned.
+    pub fn refused_better(&self) -> Vec<&Refused> {
+        let chosen = self.resolution.layers.iter().rev().find(|l| {
+            matches!(
+                l.source,
+                LayerSource::Catalog | LayerSource::Fetched | LayerSource::User
+            )
+        });
+        let bar = match chosen {
+            None => None,
+            Some(l) if self.pinned.is_some() || l.score.is_none() => return Vec::new(),
+            Some(l) => Some((l.score.unwrap_or(0), l.priority)),
+        };
+        let mut v: Vec<&Refused> = self
+            .diag
+            .refused
+            .iter()
+            .filter(|r| bar.is_none_or(|b| (r.score, r.priority) > b))
+            .collect();
+        v.sort_by_key(|r| std::cmp::Reverse((r.score, r.priority)));
+        v
     }
 
     /// Sleepy (RxOnWhenIdle = 0 or `device.sleepy`).

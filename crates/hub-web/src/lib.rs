@@ -621,7 +621,7 @@ const ct0={config:{base_url:"m"}};let ct=ct0;
 const ctMsg=()=>{},toast=m=>toasts.push(m),ctSay=toast,ctTxt=m=>"catalog updated to "+m.catalog_date+"."+m.catalog_serial;
 const mj=v=>({version:v,catalog_date:Math.floor(v/65536),catalog_serial:v%65536});
 const call=async(t,p={})=>{now+=100;if(H.other){H.up={target:"web",bytes:[]};H.at=now}
- if(t=="catalog/status")return{manifest:H.v&&mj(H.v),wants:{bank:H.bank<H.v?{name:"bank.zdb",sha256:"s"+H.v}:null},upload:H.up&&{target:H.up.target,written:H.up.bytes.length},missing:H.def?[]:[{device:"d",shards:H.noshard?[]:[0x44]}],config:ct0.config};
+ if(t=="catalog/status")return{manifest:H.v&&mj(H.v),wants:{bank:H.bank<H.v?{name:"bank.zdb",sha256:"s"+H.v}:null},upload:H.up&&{target:H.up.target,written:H.up.bytes.length},missing:H.def?[]:[{device:"d",shards:H.noshard?[]:[0x44],refused:H.refused}],config:ct0.config};
  if(t=="devices/get")return{definition:[{source:"generic",id:"generic"}].concat(H.def?[{source:H.def,id:"ikea/x"}]:[])};
  if(t=="catalog/upload_chunk"){log.push(p.target+"@"+p.offset);
   if(p.offset==0){if(H.up&&H.up.target!=p.target&&now-H.at<30000)throw Error("a "+H.up.target+" upload is in progress");H.up={target:p.target,bytes:[]}}
@@ -695,6 +695,10 @@ const DIFF="shard 44: SHA-256 differs from the installed manifest",BANK=["get ba
  // Nothing for it anywhere.
  setup({v:cur,bank:cur,none:1},[cur],cur);
  eq(await ctFind("d"),"the catalog has no definition for Remote");eq(log,["get manifest.cose",...SHARD]);
+ // Definitions that need what this firmware lacks (hub 0.3.0 and Tuya
+ // TS011F plugs): the best one named, not "no definition".
+ setup({v:cur,bank:cur,none:1,refused:["tuya/ts011f_plug_1 (NEO NAS-WR01B) requires template.tuya_metering_zero_debounce","tuya/ts011f_plug_3 (Tuya TS011F_plug_3) requires template.tuya"]},[cur],cur);
+ eq(await ctFind("d"),"Remote: the catalog's tuya/ts011f_plug_1 (NEO NAS-WR01B) requires template.tuya_metering_zero_debounce, which this hub firmware does not support yet");eq(log,["get manifest.cose",...SHARD]);
 })().catch(e=>{console.error(e);process.exit(1)});
 "#;
         let js = format!("{b64}\n{}\nconst SIGNED=Uint8Array.from({signed:?});\n{mock}", &src[a..b]);

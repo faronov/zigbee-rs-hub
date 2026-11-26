@@ -293,12 +293,32 @@ Precedence rules:
   value of, each field beyond the names) against all shard records of a
   built catalog, with the endpoints the interview stores
   (`hub::interview_endpoints`); where zhc finds no definition the hub must
-  find none.
+  find none. Vectors whose definition needs features this hub lacks are
+  resolved again as a hub with every feature would (same shards, index and
+  scoring, no feature gate): they must pick zhc's definition too, so a
+  feature gap cannot hide an index or selection difference. Only those
+  this hub resolves generic only are a tolerated feature gap (counted
+  apart, by missing feature); where it runs another definition meanwhile
+  they count as mismatches. `ZHC_PARITY_MAX` tolerates mismatches,
+  `ZHC_PARITY_SAME` sets the minimum of identical choices.
+  `hub-devices/tests/catalog_lookup.rs` checks the same on the shard path
+  (`fingerprint_keys` → shard → `shard_matches`) for Tuya TS011F plugs,
+  white-label and unknown manufacturer names included, without a built
+  catalog.
   zhc 26.130.0: 6,081 of the 6,082 vectors (of 8,216) whose definition
   this hub can load pick zhc's definition and white label; 2,134 more need
   features the hub lacks. The one left cannot be: zhc gives the white
   label MOT-C2Z10 to the model ID `"MOT-C2Z10\0\0…"` but not to
   `"MOT-C2Z10"`, and the interview stores both without the trailing NULs.
+  Against the published catalog-2026.11.24 and the vectors of the same
+  definitions commit: 5,733 of 7,574 the same; 1,774 need features and
+  resolve generic only (`template.hue_light` 952, `template.tuya` 608,
+  `template.lumi` 198, `template.tuya_metering_zero_debounce` 16); 67
+  mismatches: 59 where zhc's definition needs `template.tuya` and the hub
+  runs another Tuya definition meanwhile (e.g. `TS0001` for zhc's `WHD02`),
+  and 8 white-label differences (Paulmann software builds and the like,
+  which the generator changes merged after that release address). Every
+  vector that needs features picks zhc's definition with them.
 - **Self-description over catalog** (decided, D11). A device's own schema is generated from
   its firmware and versioned by hash, so it is more precise than a catalog
   entry written for some firmware. A catalog definition can still win where a
@@ -318,7 +338,14 @@ Precedence rules:
     field-wise overridden by higher layers.
 - **Requires.** A definition whose `requires` (8.5) lists a feature this hub
   build lacks is skipped as if it did not match, and the device's diagnostics
-  say why (`definition_skipped: requires codec.tuya_schedule_day`).
+  say why (`definition_skipped: requires codec.tuya_schedule_day`). A shard
+  definition the hub cannot run is not stored (9.3), so the catalog service
+  names it instead: `catalog_refused` in `devices/diagnostics`, `refused` in
+  `catalog/status` `missing` and `definitions/fetch` (when it would be
+  chosen over what the device resolves to), and the web UI's Find
+  definition says so rather than "no definition". (Hub 0.3.0 kept Tuya
+  TS011F plugs generic this way: their zhc definitions need the vendor
+  templates `tuya` and `tuya_metering_zero_debounce`, 17.4.)
 
 ### 3.4 Materialization and stability
 
@@ -1375,7 +1402,8 @@ without that device class or unit) and is reported in diagnostics.
   level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
   that uses a feature it does not list. A hub lacking any listed feature
-  treats the definition as non-matching (3.3).
+  treats the definition as non-matching (3.3); a code it does not know at
+  all (a newer catalog's) is missing as well and named `feature N`.
 - `revision` orders versions of one `id`. The catalog index keeps only the
   newest revision per `id` that this hub can run (a catalog may carry an
   older revision for older hubs, selected by `requires`).
@@ -1581,7 +1609,17 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   the event `definition_needed`). From an uploaded shard the hub keeps the
   records with those devices' keys that score against their fingerprints
   and need no feature it lacks, appends them to the local area and
-  re-resolves the devices. Uploads survive a dropped connection
+  re-resolves the devices. Devices whose definition came from a shard are
+  matched as well, against records that outrank it (score, then priority):
+  a device's keys span several shards that clients upload in turn, and a
+  later shard may hold the better definition (hub 0.3.0 kept the first).
+  Records that score but need a feature it lacks
+  are decoded anyway (all features) to be named: the device keeps them as
+  `refused` (id, vendor, model, missing features, score, priority) until a
+  new manifest is installed, and `missing`, `definitions/fetch` and
+  `devices/diagnostics` (`catalog_refused`) list those that would be chosen
+  over its current definition (all of them while it is generic only; none
+  while a definition is pinned). Uploads survive a dropped connection
   (`catalog/status` `upload.written`). Shards are checked against the
   *installed* manifest, so after the mirror moved to a newer release a
   client installs its manifest (and what it then `wants`) first: the web
@@ -2369,7 +2407,7 @@ code feels familiar:
 | `devices/remove` | `id`, `force` (skip Mgmt_Leave: the device is unreachable) | — (ZDO Mgmt_Leave_req unless `force`, then the coordinator purges the device either way: ZRHP `NWK_REMOVE_DEVICE` and `TBL_INVALIDATE` of its `DEVICE` entry, the host store's device record; EZSP an APS Remove-Device to a router of the neighbor table, else its key table entry is erased. The hub remembers the device as removed (network record `removed`, the last 64): the import of the NCP's devices skips it while the NCP still lists it (a child until it ages out, a router that ignored the leave), until it joins or announces itself again; forming, resetting or restoring the network forgets the list. GP: 13.7) |
 | `devices/reinterview` | `id` | progress events `interview_progress` |
 | `devices/reconfigure` | `id` | per-step results (binds, reporting, reads) |
-| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload |
+| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload |
 | `devices/pin_definition` | `id`, `definition` (id or null) | new resolution |
 
 Events (topic `devices`): `device_added`, `device_updated` (any registry field,
@@ -2427,10 +2465,10 @@ size, content_hash, requires}`, `decompile(cbor, format)`,
 | `definitions/get` | `id` or `content_hash`, `format` (`cbor` base64, or `json`: the decoded CBOR with symbolic keys) | the definition |
 | `definitions/preview` | `device`, `cbor` | the resolution the device *would* get: entities added/changed/removed, configure diff; nothing applied |
 | `definitions/scaffold` | `device` | the material for a starter definition (JSON): identity, a match clause, every attribute and Tuya DP seen with its type and last value, the generic entities; the UI renders it as YAML |
-| `definitions/fetch` | `device` | `{device, shards}`: the shards (numbers) a client fetches from the mirror and uploads (target `shard`) for this device (9.3) |
-| `catalog/status` | — | `installed` (generation, date, serial, definitions, signing kid, size), `active_slot`, `manifest` (version, date, serial, zhc), `wants` {`bank`, `web`: {name, size, sha256} or null}, `missing` [{`device`, `shards`}], `upload` {`target`, `written`}, `web_tools`, `local` (fetched definitions, bytes used/size), `slot_size`, `config`, `warnings`, `engine` |
+| `definitions/fetch` | `device` | `{device, shards, refused?}`: the shards (numbers) a client fetches from the mirror and uploads (target `shard`) for this device (9.3); `refused`: matching definitions already fetched that this firmware cannot run (`id (vendor model) requires features`) |
+| `catalog/status` | — | `installed` (generation, date, serial, definitions, signing kid, size), `active_slot`, `manifest` (version, date, serial, zhc), `wants` {`bank`, `web`: {name, size, sha256} or null}, `missing` [{`device`, `shards`, `refused?`}], `upload` {`target`, `written`}, `web_tools`, `local` (fetched definitions, bytes used/size), `slot_size`, `config`, `warnings`, `engine` |
 | `catalog/upload_chunk` | `target` (`manifest`, `bank`, `web`, `shard`), `offset`, `data` (base64 of ≤ 4 KiB: without PSRAM the hub holds the frame, the parsed request and the decoded bytes at once); at offset 0 optionally `size`, `sha256` | `{written}`; offset 0 starts a new upload (and drops an unfinished one of the same target; another target's upload that advanced in the last 30 s makes it fail with `busy`) |
-| `catalog/commit` | `target`; `shard` (0–255) for shards, `device` (optional) ; `force` (bank anti-rollback) | manifest: `{version, catalog_date, catalog_serial, wants}`; bank: `{sha256, generation, definitions, devices: [{device, from, to, added, removed, orphaned}]}`; web: `{size, files}`; shard: `{definitions, skipped, devices}`. `verification_failed` for a wrong signature, hash, version or decode |
+| `catalog/commit` | `target`; `shard` (0–255) for shards, `device` (optional) ; `force` (bank anti-rollback) | manifest: `{version, catalog_date, catalog_serial, wants}`; bank: `{sha256, generation, definitions, devices: [{device, from, to, added, removed, orphaned}]}`; web: `{size, files}`; shard: `{definitions, skipped, refused: {device: [...]}, devices}`. `verification_failed` for a wrong signature, hash, version or decode |
 | `catalog/abort` | — | drops an upload |
 | `catalog/config` | `base_url` (the mirror), `auto_update`, `auto_fetch` (each optional) | the settings clients follow (stored in the journal, `cfg/catalog`) |
 

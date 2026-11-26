@@ -324,6 +324,221 @@ fn uploads_install_fetch_restart_resume_and_corruption() {
     r.sim.stop();
 }
 
+const PLUG: &str = "zb:a4c1380000000001";
+
+/// A Tuya TS011F plug as the interview stores it.
+fn ts011f_snapshot(manufacturer: &str, app: u32) -> DeviceSnapshot {
+    let fp = Fingerprint {
+        manufacturer_name: Some(manufacturer.into()),
+        model_id: Some("TS011F".into()),
+        app_version: Some(app),
+        power_source: Some(1),
+        mfr_code: Some(0x1002),
+        endpoints: vec![EndpointFp {
+            ep: 1,
+            profile: 0x0104,
+            device_id: 0x0051,
+            in_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0B04, 0xE000, 0xE001],
+            out_clusters: vec![0x000A, 0x0019],
+        }],
+        ..Default::default()
+    };
+    DeviceSnapshot {
+        id: PLUG.into(),
+        kind: DeviceKind::Zigbee { ieee: 0xa4c1380000000001, nwk: 0x1234 },
+        fp,
+        active_eps: vec![1],
+        ..sml001_snapshot()
+    }
+}
+
+/// A release of the TS011F fixtures whose file name contains one of
+/// `names`: signed manifest and shards (no bank: shard-only definitions).
+fn ts011f_release(names: &[&str], serial: u16) -> BTreeMap<String, Vec<u8>> {
+    ts011f_release_edited(names, serial, |s| s.to_string())
+}
+
+/// [`ts011f_release`] with each source passed through `edit`.
+fn ts011f_release_edited(names: &[&str], serial: u16, edit: fn(&str) -> String) -> BTreeMap<String, Vec<u8>> {
+    let items = names.iter().map(|n| Item::new(n, ts011f_fixture(n, edit)).unwrap()).collect();
+    release_of(items, serial)
+}
+
+/// A TS011F fixture, passed through `edit`, as standalone CBOR.
+fn ts011f_fixture(name: &str, edit: fn(&str) -> String) -> Vec<u8> {
+    let p = format!("{}/../hub-devices/tests/fixtures/ts011f/{name}.yaml", env!("CARGO_MANIFEST_DIR"));
+    let src = edit(&std::fs::read_to_string(&p).unwrap());
+    zdefc::compile_str(&src, zdefc::Format::Yaml, &Default::default()).unwrap().cbor
+}
+
+/// A fixture without its `templates:` entry (and its indented lines).
+fn without_templates(s: &str) -> String {
+    let mut skip = false;
+    let keep = |l: &&str| {
+        skip = l.starts_with("templates:") || (skip && l.starts_with(' '));
+        !skip
+    };
+    s.lines().filter(keep).collect::<Vec<_>>().join("\n")
+}
+
+/// A signed manifest and the shards of `items` (no bank).
+fn release_of(items: Vec<Item>, serial: u16) -> BTreeMap<String, Vec<u8>> {
+    let (shards, digest) = zdefc::bank::build_shards(&items.iter().collect::<Vec<_>>()).unwrap();
+    let params = BankParams { catalog_date: 20261124, catalog_serial: serial, ..Default::default() };
+    let m = zdefc::bank::manifest(&params, &[], &shards, vec![], Some(digest), vec![]);
+    let mut files: BTreeMap<String, Vec<u8>> =
+        shards.into_iter().map(|(n, s)| (format!("shard-{n:02x}.cbor"), s)).collect();
+    files.insert("manifest.cose".into(), key().cose_sign1(&m.encode(), false));
+    files
+}
+
+/// zigbee-rs-hub 0.3.0 kept a Tuya TS011F plug (`_TZ3000_gjnozsaz`)
+/// generic and its Find definition said "the catalog has no definition":
+/// the published catalog's shards hold its definitions, but they need
+/// vendor templates this firmware lacks and were dropped without a word
+/// (`skipped: ["invalid: requires feature 23 ..."]`). Replayed against the
+/// published catalog-2026.11.24 (signed manifest and the shards the plug
+/// asks for, unchanged): the hub now names them, in the shard's commit, in
+/// `catalog/status` `missing`, `definitions/fetch` and the device's
+/// diagnostics, until a new manifest.
+#[test]
+fn published_catalog_names_what_a_ts011f_plug_needs() {
+    let dir = format!("{}/../hub-devices/tests/fixtures/catalog-2026.11.24", env!("CARGO_MANIFEST_DIR"));
+    let file = |n: &str| std::fs::read(format!("{dir}/{n}")).unwrap();
+    let plug_1 = "tuya/ts011f_plug_1 (NEO NAS-WR01B) requires template.tuya_metering_zero_debounce";
+    let plug_3 = "tuya/ts011f_plug_3 (Tuya TS011F_plug_3) requires template.tuya";
+    // zhc: TS011F_plug_1 (white label NAS-WR01B); with application
+    // version 69 TS011F_plug_3 (a version fingerprint).
+    for (app, want) in [(77, json!([plug_1])), (69, json!([plug_3, plug_1]))] {
+        let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+        let r = rig(store);
+        let snap = ts011f_snapshot("_TZ3000_gjnozsaz", app);
+        r.ncp.with_store(|s| s.kv_put(&format!("dev/{PLUG}"), &snap.to_bytes())).unwrap();
+        let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+        let app_ = start(&r, &flash);
+        let (sid, rx) = session(&app_);
+        let mut id = 0;
+        // Verified with the firmware's built-in key.
+        let m = upload(&app_, sid, &rx, &mut id, "manifest", &file("manifest.cose"), 0, json!({}));
+        assert_eq!(m["result"]["catalog_date"], 20261124, "{m}");
+        let st = call(&app_, sid, &rx, 900, json!({"type": "catalog/status"}));
+        let miss = st["result"]["missing"].clone();
+        assert_eq!(miss, json!([{"device": PLUG, "shards": [0x08, 0x7d, 0xb0, 0xc6, 0xd9]}]), "{st}");
+        let mut said = J::Null;
+        for n in miss[0]["shards"].as_array().unwrap() {
+            let n = n.as_u64().unwrap();
+            let c = upload(&app_, sid, &rx, &mut id, "shard", &file(&format!("shard-{n:02x}.cbor")), 0, json!({"shard": n}));
+            assert_eq!(c["result"]["definitions"], json!([]), "{c}");
+            if let Some(w) = c["result"]["refused"].get(PLUG) {
+                said = w.clone();
+            }
+        }
+        assert_eq!(said, want, "app {app}");
+        let st = call(&app_, sid, &rx, 901, json!({"type": "catalog/status"}));
+        assert_eq!(st["result"]["missing"][0]["refused"], want, "{st}");
+        let f = call(&app_, sid, &rx, 902, json!({"type": "definitions/fetch", "device": PLUG}));
+        assert_eq!(f["result"]["refused"], want, "{f}");
+        let d = call(&app_, sid, &rx, 903, json!({"type": "devices/diagnostics", "device": PLUG}));
+        assert_eq!(d["result"]["catalog_refused"], want, "{d}");
+        let l = call(&app_, sid, &rx, 904, json!({"type": "devices/get", "device": PLUG}))["result"]["resolution"]
+            ["layers"]
+            .clone();
+        assert!(l.as_array().unwrap().iter().all(|x| x["source"] == "generic"), "{l}");
+        // A newer release: its shards decide again.
+        let newer = ts011f_release(&["ts011f_plug_2", "ts011f_plug_3"], 2);
+        let m = upload(&app_, sid, &rx, &mut id, "manifest", &newer["manifest.cose"], 0, json!({}));
+        assert_eq!(m["result"]["catalog_serial"], 2, "{m}");
+        let st = call(&app_, sid, &rx, 905, json!({"type": "catalog/status"}));
+        assert_eq!(st["result"]["missing"][0].get("refused"), None, "{st}");
+        app_.shutdown();
+        r.ncp.shutdown();
+        r.sim.stop();
+    }
+}
+
+/// A device's keys span several shards (TS011F `_TZ3000_gjnozsaz`: its
+/// white-label match in shard b0, the model and version match in d9), and
+/// clients upload them in turn. A definition from an earlier shard must
+/// not keep a better one of a later shard out: with application version
+/// 69 zhc picks TS011F_plug_3 (d9) over TS011F_plug_1 (b0). Both runnable
+/// here (the fixtures without their vendor templates).
+#[test]
+fn a_later_shard_can_still_improve_a_fetched_definition() {
+    let files = ts011f_release_edited(&["ts011f_plug_1", "ts011f_plug_3"], 1, without_templates);
+    let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    r.ncp.with_store(|s| s.kv_put(&format!("dev/{PLUG}"), &ts011f_snapshot("_TZ3000_gjnozsaz", 69).to_bytes())).unwrap();
+    let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    let m = upload(&app, sid, &rx, &mut id, "manifest", &files["manifest.cose"], 0, json!({}));
+    assert_eq!(m["success"], true, "{m}");
+    let st = call(&app, sid, &rx, 900, json!({"type": "catalog/status"}));
+    let shards: Vec<u64> =
+        st["result"]["missing"][0]["shards"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).collect();
+    assert_eq!(shards, [0xb0, 0xd9], "{st}");
+    let mut stored = Vec::new();
+    for n in shards {
+        let c = upload(&app, sid, &rx, &mut id, "shard", &files[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+        stored.extend(c["result"]["definitions"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()));
+    }
+    assert_eq!(stored, ["tuya/ts011f_plug_1", "tuya/ts011f_plug_3"]);
+    let l = call(&app, sid, &rx, 901, json!({"type": "devices/get", "device": PLUG}))["result"]["resolution"]["layers"]
+        .clone();
+    assert_eq!(l.as_array().unwrap().last().unwrap()["id"], "tuya/ts011f_plug_3", "{l}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// A definition that needs a feature this build does not even know (a
+/// newer catalog's): refused and named (`feature 13`), never written to
+/// flash, also not on a second install of its shard. It used to be stored
+/// and reported under `definitions` (the feature dropped while adapting),
+/// then not loaded: the device stayed generic, "no definition" again.
+#[test]
+fn a_definition_needing_an_unknown_feature_is_refused() {
+    let mut def = zdef::decode(&ts011f_fixture("ts011f_plug_1", without_templates)).unwrap();
+    assert!(zdef::Feature::from_code(13).is_none(), "pick a code this build does not know");
+    def.requires.push(13);
+    def.requires.sort();
+    let files = release_of(vec![Item::new("future", def.encode().unwrap()).unwrap()], 1);
+    let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    r.ncp.with_store(|s| s.kv_put(&format!("dev/{PLUG}"), &ts011f_snapshot("_TZ3000_gjnozsaz", 77).to_bytes())).unwrap();
+    let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    let m = upload(&app, sid, &rx, &mut id, "manifest", &files["manifest.cose"], 0, json!({}));
+    assert_eq!(m["success"], true, "{m}");
+    let st = call(&app, sid, &rx, 900, json!({"type": "catalog/status"}));
+    let local = st["result"]["local"].clone();
+    let shards = st["result"]["missing"][0]["shards"].clone();
+    let want = json!(["tuya/ts011f_plug_1 (NEO NAS-WR01B) requires feature 13"]);
+    for round in 0..2 {
+        let mut said = J::Null;
+        for n in shards.as_array().unwrap() {
+            let n = n.as_u64().unwrap();
+            let c = upload(&app, sid, &rx, &mut id, "shard", &files[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+            assert_eq!(c["result"]["definitions"], json!([]), "round {round}: {c}");
+            if let Some(w) = c["result"]["refused"].get(PLUG) {
+                said = w.clone();
+            }
+        }
+        assert_eq!(said, want, "round {round}");
+        let st = call(&app, sid, &rx, 901 + round, json!({"type": "catalog/status"}));
+        assert_eq!(st["result"]["local"], local, "round {round}: nothing written");
+        assert_eq!(st["result"]["missing"][0]["refused"], want, "{st}");
+    }
+    let g = call(&app, sid, &rx, 910, json!({"type": "devices/diagnostics", "device": PLUG}));
+    assert_eq!(g["result"]["catalog_refused"], want, "{g}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
 /// The first `n` bytes of an upload, no commit (a dropped connection).
 fn upload_part(app: &App, sid: u64, rx: &Rx, id: &mut u64, target: &str, bytes: &[u8], n: usize) {
     *id += 1;

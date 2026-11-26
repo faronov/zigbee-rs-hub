@@ -1,0 +1,26 @@
+# Trimmed from faronov/zigbee-rs-definitions catalog-2026.11.24
+# (generated from zigbee-herdsman-converters 26.130.0, MIT): the match
+# clauses and white labels that decide TS011F plugs, the rest dropped.
+zdef: 1
+id: tuya/ts011f_plug_1
+revision: 2
+vendor: Tuya
+model: TS011F_plug_1
+description: Smart plug (with power monitoring)
+source: zhc devices/tuya.ts
+match:
+  - {model: TS011F}
+  - model: TS011F
+    manufacturer: {any: [_TZ3008_tary5dvv, _TZ3210_iooniers]}
+  - model: TS011F
+    manufacturer: {any: [_TZ3000_okaz9tjs, _TZ3000_gjnozsaz, _TZ3210_w0qqde0g]}
+    x-white-label: true
+white_label:
+  - {vendor: Elivco, model: LSPA9, manufacturer: [_TZ3000_okaz9tjs]}
+  - {vendor: NEO, model: NAS-WR01B, manufacturer: [_TZ3000_gjnozsaz]}
+  - {vendor: Haozee, model: HT-SP-ZB-01, manufacturer: [_TZ3210_w0qqde0g]}
+  - {vendor: EIGHTREE, model: EIGHTREE Socket, manufacturer: [_TZ3008_tary5dvv, _TZ3210_iooniers]}
+device: {ota: true}
+tuya: {magic_packet: true}
+templates: [{name: tuya_metering_zero_debounce}]
+x-partial: true

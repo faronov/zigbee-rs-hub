@@ -22,6 +22,15 @@ install instructions and the list of merged pull requests. A pre-release
   them back. A removed device that joins or announces itself again is
   added as before. Forming, resetting or restoring the network forgets
   them.
+- **Find definition no longer says "the catalog has no definition" for a
+  definition the firmware cannot run.** Catalog definitions that need a
+  feature the hub lacks (a vendor template, e.g. every Tuya TS011F plug
+  definition in 0.3.0) were dropped without a word, so such devices stayed
+  generic for no visible reason. The hub now names them: Find definition
+  says which definition matched and what it needs, and the device's
+  diagnostics list it (`catalog_refused`).
+- A definition fetched from one catalog shard no longer keeps a better one
+  from a later shard out (a device's keys span several shards).
 
 ### Other changes
 

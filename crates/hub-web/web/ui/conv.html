@@ -28,7 +28,7 @@ $("#cvp").onchange=e=>act("devices/pin_definition",{device:cvDev,definition:e.ta
 async function cvShow(id){const g=await act("definitions/get",{definition:id});$("#cvt").value=g.source_text||(await zdefc()).decompile(unb64(g.cbor),"yaml")}
 for(const[b,t]of[["cvr","devices/reinterview"],["cvc","devices/reconfigure"]])$("#"+b).onclick=()=>act(t,{device:cvDev}).then(()=>toast(t+": ok")).catch(()=>{});
 // Find definition: with the Catalog module's update and shard uploads.
-$("#cvf").onclick=()=>ui("catalog").then(()=>ctSerial(()=>ctGo(()=>act("definitions/fetch",{device:cvDev}).then(r=>r.shards),1)).then(()=>cvLoad(cvDev)).catch(e=>toast(e.message)),()=>{});
+$("#cvf").onclick=()=>ui("catalog").then(()=>ctSerial(()=>ctGo(()=>act("definitions/fetch",{device:cvDev}).then(r=>r.shards),1)).then(()=>call("definitions/fetch",{device:cvDev})).then(r=>{if(r.refused)toast(r.refused.join("; ")+": not supported by this hub firmware yet");cvLoad(cvDev)}).catch(e=>toast(e.message)),()=>{});
 $("#cvs").onclick=()=>act("definitions/scaffold",{device:cvDev}).then(s=>{
  const q=v=>JSON.stringify(v),i=s.identity||{},m=(s.match||[])[0]||{},y=["zdef: 1","id: "+q(((i.manufacturer||"vendor")+"/"+(i.model||"model")).toLowerCase().replace(/[^a-z0-9/_-]+/g,"-")),"revision: 1","vendor: "+q(i.manufacturer||""),"model: "+q(i.model||""),"match:","  - "+q(m),"entities:"];
  for(const e of s.generic_entities||[])y.push("  # generic: "+e.key+" ("+e.platform+", ep "+e.ep+")");
