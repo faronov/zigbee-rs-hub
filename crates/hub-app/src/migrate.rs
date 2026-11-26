@@ -349,6 +349,7 @@ pub fn entry(d: &J) -> Entry {
         fp,
         node_desc: nd,
         attrs,
+        partial: d.get("interviewed").and_then(J::as_bool) == Some(false),
     }))
 }
 
@@ -366,6 +367,11 @@ pub fn cost(d: &ImportedDevice) -> usize {
             .map(|e| 48 + 2 * (e.in_clusters.len() + e.out_clusters.len()))
             .sum::<usize>()
         + 48 * d.attrs.len()
+}
+
+/// Heap a staged group takes, roughly.
+pub fn group_cost(g: &J) -> usize {
+    96 + g["name"].as_str().map_or(0, str::len) + 64 * g["members"].as_array().map_or(0, Vec::len)
 }
 
 /// One `groups[]` entry in the hub's stored form (`zgroups`): members by
@@ -422,7 +428,7 @@ pub fn row(d: &ImportedDevice, p: &ImportPreview) -> J {
         "definition": top.map(|l| json!({"source": source_name(l.source), "id": l.id})),
         "entities": p.entities,
         "endpoints": d.fp.endpoints.len(),
-        "interview": if d.fp.endpoints.is_empty() { "on_first_contact" } else { "imported" },
+        "interview": if d.incomplete() { "on_first_contact" } else { "imported" },
     })
 }
 

@@ -10,6 +10,9 @@ use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
 type Ws = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 
+/// An apply whose devices the hub could not store (`stored: false`).
+const NOT_STORED: &str = "the hub imported the devices but could not store them (its device registry is not writable): they are lost at its next restart; check network/info's registry and import again";
+
 /// Bytes of the arrays of one request at most.
 pub const BATCH: usize = 6 * 1024;
 
@@ -226,12 +229,17 @@ pub fn run(url: &str, token: &str, doc: &J, o: &Options) -> Result<(), String> {
         last["network"] = n;
     }
     let _ = n;
+    let not_stored = o.apply && last["stored"] == false;
     if o.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({"rows": rows, "result": last})).unwrap()
         );
-        return Ok(());
+        return if not_stored {
+            Err(NOT_STORED.into())
+        } else {
+            Ok(())
+        };
     }
     print!("{}", table(&rows));
     let net = &last["network"];
@@ -254,6 +262,9 @@ pub fn run(url: &str, token: &str, doc: &J, o: &Options) -> Result<(), String> {
         );
         if !last["backup"].is_null() {
             println!("the replaced network was backed up (network/backup/replaced)");
+        }
+        if not_stored {
+            return Err(NOT_STORED.into());
         }
     } else {
         println!(

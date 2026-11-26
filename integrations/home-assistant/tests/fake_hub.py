@@ -406,6 +406,8 @@ class FakeHub:
         self.devices, self.entities, self.states = default_model()
         self.requests: list[dict[str, Any]] = []
         self.import_stage: dict[str, Any] = {}
+        # `stored` of the next apply's result (a registry that is not writable).
+        self.import_stored = True
         self.command_errors: dict[str, dict[str, str]] = {}
         self.sockets: list[tuple[web.WebSocketResponse, dict[int, set[str]]]] = []
         self.connections = 0
@@ -526,7 +528,7 @@ class FakeHub:
                 "groups": len(stage["groups"]),
                 "failed": 0,
                 "removed": 0,
-                "stored": True,
+                "stored": self.import_stored,
                 "backup": {"secret": "keys"},
             }
         )

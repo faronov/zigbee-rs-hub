@@ -112,6 +112,12 @@ async def async_import_from_zha(
     result, rows = await migrate.send(request, req_type, doc, options)
     result.pop("backup", None)
     answer: dict[str, Any] = {"result": result, "rows": rows}
+    if apply and result.get("stored") is False:
+        raise HomeAssistantError(
+            "the hub imported the devices but could not store them (its device registry is "
+            "not writable): they are lost at its next restart; check network/info's registry "
+            "and import again"
+        )
     if apply:
         areas = {i: a for i, (_, a) in names.items() if a}
         answer["areas"] = await _apply_areas(hass, hub, areas, overwrite=False, wait=AREA_WAIT)

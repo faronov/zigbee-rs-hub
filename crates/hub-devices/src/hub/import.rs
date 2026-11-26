@@ -13,12 +13,14 @@
 //!   read.
 //! - [`IMPORT_RECONFIGURE`] (another coordinator IEEE): the definition's
 //!   configure runs as after a join, [`IMPORT_SLOTS`] devices at a time.
-//! - Records without endpoints (an interview the source never finished):
-//!   the device is interviewed.
+//! - Records of an interview the source never finished
+//!   ([`ImportedDevice::incomplete`]): the device is interviewed.
 //!
 //! Sleepy devices are verified when they wake; mains devices not heard
 //! from are probed (a Basic read) one every [`IMPORT_PROBE_MS`], so that an
-//! import of a few hundred routers does not flood the network.
+//! import of a few hundred routers does not flood the network; a device
+//! that answers none of [`IMPORT_PROBE_TRIES`] probes waits until it is
+//! heard from.
 
 use std::collections::BTreeMap;
 
@@ -40,8 +42,11 @@ pub const IMPORT_RECONFIGURE: u8 = 2;
 pub const IMPORT_SLOTS: usize = 2;
 /// Spacing of the probes of imported mains devices not heard from.
 pub const IMPORT_PROBE_MS: Millis = 3_000;
-/// A probed device that did not answer is probed again after this.
+/// A probed device that did not answer is probed again after this,
+/// doubled after every further probe.
 pub const IMPORT_PROBE_RETRY_MS: Millis = 600_000;
+/// Probes of a device that does not answer, at most.
+pub const IMPORT_PROBE_TRIES: u8 = 4;
 
 /// One device of an import (the normalized document's `devices[]` entry,
 /// `docs/migration.md`).
@@ -60,6 +65,25 @@ pub struct ImportedDevice {
     /// Cached attribute values `(ep, cluster, attr, mfr, value)`; only those
     /// the hub keeps ([`persistent_value`]) are imported.
     pub attrs: Vec<(u8, u16, u16, Option<u16>, ZclValue)>,
+    /// The source says its interview did not finish (`interviewed: false`).
+    pub partial: bool,
+}
+
+impl ImportedDevice {
+    /// The source's interview is unfinished: said so, or no endpoints, an
+    /// endpoint without clusters (a simple descriptor never read) or no
+    /// model (Basic never read). The device is interviewed when it is
+    /// heard from instead of being taken as it is.
+    pub fn incomplete(&self) -> bool {
+        let fp = &self.fp;
+        self.partial
+            || fp.endpoints.is_empty()
+            || fp.model_id.is_none()
+            || fp
+                .endpoints
+                .iter()
+                .any(|e| e.in_clusters.is_empty() && e.out_clusters.is_empty())
+    }
 }
 
 /// What an import does with a device.
@@ -153,7 +177,7 @@ fn snapshot(d: &ImportedDevice, mode: u8) -> DeviceSnapshot {
         node_desc: d.node_desc,
         active_eps: d.fp.endpoints.iter().map(|e| e.ep).collect(),
         interviewed: true,
-        interview_partial: d.fp.endpoints.is_empty(),
+        interview_partial: d.incomplete(),
         attrs,
         user_name: d.name.clone(),
         disabled: false,
@@ -278,7 +302,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         d.import_contacted = true;
-        if d.fp.endpoints.is_empty() {
+        if d.interview_partial || d.fp.endpoints.is_empty() {
             // The source never finished its interview.
             d.imported = 0;
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
@@ -362,12 +386,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                     && !d.import_contacted
                     && d.gp.is_none()
                     && !d.sleepy()
+                    && d.available
+                    && d.import_probes < IMPORT_PROBE_TRIES
                     && d.fp
                         .endpoints
                         .iter()
                         .any(|e| e.in_clusters.contains(&cl::BASIC))
-                    && d.import_probe_at
-                        .is_none_or(|t| now.saturating_sub(t) >= IMPORT_PROBE_RETRY_MS)
+                    && d.import_probe_at.is_none_or(|t| {
+                        now.saturating_sub(t)
+                            >= IMPORT_PROBE_RETRY_MS << d.import_probes.saturating_sub(1)
+                    })
             })
             .map(|d| d.id.clone());
         let Some(id) = next else {
@@ -376,6 +404,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.import_probe_last = Some(now);
         if let Some(d) = self.devices.get_mut(&id) {
             d.import_probe_at = Some(now);
+            d.import_probes += 1;
         }
         // Its answer is the contact that verifies it.
         self.refresh_identity(&id, true, now);

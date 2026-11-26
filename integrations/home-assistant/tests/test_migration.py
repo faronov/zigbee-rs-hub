@@ -16,7 +16,7 @@ from custom_components.zigbee_rs_hub.hub import find_device
 from homeassistant.auth.models import User
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import Context, HomeAssistant
-from homeassistant.exceptions import ServiceValidationError, Unauthorized
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
 from homeassistant.helpers import area_registry as ar, device_registry as dr
 
 from .fake_hub import SENSOR_DEV, FakeHub
@@ -158,6 +158,13 @@ def make_db(path: Path, v: int) -> None:
 def test_zha_database_becomes_the_import_document(tmp_path: Path, v: int) -> None:
     path = tmp_path / "zigbee.db"
     make_db(path, v)
+    # zigpy's ZDO_INIT (1): the interview stopped before the simple descriptors.
+    db = sqlite3.connect(path)
+    dev = "zigbee_devices" if v >= 17 else "devices"
+    db.execute(f"INSERT INTO {dev}_v{v} VALUES ('00:12:4b:00:aa:bb:cc:01', 4369, 1, 0)")
+    db.execute(f"INSERT INTO endpoints_v{v} VALUES ('00:12:4b:00:aa:bb:cc:01', 1, 260, 0, 1)")
+    db.commit()
+    db.close()
     zha = migrate.read_zha_db(str(path))
     assert zha["version"] == v
     doc = migrate.document(zha, None, {"0017880100f1e2d3": ("Hall light", "Hall")})
@@ -185,6 +192,12 @@ def test_zha_database_becomes_the_import_document(tmp_path: Path, v: int) -> Non
         0x04B2,
     )
     assert "name" not in sensor
+    assert (light["interviewed"], sensor["interviewed"]) == (True, True)
+    unfinished = by["00124b00aabbcc01"]
+    assert unfinished["interviewed"] is False
+    assert unfinished["endpoints"] == [
+        {"id": 1, "profile": 260, "device_id": 0, "in": [], "out": []}
+    ]
     assert by["00000000017880ff"]["type"] == "green_power"
     assert doc["groups"] == [
         {
@@ -318,6 +331,19 @@ async def test_import_from_zha_previews_then_applies_with_zha_stopped(
     ours = find_device(reg, (DOMAIN, "zb:0017880100f1e2d3"), setup_entry.entry_id)
     assert ours is not None and ours.name == "Hall light"
     assert ours.area_id == ar.async_get(hass).async_get_area_by_name("Hall").id
+
+
+async def test_an_import_the_hub_could_not_store_is_an_error(
+    hass: HomeAssistant, fake_hub: FakeHub, setup_entry: MockConfigEntry, tmp_path: Path
+) -> None:
+    path = tmp_path / "zigbee.db"
+    make_db(path, 17)
+    fake_hub.import_stored = False
+    with pytest.raises(HomeAssistantError, match="could not store them"):
+        await hass.services.async_call(
+            DOMAIN, "import_from_zha", {"database": str(path), "apply": True}, blocking=True
+        )
+    assert fake_hub.calls("network/import")
 
 
 async def test_import_from_zha_refuses_what_it_cannot_read(

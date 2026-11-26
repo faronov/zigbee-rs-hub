@@ -36,9 +36,21 @@ use crate::migrate::{self, Counts, Entry, NetworkFacts, Reconfigure};
 use crate::ocb;
 
 /// A staged import is dropped this long after its last request.
+#[cfg(not(test))]
 const STAGE_TTL: Duration = Duration::from_secs(600);
+#[cfg(test)]
+const STAGE_TTL: Duration = Duration::from_secs(3);
 /// How long the apply waits for the app thread to take the devices.
+#[cfg(not(test))]
 const APPLY_WAIT: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const APPLY_WAIT: Duration = Duration::from_secs(2);
+/// How long the apply waits, after the restore, for the device registry
+/// to become writable (the backend's report of the restored network).
+const REGISTRY_WAIT: Duration = Duration::from_secs(30);
+/// Heap left free while staging (`Platform::heap`): below it the staging
+/// is refused (`busy`), as a job's launch is.
+const STAGE_HEAP_RESERVE: usize = 64 * 1024;
 
 /// The operator's options (the first request's).
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,6 +90,7 @@ pub(super) struct Stage {
     addresses: Vec<(u64, u16)>,
     /// Devices to apply (not kept for a preview).
     devices: Vec<ImportedDevice>,
+    /// Estimated heap of `devices` and `groups`.
     bytes: usize,
     ieees: Vec<u64>,
     groups: Vec<J>,
@@ -133,6 +146,24 @@ fn tag(ctx: &Ctx<'_>) -> (Option<NetworkIdentity>, bool) {
     })
     .and_then(|t| t.identity);
     (t, ctx.records.registry() == RegistryState::Owned)
+}
+
+fn too_large_bytes() -> ApiError {
+    ApiError::new(
+        "too_large",
+        format!(
+            "the records of the devices and groups exceed {} KiB",
+            migrate::MAX_STAGED_BYTES / 1024
+        ),
+    )
+}
+
+/// Whether the network-scoped records may be written (`network/registry`).
+fn registry_writable(records: &dyn crate::Records) -> bool {
+    matches!(
+        records.registry(),
+        RegistryState::Untagged | RegistryState::Owned
+    ) && kv::with(records, |s| s.gate()) == hub_store::Gate::Open
 }
 
 fn margins(r: &ocb::Restore) -> (u32, u32) {
@@ -256,15 +287,14 @@ impl Stage {
                     }
                 }
             }
-            if self.ieees.len() > migrate::MAX_DEVICES || self.bytes > migrate::MAX_STAGED_BYTES {
+            if self.ieees.len() > migrate::MAX_DEVICES {
                 return Err(ApiError::new(
                     "too_large",
-                    format!(
-                        "more than {} devices, or their records exceed {} KiB",
-                        migrate::MAX_DEVICES,
-                        migrate::MAX_STAGED_BYTES / 1024
-                    ),
+                    format!("more than {} devices", migrate::MAX_DEVICES),
                 ));
+            }
+            if self.bytes > migrate::MAX_STAGED_BYTES {
+                return Err(too_large_bytes());
             }
         }
         if let Some(list) = field(v, "groups") {
@@ -272,7 +302,11 @@ impl Stage {
             let coord = u64::from_le_bytes(self.restore.coordinator_ieee);
             for g in list {
                 let g = migrate::group(g, Some(coord)).map_err(bad)?;
-                self.groups.retain(|x| x["id"] != g["id"]);
+                if let Some(i) = self.groups.iter().position(|x| x["id"] == g["id"]) {
+                    let old = self.groups.remove(i);
+                    self.bytes = self.bytes.saturating_sub(migrate::group_cost(&old));
+                }
+                self.bytes += migrate::group_cost(&g);
                 self.groups.push(g);
             }
             if self.groups.len() > migrate::MAX_GROUPS {
@@ -280,6 +314,9 @@ impl Stage {
                     "too_large",
                     format!("more than {} groups", migrate::MAX_GROUPS),
                 ));
+            }
+            if self.bytes > migrate::MAX_STAGED_BYTES {
+                return Err(too_large_bytes());
             }
         }
         Ok(rows)
@@ -291,6 +328,25 @@ impl Admin {
     /// NCP's devices meanwhile (they would all be interviewed).
     pub fn import_holds(&self) -> bool {
         self.import_hold.load(Ordering::SeqCst)
+    }
+
+    /// Once a second: a staging idle for [`STAGE_TTL`] is dropped.
+    pub fn import_tick(&mut self) {
+        if self
+            .import_stage
+            .as_ref()
+            .is_some_and(|s| s.at.elapsed() >= STAGE_TTL)
+        {
+            info!("admin: an import staging expired");
+            self.import_stage = None;
+        }
+    }
+
+    /// The session `sid` closed: its staging is dropped.
+    pub fn session_closed(&mut self, sid: SessionId) {
+        if self.import_stage.as_ref().is_some_and(|s| s.sid == sid) {
+            self.import_stage = None;
+        }
     }
 
     /// `network/import/preview` (`dry_run`) and `network/import`.
@@ -313,6 +369,13 @@ impl Admin {
             Ok(m) => m,
             Err(e) => return fail(e),
         };
+        // One staging at a time: another session's stays.
+        if self.import_stage.as_ref().is_some_and(|s| s.sid != sid) {
+            return fail(ApiError::new(
+                "busy",
+                "another session is staging an import (it ends with its last request, when that session closes, or after 10 minutes)",
+            ));
+        }
         let first = field(v, "document");
         if let Some(doc) = first {
             self.import_stage = None;
@@ -321,24 +384,24 @@ impl Admin {
                 Err(e) => return fail(e),
             }
         }
-        if self
-            .import_stage
-            .as_ref()
-            .is_some_and(|s| s.at.elapsed() >= STAGE_TTL)
-        {
-            self.import_stage = None;
-        }
-        // Another session's staging stays.
-        let Some(stage) = self
-            .import_stage
-            .as_mut()
-            .filter(|s| s.sid == sid && s.dry_run == dry_run)
-        else {
+        let Some(stage) = self.import_stage.as_mut().filter(|s| s.dry_run == dry_run) else {
             return fail(bad(
                 "no import staged in this session: send the document first",
             ));
         };
         stage.at = Instant::now();
+        if let Some((free, _)) = self.platform.as_ref().and_then(|p| p.heap())
+            && free < STAGE_HEAP_RESERVE
+        {
+            self.import_stage = None;
+            return fail(ApiError::new(
+                "busy",
+                format!(
+                    "low memory ({} KB free): the import is dropped, try again later",
+                    free / 1024
+                ),
+            ));
+        }
         // The document's arrays, then the request's own (`network_devices`,
         // `devices`, `groups`): the first request may carry either.
         let mut rows = Vec::new();
@@ -509,10 +572,30 @@ impl Admin {
                     ),
                 ));
             }
-        } else if st.devices.is_empty() && st.groups.is_empty() {
-            return fail(bad(
-                "nothing to import: the hub runs this network already and the document has no devices",
-            ));
+        } else {
+            if st.devices.is_empty() && st.groups.is_empty() {
+                return fail(bad(
+                    "nothing to import: the hub runs this network already and the document has no devices",
+                ));
+            }
+            // No restore re-tags the records here: the devices would stay
+            // in the engine only, lost at the next restart.
+            if !matches!(
+                ctx.records.registry(),
+                RegistryState::Untagged | RegistryState::Owned
+            ) {
+                return fail(ApiError::new(
+                    "registry_read_only",
+                    format!(
+                        "the device registry ({}) is not this network's: adopt it (network/registry/adopt) or clear it (network/registry/clear), then import again",
+                        ctx.records.registry().as_str()
+                    ),
+                ));
+            }
+        }
+        let hold = self.import_hold.clone();
+        if hold.swap(true, Ordering::SeqCst) {
+            return fail(ApiError::new("busy", "an import is being applied"));
         }
         let records = ctx.records.clone();
         let net = ctx.net.clone();
@@ -524,8 +607,6 @@ impl Admin {
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
-        let hold = self.import_hold.clone();
-        hold.store(true, Ordering::SeqCst);
         let Stage {
             restore,
             devices,
@@ -581,6 +662,18 @@ impl Admin {
                     Ok(r) => report = Some(r),
                     Err(e) => return failed_with_backup(id, e, previous.as_ref(), keys_out),
                 }
+                // The devices go in once their records can be stored (the
+                // backend's report of the restored network re-tags them).
+                let t0 = Instant::now();
+                while !registry_writable(&*records) {
+                    if t0.elapsed() >= REGISTRY_WAIT {
+                        let e = ApiError::new("registry_read_only", format!(
+                            "the network was restored, but the device registry ({}) did not become writable: no device was imported; import again (the restore is not repeated)",
+                            records.registry().as_str()));
+                        return failed_with_backup(id, e, previous.as_ref(), keys_out);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
             // Binds and the IAS CIE address name the coordinator the devices
             // knew: configured again only when the hub's is another.
@@ -590,7 +683,14 @@ impl Admin {
             let mode = o.reconfigure.mode(changed);
             let (tx, rx) = mpsc::channel();
             out(JobOut::Import(Box::new(migrate::Batch { devices, groups, mode, remove_missing: o.remove_missing, done: tx })));
-            let applied = rx.recv_timeout(APPLY_WAIT).map_err(|_| ApiError::new("timeout", "the devices were not taken in time"))?;
+            let Ok(applied) = rx.recv_timeout(APPLY_WAIT) else {
+                let e = ApiError::new("timeout", if same {
+                    "the devices were not taken in time: import again"
+                } else {
+                    "the network was restored, but the devices were not taken in time: import again to finish (the restore is not repeated)"
+                });
+                return failed_with_backup(id, e, previous.as_ref(), keys_out);
+            };
             if !same {
                 out(JobOut::Reimport);
             }
@@ -640,7 +740,8 @@ impl Admin {
             drop(previous);
             Ok(Reply::Frame(t))
         });
-        // Frames now: the job did not start (busy, low memory).
+        // Frames now: the job did not start (busy, low memory); the hold
+        // was this call's.
         if !started.is_empty() {
             self.import_hold.store(false, Ordering::SeqCst);
         }

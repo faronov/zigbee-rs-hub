@@ -454,7 +454,8 @@ checks of step 0 alone, without changing anything):
    `tclk_root_generated`; the devices' own link keys go to the key table);
    the extended security bitmask as forming.
 5. `importLinkKey` for the devices' link keys, up to `KEY_TABLE_SIZE`
-   (the rest: note `ignored`). Their frame counters cannot be set.
+   (12 on the Dongle Max's stock NCP, `network/info` `capacity.link_keys`;
+   the rest: note `ignored`). Their frame counters cannot be set.
 6. `formNetwork` with the backup's PAN ID, EPID, channel, mask, NWK
    manager and update ID (TX power: the operator's, the backup's, else
    8 dBm; a backup's power the NCP refuses, `PHY_INVALID_POWER` /

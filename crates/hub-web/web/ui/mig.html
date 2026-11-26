@@ -20,7 +20,7 @@ function mgYaml(t,top,n){let sec=top,key=null,ind=-1;
   if(!sec)continue;if(ind<0||i<=ind){ind=i;key=m[1];continue}
   if(m[1]=="friendly_name"&&key!=null){const v=m[2].replace(/^['"]|['"]$/g,"");if(sec=="devices"){const k=mgIeee(key);if(k)n.d[k]=v}else n.g[+key]=v}}}
 function mgDev(e,n){const ieee=mgIeee(e.ieeeAddr);if(!ieee)return null;
- const d={ieee,nwk:e.nwkAddr,name:n.d[ieee],type:{Router:"router",EndDevice:"end_device",Coordinator:"coordinator",GreenPower:"green_power"}[e.type],manufacturer:e.manufName,model:e.modelId,manufacturer_code:e.manufId,power_source:mgPow.indexOf(e.powerSource)<0?void 0:mgPow.indexOf(e.powerSource),app_version:e.appVersion,stack_version:e.stackVersion,hw_version:e.hwVersion,zcl_version:e.zclVersion,date_code:e.dateCode,sw_build_id:e.swBuildId,endpoints:[],attributes:[],source_id:e.id};
+ const d={ieee,nwk:e.nwkAddr,name:n.d[ieee],type:{Router:"router",EndDevice:"end_device",Coordinator:"coordinator",GreenPower:"green_power"}[e.type],manufacturer:e.manufName,model:e.modelId,manufacturer_code:e.manufId,power_source:mgPow.indexOf(e.powerSource)<0?void 0:mgPow.indexOf(e.powerSource),app_version:e.appVersion,stack_version:e.stackVersion,hw_version:e.hwVersion,zcl_version:e.zclVersion,date_code:e.dateCode,sw_build_id:e.swBuildId,endpoints:[],attributes:[],source_id:e.id,interviewed:e.interviewState?e.interviewState=="SUCCESSFUL":e.interviewCompleted};
  for(const[k,ep]of Object.entries(e.endpoints||{})){const id=ep.epId!=null?ep.epId:+k;d.endpoints.push({id,profile:ep.profId,device_id:ep.devId,in:ep.inClusterList||[],out:ep.outClusterList||[]});
   for(const[c,[cid,as,a0]]of Object.entries(mgAt)){const a=((ep.clusters||{})[c]||{}),v=a.attributes||a.attrs||{};as.split(" ").forEach((an,i)=>{if(typeof v[an]=="number")d.attributes.push({ep:id,cluster:cid,attr:a0+i,value:v[an]})})}}
  d.endpoints.sort((a,b)=>a.id-b.id);return d}
@@ -48,12 +48,12 @@ function mgShow(r,rows){const kv=$("#mgn"),n=r.network||{};kv.textContent="";
  if(r.summary)kvAdd(kv,"Devices",["new","replace","keep","skip"].map(k=>r.summary[k]+" "+k).join(", ")+(r.not_imported&&r.not_imported.count?" · "+r.not_imported.count+" on the hub not imported":""));
  if(r.restore_check&&r.restore_check.message)kvAdd(kv,"Restore check",r.restore_check.message);
  const t=$("#mgt");t.textContent="";t.append(el("tr",{},...["Device","Model","Definition","Status"].map(h=>el("th",{},h))));
- for(const d of rows)t.append(el("tr",{},el("td",{},(d.name||d.ieee)+(d.name?" · "+d.ieee:"")),el("td",{},d.model||""),el("td",{},d.definition?d.definition.id:d.status=="skip"?"":"generic, "+d.entities+" entities"),el("td",{class:d.status=="skip"?"mut":null},d.status+(d.reason?" ("+d.reason+")":""))))}
+ for(const d of rows)t.append(el("tr",{},el("td",{},(d.name||d.ieee)+(d.name?" · "+d.ieee:"")),el("td",{},d.model||""),el("td",{},d.definition?d.definition.id:d.status=="skip"?"":"generic, "+d.entities+" entities"),el("td",{class:d.status=="skip"?"mut":null},d.status+(d.reason?" ("+d.reason+")":"")+(d.interview=="on_first_contact"?", interviewed when heard from":""))))}
 $("#mgp").onclick=e=>busy(e.target,(async()=>{mgDoc=await mgRead([...$("#mgf").files]);$("#mgi").textContent=(mgDoc.devices||[]).length+" devices, "+(mgDoc.groups||[]).length+" groups";
  const[r,rows]=await mgSend("network/import/preview",{});mgRows=rows;mgShow(r,rows);$("#mga").classList.remove("hide")})()).catch(err=>toast(err.message));
 $("#mgx").onclick=e=>{if(!mgDoc||!confirm("Import "+(mgDoc.devices||[]).length+" devices and their network? The running network is backed up first."))return;
  const go=q=>mgSend("network/import",q).catch(err=>{const m=err.message,k=["force","confirm","confirm_ieee_write_once"].find(k=>!q[k]&&m.includes("set "+k+" "));if(k&&confirm(m+"\n\nGo on?"))return go({...q,[k]:!0});throw err});
  $("#mgi").textContent="importing…";
- busy(e.target,go({reconfigure:$("#mgc").value,remove_missing:$("#mgr").checked}).then(([r])=>{if(r.backup)saveBackup(r.backup);const d=r.devices;
+ busy(e.target,go({reconfigure:$("#mgc").value,remove_missing:$("#mgr").checked}).then(([r])=>{if(r.backup)saveBackup(r.backup);if(r.stored===!1)throw new Error("the devices were imported but not stored (the device registry is not writable): they are lost at the next restart; check the registry in Network and import again");const d=r.devices;
   $("#mgi").textContent="Imported: "+d.new+" new, "+d.replace+" replaced, "+d.keep+" kept, "+d.skip+" skipped; "+r.groups+" groups"+". Devices are verified when they next talk.";$("#mga").classList.add("hide")})).catch(err=>{$("#mgi").textContent="";toast("import: "+err.message)})};
 </script>

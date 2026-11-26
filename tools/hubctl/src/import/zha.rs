@@ -214,15 +214,33 @@ pub fn from_db(path: &Path, backup: Option<J>, ha: Option<&HaNames>) -> Result<J
     } else {
         format!("devices_v{v}")
     };
-    let devs = rows(&db, &format!("SELECT ieee, nwk FROM {devtable}"), |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })?;
+    // zigpy's `Status`: 2 (ENDPOINTS_INIT) is a finished interview; 0 (NEW)
+    // and 1 (ZDO_INIT) are not.
+    let status = if columns(&db, &devtable).iter().any(|c| c == "status") {
+        "status"
+    } else {
+        "NULL"
+    };
+    let devs = rows(
+        &db,
+        &format!("SELECT ieee, nwk, {status} FROM {devtable}"),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        },
+    )?;
     let mut out: BTreeMap<String, serde_json::Map<String, J>> = BTreeMap::new();
-    for (ieee, nwk) in devs {
+    for (ieee, nwk, status) in devs {
         let Some(i) = ieee_hex(&ieee) else { continue };
         let mut m = serde_json::Map::new();
         m.insert("ieee".into(), i.clone().into());
         m.insert("nwk".into(), nwk.into());
+        if let Some(s) = status {
+            m.insert("interviewed".into(), (s == 2).into());
+        }
         m.insert("endpoints".into(), json!([]));
         m.insert("source_id".into(), ieee.into());
         out.insert(i, m);
@@ -532,10 +550,17 @@ pub(crate) mod tests {
         let coord = "00:0b:57:ff:fe:aa:00:01";
         let light = "00:17:88:01:00:f1:e2:d3";
         let sensor = "00:15:8d:00:03:c4:d5:e6";
-        for (ieee, nwk) in [(coord, 0), (light, 0x7A10), (sensor, 0x04B2)] {
+        // ZDO_INIT (1): its interview stopped before the simple descriptors.
+        let unfinished = "00:12:4b:00:aa:bb:cc:01";
+        for (ieee, nwk, status) in [
+            (coord, 0, 2),
+            (light, 0x7A10, 2),
+            (sensor, 0x04B2, 2),
+            (unfinished, 0x1111, 1),
+        ] {
             db.execute(
-                &format!("INSERT INTO {dev}_v{v} VALUES (?1, ?2, 2, 1764000000.0)"),
-                (ieee, nwk),
+                &format!("INSERT INTO {dev}_v{v} VALUES (?1, ?2, ?3, 1764000000.0)"),
+                (ieee, nwk, status),
             )
             .unwrap();
         }
@@ -543,6 +568,7 @@ pub(crate) mod tests {
             (light, 11, 260, 269, vec![0, 3, 4, 5, 6, 8, 768], vec![25]),
             (light, 242, 41440, 97, vec![], vec![33]),
             (sensor, 1, 260, 24321, vec![0, 3, 1026, 1029], vec![25]),
+            (unfinished, 1, 260, 0, vec![], vec![]),
         ] {
             db.execute(
                 &format!("INSERT INTO endpoints_v{v} VALUES (?1, ?2, ?3, ?4, 1)"),
@@ -698,6 +724,19 @@ pub(crate) mod tests {
                 "an MQTT device's name is not ZHA's"
             );
             assert_eq!(by("00000000017880ff")["type"], "green_power");
+            assert_eq!(
+                (
+                    light["interviewed"].as_bool(),
+                    sensor["interviewed"].as_bool()
+                ),
+                (Some(true), Some(true))
+            );
+            let unfinished = by("00124b00aabbcc01");
+            assert_eq!(unfinished["interviewed"], false, "v{v}: ZDO_INIT");
+            match hub_app::migrate::entry(unfinished) {
+                hub_app::migrate::Entry::Device(d) => assert!(d.incomplete()),
+                _ => panic!("v{v}: imported, interviewed when heard from"),
+            }
             assert_eq!(
                 doc["groups"],
                 json!([{"id": 4097, "name": "Hall", "members": [{"ieee": "0017880100f1e2d3", "ep": 11}, {"ieee": "000b57fffeaa0001", "ep": 1}]}])

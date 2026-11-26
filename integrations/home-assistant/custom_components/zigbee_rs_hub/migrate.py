@@ -181,9 +181,14 @@ def read_zha_db(path: str) -> dict[str, Any]:
             raise ValueError("not a zigpy database (no endpoints_v12 or newer)")
         dev_t = f"zigbee_devices_v{v}" if f"zigbee_devices_v{v}" in tables else f"devices_v{v}"
         out: dict[str, dict[str, Any]] = {}
-        for ieee, nwk in db.execute(f"SELECT ieee, nwk FROM {dev_t}"):
+        # zigpy's Status: 2 (ENDPOINTS_INIT) is a finished interview, 0 and 1 are not.
+        dev_cols = {r[1] for r in db.execute(f"PRAGMA table_info({dev_t})")}
+        status = "status" if "status" in dev_cols else "NULL"
+        for ieee, nwk, st in db.execute(f"SELECT ieee, nwk, {status} FROM {dev_t}"):
             if i := ieee_hex(ieee):
                 out[i] = {"ieee": i, "nwk": nwk, "endpoints": [], "source_id": ieee}
+                if st is not None:
+                    out[i]["interviewed"] = st == 2
         for ieee, ep, profile, dt in db.execute(
             f"SELECT ieee, endpoint_id, profile_id, device_type FROM endpoints_v{v} ORDER BY ieee, endpoint_id"
         ):

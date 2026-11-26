@@ -193,12 +193,12 @@ pub fn device(e: &J, names: &Names) -> Option<J> {
     if !attrs.is_empty() {
         o.insert("attributes".into(), attrs.into());
     }
-    let interviewed = e
-        .get("interviewCompleted")
-        .and_then(J::as_bool)
-        .unwrap_or(false)
-        || e.get("interviewState").and_then(J::as_str) == Some("SUCCESSFUL");
-    o.insert("interviewed".into(), interviewed.into());
+    // herdsman ≥ 3 keeps `interviewState`, older ones `interviewCompleted`.
+    let interviewed = match e.get("interviewState").and_then(J::as_str) {
+        Some(s) => Some(s == "SUCCESSFUL"),
+        None => e.get("interviewCompleted").and_then(J::as_bool),
+    };
+    set(&mut o, "interviewed", interviewed.map(J::Bool));
     set(&mut o, "source_id", e.get("id").cloned());
     Some(J::Object(o))
 }
@@ -403,12 +403,13 @@ mod tests {
     /// zigbee-herdsman's `database.db` (generated devices): the
     /// coordinator, a router with a colour light's cache, a sleepy sensor
     /// with an older `attrs` cache and no interview state, a Green Power
-    /// switch, a device without endpoints, a group, a broken line.
+    /// switch, a failed interview (endpoints, no model), a group, a broken
+    /// line.
     pub const DB: &str = r#"{"id":1,"type":"Coordinator","ieeeAddr":"0x00124b00c0ffee01","nwkAddr":0,"manufId":0,"epList":[1,242],"endpoints":{"1":{"profId":260,"epId":1,"devId":5,"inClusterList":[],"outClusterList":[],"clusters":{},"binds":[],"configuredReportings":[],"meta":{}}},"interviewCompleted":true,"meta":{}}
 {"id":2,"type":"Router","ieeeAddr":"0x0017880100f1e2d3","nwkAddr":31248,"manufId":4107,"manufName":"Signify Netherlands B.V.","powerSource":"Mains (single phase)","modelId":"LCT015","epList":[11,242],"endpoints":{"11":{"profId":260,"epId":11,"devId":269,"inClusterList":[0,3,4,5,6,8,768,4096],"outClusterList":[25],"clusters":{"genBasic":{"attributes":{"modelId":"LCT015"}},"lightingColorCtrl":{"attributes":{"colorCapabilities":31,"colorTempPhysicalMin":153,"colorTempPhysicalMax":500,"currentX":1000}}},"binds":[{"cluster":6,"type":"endpoint","deviceIeeeAddress":"0x00124b00c0ffee01","endpointID":1}],"configuredReportings":[],"meta":{}},"242":{"profId":41440,"epId":242,"devId":97,"inClusterList":[],"outClusterList":[33],"clusters":{},"binds":[],"configuredReportings":[],"meta":{}}},"appVersion":2,"stackVersion":1,"hwVersion":1,"dateCode":"20191218","swBuildId":"1.50.2_r30933","zclVersion":1,"interviewCompleted":true,"interviewState":"SUCCESSFUL","meta":{},"lastSeen":1764000000000}
 {"id":3,"type":"EndDevice","ieeeAddr":"0x00158d0003c4d5e6","nwkAddr":1202,"manufId":4151,"manufName":"LUMI","powerSource":"Battery","modelId":"lumi.weather","epList":[1],"endpoints":{"1":{"profId":260,"epId":1,"devId":24321,"inClusterList":[0,3,65535,1026,1027,1029],"outClusterList":[0,4,65535],"clusters":{"genBasic":{"attrs":{"modelId":"lumi.weather"}},"genPowerCfg":{"attrs":{"batteryVoltage":30}}}}},"appVersion":3,"meta":{}}
 {"id":4,"type":"GreenPower","ieeeAddr":"0x00000000017880ff","nwkAddr":32767,"modelId":"GreenPower_2","epList":[],"endpoints":{},"interviewCompleted":true,"meta":{},"gpSecurityKey":[1,2,3]}
-{"id":5,"type":"EndDevice","ieeeAddr":"0x00158d00aabbccdd","nwkAddr":4242,"epList":[],"endpoints":{},"interviewState":"FAILED","meta":{}}
+{"id":5,"type":"EndDevice","ieeeAddr":"0x00158d00aabbccdd","nwkAddr":4242,"epList":[1],"endpoints":{"1":{"profId":260,"epId":1,"devId":0,"inClusterList":[0,6],"outClusterList":[]}},"interviewState":"FAILED","meta":{}}
 not json
 {"id":6,"type":"Group","groupID":4097,"members":[{"deviceIeeeAddr":"0x0017880100f1e2d3","endpointID":11},{"deviceIeeeAddr":"0x0000000000000bad","endpointID":1}],"meta":{}}"#;
 
@@ -458,11 +459,19 @@ not json
                 sensor["power_source"].as_u64(),
                 sensor["interviewed"].as_bool()
             ),
-            (Some("end_device"), Some(3), Some(false))
+            (Some("end_device"), Some(3), None)
         );
         assert!(sensor.get("name").is_none() && sensor.get("attributes").is_none());
         assert_eq!(devices[2]["type"], "green_power");
-        assert_eq!(devices[3]["endpoints"], json!([]));
+        assert_eq!(devices[3]["interviewed"], false);
+        match hub_app::migrate::entry(&devices[3]) {
+            hub_app::migrate::Entry::Device(d) => assert!(d.incomplete() && d.partial),
+            _ => panic!("imported, interviewed when heard from"),
+        }
+        match hub_app::migrate::entry(&devices[1]) {
+            hub_app::migrate::Entry::Device(d) => assert!(!d.incomplete()),
+            _ => panic!(),
+        }
         assert_eq!(
             groups[0],
             json!({"id": 4097, "name": "Hall", "members": [{"ieee": "0017880100f1e2d3", "ep": 11}, {"ieee": "0000000000000bad", "ep": 1}]})

@@ -56,6 +56,7 @@ fn imported(dev: &SimDevice) -> ImportedDevice {
         fp: d.fp.clone(),
         node_desc: d.node_desc,
         attrs: Vec::new(),
+        partial: false,
     }
 }
 
@@ -317,18 +318,85 @@ fn mains_probes_are_spaced_and_sleepy_devices_wait_for_their_wake() {
 }
 
 #[test]
-fn a_record_without_endpoints_is_interviewed_when_heard_from() {
+fn an_unfinished_source_interview_is_interviewed_when_heard_from() {
     let p = plug(PLUG, 0x5A01);
-    let mut d = imported(&p);
-    d.fp.endpoints.clear();
-    let mut sim = Sim::default();
-    sim.devices.push(p.clone());
+    let unfinished: [(&str, fn(&mut ImportedDevice)); 4] = [
+        ("no endpoints", |d| d.fp.endpoints.clear()),
+        // ZHA's ZDO_INIT: the simple descriptors were never read.
+        ("endpoints without clusters", |d| {
+            for e in &mut d.fp.endpoints {
+                e.in_clusters.clear();
+                e.out_clusters.clear();
+            }
+        }),
+        // Zigbee2MQTT's FAILED interview: Basic was never read.
+        ("no model", |d| d.fp.model_id = None),
+        ("interviewed: false", |d| d.partial = true),
+    ];
+    for (case, spoil) in unfinished {
+        let mut d = imported(&p);
+        spoil(&mut d);
+        assert!(d.incomplete(), "{case}");
+        let mut sim = Sim::default();
+        sim.devices.push(p.clone());
+        let mut hub = hub_with(&[]);
+        hub.import_device(&d, IMPORT_VERIFY, T0).unwrap();
+        let id = "zb:5a52530000000001";
+        assert_eq!(hub.device(id).unwrap().record()["interview"], "imported");
+        // A restart before it talks keeps it unfinished.
+        let snap = hub.snapshot_device(id).unwrap();
+        let mut hub = hub_with(&[]);
+        hub.restore_device(snap, None, T0 + 5).unwrap();
+        let report = p.report(
+            1,
+            0x0006,
+            None,
+            &[(
+                0x0000,
+                TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+            )],
+        );
+        hub.on_aps_indication(report, T0 + 10);
+        sim.run(&mut hub, T0 + 10);
+        let dev = hub.device(id).unwrap();
+        assert_eq!(
+            (dev.interview, dev.imported, dev.interview_partial),
+            (InterviewStep::Done, 0, false),
+            "{case}"
+        );
+        assert_eq!(dev.record()["interview"], "complete", "{case}");
+        assert_eq!(dev.fp.endpoints[0].in_clusters.len(), 3, "{case}");
+        assert_eq!(dev.fp.model_id.as_deref(), Some("SIM-PLUG"), "{case}");
+        assert_eq!(dev.user_name.as_deref(), Some("SIM-PLUG at the source"));
+    }
+    assert!(!imported(&p).incomplete());
+}
+
+#[test]
+fn a_silent_mains_device_is_probed_a_few_times_then_waits() {
+    let p = plug(PLUG, 0x5A01);
     let mut hub = hub_with(&[]);
-    hub.import_device(&d, IMPORT_VERIFY, T0).unwrap();
-    assert_eq!(
-        hub.device("zb:5a52530000000001").unwrap().record()["interview"],
-        "imported"
-    );
+    hub.import_device(&imported(&p), IMPORT_VERIFY, T0).unwrap();
+    let id = "zb:5a52530000000001";
+    let mut probes = Vec::new();
+    let mut t = T0;
+    // Nobody answers for a day (the availability check is kept from
+    // marking it unavailable, which also ends the probes).
+    while t < T0 + 86_400_000 {
+        hub.devices.get_mut(id).unwrap().available = true;
+        hub.tick(t);
+        let _ = hub.transport.take();
+        if usize::from(hub.device(id).unwrap().import_probes) > probes.len() {
+            probes.push((t - T0) / 60_000);
+        }
+        t += 60_000;
+    }
+    // Minutes: at once, then 10, 20 and 40 minutes apart.
+    assert_eq!(probes, vec![0, 10, 30, 70]);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.import_probes, IMPORT_PROBE_TRIES);
+    assert_eq!(d.imported, IMPORT_VERIFY, "still waits to be heard from");
+    // Heard from at last: verified.
     let report = p.report(
         1,
         0x0006,
@@ -338,12 +406,26 @@ fn a_record_without_endpoints_is_interviewed_when_heard_from() {
             TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
         )],
     );
-    hub.on_aps_indication(report, T0 + 10);
-    sim.run(&mut hub, T0 + 10);
-    let dev = hub.device("zb:5a52530000000001").unwrap();
-    assert_eq!((dev.interview, dev.imported), (InterviewStep::Done, 0));
-    assert_eq!(dev.fp.endpoints.len(), 1, "interviewed");
-    assert_eq!(dev.user_name.as_deref(), Some("SIM-PLUG at the source"));
+    hub.on_aps_indication(report, t);
+    assert_eq!(hub.device(id).unwrap().imported, 0);
+}
+
+#[test]
+fn an_unavailable_imported_device_is_not_probed() {
+    let p = plug(PLUG, 0x5A01);
+    let mut hub = hub_with(&[]);
+    hub.import_device(&imported(&p), IMPORT_VERIFY, T0).unwrap();
+    hub.on_device_left(PLUG);
+    let _ = hub.transport.take();
+    for k in 0..5 {
+        hub.tick(T0 + k * 1000);
+    }
+    assert!(
+        !aps(&mut hub)
+            .iter()
+            .any(|a| a.dst == crate::transport::ApsDst::Nwk(0x5A01)),
+        "a device that left is not probed"
+    );
 }
 
 #[test]

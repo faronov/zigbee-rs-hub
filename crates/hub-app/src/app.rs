@@ -1350,6 +1350,7 @@ impl Runner {
         }
         self.outboxes.remove(&sid);
         self.api.disconnect(sid);
+        self.admin.session_closed(sid);
     }
 
     fn tick(&mut self) {
@@ -1399,6 +1400,7 @@ impl Runner {
         }
         self.refresh(ready && verified, now);
         self.admin.clock_tick(&mut self.engine.cfg, now);
+        self.admin.import_tick();
         // Background maintenance jobs report progress once a second.
         for ev in self.admin.progress_events() {
             self.engine.network_event(ev);

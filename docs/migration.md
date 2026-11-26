@@ -122,7 +122,8 @@ ZHA's database schemas v12 to v17 are read (zigpy 0.5x to 2.5, November
 Unique link keys per backend:
 
 - **EZSP** (Dongle Max): Z-Stack/explicit keys go to the NCP's key table
-  with `importLinkKey`, as many as its `KEY_TABLE_SIZE` (the rest are
+  with `importLinkKey`, as many as its `KEY_TABLE_SIZE` (12 on the Dongle
+  Max's stock NCP, `network/info` `capacity.link_keys`; the rest are
   `ignored` in the restore report's notes); EmberZNet sources bring the
   hashed root, so every device's derived key is the same as before.
   Devices whose key did not fit keep working on network security; their
@@ -150,6 +151,10 @@ Unique link keys per backend:
 - **Sleepy devices** are verified, and configured again where needed, when
   they next wake (a report, a poll); until then the hub shows them
   `interview: imported` and their last state unknown.
+- **Unfinished interviews at the source** (Z2M `interviewState: FAILED` or
+  `interviewCompleted: false`, zigpy status `NEW`/`ZDO_INIT`, a record
+  without a model or with an endpoint without clusters) are imported, but
+  the device is interviewed when it is first heard from.
 - **Z2M external converters and device options** are Z2M's own: the hub
   uses its definitions catalog (`definitions/fetch`, user definitions);
   devices without a definition get generic entities.
@@ -160,6 +165,12 @@ Unique link keys per backend:
 - Devices of the network an import replaces stay in the hub's registry
   (re-tagged, unavailable) unless `remove_missing`; their network's
   backup is kept (`network/backup/replaced`).
+- An import over the network the radio runs already needs the hub's
+  device registry to be this network's (`network/info` `registry.state`
+  `owned` or `untagged`): records of another backend or network
+  (`foreign`, `unverified`) are adopted or cleared first
+  (`network/registry/adopt`, `network/registry/clear`), else the import
+  answers `registry_read_only` — its devices could not be stored.
 
 ## How it works
 
@@ -171,11 +182,17 @@ Unique link keys per backend:
    before the network is left (as `network/restore`, `docs/ezsp-backend.md`).
 3. The restore (EZSP: IEEE token, counters, security state, key table,
    `formNetwork`, child table; ZRHP: `BKP_RESTORE_*`), the records tagged
-   with the imported network (registry `owned`).
+   with the imported network (registry `owned`); the job waits (30 s at
+   most) until the registry is writable, else it ends with
+   `registry_read_only` and no device imported (run it again).
 4. The devices and groups, on the app thread: each appears as the hub
    would have interviewed it, `interview: imported`; the registry is
-   written at once. Meanwhile the hub does not import the NCP's own device
-   tables (that would interview every device); afterwards they add nothing.
+   written at once (`stored`; the clients report `stored: false` as an
+   error: the devices would be lost at the next restart). Meanwhile the
+   hub does not import the NCP's own device tables (that would interview
+   every device); afterwards they add nothing. An app thread that does not
+   take them in 2 minutes ends the job with `timeout`; running the import
+   again finishes it.
 
 Nothing is sent to an imported device at import. When it is first heard
 from (any frame, an announce, the answer to a probe):
@@ -187,13 +204,14 @@ from (any frame, an announce, the answer to a probe):
   devices at a time (a sleepy device that finds both turns taken tries
   again at its next wake; a sleeping one's requests wait for its wake and
   do not hold a turn);
-- a record without endpoints (the source's interview never finished): the
-  device is interviewed.
+- a record of an interview the source never finished (see the limits):
+  the device is interviewed.
 
 Mains devices not heard from are probed (a Basic read), one every 3 s, so
 two hundred routers take ten minutes, not a burst. A probe without an
-answer is repeated after 10 minutes. A device then shows `interview:
-complete`.
+answer is repeated after 10, 20 and 40 minutes; after four the device
+waits until it is heard from, and an unavailable device is not probed.
+A device then shows `interview: complete`.
 
 **Idempotent, resumable.** The same document again over the running
 network skips the restore (`network.action: "same"`) and changes no
@@ -241,7 +259,8 @@ source's files; the hub reads nothing else. JSON:
 | `node_descriptor` | when known: rx-on-when-idle and mains from `mac_capabilities`; without it routers and mains end devices listen, other end devices sleep |
 | `endpoints[]` | `id` (1–240, 242), `profile`, `device_id`, `in`/`out` cluster lists; none: interviewed on first contact |
 | `attributes[]` | cached values, only those the hub keeps (`persistent_value`), 64 at most |
-| `interviewed`, `source_id` | informational |
+| `interviewed` | `false`: the source's interview did not finish, the device is interviewed when heard from (so are records without `model` or with an endpoint without clusters); absent: as its record shows |
+| `source_id` | informational |
 | `groups[]` | `id` (1–0xFFF7), `name`, `members` [{`ieee`, `ep`}]; the coordinator's membership is the hub endpoint's |
 
 ## API
@@ -251,23 +270,29 @@ and take the document in requests of a few kilobytes: the first carries
 `document` (its header, `network` — its `devices` may be left out —,
 `groups`, maybe `devices`), the following ones any of `network_devices`
 (OCB `devices[]` entries), `devices` and `groups`; `more: true` on all but
-the last. The options go with the first. A staging belongs to its session
-and ends with its last request or after 10 minutes. Clients send at most
-6 KB of entries per request, the groups in batches too (the hub takes
-16 KiB frames).
+the last. The options go with the first. One staging at a time: it
+belongs to its session and ends with its last request, when the session
+closes, or 10 minutes after its last request (another session's request
+meanwhile answers `busy`); staging is refused (`busy`) when the hub's heap
+runs low. Clients send at most 6 KB of entries per request, the groups in
+batches too (the hub takes 16 KiB frames).
 
 | Type | Parameters | Result |
 |---|---|---|
 | `network/import/preview` | as above; options as `network/import` (they decide `needs`) | per request: `devices` (rows of its entries: `ieee`, `id`, `name`, `manufacturer`, `model`, `status` `new`/`replace`/`keep`/`skip`, `reason` of a skip: `green_power`, `coordinator`, `no_nwk`, `duplicate`, `invalid`; `definition` {`source`, `id`} or null for generic, `entities`, `endpoints`, `interview` `imported`/`on_first_contact`), `staged_devices`; the first: `network` {`ext_pan_id`, `pan_id`, `channel`, `coordinator_ieee`, `nwk_frame_counter`, `tclk_frame_counter`, `nwk_margin`, `aps_margin`, `devices`, `link_keys`, `hashed_tclk`, `stack`, `created`, `made_by`, `action` (`restore`, or `same`: the hub runs it already), `running` {`ext_pan_id`, `up`}, `coordinator` (`same`, `differs`, `unknown`: against the radio's IEEE now), `backend`, `needs` (`force`, `confirm`)}. The last also: `summary` {`new`, `replace`, `keep`, `skip`}, `groups`, `not_imported` {`count`, `devices` (the hub's devices the document does not list, at most 100), `removed`}, `restore_check` (`ok`, `not_needed`, or {`code`, `message`} of the backend's refusal, e.g. "set confirm_ieee_write_once"). Nothing changes |
-| `network/import` | the document; `force` (the radio runs another network), `confirm` (EZSP: the records are another network's), `confirm_ieee_write_once`, `allow_ieee_change` (default true), `skip_backup`, `remove_missing` (forget the hub's devices the document does not list), `reconfigure` (`auto`, `always`, `never`) | rows as the preview for every request but the last; the last starts the job and answers `network` {`action` `restored`/`same`, `pan_id`, `channel`, `ext_pan_id`, `coordinator_ieee`, `devices`, and after a restore `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` (as `network/restore`)}, `coordinator_changed`, `reconfigure`, `devices` {`new`, `replace`, `keep`, `skip`}, `failed`, `removed`, `groups`, `stored` (the registry written; else once the records are verified), `pending_verification`, `previous_network_backed_up`, `backup` (the replaced network's, with an API token) |
+| `network/import` | the document; `force` (the radio runs another network), `confirm` (EZSP: the records are another network's), `confirm_ieee_write_once`, `allow_ieee_change` (default true), `skip_backup`, `remove_missing` (forget the hub's devices the document does not list), `reconfigure` (`auto`, `always`, `never`) | rows as the preview for every request but the last; the last starts the job and answers `network` {`action` `restored`/`same`, `pan_id`, `channel`, `ext_pan_id`, `coordinator_ieee`, `devices`, and after a restore `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` (as `network/restore`)}, `coordinator_changed`, `reconfigure`, `devices` {`new`, `replace`, `keep`, `skip`}, `failed`, `removed`, `groups`, `stored` (the registry written; `false` is reported as an error by the clients), `pending_verification`, `previous_network_backed_up`, `backup` (the replaced network's, with an API token) |
 
 Errors: `unauthorized` (no API token), `network_required`,
 `invalid_value` (not the format, a bad network part, "set force"),
-`registry_read_only` ("set confirm"), `unsupported` (no restore on this
-NCP), `too_large` (more than 500 devices, 256 groups, or 384 KiB of
-staged records), `backup_incomplete` (the running network's backup has no
-key: `skip_backup`), `busy` (another job), the backend's restore refusals
-(`docs/ezsp-backend.md`), `timeout`. A failure after the leave answers
+`registry_read_only` ("set confirm"; over the running network: the
+registry is not this network's, adopt or clear it; after a restore: it did
+not become writable), `unsupported` (no restore on this NCP), `too_large`
+(more than 500 devices, 256 groups, or 384 KiB of staged device and group
+records), `backup_incomplete` (the running network's backup has no key:
+`skip_backup`), `busy` (another job, an import being applied, another
+session's staging, low memory), the backend's restore refusals
+(`docs/ezsp-backend.md`), `timeout` (the devices not taken in time: run
+the import again). A failure after the leave answers
 the error with the replaced network's `backup`, as `network/restore`.
 Event `network_updated` {`reason: "imported"`}. The device record's
 `interview` is `imported` until the device is verified.

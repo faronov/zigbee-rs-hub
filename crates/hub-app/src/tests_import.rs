@@ -5,6 +5,10 @@
 //! when the coordinator IEEE changed; refusals change nothing, a second
 //! run over the same network changes nothing more.
 
+use std::collections::BTreeMap;
+
+use hub_devices::hub::ApiError;
+
 use super::*;
 
 /// The imported network (Zigbee2MQTT's form, generated values): one router
@@ -184,6 +188,10 @@ fn an_import_restores_the_network_and_the_devices_without_pairing() {
             "{kind:?}: {res}"
         );
         assert_eq!(res["groups"], 1);
+        assert_eq!(
+            res["stored"], true,
+            "{kind:?}: the devices went in once the registry was writable"
+        );
         assert_eq!(res["previous_network_backed_up"], true);
         assert_eq!(
             res["backup"]["extended_pan_id"].as_str().map(str::len),
@@ -343,7 +351,7 @@ fn imports_are_staged_in_batches_and_refused_clearly() {
         2,
         json!({"type": "network/import/preview", "devices": [plug_entry()]}),
     );
-    assert_eq!(r["error"]["code"], "invalid_value", "{r}");
+    assert_eq!(r["error"]["code"], "busy", "{r}");
     let nd = network(sim_ieee(Kind::Zrhp))["devices"].clone();
     let r = call(
         &rig.app,
@@ -470,6 +478,26 @@ fn the_preview_resolves_catalog_definitions() {
         (Some("9290012607"), Some("imported")),
         "the definition's model"
     );
+    // Records of an interview the source did not finish: interviewed when
+    // heard from (Zigbee2MQTT's FAILED interview: endpoints, no model;
+    // `interviewed: false`).
+    let mut no_model = plug_entry();
+    no_model.as_object_mut().unwrap().remove("model");
+    let mut unfinished = plug_entry();
+    unfinished["ieee"] = json!("5a52530000000002");
+    unfinished["interviewed"] = json!(false);
+    doc["devices"] = json!([no_model, unfinished]);
+    let p = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        2,
+        json!({"type": "network/import/preview", "document": doc}),
+    ))
+    .clone();
+    for row in p["devices"].as_array().unwrap() {
+        assert_eq!(row["interview"], "on_first_contact", "{row}");
+    }
     rig.finish();
 }
 
@@ -639,6 +667,367 @@ fn many_devices_go_in_batches() {
         list.iter()
             .all(|d| d["interview"] == "imported" || d["interview"] == "complete"),
         "{list:?}"
+    );
+    rig.finish();
+}
+
+/// The operator's two confirmations are asked for one at a time: `force`
+/// (the NCP runs another network) and `confirm` (the records are another
+/// network's); either alone changes nothing.
+#[test]
+fn force_and_confirm_are_each_required() {
+    let rig = Rig::new(Kind::Ezsp, true);
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || {
+        info(&rig.app, sid, &rx)["registry"]["state"] == "owned"
+    });
+    let doc = document(sim_ieee(Kind::Ezsp));
+    let p = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        1,
+        json!({"type": "network/import/preview", "document": doc}),
+    ))
+    .clone();
+    assert_eq!(p["network"]["needs"], json!(["force", "confirm"]), "{p}");
+    let r = call(
+        &rig.app,
+        sid,
+        &rx,
+        2,
+        json!({"type": "network/import", "document": doc, "force": true}),
+    );
+    assert_eq!(r["error"]["code"], "registry_read_only", "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("set confirm"),
+        "{r}"
+    );
+    let r = call(
+        &rig.app,
+        sid,
+        &rx,
+        3,
+        json!({"type": "network/import", "document": doc, "confirm": true}),
+    );
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("set force"),
+        "{r}"
+    );
+    assert_eq!(rig.tag().map(|t| t.ext_pan_id), Some([0xDD; 8]));
+    assert_eq!(device(&rig.app, sid, &rx)["error"]["code"], "not_found");
+    rig.finish();
+}
+
+/// The NCP runs the imported network, but the records are another
+/// backend's: the import refuses (its devices could not be stored) until
+/// the operator adopts or clears them.
+#[test]
+fn foreign_records_on_the_imported_network_are_adopted_first() {
+    let flash = SharedFlash::new();
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || {
+        info(&rig.app, sid, &rx)["registry"]["state"] == "owned"
+    });
+    let doc = document(sim_ieee(Kind::Ezsp));
+    ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        1,
+        json!({"type": "network/restore", "backup": doc["network"], "force": true, "confirm": true}),
+    ));
+    wait("restored", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ext_pan_id"] == "a1a1a1a1a1a1a1a1" && i["registry"]["state"] == "owned"
+    });
+    let ncp = rig.ezsp.as_ref().unwrap().ncp(|n| n.config().clone());
+    rig.finish();
+    let mut s = flash.store();
+    s.kv_put(
+        OWNER_KEY,
+        OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes(),
+    )
+    .unwrap();
+    drop(s);
+
+    let rig = Rig::ezsp(ncp, flash.store());
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || {
+        info(&rig.app, sid, &rx)["registry"]["state"] == "foreign"
+    });
+    let p = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        2,
+        json!({"type": "network/import/preview", "document": doc}),
+    ))
+    .clone();
+    assert_eq!(p["network"]["action"], "same", "{p}");
+    let r = call(
+        &rig.app,
+        sid,
+        &rx,
+        3,
+        json!({"type": "network/import", "document": doc, "force": true, "confirm": true}),
+    );
+    assert_eq!(r["error"]["code"], "registry_read_only", "{r}");
+    assert!(
+        r["error"]["message"].as_str().unwrap().contains("adopt"),
+        "{r}"
+    );
+    assert_eq!(device(&rig.app, sid, &rx)["error"]["code"], "not_found");
+    assert_eq!(
+        kv::with(&*rig.kv, |s| s.get(OWNER_KEY).and_then(OwnerTag::decode))
+            .unwrap()
+            .backend,
+        "zrhp",
+        "the tag kept"
+    );
+    let a = call(
+        &rig.app,
+        sid,
+        &rx,
+        4,
+        json!({"type": "network/registry/adopt", "confirm": true}),
+    );
+    assert_eq!(ok(&a)["registry"]["state"], "owned", "{a}");
+    let res = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        5,
+        json!({"type": "network/import", "document": doc}),
+    ))
+    .clone();
+    assert_eq!(
+        (res["network"]["action"].as_str(), res["stored"].as_bool()),
+        (Some("same"), Some(true)),
+        "{res}"
+    );
+    wait("stored", || {
+        kv::with(&*rig.kv, |s| s.get(&format!("dev/{PLUG_ID}")).is_some())
+    });
+    rig.finish();
+}
+
+/// Holds the app thread (`test/stall`): what it should take waits.
+struct Stall;
+
+impl crate::RequestHook for Stall {
+    fn prefix(&self) -> &'static str {
+        "test/"
+    }
+
+    fn request(&mut self, _: &str, _: &J) -> Result<J, ApiError> {
+        thread::sleep(Duration::from_secs(5));
+        Ok(json!(true))
+    }
+}
+
+/// ZRHP: a second apply while one runs is refused without ending the
+/// first one's hold; an app thread that does not take the devices in time
+/// ends the apply with `timeout` after the restore, and the import run
+/// again over the restored network finishes it.
+#[test]
+fn an_apply_that_timed_out_after_the_restore_resumes() {
+    let mut rig = rig(Kind::Zrhp);
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered);
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    rig.app.add_hook(Box::new(Stall));
+    let doc = document(sim_ieee(Kind::Zrhp));
+    let apply = |id: u64| {
+        json!({"type": "network/import", "id": id, "document": doc, "force": true, "confirm": true})
+            .to_string()
+    };
+    rig.app.text(sid, apply(1));
+    rig.app.text(sid, apply(2));
+    rig.app
+        .text(sid, json!({"type": "test/stall", "id": 3}).to_string());
+    let mut answers = BTreeMap::new();
+    while answers.len() < 3 {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T * 2).unwrap()).unwrap();
+        if f["type"] == "result" {
+            answers.insert(f["id"].as_u64().unwrap(), f);
+        }
+    }
+    assert_eq!(answers[&2]["error"]["code"], "busy", "{}", answers[&2]);
+    assert!(
+        answers[&2]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("an import is being applied"),
+        "{}",
+        answers[&2]
+    );
+    assert_eq!(answers[&1]["error"]["code"], "timeout", "{}", answers[&1]);
+    assert_eq!(
+        answers[&1]["backup"]["extended_pan_id"]
+            .as_str()
+            .map(str::len),
+        Some(16),
+        "the replaced network's backup comes with the error"
+    );
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ext_pan_id"] == "a1a1a1a1a1a1a1a1" && i["registry"]["state"] == "owned"
+    });
+    let res = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        4,
+        json!({"type": "network/import", "document": doc}),
+    ))
+    .clone();
+    assert_eq!(
+        (res["network"]["action"].as_str(), res["stored"].as_bool()),
+        (Some("same"), Some(true)),
+        "{res}"
+    );
+    let d = &res["devices"];
+    assert_eq!(
+        d["new"].as_u64().unwrap() + d["replace"].as_u64().unwrap() + d["keep"].as_u64().unwrap(),
+        1,
+        "{res}"
+    );
+    assert_eq!(ok(&device(&rig.app, sid, &rx))["name"], "Desk plug");
+    rig.finish();
+}
+
+/// A staging ends when its session closes, or after its TTL (3 s in
+/// tests) without a request; meanwhile another session is told it runs.
+#[test]
+fn a_staging_ends_with_its_session_or_its_ttl() {
+    let rig = Rig::new(Kind::Zrhp, true);
+    let (a, rxa) = session(&rig.app);
+    let (b, rxb) = session(&rig.app);
+    let mut head = document(sim_ieee(Kind::Zrhp));
+    head["devices"] = json!([]);
+    let stage = |sid, rx: &Receiver<String>| {
+        ok(&call(
+            &rig.app,
+            sid,
+            rx,
+            1,
+            json!({"type": "network/import/preview", "document": head, "more": true}),
+        ));
+    };
+    let probe = |sid, rx: &Receiver<String>| {
+        call(
+            &rig.app,
+            sid,
+            rx,
+            2,
+            json!({"type": "network/import/preview", "devices": [], "more": true}),
+        )["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    stage(a, &rxa);
+    let staged = Instant::now();
+    assert_eq!(probe(b, &rxb), "busy");
+    let r = call(
+        &rig.app,
+        b,
+        &rxb,
+        3,
+        json!({"type": "network/import/preview", "document": head, "more": true}),
+    );
+    assert_eq!(
+        r["error"]["code"], "busy",
+        "not over another session's: {r}"
+    );
+    rig.app.disconnect(a);
+    // Well before the TTL.
+    while probe(b, &rxb) != "invalid_value" {
+        assert!(
+            staged.elapsed() < Duration::from_millis(1500),
+            "dropped with its session"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let (c, rxc) = session(&rig.app);
+    stage(c, &rxc);
+    assert_eq!(probe(b, &rxb), "busy");
+    wait("expired", || probe(b, &rxb) == "invalid_value");
+    rig.finish();
+}
+
+/// The groups count in the staged bytes; at most 256 groups.
+#[test]
+fn imports_beyond_the_limits_are_refused() {
+    let rig = Rig::new(Kind::Zrhp, true);
+    let (sid, rx) = session(&rig.app);
+    let mut head = document(sim_ieee(Kind::Zrhp));
+    head["devices"] = json!([]);
+    head["groups"] = json!([]);
+    let group = |id: u64, members: u64| {
+        json!({"id": id, "name": "Room", "members": (0..members)
+            .map(|m| json!({"ieee": format!("{:016x}", 0x5A52_5300_0001_0000 + m), "ep": 1}))
+            .collect::<Vec<_>>()})
+    };
+    let mut many = head.clone();
+    many["groups"] = (1..=257).map(|i| group(i, 0)).collect();
+    let r = call(
+        &rig.app,
+        sid,
+        &rx,
+        1,
+        json!({"type": "network/import/preview", "document": many}),
+    );
+    assert_eq!(r["error"]["code"], "too_large", "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("256 groups"),
+        "{r}"
+    );
+    ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        2,
+        json!({"type": "network/import", "document": head, "force": true, "more": true}),
+    ));
+    let mut refused = None;
+    for b in 0..5u64 {
+        let groups: Vec<J> = (0..50).map(|i| group(1 + b * 50 + i, 40)).collect();
+        let r = call(
+            &rig.app,
+            sid,
+            &rx,
+            3 + b,
+            json!({"type": "network/import", "groups": groups, "more": true}),
+        );
+        if r["success"] == false {
+            refused = Some((b, r));
+            break;
+        }
+    }
+    let (b, r) = refused.expect("refused");
+    assert_eq!(r["error"]["code"], "too_large", "{r}");
+    assert!(
+        r["error"]["message"].as_str().unwrap().contains("KiB"),
+        "{r}"
+    );
+    assert!(b >= 2, "about 140 groups of 40 members fit: {b}");
+    assert_ne!(
+        info(&rig.app, sid, &rx)["ext_pan_id"],
+        "a1a1a1a1a1a1a1a1",
+        "nothing changed"
     );
     rig.finish();
 }

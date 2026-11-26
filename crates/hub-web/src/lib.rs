@@ -32,13 +32,14 @@ pub const MODULE_BUDGETS: [(&str, usize); 5] =
 
 /// Budget of the page and all its modules, compressed, in every variant
 /// but the developer edition: what the web UI takes of the firmware image
-/// (each file compressed alone costs some 3 KiB more than one page).
-pub const TOTAL_BUDGET: usize = 44 * 1024;
+/// (each file compressed alone costs some 3 KiB more than one page; raised
+/// from 44 KiB for the migration wizard's module).
+pub const TOTAL_BUDGET: usize = 48 * 1024;
 
 /// [`TOTAL_BUDGET`] of the developer edition ("devtools": feature `dev`,
 /// the `tbr-hub-<ver>-8mb-devtools` and Dongle-M devtools images), with
-/// room for its developer tools.
-pub const DEV_TOTAL_BUDGET: usize = 64 * 1024;
+/// room for its developer tools (raised from 64 KiB with [`TOTAL_BUDGET`]).
+pub const DEV_TOTAL_BUDGET: usize = 68 * 1024;
 
 /// Strong ETag of [`INDEX_HTML_GZ`], with its quotes.
 pub const ETAG: &str = include_str!(concat!(env!("OUT_DIR"), "/etag"));
@@ -486,8 +487,10 @@ const db=[
  {id:1,type:"Coordinator",ieeeAddr:"0x00124b00c0ffee01",nwkAddr:0,endpoints:{}},
  {id:2,type:"Router",ieeeAddr:"0x0017880100F1E2D3",nwkAddr:31248,manufId:4107,manufName:"Signify",powerSource:"Mains (single phase)",modelId:"LCT015",
   endpoints:{"11":{profId:260,epId:11,devId:269,inClusterList:[0,6,768],outClusterList:[25],clusters:{lightingColorCtrl:{attributes:{colorCapabilities:31,currentX:9}}}},
-             "2":{profId:260,epId:2,devId:1,inClusterList:[],outClusterList:[]}},swBuildId:"1.50"},
- {id:3,type:"EndDevice",ieeeAddr:"0x00158d0003c4d5e6",nwkAddr:1202,powerSource:"Battery",endpoints:{}},
+             "2":{profId:260,epId:2,devId:1,inClusterList:[],outClusterList:[]}},swBuildId:"1.50",interviewCompleted:true,interviewState:"SUCCESSFUL"},
+ {id:3,type:"EndDevice",ieeeAddr:"0x00158d0003c4d5e6",nwkAddr:1202,powerSource:"Battery",endpoints:{},interviewCompleted:false},
+ {id:5,type:"Router",ieeeAddr:"0x00124b00aabbcc01",nwkAddr:4369,endpoints:{"1":{profId:260,epId:1,devId:0,inClusterList:[0,6],outClusterList:[]}},interviewState:"FAILED"},
+ {id:6,type:"Router",ieeeAddr:"0x00124b00aabbcc02",nwkAddr:4370,endpoints:{}},
  {id:4,type:"Group",groupID:4097,members:[{deviceIeeeAddr:"0x0017880100f1e2d3",endpointID:11}]}
 ].map(e=>JSON.stringify(e)).join("\n")+"\nnot json\n";
 const conf="homeassistant: true\ndevices:\n  '0x0017880100f1e2d3':\n    friendly_name: Hall light\n    retain: false\ngroups:\n  '4097':\n    friendly_name: Hall\nmqtt:\n  server: mqtt://x\n";
@@ -496,7 +499,9 @@ const ocb={metadata:{format:"zigpy/open-coordinator-backup",version:1,source:"zi
 (async()=>{
  const d=await mgRead([file("database.db",db),file("configuration.yaml",conf),file("devices.yaml",devs),file("coordinator_backup.json",JSON.stringify(ocb))]);
  eq([d.format,d.version,d.source.kind,d.network.extended_pan_id],["zigbee-rs-hub/import",1,"z2m","a1b2c3d4e5f60718"]);
- eq(d.devices.length,2);
+ eq(d.devices.length,4);
+ // The source's interview state: herdsman ≥ 3's interviewState, older interviewCompleted, else unsaid.
+ eq(d.devices.map(x=>x.interviewed),[true,false,false,void 0]);
  const l=d.devices[0];
  eq([l.ieee,l.nwk,l.name,l.type,l.power_source,l.sw_build_id],["0017880100f1e2d3",31248,"Hall light","router",1,"1.50"]);
  eq(l.endpoints.map(e=>e.id),[2,11]);

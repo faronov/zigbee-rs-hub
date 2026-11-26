@@ -401,6 +401,8 @@ pub struct Device {
     /// Last probe of an imported mains device not heard from yet; not
     /// persisted.
     pub import_probe_at: Option<Millis>,
+    /// Probes sent to it this run (at most `IMPORT_PROBE_TRIES`).
+    pub import_probes: u8,
 }
 
 impl Device {
@@ -446,6 +448,7 @@ impl Device {
             imported: 0,
             import_contacted: false,
             import_probe_at: None,
+            import_probes: 0,
         }
     }
 
