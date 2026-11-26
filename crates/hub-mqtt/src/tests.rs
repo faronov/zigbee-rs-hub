@@ -996,3 +996,14 @@ fn documents_match_zigbee2mqtt_references() {
         "health_check_response",
     );
 }
+
+#[test]
+fn hub_version_skips_the_board_suffix() {
+    use crate::bridge::hub_version;
+    assert_eq!(
+        hub_version("zigbee-rs-hub 0.3.0 (SONOFF Dongle Max (Dongle-M))"),
+        "0.3.0"
+    );
+    assert_eq!(hub_version("zigbee-rs-hub 0.1.8"), "0.1.8");
+    assert_eq!(hub_version("zigbee-rs-hub"), "");
+}

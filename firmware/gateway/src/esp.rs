@@ -132,6 +132,18 @@ fn files_text() -> String {
     }
 }
 
+/// The running image's version (`zrh-donglem-0.3.0` → `0.3.0`): the release
+/// version, which this library crate's own version is not.
+pub fn app_version() -> String {
+    let desc = unsafe { &*sys::esp_app_get_description() };
+    let v = unsafe { CStr::from_ptr(desc.version.as_ptr()) }.to_string_lossy().into_owned();
+    let start = v.char_indices().find(|&(i, c)| c.is_ascii_digit() && (i == 0 || v[..i].ends_with('-'))).map(|(i, _)| i);
+    match start {
+        Some(i) => v[i..].to_owned(),
+        None => v,
+    }
+}
+
 /// The boot report (log and `info`).
 pub fn boot_report(board: &BoardProfile) -> Vec<String> {
     let mut out = Vec::new();

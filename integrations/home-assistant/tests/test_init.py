@@ -15,7 +15,7 @@ from custom_components.zigbee_rs_hub.diagnostics import (
     async_get_config_entry_diagnostics,
     async_get_device_diagnostics,
 )
-from custom_components.zigbee_rs_hub.hub import find_device
+from custom_components.zigbee_rs_hub.hub import find_device, hub_version
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_ENTITY_ID, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
@@ -658,3 +658,10 @@ async def test_composite_platforms(
             command,
             params,
         ), service
+
+
+def test_hub_version_with_a_board_suffix() -> None:
+    """The Dongle Max names its board after the version."""
+    assert hub_version("zigbee-rs-hub 0.3.0 (SONOFF Dongle Max (Dongle-M))") == "0.3.0"
+    assert hub_version("zigbee-rs-hub 0.2.4") == "0.2.4"
+    assert hub_version("zigbee-rs-hub") is None
