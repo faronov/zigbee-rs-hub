@@ -239,6 +239,12 @@ about 259 KB of headroom (the hand-written API request parser saved
 and `zigbee-zrhp` (about 109 KB), so size is not on the backends' critical
 path. These are build results, not hardware results.
 
+Release 0.4.0 (CI, quad / octal): 4 MB 2,876,096 / 2,877,280 B (95.4 % of
+the 2,944 KiB slot, ~137 KB left); 8 MB 3,026,304 / 3,027,488 B and its
+developer edition 3,027,056 / 3,028,240 B (96.3 % of the 3 MiB slot,
+~117 KB left); `zrh-donglem` 3,095,776 B of its 6 MiB slot. The 8 MB
+headroom is the tightest; a size pass is planned after 0.4.0.
+
 Every image detects PSRAM at boot. Without it the application is not
 started (hardware run on the N4R8 lab board with a Quad image: ~35 KB of
 internal heap left, crash once clients connected); the hub core keeps the

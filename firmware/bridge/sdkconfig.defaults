@@ -28,6 +28,10 @@ CONFIG_TINYUSB_DESC_CDC_STRING="H2 bridge"
 
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
 CONFIG_APP_PROJECT_VER="tbr-bridge-0.2.6"
+# No build time/date in the app description: the same source gives the same
+# image in every release build (tools/release-images.py checks the fields
+# are empty), so tbr-bridge changes version only when its code does.
+CONFIG_APP_COMPILE_TIME_DATE=n
 
 # uxTaskGetSystemState() for the hang supervisor (src/diag.rs).
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y

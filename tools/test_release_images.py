@@ -112,6 +112,15 @@ def esp_image(chip_id=0, mode=2, size_freq=0x40, min_rev=300, hash_appended=1, v
     return header + b"\0" * 8 + desc + b"\0" * 64
 
 
+class BuildTimeTests(unittest.TestCase):
+    def test_build_time_and_date_of_the_app_description(self):
+        image = bytearray(esp_image(version=b"tbr-bridge-0.2.6"))
+        self.assertEqual(release_images.app_build_time(bytes(image)), "")
+        image[32 + 80:32 + 88] = b"17:23:40"
+        image[32 + 96:32 + 107] = b"Nov 26 2026"
+        self.assertEqual(release_images.app_build_time(bytes(image)), "17:23:40 Nov 26 2026")
+
+
 class DongleImageTests(unittest.TestCase):
     def test_sonoff_bootloader_settings_pass(self):
         release_images.check_dongle_app(esp_image(), "0.3.0")

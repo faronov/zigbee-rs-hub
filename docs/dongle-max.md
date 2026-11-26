@@ -54,6 +54,12 @@ flashed over USB with hwlab esprom, SONOFF's bootloader and `ota_0` kept):
   NCP appends a byte to the incoming messages of a device that joined in
   its session, and the backend refused them (`docs/ezsp-backend.md`, "On
   the Dongle Max").
+- Network backup export and a restore onto the same network (hub 0.3.0):
+  OK, the joined sensor kept working.
+- On main 21354727 (2026-11-26): the hub name carries the image version
+  (#91); a Zigbee2MQTT-format import of its own network
+  (`docs/migration.md`): preview `action: same`, apply `stored: true`, the
+  names from `devices.yaml` applied, the devices `complete` and available.
 
 ## Features
 
@@ -579,10 +585,10 @@ stored network (the hub's backend calls it at every session start).
 ## Not in this image, limits
 
 - **Network backup/restore through EZSP**: an export and a restore onto
-  the same network ran on the lab unit (0.3.0); a restore onto another
-  radio or IEEE (the token interface, a one-time custom EUI-64) and a
-  migration import (`docs/migration.md`) are host-tested only
-  (`docs/ezsp-backend.md`).
+  the same network, and a Zigbee2MQTT-format import of the same network,
+  ran on the lab unit; a restore or import onto another radio or IEEE (the
+  token interface, a one-time custom EUI-64) and a ZHA import are
+  host-tested only (`docs/ezsp-backend.md`, `docs/migration.md`).
 - **Green Power through EZSP**: GP frames are ignored.
 - **MG24 firmware updates** through the Gecko bootloader: the `donglem`
   branch's updater (radio banks in its own `hubdata`, ZRHP-based

@@ -12,8 +12,9 @@ Dongle Max" below). The hub app runs on it (hub-app feature `ezsp`,
 `hubctl --backend ezsp --sim`, and in the SONOFF Dongle Max image
 `zrh-donglem` (PR H2, `docs/dongle-max.md`). Backup and restore ("Backup
 and restore"): a backup export and a restore onto the same network ran on
-the lab Dongle Max (hub 0.3.0; the joined sensor kept working); a restore
-onto another radio or IEEE and the migration import are host-tested only.
+the lab Dongle Max (hub 0.3.0; the joined sensor kept working), and so did
+a Zigbee2MQTT-format import of its own network (main 21354727); a restore
+or import onto another radio or IEEE is host-tested only.
 
 ## Target
 

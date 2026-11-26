@@ -38,8 +38,8 @@ install instructions and the list of merged pull requests. A pre-release
   require a user name and password)` instead of `disconnected`, and the
   web UI points to a Home Assistant user or the Mosquitto add-on's logins
   when an anonymous client is refused (the add-on does not accept
-  anonymous clients). A password without a user name is no longer sent
-  (MQTT 3.1.1 forbids it).
+  anonymous clients; checked against it). A password without a user name
+  is no longer sent (MQTT 3.1.1 forbids it).
 - **Dongle Max: hub version.** `hub/info` `name` carries the image's
   version (0.3.0 said `zigbee-rs-hub 0.2.0`), and the Home Assistant
   integration reads the version from the name on every board (the Dongle
@@ -113,8 +113,9 @@ install instructions and the list of merged pull requests. A pre-release
 - **Home Assistant:** integration **0.6.0** (`integrations/home-assistant`):
   the migration services above and the hub version read from the name.
 - **tbr-bridge 0.2.6** (the S3 app for bridge mode on Espressif's stock
-  layout): no functional change (esp-idf-svc pinned); a new version
-  because the rebuilt image differs from 0.2.5.
+  layout): no functional change (esp-idf-svc pinned). Its image no longer
+  carries a build time, so later releases rebuild it byte for byte and it
+  keeps its version until its code changes.
 
 ### Known limitations
 
@@ -122,20 +123,26 @@ install instructions and the list of merged pull requests. A pre-release
   yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
   quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio, so Zigbee
   on a quad-PSRAM board is still untested.
-- Migration: host-tested on both simulated backends (ZRHP and EZSP) and
-  against Zigbee2MQTT and ZHA files; not yet run on hardware. Green Power
+- Migration: host-tested on both simulated backends (ZRHP and EZSP) with
+  Zigbee2MQTT and ZHA files. On hardware a Zigbee2MQTT-format import of
+  the Dongle Max's own network ran (preview `same`, names applied, devices
+  complete); an import onto another radio or network and a ZHA import
+  have not. Green Power
   devices are not imported (commission them again); after a change of the
   coordinator IEEE some devices keep the old trust center address (prefer
   a radio that takes the backup's IEEE); Z2M/ZHA per-device settings and
   external converters are not imported (`docs/migration.md`, Limits).
 - No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
   from the console or the browser console).
+- A device removed with `force` can come back after a reboot, because the
+  radio still lists it (fix in progress).
 - SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
-  joining and interviews, reports, and a network backup export and
-  restore onto the same network (0.3.0; the joined sensor kept working).
-  Not yet run: Ethernet, `stock confirm`, the self-update, installation
-  through SONOFF's web console, a restore onto another radio, a
-  migration import. No Green Power, no MG24 firmware update; at most 8
+  joining and interviews, reports, a network backup export and restore
+  onto the same network (0.3.0; the joined sensor kept working), the hub
+  name and version, a Zigbee2MQTT-format import of its own network. Not
+  yet run: Ethernet, `stock confirm`, the self-update, installation
+  through SONOFF's web console, a restore or import onto another radio.
+  No Green Power, no MG24 firmware update; at most 8
   groups on the hub's endpoint (the NCP's multicast table); if the first
   boot cannot claim SONOFF's `files` partition the hub keeps its data in
   RAM only (a banner says so). Not offered by the web flasher (its erase

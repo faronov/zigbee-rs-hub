@@ -2,6 +2,8 @@
 # identity, so the bridge mode looks exactly like tbr-bridge to the host).
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
 CONFIG_APP_PROJECT_VER="tbr-hub-0.4.0"
+# tbr-hub keeps its build time/date (tbr-bridge drops them to be reproducible).
+CONFIG_APP_COMPILE_TIME_DATE=y
 
 # WebSocket JSON API (esp_http_server).
 CONFIG_HTTPD_WS_SUPPORT=y
