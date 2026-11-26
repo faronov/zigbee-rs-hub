@@ -12,9 +12,9 @@ install instructions and the list of merged pull requests. A pre-release
 
 - **Web UI: tabs in a sidebar.** On screens 900 px wide or more the tabs
   are a sidebar on the left; on phones a menu button (☰, with the open
-  tab's title) opens them over the page (a tab, Escape or a tap elsewhere
-  closes it). No horizontal scroll at 320 px any more (the device grid
-  overflowed there).
+  tab's title) opens them over the page (a tab, Escape or a tap on the
+  dimmed page closes it). No horizontal scroll at 320 px any more (the
+  device grid overflowed there).
 - **Device cards: status at the top.** Battery, LQI, RSSI, last seen and
   power source sit right under the card's title, in the device page's
   order, in the same place on every card (they were under the entities).

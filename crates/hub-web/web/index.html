@@ -64,7 +64,8 @@ pre{white-space:pre-wrap;font-size:.8em;max-height:24em;overflow:auto;background
 #tabs button.on{color:var(--fg);border-left-color:var(--acc);background:var(--bg)}
 #mnb,body:not(.in) #tabs{display:none}
 @media(min-width:900px){body.in{padding-left:11em}body.in header{margin-left:-11em}}
-@media(max-width:899.9px){body.in #mnb{display:block}body:not(.mn) #tabs{display:none}#tabs{width:min(16em,85vw)}body.mn::after{content:"";position:fixed;inset:0;z-index:1;background:#0006}}
+#mnx{display:none;position:fixed;inset:0;z-index:1;background:#0006}
+@media(max-width:899.9px){body.in #mnb{display:block}body:not(.mn) #tabs{display:none}#tabs{width:min(16em,85vw)}body.in.mn #mnx{display:block}}
 .card h3{font-size:.9em;margin:.8em 0 0;color:var(--mut)}
 .dev .gh{font-size:.75em;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin:1.6em 0 .3em;cursor:default}.gh+.ents{margin:0;border-top:0}
 #gcw{display:inline-block;margin:.6em 0 0}
@@ -80,7 +81,7 @@ progress{width:12em}
 <p class="mut">The hub's console prints it with <code>token</code>; a link ending in <code>#token=…</code> also works.</p>
 <form id="lf"><input id="tok" type="password" autocomplete="current-password" placeholder="token" required><button class="p">Connect</button></form>
 </div>
-<nav id="tabs"></nav>
+<nav id="tabs"></nav><div id="mnx"></div>
 <main id="app" class="hide">
 <!-- gateway:start -->
 <p id="gsban" class="card hide" style="color:var(--bad)"></p>
@@ -215,11 +216,13 @@ let ws,rid=0,pend={},devs={},ents={},states={},net={},hub={},pjEnd=0,retry=1000,
 // module `data-mod` (if any) is loaded. tabs(u): u when the user asked
 // (a tab clicked, a link followed), else for the hub (connect, hub/info).
 // The tabs are a sidebar; on a narrow screen a menu that the button ☰ (with
-// the tab's title) opens over the page; a tab, Escape or a click elsewhere
-// closes it. A tab focused keeps the focus when they are rebuilt.
+// the tab's title) opens over the page; a tab, Escape, ☰ again or a tap on
+// the backdrop #mnx closes it (an element with its own click handler: iOS
+// sends no click to a bare <body>). A tab focused keeps the focus when they
+// are rebuilt.
 const onTab={},mnb=$("#mnb"),mn=o=>{document.body.classList.toggle("mn",o);mnb.setAttribute("aria-expanded",!!o);if(o)$("#tabs .on").focus()};
 mnb.onclick=()=>mn(!document.body.classList.contains("mn"));
-addEventListener("click",e=>{if(!e.target.closest("#tabs,#mnb"))mn(0)});
+$("#mnx").onclick=()=>mn(0);
 addEventListener("keydown",e=>{if(e.key=="Escape"&&document.body.classList.contains("mn")){mn(0);mnb.focus()}});
 $("#tabs").addEventListener("focusout",e=>{const r=e.relatedTarget;if(r&&!r.closest("#tabs,#mnb"))mn(0)});
 // Modules: the rarely used tabs, loaded on demand from the hub (never from
@@ -264,7 +267,7 @@ function connect(){
  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch{return}onMsg(m,tok)};
  ws.onclose=()=>{for(const k in pend)pend[k].no(new Error("connection closed"));pend={};authed=false;status("disconnected, retrying…","");setTimeout(connect,retry);retry=Math.min(retry*2,15000)};
 }
-function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");document.body.classList.remove("in");status("no token","")}
+function showLogin(){$("#login").classList.remove("hide");$("#app").classList.add("hide");document.body.classList.remove("in");mn(0);status("no token","")}
 $("#lf").onsubmit=e=>{e.preventDefault();localStorage.setItem("zrhToken",$("#tok").value.trim());$("#login").classList.add("hide");connect()};
 function onMsg(m,tok){
  if(m.type=="auth_required"){ws.send(JSON.stringify({type:"auth",token:tok}));return}
