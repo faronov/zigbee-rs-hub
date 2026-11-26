@@ -17,7 +17,8 @@
 //!   ([`ImportedDevice::incomplete`]): the device is interviewed.
 //!
 //! Sleepy devices are verified when they wake; mains devices not heard
-//! from are probed (a Basic read) one every [`IMPORT_PROBE_MS`], so that an
+//! from are probed (a Basic read; `Active_EP_req` for an unfinished
+//! record or one without Basic) one every [`IMPORT_PROBE_MS`], so that an
 //! import of a few hundred routers does not flood the network; a device
 //! that answers none of [`IMPORT_PROBE_TRIES`] probes waits until it is
 //! heard from.
@@ -27,12 +28,12 @@ use std::collections::BTreeMap;
 use crate::configure::{build_ops, configure_hash};
 use crate::device::{Device, DeviceKind, InterviewStep, Millis};
 use crate::fingerprint::Fingerprint;
-use crate::hub::{DevEnv, Hub, HubEvent, zigbee_id};
+use crate::hub::{DevEnv, Hub, HubEvent, Purpose, zigbee_id};
 use crate::persist::{AttrSnap, DeviceSnapshot, SNAPSHOT_VERSION, persistent_value};
 use crate::resolve::LayerRef;
 use crate::transport::ZigbeeTransport;
 use crate::zcl::{ZclValue, cluster as cl};
-use crate::zdo::NodeDescriptor;
+use crate::zdo::{self, NodeDescriptor};
 
 /// The coordinator IEEE is the one the device knows: verify only.
 pub const IMPORT_VERIFY: u8 = 1;
@@ -388,10 +389,6 @@ impl<T: ZigbeeTransport> Hub<T> {
                     && !d.sleepy()
                     && d.available
                     && d.import_probes < IMPORT_PROBE_TRIES
-                    && d.fp
-                        .endpoints
-                        .iter()
-                        .any(|e| e.in_clusters.contains(&cl::BASIC))
                     && d.import_probe_at.is_none_or(|t| {
                         now.saturating_sub(t)
                             >= IMPORT_PROBE_RETRY_MS << d.import_probes.saturating_sub(1)
@@ -402,12 +399,31 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         };
         self.import_probe_last = Some(now);
-        if let Some(d) = self.devices.get_mut(&id) {
-            d.import_probe_at = Some(now);
-            d.import_probes += 1;
+        let Some(d) = self.devices.get_mut(&id) else {
+            return;
+        };
+        d.import_probe_at = Some(now);
+        d.import_probes += 1;
+        // Its answer is the contact that verifies it (or starts the
+        // interview of an unfinished record).
+        let basic = !d.interview_partial
+            && d.fp
+                .endpoints
+                .iter()
+                .any(|e| e.in_clusters.contains(&cl::BASIC));
+        let nwk = d.nwk().unwrap_or(0xFFFE);
+        if basic {
+            self.refresh_identity(&id, true, now);
+        } else {
+            let tsn = self.next_zdo_tsn();
+            self.send_zdo(
+                &id,
+                zdo::cluster::ACTIVE_EP_REQ,
+                zdo::nwk_req(tsn, nwk),
+                Purpose::None,
+                now,
+            );
         }
-        // Its answer is the contact that verifies it.
-        self.refresh_identity(&id, true, now);
     }
 }
 

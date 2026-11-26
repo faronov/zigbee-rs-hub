@@ -411,6 +411,71 @@ fn a_silent_mains_device_is_probed_a_few_times_then_waits() {
 }
 
 #[test]
+fn an_unfinished_mains_record_is_probed_with_active_ep_req_and_interviewed() {
+    let p = plug(PLUG, 0x5A01);
+    let id = "zb:5a52530000000001";
+    let unfinished: [fn(&mut ImportedDevice); 2] = [
+        |d| d.fp.endpoints.clear(),
+        // zigpy's ZDO_INIT: endpoints without clusters.
+        |d| {
+            for e in &mut d.fp.endpoints {
+                e.in_clusters.clear();
+                e.out_clusters.clear();
+            }
+        },
+    ];
+    for spoil in unfinished {
+        let mut d = imported(&p);
+        spoil(&mut d);
+        let mut sim = Sim::default();
+        sim.devices.push(p.clone());
+        let mut hub = hub_with(&[]);
+        hub.import_device(&d, IMPORT_VERIFY, T0).unwrap();
+        let _ = hub.transport.take();
+        hub.tick(T0 + 1000);
+        let probes: Vec<u16> = hub
+            .transport
+            .sent
+            .iter()
+            .filter_map(|s| match s {
+                Sent::Aps(a) if a.dst == crate::transport::ApsDst::Nwk(0x5A01) => Some(a.cluster),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(probes, vec![0x0005], "Active_EP_req");
+        sim.run(&mut hub, T0 + 1000);
+        let dev = hub.device(id).unwrap();
+        assert_eq!(
+            (dev.interview, dev.imported, dev.interview_partial),
+            (InterviewStep::Done, 0, false)
+        );
+        assert_eq!(dev.fp.endpoints[0].in_clusters.len(), 3);
+    }
+    // Silent: as many probes as any other, all Active_EP_req (the
+    // availability check's Basic reads aside).
+    let mut d = imported(&p);
+    d.fp.endpoints.clear();
+    let mut hub = hub_with(&[]);
+    hub.import_device(&d, IMPORT_VERIFY, T0).unwrap();
+    let _ = hub.transport.take();
+    let mut clusters = Vec::new();
+    let mut t = T0;
+    while t < T0 + 86_400_000 {
+        hub.devices.get_mut(id).unwrap().available = true;
+        hub.tick(t);
+        clusters.extend(
+            aps(&mut hub)
+                .iter()
+                .filter(|a| a.dst == crate::transport::ApsDst::Nwk(0x5A01) && a.profile == 0)
+                .map(|a| a.cluster),
+        );
+        t += 60_000;
+    }
+    assert_eq!(hub.device(id).unwrap().import_probes, IMPORT_PROBE_TRIES);
+    assert_eq!(clusters, vec![0x0005; usize::from(IMPORT_PROBE_TRIES)]);
+}
+
+#[test]
 fn an_unavailable_imported_device_is_not_probed() {
     let p = plug(PLUG, 0x5A01);
     let mut hub = hub_with(&[]);

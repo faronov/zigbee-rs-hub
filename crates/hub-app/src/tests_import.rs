@@ -819,6 +819,51 @@ fn foreign_records_on_the_imported_network_are_adopted_first() {
     rig.finish();
 }
 
+/// Records closed at the start (another backend's): an import of another
+/// network with `force` and `confirm` takes them; its devices go in after
+/// the records the restore opened were loaded, and are stored at once
+/// with the imported data.
+#[test]
+fn an_import_over_records_closed_at_the_start_stores_its_devices() {
+    let flash = SharedFlash::new();
+    let mut s = flash.store();
+    s.kv_put(
+        OWNER_KEY,
+        OwnerTag::new(BackendKind::Zrhp, None).encode().as_bytes(),
+    )
+    .unwrap();
+    drop(s);
+    let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+    let (sid, rx) = session(&rig.app);
+    wait("foreign", || {
+        info(&rig.app, sid, &rx)["registry"]["state"] == "foreign"
+    });
+    let doc = document(sim_ieee(Kind::Ezsp));
+    let res = ok(&call(
+        &rig.app,
+        sid,
+        &rx,
+        1,
+        json!({"type": "network/import", "document": doc, "force": true, "confirm": true}),
+    ))
+    .clone();
+    assert_eq!(
+        (res["network"]["action"].as_str(), res["stored"].as_bool()),
+        (Some("restored"), Some(true)),
+        "{res}"
+    );
+    let rec = kv::with(&*rig.kv, |s| {
+        s.get(&format!("dev/{PLUG_ID}")).map(<[u8]>::to_vec)
+    })
+    .expect("stored with the answer");
+    assert!(
+        String::from_utf8_lossy(&rec).contains("Desk plug"),
+        "the imported record"
+    );
+    assert_eq!(ok(&device(&rig.app, sid, &rx))["name"], "Desk plug");
+    rig.finish();
+}
+
 /// Holds the app thread (`test/stall`): what it should take waits.
 struct Stall;
 

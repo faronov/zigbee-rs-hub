@@ -185,7 +185,10 @@ Unique link keys per backend:
    with the imported network (registry `owned`); the job waits (30 s at
    most) until the registry is writable, else it ends with
    `registry_read_only` and no device imported (run it again).
-4. The devices and groups, on the app thread: each appears as the hub
+4. The devices and groups, on the app thread: first the stored records
+   the restore opened are loaded (records that were `foreign` or
+   `unverified` at the start: a device of the same IEEE the hub
+   interviewed is kept); then each imported device appears as the hub
    would have interviewed it, `interview: imported`; the registry is
    written at once (`stored`; the clients report `stored: false` as an
    error: the devices would be lost at the next restart). Meanwhile the
@@ -207,8 +210,9 @@ from (any frame, an announce, the answer to a probe):
 - a record of an interview the source never finished (see the limits):
   the device is interviewed.
 
-Mains devices not heard from are probed (a Basic read), one every 3 s, so
-two hundred routers take ten minutes, not a burst. A probe without an
+Mains devices not heard from are probed (a Basic read; `Active_EP_req`
+for an unfinished record or one without Basic), one every 3 s, so two
+hundred routers take ten minutes, not a burst. A probe without an
 answer is repeated after 10, 20 and 40 minutes; after four the device
 waits until it is heard from, and an unavailable device is not probed.
 A device then shows `interview: complete`.

@@ -1355,7 +1355,11 @@ impl Runner {
 
     fn tick(&mut self) {
         let now = self.now();
-        self.check_registry(now);
+        // While an import is applied, the records its restore opens load
+        // right before its devices go in (`apply_import`).
+        if !self.admin.import_holds() {
+            self.check_registry(now);
+        }
         let probe = self.t0.elapsed().as_secs().is_multiple_of(KEEPALIVE_S);
         let dead: Vec<SessionId> = self
             .sinks
@@ -1546,6 +1550,11 @@ impl Runner {
     /// once; the answer goes back to the import job.
     #[inline(never)]
     fn apply_import(&mut self, b: crate::migrate::Batch, now: Millis) {
+        // A restore over records that were closed at the start (foreign,
+        // unverified) opened them: their stored devices load first, so
+        // that the imported ones replace or keep them, and not the other
+        // way round at the next tick.
+        self.check_registry(now);
         let mut a = crate::migrate::Applied::default();
         for d in &b.devices {
             match self.engine.import_device(d, b.mode, now) {
