@@ -709,6 +709,77 @@ fn a_partial_interview_resumes_when_the_device_announces_itself() {
     );
 }
 
+/// The likeliest partial interview: the Node descriptor was lost right
+/// after the join, the endpoints and their entities are fine. Resumed after
+/// a rejoin where a Simple descriptor request would fail, it asks only the
+/// Node descriptor: the endpoints and entities stay.
+#[test]
+fn a_resumed_interview_asks_only_what_the_device_lacks() {
+    use crate::zdo::cluster::{ACTIVE_EP_REQ, NODE_DESC_REQ, SIMPLE_DESC_REQ};
+    let id = "zb:0017880100aabbcc";
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    let mut l = light();
+    l.zdo_failing.insert(NODE_DESC_REQ);
+    sim.devices.push(l);
+    sim.join(&mut hub, LIGHT, T0);
+    let d = hub.device(id).unwrap();
+    assert!(d.interview_partial && d.entity(11, "light").is_some());
+    let eps = d.fp.endpoints.clone();
+
+    sim.dev(LIGHT).zdo_failing = [SIMPLE_DESC_REQ].into();
+    sim.log.clear();
+    announce(&mut hub, &mut sim, LIGHT, T0 + 60_000);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.fp.endpoints, eps);
+    assert!(d.entity(11, "light").is_some());
+    assert!(d.node_desc.is_some());
+    assert_eq!(d.record()["interview"], "complete");
+    let zdo: Vec<u16> = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0)
+        .map(|a| a.cluster)
+        .collect();
+    assert!(zdo.contains(&NODE_DESC_REQ), "{zdo:04x?}");
+    assert!(
+        !zdo.contains(&ACTIVE_EP_REQ) && !zdo.contains(&SIMPLE_DESC_REQ),
+        "{zdo:04x?}"
+    );
+}
+
+/// A resumption asks only the Simple descriptor the device lacks and
+/// stores it where a full interview would (the endpoints' order).
+#[test]
+fn a_resumed_interview_stores_a_descriptor_in_the_interview_order() {
+    use crate::zdo::cluster::SIMPLE_DESC_REQ;
+    let id = "zb:0017880100aabbcc";
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices
+        .push(light().endpoint(12, 0x0104, 0x0100, &[0x0000, 0x0006], &[]));
+    sim.join(&mut hub, LIGHT, T0);
+    let eps = hub.device(id).unwrap().fp.endpoints.clone();
+    assert_eq!(eps.iter().map(|e| e.ep).collect::<Vec<_>>(), [11, 12]);
+    // Endpoint 11's descriptor failed.
+    let d = hub.device_mut(id).unwrap();
+    d.fp.endpoints.remove(0);
+    d.interview_partial = true;
+
+    sim.log.clear();
+    announce(&mut hub, &mut sim, LIGHT, T0 + 60_000);
+    let asked: Vec<u8> = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0 && a.cluster == SIMPLE_DESC_REQ)
+        .map(|a| a.payload[3])
+        .collect();
+    assert_eq!(asked, [11]);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.fp.endpoints, eps);
+    assert_eq!(d.record()["interview"], "complete");
+}
+
 /// An Active_EP_rsp with an error status fails the step (it is not an
 /// empty endpoint list): partial, and resumed there.
 #[test]

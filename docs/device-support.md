@@ -200,16 +200,18 @@ known (for example only the Node descriptor and Simple descriptors) and a
 `interview: partial` flag; resolution reruns when more is learned. When it
 next rejoins or announces itself (the coordinator's join event, or its
 `Device_annce`: the moment a sleepy device is awake) the hub resumes the
-interview at the first step whose answer is missing (the Node descriptor,
-the endpoint list, a Simple descriptor, else the Basic reads), keeping what
-it knows and the user's names and settings, then resolves and configures
-as after a join. At most 5 times per device and hub run (not stored: a
-restart allows as many again), the first at once, the next ones at least
-10, 20, 40 and 80 min after the previous one however often it announces;
-`devices/reinterview` starts over and resets the count. A rejoin during an
-interview sends its current step again only when no request of it is in
-flight to the device's current address. `devices/diagnostics` counts the
-resumptions (`interview_resumes`). A complete interview is never resumed.
+interview asking only the answers it lacks (the Node descriptor, the
+endpoint list, the Simple descriptors it has not got, then the Basic reads
+again), so a failure then loses nothing it knew; descriptors are replaced
+only by a successful answer, and the user's names and settings stay. Then
+it resolves and configures as after a join. At most 5 times per device and
+hub run (not stored: a restart allows as many again), the first at once,
+the next ones at least 10, 20, 40 and 80 min after the previous one however
+often it announces; `devices/reinterview` starts over and resets the count.
+A rejoin during an interview sends its current step again only when no
+request of it is in flight to the device's current address.
+`devices/diagnostics` counts the resumptions (`interview_resumes`). A
+complete interview is never resumed.
 
 A device imported from another coordinator's records (`network/import`,
 [`docs/migration.md`](migration.md)) is resolved from the imported
