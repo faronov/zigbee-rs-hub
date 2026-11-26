@@ -2903,7 +2903,9 @@ the hub. It is a client of this API (an in-process session the app
 authenticates itself, `App::connect_trusted`), so it sees exactly what the
 web UI and the HA integration see. **Plain MQTT 3.1.1 over TCP**: the hub
 does no TLS (the esp-mqtt SSL and WebSocket transports are compiled out),
-so the broker belongs on the LAN; user name and password are optional.
+so the broker belongs on the LAN; user name and password are optional
+(empty: an anonymous CONNECT, which Home Assistant's Mosquitto add-on and
+Mosquitto 2.x without `allow_anonymous true` refuse).
 Firmware feature `mqtt`, selected by standard 4 MB and 8 MB BR images.
 A build without it answers `mqtt/*` with `unsupported`. The bridge runs
 only when enabled in its settings. Release 0.2.0 predates the 4 MB MQTT profile.
@@ -2914,7 +2916,7 @@ Requests (authenticated sessions; `hub/info` `maintenance` lists `mqtt`):
 |---|---|---|
 | `mqtt/config/get` | — | `enabled`, `host`, `port` (1883), `client_id` (empty: `zigbee-rs-hub-<last 6 hex of the coordinator IEEE>`), `username`, `password_set` (the password is never returned), `base_topic` (`zigbee2mqtt`), `keepalive_s` (60), `discovery` (false), `discovery_prefix` (`homeassistant`), `retain_state` (false), `retain_availability` (true), `qos` (0) |
 | `mqtt/config/set` | any of the fields above, and `password` (`""` removes it) | the new settings; validated (`invalid_value`: no wildcards or empty levels in topics, host without a scheme), stored (NVS `hub/mqtt` on the S3; `hubctl serve --mqtt-settings FILE`), applied at once (the bridge restarts) |
-| `mqtt/status` | — | `state` (`disabled`, `low_memory`, `waiting_for_hub`, `connecting`, `connected`, `retrying`), `last_error`, `retry_in_s`, `connects`, `published`, `received`, `dropped`, `errors`, `devices`, `queued_bytes`, `api_resyncs`, `stack_min_free`, `tls: false` |
+| `mqtt/status` | — | `state` (`disabled`, `low_memory`, `waiting_for_hub`, `connecting`, `connected`, `retrying`), `last_error` (e.g. `connection refused: not authorized` for CONNACK 5, `connection refused: bad user name or password` for 4, `the broker closed the connection after CONNECT` without a CONNACK, with `(it may require a user name and password)` for an anonymous client), `retry_in_s`, `connects`, `published`, `received`, `dropped`, `errors`, `devices`, `queued_bytes`, `api_resyncs`, `stack_min_free`, `tls: false` |
 
 Topics (`<base>` = `base_topic`):
 

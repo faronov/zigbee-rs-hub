@@ -190,6 +190,7 @@ progress{width:12em}
 <p class="mut hide" id="mqno">Not in this firmware build: the MQTT bridge is built with the feature mqtt (in the 4 MB and 8 MB release images).</p>
 <p class="mut">Devices on an MQTT broker with Zigbee2MQTT's topics and payloads (Node-RED, ioBroker, openHAB, Home Assistant MQTT). Plain MQTT over TCP, no TLS: use a broker on your LAN. Home Assistant: use either the hub's integration or MQTT discovery, not both.</p>
 <dl class="kv" id="mqs"></dl>
+<p class="warn hide" id="mqah">The broker refuses anonymous clients. Home Assistant's Mosquitto add-on needs a user: create one (Settings → People → Users, or the add-on's logins) and enter it here.</p>
 <div class="row"><label><input type="checkbox" id="mqe"> Enabled</label><input id="mqh" placeholder="broker host" size="16"><input id="mqp" type="number" class="num" placeholder="1883"></div>
 <div class="row"><input id="mqu" placeholder="user (optional)" size="12"><input id="mqw" type="password" placeholder="password" size="12"><input id="mqc" placeholder="client ID (auto)" size="14"></div>
 <div class="row"><label>Base topic <input id="mqb" size="12"></label><label>Keepalive <input id="mqk" type="number" class="num"> s</label><label>QoS <select id="mqq"><option>0</option><option>1</option></select></label></div>
@@ -620,7 +621,7 @@ function loadSys(){call("hub/system").then(s=>{const h=s.heap||{},w=s.wifi||{},a
 // MQTT bridge settings: checkboxes and fields map 1:1 to mqtt/config.
 const mqF={mqh:"host",mqp:"port",mqu:"username",mqc:"client_id",mqb:"base_topic",mqk:"keepalive_s",mqx:"discovery_prefix",mqq:"qos"},mqB={mqe:"enabled",mqd:"discovery",mqr:"retain_state",mqa:"retain_availability"};
 function loadMqtt(){const on=has("mqtt");$("#mqno").classList.toggle("hide",on);for(const e of $("#mqcard").querySelectorAll("input,select,button"))e.disabled=!on;if(on)Promise.all([call("mqtt/config/get"),call("mqtt/status")]).then(([c,s])=>{for(const k in mqF)$("#"+k).value=c[mqF[k]];for(const k in mqB)$("#"+k).checked=c[mqB[k]];$("#mqw").value="";$("#mqw").placeholder=c.password_set?"password (unchanged)":"password";
- kv($("#mqs"),[["State",s.state+(s.retry_in_s!=null?" (retry in "+s.retry_in_s+" s)":"")],["Last error",s.last_error],["Devices",s.devices],["Messages",s.published+" out, "+s.received+" in, "+s.dropped+" dropped, "+s.errors+" errors"]])}).catch(()=>{})}
+ kv($("#mqs"),[["State",s.state+(s.retry_in_s!=null?" (retry in "+s.retry_in_s+" s)":"")],["Last error",s.last_error],["Devices",s.devices],["Messages",s.published+" out, "+s.received+" in, "+s.dropped+" dropped, "+s.errors+" errors"]]);$("#mqah").classList.toggle("hide",!!c.username||!/authori|user name/.test(s.last_error))}).catch(()=>{})}
 $("#mqsv").onclick=e=>{const p={};for(const k in mqF){const f=mqF[k],v=$("#"+k).value.trim(),n=["port","keepalive_s","qos"].includes(f);if(!(n&&v===""))p[f]=n?+v:v}for(const k in mqB)p[mqB[k]]=$("#"+k).checked;if($("#mqw").value)p.password=$("#mqw").value;
  busy(e.target,act("mqtt/config/set",p).then(()=>{toast("MQTT settings saved");setTimeout(loadMqtt,1500)})).catch(()=>{})};
 $("#pics").checked=picOn();$("#pics").onchange=e=>{localStorage.setItem("zrhPics",e.target.checked?"1":"0");for(const id in devs)devSet(devs[id]);renderAll();if(mapData)drawMap(mapData)};

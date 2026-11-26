@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::bridge::Msg;
 use crate::codec::{Packet, Will};
-use crate::service::{ConnectOptions, Event, EventFn, Transport};
+use crate::service::{ConnDiag, ConnectOptions, Event, EventFn, Transport};
 
 /// Largest packet taken from the broker by default; larger ones are
 /// skipped (a retained giant on a subscribed topic must not cut the
@@ -71,14 +71,21 @@ impl TcpTransport {
     }
 }
 
-fn reader(conn: Arc<Conn>, mut s: TcpStream, keepalive: Duration, max: usize, events: EventFn) {
+fn reader(
+    conn: Arc<Conn>,
+    mut s: TcpStream,
+    keepalive: Duration,
+    max: usize,
+    mut diag: ConnDiag,
+    events: EventFn,
+) {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 512];
     let mut skip = 0usize;
     let mut last_rx = Instant::now();
-    let fail = |e: String| {
+    let fail = |d: &mut ConnDiag| {
         if !conn.stop.load(Ordering::SeqCst) {
-            events(Event::Disconnected(e));
+            events(Event::Disconnected(d.ended()));
         }
     };
     loop {
@@ -86,7 +93,10 @@ fn reader(conn: Arc<Conn>, mut s: TcpStream, keepalive: Duration, max: usize, ev
             return;
         }
         match s.read(&mut chunk) {
-            Ok(0) => return fail("the broker closed the connection".into()),
+            Ok(0) => {
+                diag.closed();
+                return fail(&mut diag);
+            }
             Ok(n) => {
                 last_rx = Instant::now();
                 let mut data = &chunk[..n];
@@ -111,17 +121,13 @@ fn reader(conn: Arc<Conn>, mut s: TcpStream, keepalive: Duration, max: usize, ev
                         Ok(Some((p, used))) => {
                             buf.drain(..used);
                             match p {
-                                Packet::ConnAck { code: 0, .. } => events(Event::Connected),
+                                Packet::ConnAck { code: 0, .. } => {
+                                    diag.connected();
+                                    events(Event::Connected)
+                                }
                                 Packet::ConnAck { code, .. } => {
-                                    let why = match code {
-                                        1 => "unacceptable protocol version",
-                                        2 => "client identifier rejected",
-                                        3 => "server unavailable",
-                                        4 => "bad user name or password",
-                                        5 => "not authorized",
-                                        _ => "refused",
-                                    };
-                                    return fail(format!("connection refused: {why}"));
+                                    diag.refused(code);
+                                    return fail(&mut diag);
                                 }
                                 Packet::Publish {
                                     topic,
@@ -139,16 +145,30 @@ fn reader(conn: Arc<Conn>, mut s: TcpStream, keepalive: Duration, max: usize, ev
                             }
                         }
                         Ok(None) => break,
-                        Err(e) => return fail(e.to_string()),
+                        Err(e) => {
+                            diag.error(e.to_string());
+                            return fail(&mut diag);
+                        }
                     }
                 }
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(e) => return fail(e.to_string()),
+            Err(e) => {
+                if matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                ) {
+                    diag.closed();
+                } else {
+                    diag.error(e.to_string());
+                }
+                return fail(&mut diag);
+            }
         }
         if !keepalive.is_zero() {
             if last_rx.elapsed() > keepalive + keepalive / 2 {
-                return fail("keepalive timeout".into());
+                diag.error("keepalive timeout");
+                return fail(&mut diag);
             }
             let idle = conn.w.lock().unwrap().1.elapsed();
             if idle >= keepalive / 2 {
@@ -195,10 +215,11 @@ impl Transport for TcpTransport {
         let c2 = conn.clone();
         let ka = Duration::from_secs(u64::from(o.keepalive_s));
         let max = self.max;
+        let diag = ConnDiag::new(o.username.is_none());
         let h = thread::Builder::new()
             .name("mqtt-rx".into())
             .stack_size(self.stack)
-            .spawn(move || reader(c2, r, ka, max, events))
+            .spawn(move || reader(c2, r, ka, max, diag, events))
             .map_err(|e| e.to_string())?;
         self.conn = Some(conn);
         self.reader = Some(h);

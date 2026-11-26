@@ -1222,6 +1222,20 @@ openHAB, MQTT discovery Home Assistant, скрипты. `crates/hub-mqtt` —
   client ID (по умолчанию `zigbee-rs-hub-<6 hex IEEE координатора>`),
   логин/пароль, базовый топик (`zigbee2mqtt`), keepalive, discovery HA и
   его префикс (`homeassistant`), retain состояний/доступности, QoS.
+- **Анонимно или с логином**: пустые поля логина и пароля — анонимное
+  подключение (в CONNECT нет ни того, ни другого; пароль без логина не
+  отправляется). Многие брокеры не пускают анонимных клиентов: Mosquitto
+  2.x без `allow_anonymous true` и **аддон Mosquitto в Home Assistant
+  всегда** — в его логе тогда `received null username or password for
+  unpwd check` и `… disconnected: not authorised.` Для аддона создайте
+  пользователя Home Assistant (Настройки → Люди → Пользователи; не
+  `homeassistant` и не `addons`) или запись в `logins` аддона и введите
+  его в хабе. `last_error` в `mqtt/status` объясняет причину:
+  `connection refused: not authorized` (CONNACK 5), `connection refused:
+  bad user name or password` (CONNACK 4), `the broker closed the
+  connection after CONNECT (it may require a user name and password)`
+  (закрыл без CONNACK); веб-интерфейс тогда показывает подсказку для
+  анонимного клиента.
 - **Топики**: `<base>/<friendly_name>` (состояние JSON, ключи — имена
   exposes Zigbee2MQTT: `temperature`, `humidity`, `battery`, `voltage` (мВ),
   `state` `ON`/`OFF`, `brightness` 0–254, `color_temp` (майред), `color`,
