@@ -3268,26 +3268,48 @@ pub(crate) fn build_dispatch(d: &Device) -> BTreeMap<DKey, Vec<(usize, Option<us
 }
 
 impl<T: ZigbeeTransport> Hub<T> {
-    /// Records what the catalog service found in a shard of catalog
-    /// `version` for device `id` (9.3): the definitions it matches that
-    /// this firmware cannot run. The first shard of a newer catalog
-    /// replaces what earlier catalogs' shards left; later ones add to it.
-    /// A change emits `device_updated` (the record's
-    /// `definition_approximate`; the registry keeps it).
-    pub fn note_refused(&mut self, id: &str, version: u64, found: Vec<crate::device::Refused>) {
+    /// Records what the catalog service found for device `id` in its
+    /// shard `shard` of catalog `version` (9.3): the definitions it matches
+    /// that this firmware cannot run. They replace what that shard found
+    /// before; the other shards' findings stay. `checked`: the shard counts
+    /// as checked under `version` (not when storing a definition for the
+    /// device failed). Once all of `device_shards` are checked, findings of
+    /// other shards (no longer the device's) are dropped. A change emits
+    /// `device_updated` (the record's `definition_approximate`; the
+    /// registry keeps it).
+    pub fn note_refused(
+        &mut self,
+        id: &str,
+        version: u64,
+        shard: u8,
+        device_shards: &[u8],
+        checked: bool,
+        found: Vec<crate::device::Refused>,
+    ) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
-        let old = (d.refused.clone(), d.refused_version);
+        let old = (
+            d.refused.clone(),
+            d.refused_version,
+            d.refused_checked.clone(),
+        );
         if d.refused_version != version {
-            d.refused.clear();
             d.refused_version = version;
+            d.refused_checked.clear();
         }
-        for r in found {
-            d.refused.retain(|x| x.id != r.id);
+        d.refused.retain(|r| r.shard != shard);
+        for mut r in found {
+            r.shard = shard;
             d.refused.push(r);
         }
-        if (&d.refused, d.refused_version) != (&old.0, old.1) {
+        if checked && !d.refused_checked.contains(&shard) {
+            d.refused_checked.push(shard);
+        }
+        if device_shards.iter().all(|n| d.refused_checked.contains(n)) {
+            d.refused.retain(|r| device_shards.contains(&r.shard));
+        }
+        if (&d.refused, d.refused_version, &d.refused_checked) != (&old.0, old.1, &old.2) {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
     }

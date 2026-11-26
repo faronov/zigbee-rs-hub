@@ -195,6 +195,7 @@ fn snapshot(d: &ImportedDevice, mode: u8) -> DeviceSnapshot {
         imported: mode,
         refused: Vec::new(),
         refused_version: 0,
+        refused_checked: Vec::new(),
     }
 }
 

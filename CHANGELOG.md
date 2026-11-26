@@ -23,7 +23,6 @@ install instructions and the list of merged pull requests. A pre-release
   in the device record and diagnostics). After
   the update use Find definition on the device page (or Catalog › Fetch
   missing definitions) to fetch it.
-
 - **A removed device stays removed.** A device removed with
   `devices/remove` (with or without `force`) that the coordinator still
   listed came back at the next hub restart or NCP reset, as a partial

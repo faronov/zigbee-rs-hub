@@ -337,71 +337,117 @@ fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::
         requires: vec![requires.into()],
         score,
         priority: 0,
+        shard: 0,
     }
 }
 
 /// `definition_approximate`: the plug runs TS011F_plug_1 while a catalog
-/// definition that outranks it needs a feature this firmware lacks; kept
-/// in the snapshot. A firmware that gained the feature drops it on restore
-/// and marks the device for the catalog service to check again.
+/// definition that outranks it needs a feature this firmware lacks. What a
+/// shard found is replaced only by that shard's next check (a shard checked
+/// for another device does not clear the others'), kept in the snapshot;
+/// a firmware that gained the feature drops it on restore and marks the
+/// device for the catalog service to check again.
 #[test]
 fn approximate_definition_is_recorded_kept_and_rechecked() {
     let (mut hub, _sim) = joined();
     let d = hub.device(ID).unwrap();
     let s = d.resolution.layers.last().unwrap().score.unwrap();
     assert!(d.record().get("definition_approximate").is_none());
-    // A lower-scoring refusal is no better: not approximate.
-    hub.note_refused(ID, 7, vec![refused("tuya/x", "X", "template.tuya", s)]);
-    assert!(
+    let both = [0x10, 0x20];
+    let approx = |hub: &Hub<MockTransport>| {
         hub.device(ID)
             .unwrap()
             .record()
             .get("definition_approximate")
-            .is_none()
-    );
-    hub.drain_events();
+            .cloned()
+    };
+    // A lower-scoring refusal is no better: not approximate.
     hub.note_refused(
         ID,
         7,
-        vec![
-            refused("tuya/ts011f_plug_3", "JR-ZPM03", "template.tuya", s + 10),
-            refused("future/x", "Y", "feature 13", s + 5),
-        ],
+        0x10,
+        &both,
+        true,
+        vec![refused("tuya/x", "X", "template.tuya", s)],
     );
+    assert_eq!(approx(&hub), None);
+    hub.drain_events();
+    let plug_3 = || refused("tuya/ts011f_plug_3", "JR-ZPM03", "template.tuya", s + 10);
+    hub.note_refused(ID, 7, 0x20, &both, true, vec![plug_3()]);
     assert!(
         hub.drain_events()
             .iter()
             .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == ID))
     );
     let want = json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.tuya"]});
-    assert_eq!(
-        hub.device(ID).unwrap().record()["definition_approximate"],
-        want
-    );
+    assert_eq!(approx(&hub), Some(want.clone()));
     assert_eq!(hub.diagnostics(ID).unwrap()["definition_approximate"], want);
-    // A newer catalog's first shard replaces what the older one left.
-    hub.note_refused(ID, 8, vec![refused("future/x", "Y", "feature 13", s + 5)]);
-    let d = hub.device(ID).unwrap();
-    assert_eq!((d.refused.len(), d.refused_version), (1, 8));
+    // A newer catalog: shard 0x10 checked (e.g. for another device sharing
+    // it) replaces only its own findings; plug_3 (0x20) stays.
     hub.note_refused(
         ID,
         8,
-        vec![refused(
-            "tuya/ts011f_plug_3",
-            "JR-ZPM03",
-            "template.tuya",
-            s + 10,
-        )],
+        0x10,
+        &both,
+        true,
+        vec![refused("future/x", "Y", "feature 13", s + 5)],
     );
+    let d = hub.device(ID).unwrap();
+    let ids = |d: &crate::device::Device| {
+        d.refused
+            .iter()
+            .map(|r| (r.id.clone(), r.shard))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(d),
+        [
+            ("tuya/ts011f_plug_3".to_string(), 0x20),
+            ("future/x".to_string(), 0x10)
+        ]
+    );
+    assert_eq!(
+        (d.refused_version, d.refused_checked.clone()),
+        (8, vec![0x10])
+    );
+    assert_eq!(approx(&hub), Some(want.clone()));
+    // A failed store does not count as checked.
+    hub.note_refused(ID, 8, 0x20, &both, false, vec![plug_3()]);
+    assert_eq!(hub.device(ID).unwrap().refused_checked, [0x10]);
+    hub.note_refused(ID, 8, 0x20, &both, true, vec![plug_3()]);
+    assert_eq!(hub.device(ID).unwrap().refused_checked, [0x10, 0x20]);
     let snap = hub.snapshot_device(ID).unwrap();
-    let snap = crate::persist::DeviceSnapshot::from_bytes(&snap.to_bytes()).unwrap();
-    assert_eq!((snap.refused.len(), snap.refused_version), (2, 8));
-    // Restored by the same firmware: unchanged.
+    let mut snap = crate::persist::DeviceSnapshot::from_bytes(&snap.to_bytes()).unwrap();
+    assert_eq!(
+        (
+            snap.refused.len(),
+            snap.refused_version,
+            snap.refused_checked.clone()
+        ),
+        (2, 8, vec![0x10, 0x20])
+    );
+    // Once every shard of the device is checked, findings of shards no
+    // longer its own go.
+    hub.note_refused(ID, 9, 0x20, &[0x20], true, vec![plug_3()]);
+    assert_eq!(
+        ids(hub.device(ID).unwrap()),
+        [("tuya/ts011f_plug_3".to_string(), 0x20)]
+    );
+    // Saved by a build that named code 22 `feature 22`.
+    let p3 = snap
+        .refused
+        .iter()
+        .position(|r| r.id == "tuya/ts011f_plug_3")
+        .unwrap();
+    snap.refused[p3].requires = vec!["feature 22".into()];
+    // Restored by a firmware without template.tuya: unchanged.
     let mut same = hub_with(&[]);
     same.restore_device(snap.clone(), None, T0).unwrap();
-    assert_eq!(same.device(ID).unwrap().refused_version, 8);
-    // Restored by one that has template.tuya: plug_3 is dropped (to be
-    // fetched now), the device is checked again.
+    let d = same.device(ID).unwrap();
+    assert_eq!((d.refused.len(), d.refused_version), (2, 8));
+    assert_eq!(d.refused[p3].requires, ["template.tuya"]);
+    // By one that has it: plug_3 is dropped (to be fetched now), every
+    // shard is checked again.
     let mut newer = hub_with(&[]);
     newer.features.push("template.tuya");
     newer.restore_device(snap, None, T0).unwrap();
@@ -410,5 +456,8 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
         d.refused.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
         ["future/x"]
     );
-    assert_eq!(d.refused_version, crate::device::REFUSED_RECHECK);
+    assert_eq!(
+        (d.refused_version, d.refused_checked.len()),
+        (crate::device::REFUSED_RECHECK, 0)
+    );
 }

@@ -245,6 +245,9 @@ pub struct Refused {
     pub score: u32,
     /// Its priority (3.3 ties).
     pub priority: i32,
+    /// The shard it was found in (a shard check replaces that shard's).
+    #[serde(default)]
+    pub shard: u8,
 }
 
 impl Refused {
@@ -411,9 +414,14 @@ pub struct Device {
     /// run (they need features it lacks), recorded when the catalog
     /// service checks a shard for the device; kept with the device.
     pub refused: Vec<Refused>,
-    /// The catalog version (`date << 16 | serial`) whose shards `refused`
-    /// is from (0: to check again).
+    /// The catalog version (`date << 16 | serial`) under which
+    /// `refused_checked` were checked (0: never; [`REFUSED_RECHECK`]: to
+    /// check again).
     pub refused_version: u64,
+    /// The device's shards checked under `refused_version`; `refused`
+    /// holds what each of them found (until a newer catalog checks it
+    /// again, an older catalog's findings stay).
+    pub refused_checked: Vec<u8>,
     /// Tuya sequence number.
     pub tuya_seq: u16,
     /// Tuya last time push, ms.
@@ -486,6 +494,7 @@ impl Device {
             diag: Diagnostics::default(),
             refused: Vec::new(),
             refused_version: 0,
+            refused_checked: Vec::new(),
             tuya_seq: 0,
             tuya_time_at: None,
             dedup: VecDeque::new(),
@@ -550,6 +559,13 @@ impl Device {
             .filter(|r| bar.is_none_or(|b| (r.score, r.priority) > b))
             .collect();
         v.sort_by_key(|r| std::cmp::Reverse((r.score, r.priority)));
+        // Once per definition (found in several shards).
+        let mut seen: Vec<&str> = Vec::new();
+        v.retain(|r| {
+            let new = !seen.contains(&r.id.as_str());
+            seen.push(&r.id);
+            new
+        });
         v
     }
 

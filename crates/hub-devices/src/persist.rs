@@ -164,9 +164,13 @@ pub struct DeviceSnapshot {
     /// ([`Device::refused`]; `definition_approximate`); absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<crate::device::Refused>,
-    /// The catalog version they are from ([`Device::refused_version`]).
+    /// The catalog version they were checked under
+    /// ([`Device::refused_version`]).
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub refused_version: u64,
+    /// The shards checked under it ([`Device::refused_checked`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_checked: Vec<u8>,
 }
 
 fn is_zero(v: &u8) -> bool {
@@ -289,6 +293,7 @@ impl DeviceSnapshot {
             imported: d.imported,
             refused: d.refused.clone(),
             refused_version: d.refused_version,
+            refused_checked: d.refused_checked.clone(),
         }
     }
 
@@ -358,15 +363,24 @@ impl<T: ZigbeeTransport> Hub<T> {
         // A firmware that has gained features they need: what it can run
         // now is to be fetched (the catalog service checks the device's
         // shards again).
+        // Names compare as this build names the codes (`feature N` saved
+        // by a build that did not know code N).
         d.refused = s.refused;
         d.refused_version = s.refused_version;
+        d.refused_checked = s.refused_checked;
         let features = &self.features;
         for r in &mut d.refused {
-            r.requires.retain(|f| !features.iter().any(|x| x == f));
+            r.requires = r
+                .requires
+                .iter()
+                .map(|f| crate::zdef_adapter::canonical_feature(f))
+                .filter(|f| !features.iter().any(|x| x == f))
+                .collect();
         }
         if d.refused.iter().any(|r| r.requires.is_empty()) {
             d.refused.retain(|r| !r.requires.is_empty());
             d.refused_version = crate::device::REFUSED_RECHECK;
+            d.refused_checked.clear();
         }
         for (ep, cl, at, mfr, supported, value) in s.attrs {
             let support = if supported {

@@ -1635,19 +1635,27 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   Records that score but need a feature it lacks
   are decoded anyway (all features) to be named: the device keeps them as
   `refused` (id, white-label vendor and model, missing features, score,
-  priority) with the catalog version they are from, in its registry record
-  (they survive a restart). The first shard of a newer catalog checked for
-  the device replaces them; until then `missing` lists it with `recheck:
-  true` also while it has a definition (the web UI does not count those as
-  "without definition"), and so does a restart on a firmware that gained
-  their features (what it can run now is fetched). `missing`,
+  priority, the shard it was found in) in its registry record (they
+  survive a restart), with the catalog version and the device's shards
+  checked under it. A shard check replaces that shard's findings only (a
+  shard uploaded for another device that shares a key checks that shard
+  only); a device with refusals is checked again under a newer catalog —
+  and after a restart on a firmware that gained their features, which
+  drops those (what it can run now is fetched) — until every one of its
+  shards is: `missing` lists it with `recheck: true` also while it has a
+  definition (the web UI does not count those as "without definition").
+  `missing` lists a device's shards not yet checked under the installed
+  catalog (a generic device whose shards are all checked stays listed,
+  without shards); `definitions/fetch` lists all of them. `missing`,
   `definitions/fetch` and `devices/diagnostics` (`catalog_refused`) list
   those that would be chosen over its current definition (all of them
   while it is generic only; none while a definition is pinned); when the
   device runs a catalog definition, the best of them is its record's
   `definition_approximate`. A definition already stored is stored again
   when a shard has keys it was not stored under (a shard record carries
-  the definition's keys in that shard only); the newest record is read. Uploads survive a dropped connection
+  the definition's keys in that shard only); the new record supersedes the
+  older ones whose keys it has (they are not read, and compaction drops
+  them). Uploads survive a dropped connection
   (`catalog/status` `upload.written`). Shards are checked against the
   *installed* manifest, so after the mirror moved to a newer release a
   client installs its manifest (and what it then `wants`) first: the web

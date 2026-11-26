@@ -150,6 +150,7 @@ fn sml001_snapshot() -> DeviceSnapshot {
         imported: 0,
         refused: vec![],
         refused_version: 0,
+        refused_checked: vec![],
     }
 }
 
@@ -336,6 +337,11 @@ fn ts011f_snapshot(manufacturer: &str, app: u32) -> DeviceSnapshot {
 /// A Tuya TS011F at `ieee` with `gangs` outlets (endpoints 1..=gangs; the
 /// first with metering).
 fn ts011f_device(ieee: u64, manufacturer: &str, app: u32, gangs: u8) -> DeviceSnapshot {
+    tuya_device(ieee, manufacturer, "TS011F", app, gangs)
+}
+
+/// A Tuya device (model ID `model`) shaped like [`ts011f_device`].
+fn tuya_device(ieee: u64, manufacturer: &str, model: &str, app: u32, gangs: u8) -> DeviceSnapshot {
     let endpoints = (1..=gangs)
         .map(|ep| EndpointFp {
             ep,
@@ -351,7 +357,7 @@ fn ts011f_device(ieee: u64, manufacturer: &str, app: u32, gangs: u8) -> DeviceSn
         .collect();
     let fp = Fingerprint {
         manufacturer_name: Some(manufacturer.into()),
-        model_id: Some("TS011F".into()),
+        model_id: Some(model.into()),
         app_version: Some(app),
         power_source: Some(1),
         mfr_code: Some(0x1002),
@@ -551,6 +557,78 @@ fn fallbacks_to_ts011f_plug_1_are_marked_approximate() {
     check(&app, sid, &rx);
     let st = call(&app, sid, &rx, 901, json!({"type": "catalog/status"}));
     assert_eq!(st["result"]["missing"], json!([]), "{st}");
+    app.shutdown();
+    r.ncp.shutdown();
+    r.sim.stop();
+}
+
+/// A shard uploaded for another device checks only that shard for a
+/// device to be checked again: P (TS011F, version 69: TS011F_plug_1, plug_3
+/// refused) and A (same manufacturer, another model) share the shard of the
+/// manufacturer key. Under a newer catalog, uploading A's shard alone left
+/// P without its refusals and out of `missing` (never checked again); now P
+/// stays approximate and listed, with the shards not checked yet only.
+#[test]
+fn a_shard_of_another_device_does_not_end_a_recheck() {
+    let v1 = ts011f_release(&["ts011f_plug_1", "ts011f_plug_3"], 1);
+    let mut items: Vec<Item> = ["ts011f_plug_1", "ts011f_plug_3"]
+        .iter()
+        .map(|n| Item::new(n, ts011f_fixture(n, |s| s.to_string())).unwrap())
+        .collect();
+    let any = "zdef: 1\nid: test/zzzzzzzz_switch\nrevision: 1\nvendor: Tuya\nmodel: TS0001_test\nmatch: [{manufacturer: _TZ3000_zzzzzzzz}]\n";
+    items.push(Item::new("any", zdefc::compile_str(any, zdefc::Format::Yaml, &Default::default()).unwrap().cbor).unwrap());
+    let v2 = release_of(items, 2);
+    let (p, a) = (
+        tuya_device(0xa4c1380000000021, "_TZ3000_zzzzzzzz", "TS011F", 69, 1),
+        tuya_device(0xa4c1380000000022, "_TZ3000_zzzzzzzz", "TS0001", 69, 1),
+    );
+    let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+    let r = rig(store);
+    for s in [&p, &a] {
+        r.ncp.with_store(|st| st.kv_put(&format!("dev/{}", s.id), &s.to_bytes())).unwrap();
+    }
+    let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+    let app = start(&r, &flash);
+    let (sid, rx) = session(&app);
+    let mut id = 0;
+    let missing = |id: u64| call(&app, sid, &rx, id, json!({"type": "catalog/status"}))["result"]["missing"].clone();
+    let entry = |m: &J, dev: &str| m.as_array().unwrap().iter().find(|e| e["device"] == dev).cloned();
+    let shards = |e: &J| e["shards"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).collect::<Vec<_>>();
+    let approx = |id: u64| {
+        call(&app, sid, &rx, id, json!({"type": "devices/get", "device": p.id}))["result"]["definition_approximate"].clone()
+    };
+    let plug_3 = json!({"better": "tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", "needs": ["template.tuya"]});
+    // Catalog 1: P gets TS011F_plug_1, approximate.
+    let m = upload(&app, sid, &rx, &mut id, "manifest", &v1["manifest.cose"], 0, json!({}));
+    assert_eq!(m["success"], true, "{m}");
+    let e = entry(&missing(900), &p.id).unwrap();
+    for n in shards(&e) {
+        upload(&app, sid, &rx, &mut id, "shard", &v1[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+    }
+    assert_eq!(approx(901), plug_3);
+    // Catalog 2: P is to be checked again on all its shards.
+    let m = upload(&app, sid, &rx, &mut id, "manifest", &v2["manifest.cose"], 0, json!({}));
+    assert_eq!(m["success"], true, "{m}");
+    let m2 = missing(902);
+    let (ep, ea) = (entry(&m2, &p.id).unwrap(), entry(&m2, &a.id).unwrap());
+    assert_eq!(ep["recheck"], true, "{m2}");
+    let (sp, sa) = (shards(&ep), shards(&ea));
+    assert!(sa.len() == 1 && sp.contains(&sa[0]) && sp.len() > 1, "{m2}");
+    // A's shard alone (shared with P): A gets its definition, P stays
+    // approximate and listed with the rest of its shards.
+    let c = upload(&app, sid, &rx, &mut id, "shard", &v2[&format!("shard-{:02x}.cbor", sa[0])], 0, json!({"shard": sa[0]}));
+    assert_eq!(c["result"]["definitions"], json!(["test/zzzzzzzz_switch"]), "{c}");
+    let m3 = missing(903);
+    assert!(entry(&m3, &a.id).is_none(), "{m3}");
+    let ep = entry(&m3, &p.id).expect("P still to check");
+    assert_eq!((ep["recheck"].clone(), shards(&ep)), (json!(true), sp.iter().copied().filter(|n| *n != sa[0]).collect::<Vec<_>>()));
+    assert_eq!(approx(904), plug_3);
+    // The rest: checked, still approximate (plug_3 still needs the template).
+    for n in shards(&ep) {
+        upload(&app, sid, &rx, &mut id, "shard", &v2[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
+    }
+    assert_eq!(missing(905), json!([]));
+    assert_eq!(approx(906), plug_3);
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

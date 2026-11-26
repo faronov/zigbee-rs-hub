@@ -273,22 +273,38 @@ pub struct FetchedCatalog {
 }
 
 impl FetchedCatalog {
-    /// The newest record of each definition (a definition stored again
-    /// under more keys supersedes its earlier record).
-    fn latest(&self) -> impl Iterator<Item = &Fetched> {
-        let id = |f: &Fetched| {
-            peek_summary(f.cbor, &DecodeOptions::default())
-                .ok()
-                .and_then(|s| s.id)
-        };
-        self.defs
+    /// `recs` (in log order) without those a later record of the same
+    /// definition supersedes: it has all their keys (a definition stored
+    /// again under more keys, 9.3). Records of one definition from
+    /// different shards (disjoint keys) all stay.
+    fn current(recs: Vec<&Fetched>) -> Vec<&Fetched> {
+        let ids: Vec<Option<String>> = recs
             .iter()
-            .enumerate()
-            .filter(move |(i, f)| {
-                let me = id(f);
-                me.is_none() || !self.defs[i + 1..].iter().any(|g| id(g) == me)
+            .map(|f| {
+                peek_summary(f.cbor, &DecodeOptions::default())
+                    .ok()
+                    .and_then(|s| s.id)
             })
-            .map(|(_, f)| f)
+            .collect();
+        let gone = |i: usize| {
+            ids[i].is_some()
+                && (i + 1..recs.len()).any(|j| {
+                    ids[j] == ids[i] && recs[i].keys.iter().all(|k| recs[j].keys.contains(k))
+                })
+        };
+        (0..recs.len())
+            .filter(|&i| !gone(i))
+            .map(|i| recs[i])
+            .collect()
+    }
+
+    /// Whether each record is superseded ([`Self::current`]), for
+    /// compaction.
+    pub fn superseded(defs: &[Fetched]) -> Vec<bool> {
+        let kept = Self::current(defs.iter().collect());
+        defs.iter()
+            .map(|f| !kept.iter().any(|k| std::ptr::eq(*k, f)))
+            .collect()
     }
 
     fn load(f: &Fetched) -> Option<Definition> {
@@ -309,8 +325,15 @@ impl FetchedCatalog {
 impl Catalog for FetchedCatalog {
     fn candidates(&self, fp: &Fingerprint) -> Vec<Arc<Definition>> {
         let keys = fingerprint_keys(fp);
-        self.latest()
+        // Matching first: a superseding record has the keys of the one it
+        // supersedes, so it matches as well.
+        let hits = self
+            .defs
+            .iter()
             .filter(|f| f.keys.iter().any(|k| keys.contains(k)))
+            .collect();
+        Self::current(hits)
+            .into_iter()
             .filter_map(Self::load)
             .map(Arc::new)
             .collect()
@@ -327,7 +350,11 @@ impl Catalog for FetchedCatalog {
     }
 
     fn all(&self) -> Vec<Arc<Definition>> {
-        self.latest().filter_map(Self::load).map(Arc::new).collect()
+        Self::current(self.defs.iter().collect())
+            .into_iter()
+            .filter_map(Self::load)
+            .map(Arc::new)
+            .collect()
     }
 }
 

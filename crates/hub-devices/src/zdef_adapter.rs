@@ -567,14 +567,7 @@ pub fn adapt(
     // feature by that name, so the definition is refused (8.5) wherever it
     // is checked (shard install, bank and fetched candidates) instead of
     // being run without it.
-    d.requires = zd
-        .requires
-        .iter()
-        .map(|f| match zdef::enums::Feature::from_code(u64::from(*f)) {
-            Some(x) => x.as_str().to_string(),
-            None => format!("feature {f}"),
-        })
-        .collect();
+    d.requires = zd.requires.iter().map(|f| feature_name(*f)).collect();
     d.priority = zd.priority.unwrap_or(0) as i32;
     if let Some(dev) = &zd.device {
         d.device = DeviceFields {
@@ -660,6 +653,27 @@ pub fn adapt(
     d.content_hash = content_hash;
     d.zdef = Some(def.clone());
     Ok(d)
+}
+
+/// The name of feature `code` (8.5); `feature N` for a code this build
+/// does not know.
+pub fn feature_name(code: u16) -> String {
+    match zdef::enums::Feature::from_code(u64::from(code)) {
+        Some(x) => x.as_str().to_string(),
+        None => format!("feature {code}"),
+    }
+}
+
+/// A feature name as this build names it: `feature N` saved by an older
+/// build becomes the name of code N if this build knows it.
+pub fn canonical_feature(name: &str) -> String {
+    match name
+        .strip_prefix("feature ")
+        .and_then(|n| n.parse::<u16>().ok())
+    {
+        Some(code) => feature_name(code),
+        None => name.to_string(),
+    }
 }
 
 /// The `zdef` features this engine implements: all of v1 (not `wasm`) and
