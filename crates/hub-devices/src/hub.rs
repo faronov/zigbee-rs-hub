@@ -3273,6 +3273,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             "fingerprint_hash": d.fp_hash,
             "layers": d.resolution.layers,
             "resolution_diagnostics": d.resolution.diagnostics,
+            "catalog_refused": d.refused_better().iter().map(|r| r.message()).collect::<Vec<_>>(),
             "configure_hash": d.configure.hash,
             "configure": d.diag.configure,
             "unknown_attributes": d.diag.unknown_attrs.iter().map(|((ep, c, a), v)| json!({"ep": ep, "cluster": format!("0x{c:04x}"), "attr": format!("0x{a:04x}"), "value": v})).collect::<Vec<_>>(),

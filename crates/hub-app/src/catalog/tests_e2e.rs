@@ -324,6 +324,118 @@ fn uploads_install_fetch_restart_resume_and_corruption() {
     r.sim.stop();
 }
 
+const PLUG: &str = "zb:a4c1380000000001";
+
+/// A Tuya TS011F plug as the interview stores it.
+fn ts011f_snapshot(manufacturer: &str, app: u32) -> DeviceSnapshot {
+    let fp = Fingerprint {
+        manufacturer_name: Some(manufacturer.into()),
+        model_id: Some("TS011F".into()),
+        app_version: Some(app),
+        power_source: Some(1),
+        mfr_code: Some(0x1002),
+        endpoints: vec![EndpointFp {
+            ep: 1,
+            profile: 0x0104,
+            device_id: 0x0051,
+            in_clusters: vec![0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0B04, 0xE000, 0xE001],
+            out_clusters: vec![0x000A, 0x0019],
+        }],
+        ..Default::default()
+    };
+    DeviceSnapshot {
+        id: PLUG.into(),
+        kind: DeviceKind::Zigbee { ieee: 0xa4c1380000000001, nwk: 0x1234 },
+        fp,
+        active_eps: vec![1],
+        ..sml001_snapshot()
+    }
+}
+
+/// A release of the TS011F fixtures whose file name contains one of
+/// `names`: signed manifest and shards (no bank: shard-only definitions).
+fn ts011f_release(names: &[&str], serial: u16) -> BTreeMap<String, Vec<u8>> {
+    let dir = format!("{}/../hub-devices/tests/fixtures/ts011f", env!("CARGO_MANIFEST_DIR"));
+    let mut items = Vec::new();
+    for n in names {
+        let p = format!("{dir}/{n}.yaml");
+        let c = zdefc::compile_str(&std::fs::read_to_string(&p).unwrap(), zdefc::Format::Yaml, &Default::default())
+            .unwrap();
+        items.push(Item::new(&p, c.cbor).unwrap());
+    }
+    let (shards, digest) = zdefc::bank::build_shards(&items.iter().collect::<Vec<_>>()).unwrap();
+    let params = BankParams { catalog_date: 20261124, catalog_serial: serial, ..Default::default() };
+    let m = zdefc::bank::manifest(&params, &[], &shards, vec![], Some(digest), vec![]);
+    let mut files: BTreeMap<String, Vec<u8>> =
+        shards.into_iter().map(|(n, s)| (format!("shard-{n:02x}.cbor"), s)).collect();
+    files.insert("manifest.cose".into(), key().cose_sign1(&m.encode(), false));
+    files
+}
+
+/// zigbee-rs-hub 0.3.0 kept a Tuya TS011F plug (`_TZ3000_gjnozsaz`)
+/// generic and its Find definition said "the catalog has no definition":
+/// the published catalog's shards hold its definitions, but they need
+/// vendor templates this firmware lacks and were dropped without a word
+/// (`skipped: ["invalid: requires feature 23 ..."]`). Replayed against the
+/// published catalog-2026.11.24 (signed manifest and the shards the plug
+/// asks for, unchanged): the hub now names them, in the shard's commit, in
+/// `catalog/status` `missing`, `definitions/fetch` and the device's
+/// diagnostics, until a new manifest.
+#[test]
+fn published_catalog_names_what_a_ts011f_plug_needs() {
+    let dir = format!("{}/../hub-devices/tests/fixtures/catalog-2026.11.24", env!("CARGO_MANIFEST_DIR"));
+    let file = |n: &str| std::fs::read(format!("{dir}/{n}")).unwrap();
+    let plug_1 = "tuya/ts011f_plug_1 (NEO NAS-WR01B) requires template.tuya_metering_zero_debounce";
+    let plug_3 = "tuya/ts011f_plug_3 (Tuya TS011F_plug_3) requires template.tuya";
+    // zhc: TS011F_plug_1 (white label NAS-WR01B); with application
+    // version 69 TS011F_plug_3 (a version fingerprint).
+    for (app, want) in [(77, json!([plug_1])), (69, json!([plug_3, plug_1]))] {
+        let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
+        let r = rig(store);
+        let snap = ts011f_snapshot("_TZ3000_gjnozsaz", app);
+        r.ncp.with_store(|s| s.kv_put(&format!("dev/{PLUG}"), &snap.to_bytes())).unwrap();
+        let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
+        let app_ = start(&r, &flash);
+        let (sid, rx) = session(&app_);
+        let mut id = 0;
+        // Verified with the firmware's built-in key.
+        let m = upload(&app_, sid, &rx, &mut id, "manifest", &file("manifest.cose"), 0, json!({}));
+        assert_eq!(m["result"]["catalog_date"], 20261124, "{m}");
+        let st = call(&app_, sid, &rx, 900, json!({"type": "catalog/status"}));
+        let miss = st["result"]["missing"].clone();
+        assert_eq!(miss, json!([{"device": PLUG, "shards": [0x08, 0x7d, 0xb0, 0xc6, 0xd9]}]), "{st}");
+        let mut said = J::Null;
+        for n in miss[0]["shards"].as_array().unwrap() {
+            let n = n.as_u64().unwrap();
+            let c = upload(&app_, sid, &rx, &mut id, "shard", &file(&format!("shard-{n:02x}.cbor")), 0, json!({"shard": n}));
+            assert_eq!(c["result"]["definitions"], json!([]), "{c}");
+            if let Some(w) = c["result"]["refused"].get(PLUG) {
+                said = w.clone();
+            }
+        }
+        assert_eq!(said, want, "app {app}");
+        let st = call(&app_, sid, &rx, 901, json!({"type": "catalog/status"}));
+        assert_eq!(st["result"]["missing"][0]["refused"], want, "{st}");
+        let f = call(&app_, sid, &rx, 902, json!({"type": "definitions/fetch", "device": PLUG}));
+        assert_eq!(f["result"]["refused"], want, "{f}");
+        let d = call(&app_, sid, &rx, 903, json!({"type": "devices/diagnostics", "device": PLUG}));
+        assert_eq!(d["result"]["catalog_refused"], want, "{d}");
+        let l = call(&app_, sid, &rx, 904, json!({"type": "devices/get", "device": PLUG}))["result"]["resolution"]
+            ["layers"]
+            .clone();
+        assert!(l.as_array().unwrap().iter().all(|x| x["source"] == "generic"), "{l}");
+        // A newer release: its shards decide again.
+        let newer = ts011f_release(&["ts011f_plug_2", "ts011f_plug_3"], 2);
+        let m = upload(&app_, sid, &rx, &mut id, "manifest", &newer["manifest.cose"], 0, json!({}));
+        assert_eq!(m["result"]["catalog_serial"], 2, "{m}");
+        let st = call(&app_, sid, &rx, 905, json!({"type": "catalog/status"}));
+        assert_eq!(st["result"]["missing"][0].get("refused"), None, "{st}");
+        app_.shutdown();
+        r.ncp.shutdown();
+        r.sim.stop();
+    }
+}
+
 /// The first `n` bytes of an upload, no commit (a dropped connection).
 fn upload_part(app: &App, sid: u64, rx: &Rx, id: &mut u64, target: &str, bytes: &[u8], n: usize) {
     *id += 1;

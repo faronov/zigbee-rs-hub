@@ -1,0 +1,19 @@
+# Trimmed from faronov/zigbee-rs-definitions catalog-2026.11.24
+# (generated from zigbee-herdsman-converters 26.130.0, MIT).
+zdef: 1
+id: tuya/ts011f_plug_2
+revision: 1
+vendor: Tuya
+model: TS011F_plug_2
+description: Smart plug (without power monitoring)
+source: zhc devices/tuya.ts
+match:
+  - model: TS011F
+    manufacturer: {any: [_TZ3000_hyfvrar3, _TZ3000_v1pdxuqq]}
+tuya: {magic_packet: true}
+templates:
+  - name: tuya
+    params:
+      features:
+        tuya_on_off: {childLock: true, indicatorMode: true, onOffCountdown: true, powerOutageMemory: true}
+      keys: [child_lock, countdown, indicator_mode, power_outage_memory, switch]

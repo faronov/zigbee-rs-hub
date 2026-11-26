@@ -435,6 +435,13 @@ pub struct LayerRef {
     /// A partially translated catalog definition ([`Definition::partial`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// The definition's priority (3.3 ties).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub priority: i32,
+}
+
+fn is_zero(p: &i32) -> bool {
+    *p == 0
 }
 
 /// The merged result for one device.
@@ -692,6 +699,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         score: None,
         clause: None,
         partial: false,
+        priority: 0,
     });
     let disable = layers.iter().any(|(d, _)| d.generic.disable);
     // Boxed values: the Xtensa LLVM backend (Rust 1.90.0.0) fails
@@ -762,6 +770,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             score: *s,
             clause: s.and_then(|_| best_clause(d, fp)),
             partial: d.partial(),
+            priority: d.priority,
         });
         for e in &d.entities {
             if let Some(p) = &e.present_if {

@@ -15,9 +15,14 @@
 
 use std::collections::BTreeMap;
 
-use hub_devices::bankcat::{Fetched, FetchedCatalog};
+use std::sync::Arc;
+
+use hub_devices::bankcat::{Fetched, FetchedCatalog, fingerprint_keys};
 use hub_devices::fingerprint::{EndpointFp, Fingerprint};
-use hub_devices::resolve::{HUB_FEATURES, MemoryCatalog, ResolveInput, resolve};
+use hub_devices::model::{Definition, LayerSource};
+use hub_devices::resolve::{
+    Catalog, HUB_FEATURES, MemoryCatalog, ResolveInput, missing_features, resolve,
+};
 use hub_devices::zdo::LogicalType;
 use serde_json::Value as J;
 
@@ -74,11 +79,11 @@ fn fingerprint(v: &J) -> Fingerprint {
     }
 }
 
-/// Every shard record as a fetched definition, and the models present
-/// (whether this engine can load them: it has every feature they need).
-fn catalog(dir: &str) -> (FetchedCatalog, BTreeMap<String, bool>) {
+/// Every shard record as a fetched definition, and per model the features
+/// this engine lacks to load it (none: it loads).
+fn catalog(dir: &str) -> (FetchedCatalog, BTreeMap<String, Vec<String>>) {
     let mut cat = FetchedCatalog::default();
-    let mut models = BTreeMap::new();
+    let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for i in 0..=255u8 {
         let path = format!("{dir}/shard-{i:02x}.cbor");
         let Ok(bytes) = std::fs::read(&path) else {
@@ -86,15 +91,15 @@ fn catalog(dir: &str) -> (FetchedCatalog, BTreeMap<String, bool>) {
         };
         for r in zdef::bank::decode_shard(&bytes).expect(&path) {
             let cbor: &'static [u8] = Box::leak(r.definition.into_boxed_slice());
-            if let Ok(s) = zdef::codec::peek_summary(cbor, &zdef::codec::DecodeOptions::default())
-                && let Some(model) = s.model
-            {
-                let ok = hub_devices::zdef_adapter::load_cbor(
-                    cbor,
-                    hub_devices::model::LayerSource::Fetched,
-                )
-                .is_ok();
-                *models.entry(model).or_insert(false) |= ok;
+            if let Some(d) = load_every(cbor) {
+                let lacks = missing_features(&d, HUB_FEATURES);
+                match models.get_mut(&d.model) {
+                    Some(m) if lacks.len() < m.len() => *m = lacks,
+                    Some(_) => {}
+                    None => {
+                        models.insert(d.model.clone(), lacks);
+                    }
+                }
             }
             cat.defs.push(Fetched {
                 keys: r.key_hashes,
@@ -104,6 +109,51 @@ fn catalog(dir: &str) -> (FetchedCatalog, BTreeMap<String, bool>) {
     }
     (cat, models)
 }
+
+/// A definition decoded whatever features it needs.
+fn load_every(cbor: &[u8]) -> Option<Definition> {
+    let zd = zdef::load(cbor, &zdef::HubFeatures(u128::MAX)).ok()?;
+    hub_devices::zdef_adapter::adapt(zd, LayerSource::Fetched, None).ok()
+}
+
+/// The catalog as a hub with every feature would see it: the selection
+/// for definitions that need features this hub lacks (the index and the
+/// scoring are the same; only the feature gate is left out).
+struct Every(Vec<(Vec<u64>, Arc<Definition>)>);
+
+impl Every {
+    fn new(cat: &FetchedCatalog) -> Self {
+        Self(
+            cat.defs
+                .iter()
+                .filter_map(|f| Some((f.keys.clone(), Arc::new(load_every(f.cbor)?))))
+                .collect(),
+        )
+    }
+}
+
+impl Catalog for Every {
+    fn candidates(&self, fp: &Fingerprint) -> Vec<Arc<Definition>> {
+        let keys = fingerprint_keys(fp);
+        self.0
+            .iter()
+            .filter(|(k, _)| k.iter().any(|h| keys.contains(h)))
+            .map(|(_, d)| d.clone())
+            .collect()
+    }
+    fn get(&self, _: &str) -> Option<Arc<Definition>> {
+        None
+    }
+    fn all(&self) -> Vec<Arc<Definition>> {
+        Vec::new()
+    }
+}
+
+/// Vectors whose definition needs features this hub lacks (vendor
+/// templates, ...) and that a hub with them picks like zhc: a feature gap,
+/// not a parity difference (the device resolves generic only, and the
+/// catalog service names the definition, `catalog_refused`).
+const NEEDS_FEATURES: &str = "needs features the hub lacks (zhc's choice with them)";
 
 #[test]
 #[ignore = "needs ZHC_VECTORS and ZDEF_SHARDS"]
@@ -116,6 +166,12 @@ fn hub_picks_the_definition_zhc_picks() {
     let vectors: Vec<J> =
         serde_json::from_str(&std::fs::read_to_string(&vectors).unwrap()).unwrap();
     let (cat, models) = catalog(&shards);
+    let every = Every::new(&cat);
+    let all_features: Vec<&str> = (0..128u64)
+        .filter_map(zdef::enums::Feature::from_code)
+        .map(|f| f.as_str())
+        .collect();
+    let mut lacking: BTreeMap<String, usize> = BTreeMap::new();
     eprintln!(
         "{} vectors, {} catalog definitions",
         vectors.len(),
@@ -152,8 +208,26 @@ fn hub_picks_the_definition_zhc_picks() {
             "zhc finds no definition"
         } else if !models.contains_key(want_base) {
             "expected definition not in the catalog"
-        } else if !models[want_base] {
-            "expected definition needs features the hub lacks"
+        } else if !models[want_base].is_empty() {
+            // What a hub with those features would pick: the gap is a
+            // feature, not the index or the selection.
+            let with = resolve(&ResolveInput {
+                fp: &fp,
+                generic: &generic,
+                catalog: &every,
+                user: &user,
+                self_description: None,
+                pinned: None,
+                features: &all_features,
+            });
+            if with.def_model.as_deref() == Some(want_base) && with.model.as_deref() == Some(want) {
+                for f in &models[want_base] {
+                    *lacking.entry(f.clone()).or_default() += 1;
+                }
+                NEEDS_FEATURES
+            } else {
+                "needs features, and picks another definition with them"
+            }
         } else if got_base.is_empty() {
             "generic only"
         } else if got_base != want_base {
@@ -163,7 +237,7 @@ fn hub_picks_the_definition_zhc_picks() {
         };
         *counts.entry(class).or_default() += 1;
         let ex = examples.entry(class).or_default();
-        if class != "same" && ex.len() < 15 {
+        if class != "same" && class != NEEDS_FEATURES && ex.len() < 15 {
             ex.push(format!(
                 "{} -> hub {got_base}/{got}, zhc {want_base}/{want}",
                 v["fp"]
@@ -171,6 +245,7 @@ fn hub_picks_the_definition_zhc_picks() {
         }
     }
     eprintln!("{counts:#?}");
+    eprintln!("\n{NEEDS_FEATURES}, by feature: {lacking:#?}");
     for (class, ex) in &examples {
         if !ex.is_empty() {
             eprintln!("\n{class}:");
@@ -185,7 +260,7 @@ fn hub_picks_the_definition_zhc_picks() {
         .unwrap_or(0);
     let bad: usize = counts
         .iter()
-        .filter(|(k, _)| **k != "same")
+        .filter(|(k, _)| **k != "same" && **k != NEEDS_FEATURES)
         .map(|(_, n)| n)
         .sum();
     assert!(

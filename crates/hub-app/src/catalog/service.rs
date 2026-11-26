@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine as _;
 use hub_devices::api::ApiExtension;
 use hub_devices::bankcat::{StoreCatalog, fingerprint_keys};
-use hub_devices::device::{InterviewStep, Millis};
+use hub_devices::device::{Device, InterviewStep, Millis, Refused};
 use hub_devices::hub::{ApiError, Hub};
 use hub_devices::model::LayerSource;
 use hub_devices::resolve::Catalog;
@@ -156,12 +156,29 @@ fn asset_json(a: &ManifestAsset) -> J {
 }
 
 /// Devices that need a definition: interviewed, identified, generic only.
-fn generic_only<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &hub_devices::device::Device> {
+fn generic_only<T: ZigbeeTransport>(hub: &Hub<T>) -> impl Iterator<Item = &Device> {
     hub.devices().filter(|d| {
         d.interview == InterviewStep::Done
             && (d.fp.model_id.is_some() || d.fp.gp.is_some())
             && d.resolution.layers.iter().all(|l| l.source == LayerSource::Generic)
     })
+}
+
+/// [`Device::refused_better`] as messages (`catalog/status` `missing`,
+/// `definitions/fetch`, a shard's commit).
+fn refused_messages(d: &Device) -> Vec<String> {
+    d.refused_better().iter().map(|r| r.message()).collect()
+}
+
+/// A device's entry of `missing` or `definitions/fetch`: the shards that
+/// hold its keys and, once fetched, what matched that it cannot run.
+fn fetch_entry(store: &CatalogStore, d: &Device) -> J {
+    let mut e = obj!({"device": d.id.clone(), "shards": shards_of(store, &fingerprint_keys(&d.fp))});
+    let why = refused_messages(d);
+    if !why.is_empty() {
+        e["refused"] = why.into();
+    }
+    e
 }
 
 /// Byte range of the string value of key `key` in a JSON text (the first
@@ -237,9 +254,7 @@ impl CatalogService {
         if self.store.manifest.is_none() {
             return J::Array(Vec::new());
         }
-        generic_only(hub)
-            .map(|d| obj!({"device": d.id.clone(), "shards": shards_of(&self.store, &fingerprint_keys(&d.fp))}))
-            .collect()
+        generic_only(hub).map(|d| fetch_entry(&self.store, d)).collect()
     }
 
     /// Announces devices that newly need a definition (event
@@ -414,6 +429,13 @@ impl CatalogService {
                     self.store.install_manifest(f, writer.len()).map_err(vf)?
                 };
                 self.announced.clear();
+                // The new release's shards decide again.
+                let ids: Vec<String> = hub.devices().filter(|d| !d.diag.refused.is_empty()).map(|d| d.id.clone()).collect();
+                for id in ids {
+                    if let Some(d) = hub.device_mut(&id) {
+                        d.diag.refused.clear();
+                    }
+                }
                 let r = obj!({"version": m.version(), "catalog_date": m.catalog_date, "catalog_serial": m.catalog_serial, "wants": self.wants()});
                 self.event("catalog_manifest", r.clone());
                 Ok(r)
@@ -510,19 +532,25 @@ impl CatalogService {
             .collect();
         let mut have: Vec<String> = self.store.local.catalog().all().iter().map(|d| d.id.clone()).collect();
         let (mut stored, mut skipped) = (Vec::new(), Vec::new());
+        let mut refused: Vec<(String, Refused)> = Vec::new();
         let mut affected = BTreeMap::new();
+        // Decoded whatever features they need, so that a definition this
+        // hub cannot run is still matched and named (not silently dropped).
+        let every = zdef::HubFeatures(u128::MAX);
         for (rk, _req, cbor) in recs {
-            let d = match hub_devices::zdef_adapter::load_cbor(cbor, LayerSource::Fetched) {
+            let d = match zdef::load(cbor, &every)
+                .map_err(|e| e.to_string())
+                .and_then(|zd| hub_devices::zdef_adapter::adapt(zd, LayerSource::Fetched, None).map_err(|e| e.0))
+            {
                 Ok(d) => d,
                 Err(e) => {
-                    skipped.push(format!("invalid: {}", e.0));
+                    skipped.push(format!("invalid: {e}"));
                     continue;
                 }
             };
-            let hits: Vec<&String> = targets
+            let hits: Vec<(&String, &hub_devices::fingerprint::Fingerprint, u32)> = targets
                 .iter()
-                .filter(|(_, fp)| hub_devices::resolve::score(&d, fp).is_some())
-                .map(|(id, _)| id)
+                .filter_map(|(id, fp)| hub_devices::resolve::score(&d, fp).map(|s| (id, fp, s)))
                 .collect();
             if hits.is_empty() || have.contains(&d.id) {
                 continue;
@@ -530,6 +558,24 @@ impl CatalogService {
             let missing = hub_devices::resolve::missing_features(&d, &hub.features);
             if !missing.is_empty() {
                 skipped.push(format!("{} requires {}", d.id, missing.join(", ")));
+                for (h, fp, score) in hits {
+                    // Named as the user knows the device: its white label.
+                    let zfp = hub_devices::zdef_adapter::zdef_fingerprint(fp);
+                    let (vendor, model) = d
+                        .white_label
+                        .iter()
+                        .find(|w| w.selects(&zfp))
+                        .map_or((&d.vendor, &d.model), |w| (&w.vendor, &w.model));
+                    let r = Refused {
+                        id: d.id.clone(),
+                        vendor: vendor.clone(),
+                        model: model.clone(),
+                        requires: missing.clone(),
+                        score,
+                        priority: d.priority,
+                    };
+                    refused.push((h.clone(), r));
+                }
                 continue;
             }
             let keep = |x: &hub_devices::bankcat::Fetched| {
@@ -544,7 +590,7 @@ impl CatalogService {
             };
             match r {
                 Ok(()) => {
-                    for h in hits {
+                    for (h, _, _) in hits {
                         affected.insert(h.clone(), ());
                     }
                     have.push(d.id.clone());
@@ -565,7 +611,21 @@ impl CatalogService {
         if !stored.is_empty() {
             info!("catalog: {} fetched definitions stored", stored.len());
         }
-        let r = obj!({"definitions": stored, "skipped": skipped, "devices": devices});
+        for (id, r) in refused {
+            if let Some(d) = hub.device_mut(&id) {
+                info!("catalog: {id} matches {}, which this firmware cannot run", r.message());
+                d.diag.refused.retain(|x| x.id != r.id);
+                d.diag.refused.push(r);
+            }
+        }
+        // Per target device, what it would use if this hub could run it.
+        let mut why = serde_json::Map::new();
+        for (id, _) in &targets {
+            if let Some(m) = hub.device(id).map(refused_messages).filter(|m| !m.is_empty()) {
+                why.insert(id.clone(), m.into());
+            }
+        }
+        let r = obj!({"definitions": stored, "skipped": skipped, "refused": why, "devices": devices});
         self.event("definition_fetched", r.clone());
         Ok(r)
     }
@@ -616,9 +676,7 @@ impl<T: ZigbeeTransport> ApiExtension<T> for CatalogService {
                 match (hub.device(id), &self.store.manifest) {
                     (None, _) => Err(err("not_found", format!("no device {id}"))),
                     (Some(_), None) => Err(err("not_found", "no catalog manifest installed")),
-                    (Some(d), Some(_)) => {
-                        Ok(obj!({"device": id, "shards": shards_of(&self.store, &fingerprint_keys(&d.fp))}))
-                    }
+                    (Some(d), Some(_)) => Ok(fetch_entry(&self.store, d)),
                 }
             }
             _ => return None,
