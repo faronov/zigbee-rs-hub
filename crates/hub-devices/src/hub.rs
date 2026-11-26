@@ -1422,6 +1422,13 @@ impl<T: ZigbeeTransport> Hub<T> {
         // re-interview that changed the fingerprint it is kept as an orphan
         // (its endpoint may come back).
         let same_fp = d.fp_hash == Some(d.fp.hash());
+        // Another fingerprint (a re-interview) has other index keys: none
+        // of its shards counts as checked any more, so Find definition and
+        // `missing` fetch its own.
+        if d.fp_hash.is_some() && !same_fp {
+            d.refused_version = 0;
+            d.refused_checked.clear();
+        }
         let mut orphaned = Vec::new();
         let mut removed = Vec::new();
         for (uid, mut e) in old {
@@ -3293,6 +3300,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             d.refused.clone(),
             d.refused_version,
             d.refused_checked.clone(),
+            d.refused_recheck,
         );
         if d.refused_version != version {
             d.refused_version = version;
@@ -3308,8 +3316,15 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         if device_shards.iter().all(|n| d.refused_checked.contains(n)) {
             d.refused.retain(|r| device_shards.contains(&r.shard));
+            d.refused_recheck = false;
         }
-        if (&d.refused, d.refused_version, &d.refused_checked) != (&old.0, old.1, &old.2) {
+        let now = (
+            &d.refused,
+            d.refused_version,
+            &d.refused_checked,
+            d.refused_recheck,
+        );
+        if now != (&old.0, old.1, &old.2, old.3) {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
     }

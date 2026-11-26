@@ -221,12 +221,6 @@ pub struct Diagnostics {
     pub counters: BTreeMap<String, u64>,
 }
 
-/// [`Device::refused_version`] of a device whose refused definitions this
-/// firmware can run now (set when it is restored after an update that
-/// gained their features): the catalog service checks its shards again.
-/// No catalog has this version (`date << 16 | serial`).
-pub const REFUSED_RECHECK: u64 = 1;
-
 /// A catalog definition a device matches that this hub cannot run: it
 /// requires features (vendor templates, codecs) the firmware lacks, so it
 /// is neither stored nor resolved (3.3), and without this record the device
@@ -415,13 +409,16 @@ pub struct Device {
     /// service checks a shard for the device; kept with the device.
     pub refused: Vec<Refused>,
     /// The catalog version (`date << 16 | serial`) under which
-    /// `refused_checked` were checked (0: never; [`REFUSED_RECHECK`]: to
-    /// check again).
+    /// `refused_checked` were checked (0: never).
     pub refused_version: u64,
     /// The device's shards checked under `refused_version`; `refused`
     /// holds what each of them found (until a newer catalog checks it
     /// again, an older catalog's findings stay).
     pub refused_checked: Vec<u8>,
+    /// Refused definitions this firmware can run now were dropped when the
+    /// device was restored (an update gained their features): its shards
+    /// are to be checked again, all of them, before this clears.
+    pub refused_recheck: bool,
     /// Tuya sequence number.
     pub tuya_seq: u16,
     /// Tuya last time push, ms.
@@ -495,6 +492,7 @@ impl Device {
             refused: Vec::new(),
             refused_version: 0,
             refused_checked: Vec::new(),
+            refused_recheck: false,
             tuya_seq: 0,
             tuya_time_at: None,
             dedup: VecDeque::new(),

@@ -171,6 +171,9 @@ pub struct DeviceSnapshot {
     /// The shards checked under it ([`Device::refused_checked`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_checked: Vec<u8>,
+    /// To be checked again on all its shards ([`Device::refused_recheck`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused_recheck: bool,
 }
 
 fn is_zero(v: &u8) -> bool {
@@ -294,6 +297,7 @@ impl DeviceSnapshot {
             refused: d.refused.clone(),
             refused_version: d.refused_version,
             refused_checked: d.refused_checked.clone(),
+            refused_recheck: d.refused_recheck,
         }
     }
 
@@ -368,6 +372,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.refused = s.refused;
         d.refused_version = s.refused_version;
         d.refused_checked = s.refused_checked;
+        d.refused_recheck = s.refused_recheck;
         let features = &self.features;
         for r in &mut d.refused {
             r.requires = r
@@ -379,8 +384,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         if d.refused.iter().any(|r| r.requires.is_empty()) {
             d.refused.retain(|r| !r.requires.is_empty());
-            d.refused_version = crate::device::REFUSED_RECHECK;
+            d.refused_version = 0;
             d.refused_checked.clear();
+            d.refused_recheck = true;
         }
         for (ep, cl, at, mfr, supported, value) in s.attrs {
             let support = if supported {
