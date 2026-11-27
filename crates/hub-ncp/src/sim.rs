@@ -143,6 +143,10 @@ pub struct SimState {
     pub scan_time: Duration,
     /// Send the proposed `EVT_SCAN_PROGRESS` (0x018B) after each channel.
     pub scan_progress: bool,
+    /// The last `SYS_SET_CONFIG` `log_level`.
+    pub log_level: Option<u8>,
+    /// Sequence of the next `EVT_LOG_RECORD`.
+    pub log_seq: u16,
 }
 
 /// A network the simulated NCP hears in an active scan.
@@ -274,6 +278,8 @@ impl SimNcp {
             beacons: Vec::new(),
             scan_time: Duration::from_millis(20),
             scan_progress: true,
+            log_level: None,
+            log_seq: 0,
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self {
@@ -309,10 +315,25 @@ impl SimNcp {
         *self.aps_hook.lock().unwrap() = Some(hook);
     }
 
-    /// Send an event (ZIGBEE endpoint) with a raw payload, as if the
-    /// network produced it (indications, joins, GP frames).
+    /// Send an event (on its endpoint, ZIGBEE for unknown IDs) with a raw
+    /// payload, as if the network produced it (indications, joins, GP
+    /// frames).
     pub fn inject_event(&self, msg_id: u16, payload: Vec<u8>) {
         self.inject.lock().unwrap().push((msg_id, payload));
+    }
+
+    /// An `EVT_LOG_RECORD` (LOG endpoint: sent once the host grants it
+    /// credit).
+    pub fn log_record(&self, level: u8, text: &str) {
+        let seq = self.with(|s| {
+            s.log_seq = s.log_seq.wrapping_add(1);
+            s.log_seq
+        });
+        let e = zigbee_zrhp::msg::log::EvtLogRecord { time_ms: 10 * u32::from(seq), level, module: 0, seq, text: zigbee_zrhp::codec::Rest(text.as_bytes()) };
+        let mut b = vec![0u8; 256];
+        let n = zigbee_zrhp::codec::encode_into(&e, &mut b).unwrap();
+        b.truncate(n);
+        self.inject_event(ids::EVT_LOG_RECORD, b);
     }
 
     /// Stop the thread.
@@ -378,7 +399,8 @@ impl SimNcp {
                     Action::Reboot => self.reboot(),
                     Action::Event(id, payload) => {
                         seq = seq.wrapping_add(1);
-                        let _ = q.queue(Endpoint::Zigbee).raw(Kind::Event, id, seq, &payload);
+                        let ep = zigbee_zrhp::msg::home_endpoint(id).unwrap_or(Endpoint::Zigbee);
+                        let _ = q.queue(ep).raw(Kind::Event, id, seq, &payload);
                     }
                 }
             }
@@ -873,6 +895,26 @@ impl SimNcp {
                 ok(encode!(TblSyncRsp { ncp_table_epoch: 0xE0E0_0001, host_acked_rev: 0, dirty: 0, cached_devices: 0, cached_routes: 0, paging_active: 0 }))
             }
             ids::LOG_CONFIG => status(Status::Success),
+            ids::SYS_SET_CONFIG => {
+                use zigbee_zrhp::msg::system::{ConfigStatus, SysSetConfig, SysSetConfigRsp, config};
+                let r: SysSetConfig = m.decode().unwrap();
+                let results: Vec<ConfigStatus> = r
+                    .values
+                    .iter()
+                    .map(|v| ConfigStatus {
+                        id: v.id,
+                        status: match (v.id, v.value.0) {
+                            (config::LOG_LEVEL, [l]) if *l <= 5 => {
+                                s.log_level = Some(*l);
+                                Status::Success
+                            }
+                            (config::LOG_LEVEL, _) => Status::InvalidParameter,
+                            _ => Status::UnsupportedCommand,
+                        },
+                    })
+                    .collect();
+                ok(encode!(SysSetConfigRsp { results: List::new(&results) }))
+            }
             // Pages of two, to exercise the cursors.
             ids::TBL_READ => {
                 let r: TblRead = m.decode().unwrap();

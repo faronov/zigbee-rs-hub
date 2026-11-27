@@ -198,6 +198,19 @@ pub struct FrameCounters {
     pub stride: u32,
 }
 
+/// The NCP's log in the hub's ([`NetworkAdmin::ncp_log`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NcpLog {
+    /// 0 off, 1 error … 5 trace.
+    pub level: u8,
+    /// Records in the hub's log.
+    pub forwarded: u32,
+    /// Records over the rate limit, not shown.
+    pub suppressed: u32,
+    /// Records the NCP dropped (its log was full).
+    pub dropped: u32,
+}
+
 /// NCP diagnostics; the application renders the JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Diagnostics {
@@ -213,6 +226,12 @@ pub struct Diagnostics {
     pub coex: bool,
     /// TX power the operator set (dBm).
     pub tx_power_set: Option<i8>,
+    /// The NCP keeps an EZSP backup's hashed Trust Center link key root
+    /// and derives the devices' keys from it (ZRHP capability bit 14);
+    /// `None`: not a ZRHP NCP.
+    pub ezsp_hashed_tclk: Option<bool>,
+    /// The NCP's log ([`NetworkAdmin::ncp_log`]), when the backend has it.
+    pub ncp_log: Option<NcpLog>,
     /// Requests the NCP does not implement.
     pub unsupported: Vec<&'static str>,
     /// Other failures, one line each.
@@ -550,6 +569,14 @@ pub trait NetworkAdmin: Send + Sync {
     /// The TX power the operator set, reapplied after NCP restarts.
     fn tx_power_setting(&self) -> Option<i8> {
         None
+    }
+
+    /// The NCP's log in the hub's log: sets its level first when `level`
+    /// is given (0 off, 1 error … 5 trace; kept, and applied in every
+    /// session), then its level and counters.
+    fn ncp_log(&self, level: Option<u8>) -> Result<NcpLog, CoordError> {
+        let _ = level;
+        Err(CoordError::Unsupported)
     }
 
     /// The coordinator's [`CoordStatus`] snapshot (no I/O, like

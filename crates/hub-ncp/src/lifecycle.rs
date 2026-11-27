@@ -29,7 +29,7 @@ use log::{error, info, warn};
 use zigbee_zrhp::codec::List;
 use zigbee_zrhp::msg::data::{ApsDataRequest, EvtApsDataConfirm};
 use zigbee_zrhp::msg::ids;
-use zigbee_zrhp::msg::log::EvtLogRecord;
+use zigbee_zrhp::msg::log::{EvtLogDropped, EvtLogRecord};
 use zigbee_zrhp::msg::network::{
     EvtAddressChanged, EvtDeviceAuthorized, EvtDeviceJoined, EvtDeviceLeft, EvtNetworkState, EvtPermitJoinState,
     NwkAddEndpoint, NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin,
@@ -51,6 +51,9 @@ use crate::transport::{Line, NcpControl, PortRx, PortTx};
 #[path = "netops.rs"]
 mod netops;
 pub use netops::{ChannelChange, EnergyChannel, RestoreOptions, RestoreReport, TX_POWER_KEY, end_record};
+#[path = "ncplog.rs"]
+mod ncplog;
+pub use ncplog::{LOG_KEY, NcpLogStats};
 
 /// Fallback `fc_stride` (spec 8.4: `0x400`).
 pub const DEFAULT_FC_STRIDE: u32 = 0x400;
@@ -70,7 +73,10 @@ pub struct ResumePolicy {
     /// Never confirm a trial image, not even the hub's own (rollback tests:
     /// a reset of the unconfirmed trial image returns to the previous slot).
     pub hold_trial: bool,
-    /// `LOG_CONFIG` level to request in every session (`None`: leave it).
+    /// NCP log level to set in every session (`SYS_SET_CONFIG`
+    /// `log_level`; `None`: leave it) unless the operator set one
+    /// ([`Hub::set_ncp_log`]); also the level of the NCP's records the hub
+    /// logs (`None`: info).
     pub log_level: Option<u8>,
 }
 
@@ -267,6 +273,8 @@ struct Inner {
     closed: std::sync::atomic::AtomicBool,
     /// Whose the hub's network-scoped records are (locked after `store`).
     registry: Mutex<RegistryState>,
+    /// The NCP's log in the hub's.
+    log: ncplog::NcpLog,
 }
 
 /// The running hub core. Cheap to clone.
@@ -284,6 +292,7 @@ impl Hub {
     {
         // Before the lifecycle runs and the application loads its records.
         let registry = owner::open(&mut store, cfg.resume.adopt || cfg.resume.init_network);
+        let log_level = Hub::stored_log_level(&store).or(cfg.resume.log_level).unwrap_or(ncplog::DEFAULT_LEVEL);
         let mut cookie = [0u8; 4];
         while u32::from_le_bytes(cookie) == 0 {
             rng(&mut cookie);
@@ -326,6 +335,7 @@ impl Hub {
             coex: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
             registry: Mutex::new(registry),
+            log: ncplog::NcpLog::new(log_level),
         });
         let hub = Hub { inner };
         let worker = hub.clone();
@@ -615,11 +625,11 @@ impl Hub {
         if policy.replay && ownership == Ownership::Owned {
             self.replay_tx_power()?;
         }
-        if let Some(level) = policy.log_level {
-            let body = zigbee_zrhp::msg::log::LogConfig { level, module_mask: u32::MAX };
-            if let Err(e) = c.call(&body, self.opts(Duration::from_secs(5))) {
-                warn!("hub: LOG_CONFIG: {e}");
-            }
+        let level = Hub::stored_log_level(&self.inner.store.lock().unwrap()).or(policy.log_level);
+        if let Some(level) = level
+            && let Err(e) = self.log_config(level, true)
+        {
+            warn!("hub: NCP log level {level}: {e}");
         }
 
         // 5. TBL_SYNC (not in read-only observation).
@@ -894,7 +904,12 @@ impl Hub {
             }
             ids::EVT_LOG_RECORD => {
                 if let Ok(e) = m.decode::<EvtLogRecord>() {
-                    info!("ncp [{} ms L{}] {}", e.time_ms, e.level, String::from_utf8_lossy(e.text.0));
+                    self.inner.log.record(&e);
+                }
+            }
+            ids::EVT_LOG_DROPPED => {
+                if let Ok(e) = m.decode::<EvtLogDropped>() {
+                    self.inner.log.dropped(&e);
                 }
             }
             _ => {}

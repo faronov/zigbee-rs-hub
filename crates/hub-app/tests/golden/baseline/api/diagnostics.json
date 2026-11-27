@@ -44,6 +44,7 @@
     }
   ],
   "errors": [],
+  "ezsp_hashed_tclk": false,
   "frame_counters": {
     "aps": 1024,
     "aps_limit": 2048,
@@ -64,6 +65,12 @@
     "pta_coex": false,
     "restore_in_progress": false,
     "uptime_s": 3600
+  },
+  "ncp_log": {
+    "dropped": 0,
+    "forwarded": 0,
+    "level": 3,
+    "suppressed": 0
   },
   "pta": {
     "capable": false,

@@ -1603,6 +1603,18 @@ fn the_network_and_its_devices_move_from_the_ezsp_ncp_to_the_zrhp_ncp() {
     let r = call(&rig.app, sid, &rx, 5, json!({"type": "network/restore", "backup": kept, "confirm": true}));
     let rep = ok(&r);
     assert!(rep["nwk_fc_start"].as_u64().unwrap() >= 80_000, "the backup's counter plus the margin: {rep}");
+    // EmberZNet's hashed link key root goes to the zigbee-rs NCP, which
+    // derives the devices' link keys from it as EmberZNet did.
+    let root = backup["stack_specific"]["ezsp"]["hashed_tclk"].as_str().unwrap().to_string();
+    let stream = rig.zsim.as_ref().unwrap().with(|s| s.restored.clone()).unwrap();
+    let roots: Vec<String> = zigbee_zrhp::records::RawRecords::new(&stream)
+        .flatten()
+        .filter_map(|(_, tlv)| match zigbee_zrhp::codec::Reader::new(tlv).read() {
+            Ok(zigbee_zrhp::records::Record::EzspHashedTclk(k)) => Some(k.iter().map(|b| format!("{b:02x}")).collect()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(roots, [root], "the root record restored");
     wait("the restored network owned", || {
         let i = info(&rig.app, sid, &rx);
         i["ownership"] == "owned" && i["registry"]["state"] == "owned" && i["ext_pan_id"] == "dddddddddddddddd"

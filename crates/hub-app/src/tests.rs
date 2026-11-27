@@ -998,8 +998,17 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     assert!(d["counters"].as_array().unwrap().iter().any(|c| c["name"] == "tx_frames"), "{d}");
     assert_eq!(d["pta"]["capable"], false);
     assert!(d["host_link"].as_array().unwrap().iter().any(|c| c["name"] == "tx_frames"));
+    assert_eq!((&d["ezsp_hashed_tclk"], &d["ncp_log"]["level"]), (&json!(false), &json!(3)), "{d}");
     let d = call(&app, sid, &rx, 9, json!({"type": "network/diagnostics", "reset": true, "groups": 1}));
     assert!(ok(&d)["counters"].as_array().unwrap().iter().all(|c| c["value"] == 0));
+
+    // The NCP's log: its level goes to the NCP and is kept.
+    let l = call(&app, sid, &rx, 90, json!({"type": "network/ncp_log", "level": 4}));
+    assert_eq!(ok(&l)["level"], 4, "{l}");
+    assert_eq!((r.sim.state().log_level, r.ncp.ncp_log().level), (Some(4), 4));
+    let l = call(&app, sid, &rx, 91, json!({"type": "network/ncp_log"}));
+    assert_eq!(ok(&l)["level"], 4);
+    assert_eq!(err_code(&call(&app, sid, &rx, 92, json!({"type": "network/ncp_log", "level": 6}))), "invalid_value");
 
     // An NCP image without NWK_SET_TX_POWER.
     r.sim.with(|s| s.unsupported.push(ids::NWK_SET_TX_POWER));

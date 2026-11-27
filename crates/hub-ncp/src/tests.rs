@@ -585,3 +585,86 @@ fn an_interrupted_formation_keeps_the_records_owned() {
     hub.shutdown();
     sim.stop();
 }
+
+fn until(what: &str, f: impl Fn() -> bool) {
+    let t = std::time::Instant::now();
+    while !f() {
+        assert!(t.elapsed() < T, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The NCP's log reaches the hub's: the hub grants the LOG endpoint
+/// credit, so the records the NCP kept from its reset arrive (with the
+/// embedded profile's zero credit they never did), then the ones after,
+/// up to the hub's level; a level set goes to the NCP, into the store and
+/// into every later session.
+#[test]
+fn the_ncps_log_reaches_the_hubs() {
+    use zigbee_zrhp::msg::log::EvtLogDropped;
+    let (host, ncp) = pipe::pair();
+    let sim = SimNcp::start(ncp);
+    for text in ["CTUNE 0x78 from MFG_CTUNE", "IEEE from DEVINFO", "foreign NVM3 found: wiped", "NV journals ok"] {
+        sim.log_record(3, text);
+    }
+    let (rx, tx) = host.split();
+    let mut cfg = HubConfig::default();
+    cfg.driver.lines = vec![Line::BR_DEFAULT];
+    let hub = Hub::start(cfg, rx, tx, None, Store::volatile(), rng());
+    until("the boot records", || hub.ncp_log().forwarded == 4);
+    assert_eq!(hub.ncp_log().level, 3, "info by default");
+    assert_eq!(sim.state().log_level, None, "no LOG_CONFIG without a level set");
+    sim.log_record(4, "debug: not shown at info");
+    sim.log_record(2, "a warning");
+    until("the warning", || hub.ncp_log().forwarded == 5);
+
+    hub.set_ncp_log(1).unwrap();
+    assert_eq!(sim.state().log_level, Some(1));
+    assert_eq!(hub.with_store(|s| s.kv_get(crate::lifecycle::LOG_KEY).map(<[u8]>::to_vec)), Some(vec![1]));
+    sim.log_record(2, "a warning, not shown at error");
+    sim.log_record(1, "an error");
+    until("the error", || hub.ncp_log().forwarded == 6);
+    let mut b = vec![0u8; 16];
+    let n = zigbee_zrhp::codec::encode_into(&EvtLogDropped { count: 7, first_seq: 40 }, &mut b).unwrap();
+    sim.inject_event(ids::EVT_LOG_DROPPED, b[..n].to_vec());
+    until("the drop report", || hub.ncp_log().dropped == 7);
+
+    sim.with(|s| s.log_level = None);
+    let resumes = hub.status().resumes;
+    reboot(&hub, &sim);
+    assert!(hub.wait_status(T, |s| s.resumes > resumes));
+    assert_eq!(sim.state().log_level, Some(1), "replayed in the resume");
+    assert_eq!(hub.ncp_log().forwarded, 6);
+    hub.shutdown();
+    sim.stop();
+}
+
+/// LOG credit is the driver's choice: without it (the backend probe's) the
+/// NCP keeps its log, so the records it kept since its reset are left to
+/// the hub's session, which grants it ([`the_ncps_log_reaches_the_hubs`]).
+#[test]
+fn a_driver_without_log_credit_leaves_the_ncps_log() {
+    use crate::driver::{self, DriverConfig, DriverEvent};
+    let (host, ncp) = pipe::pair();
+    let sim = SimNcp::start(ncp);
+    sim.log_record(3, "CTUNE 0x78 from MFG_CTUNE");
+    let (rx, tx) = host.split();
+    let cfg = DriverConfig { lines: vec![Line::BR_DEFAULT], auto_ready: true, log_credits: 0, ..DriverConfig::default() };
+    let (client, events) = driver::start(cfg, rx, tx, 0x5EED_0012);
+    assert!(client.wait_state(T, |s| s == crate::SessionState::Ready).is_some());
+    assert_eq!(echo_on(&client, b"x").unwrap(), b"x", "the session works");
+    // Three keepalive intervals (a late grant travels with the next ACK).
+    let t = std::time::Instant::now();
+    while let Some(left) = Duration::from_millis(1500).checked_sub(t.elapsed()) {
+        if let Ok(DriverEvent::Event(m)) = events.recv_timeout(left) {
+            assert_ne!(m.msg_id, ids::EVT_LOG_RECORD, "a log record without LOG credit");
+        }
+    }
+    assert!(client.shutdown_and_wait(T));
+    sim.stop();
+}
+
+fn echo_on(c: &crate::Client, data: &[u8]) -> Result<Vec<u8>, Error> {
+    let rsp = c.call(&SysEcho { data: Rest(data) }, CallOpts::default())?;
+    Ok(rsp.payload[1..].to_vec())
+}

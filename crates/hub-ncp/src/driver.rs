@@ -51,6 +51,14 @@ use crate::transport::{Line, PortRx, PortTx};
 /// Embedded-host link: 8 TX and 8 RX slots (spec 3.3/3.4, ≈ 11.9 KB).
 pub type HostLink = Link<8, 8>;
 
+/// LOG endpoint credit (frames) the hub grants the NCP once a session is
+/// up ([`DriverConfig::log_credits`]). The embedded profile grants none at
+/// the handshake (spec 3.3), and an NCP keeps its log, boot records
+/// included, until a host grants some; then they arrive and go into the
+/// hub's log (`lifecycle`, NCP log). Returned as each record is taken
+/// (`auto_credit`).
+pub const LOG_CREDITS: u8 = 2;
+
 /// Compile-time image of a fresh embedded-profile link (cookie 1; the
 /// driver gives it its real cookie with `reopen`).
 static TEMPLATE: HostLink = HostLink::new(LinkConfig::embedded_host(), 1);
@@ -114,6 +122,10 @@ pub struct DriverConfig {
     pub auto_ready: bool,
     /// Driver thread stack (the link itself is on the heap).
     pub stack_size: usize,
+    /// LOG endpoint credit granted in every session (default
+    /// [`LOG_CREDITS`]; 0: the NCP keeps its log, as for a probe that
+    /// must leave the boot records to the hub).
+    pub log_credits: u8,
 }
 
 impl Default for DriverConfig {
@@ -128,6 +140,7 @@ impl Default for DriverConfig {
             resume_budget: Duration::from_secs(20),
             auto_ready: false,
             stack_size: DRIVER_STACK,
+            log_credits: LOG_CREDITS,
         }
     }
 }
@@ -1158,6 +1171,10 @@ impl<T: PortTx> Driver<T> {
         self.session = Some(info);
         self.resync = same;
         self.established_at = Instant::now();
+        // Every session starts with the handshake's credit (none on LOG).
+        if self.cfg.log_credits > 0 {
+            self.link.release_credit(Endpoint::Log, self.cfg.log_credits);
+        }
         let doubtful: Vec<u16> = self
             .pending
             .iter()

@@ -62,6 +62,8 @@ zigbee-rs-hub gateway console:\r
                        foreign: any image but a ZRHP NCP application\r
                        (SONOFF's EmberZNet, an NV clear)\r
   ncp restore confirm  restore the network kept before the last NCP update\r
+  ncp log [on|off|level <0-5>] the zigbee-rs NCP's log in the hub's (stored;\r
+                       on = 3, info, the default)\r
   ncp reset confirm    reset the MG24 into its application, restart the hub\r
   stock                SONOFF's application in ota_0, and how to return to it\r
   stock confirm        give SONOFF's files back (if claimed), select ota_0 and\r
@@ -240,6 +242,7 @@ fn command(words: &[&str]) -> String {
                 Err(e) => format!("refused ({}): {}\r\n", e.code, e.message),
             }
         }
+        ["ncp", "log", args @ ..] => hub::ncp_log(args),
         ["ncp", "restore", "confirm"] => match ncp::restore_request() {
             Ok(()) => "restoring the kept network (`ncp` shows the result)\r\n".into(),
             Err(e) => format!("refused ({}): {}\r\n", e.code, e.message),
