@@ -198,6 +198,11 @@ impl ImageKind {
 pub struct GblInfo {
     /// File size.
     pub size: u32,
+    /// Bytes up to the end of the end tag (its CRC included): what to send
+    /// the bootloader. Its parser takes the end tag's packet and refuses
+    /// every packet after it (`BOOTLOADER_ERROR_PARSER_EOF`), so padding
+    /// that would fill a packet of its own must not be sent.
+    pub gbl_len: u32,
     /// The end tag's CRC-32.
     pub crc32: u32,
     /// The header's type (bit 8: signed).
@@ -488,6 +493,7 @@ impl GblParser {
             padding: 0,
             info: GblInfo {
                 size: 0,
+                gbl_len: 0,
                 crc32: 0,
                 gbl_type: 0,
                 app: None,
@@ -695,6 +701,7 @@ impl GblParser {
                     return Err(GblError::Crc { stored, computed });
                 }
                 self.info.crc32 = stored;
+                self.info.gbl_len = self.offset;
                 self.stage = Stage::Padding;
             }
             _ => {}

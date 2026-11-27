@@ -602,7 +602,8 @@ the image uploaded through the API). What happens, on a thread of its own:
    taken from the running backend (parked: it sends and receives nothing,
    as with a silent NCP), the MG24 is reset into its bootloader (GPIO12
    high across a GPIO15 pulse), the menu it prints taken, `1`, the image
-   over XMODEM-CRC (128-byte blocks, NAKs and lost answers retried, 10
+   up to its end tag (padding after it is not sent: the bootloader refuses
+   a packet after the end tag's) over XMODEM-CRC (128-byte blocks, NAKs and lost answers retried, 10
    sends per block), and the bootloader's verdict (`Serial upload
    complete`, or `aborted` with its error code). Up to 3 attempts, each
    from a new bootloader entry.

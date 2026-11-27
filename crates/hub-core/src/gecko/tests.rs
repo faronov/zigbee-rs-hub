@@ -327,6 +327,20 @@ struct SimBl {
     f: Faults,
 }
 
+/// The end tag is complete in `image` (the bootloader's parser is done).
+fn gbl_done(image: &[u8]) -> bool {
+    let mut at = 0usize;
+    while at + 8 <= image.len() {
+        let id = u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        let len = u32::from_le_bytes(image[at + 4..at + 8].try_into().unwrap()) as usize;
+        if id == TAG_END {
+            return at + 8 + len <= image.len();
+        }
+        at += 8 + len;
+    }
+    false
+}
+
 impl SimBl {
     fn new(f: Faults) -> SimBl {
         let mut s = SimBl {
@@ -438,6 +452,11 @@ impl SimBl {
                     || self.f.nak.contains(&n)
                 {
                     NAK
+                } else if gbl_done(&self.image) {
+                    // A packet after the end tag: BOOTLOADER_ERROR_PARSER_EOF.
+                    self.emit(&[CAN, CAN, CAN]);
+                    self.complete(false, b"\r\nfile error 0x\x004F\r\n");
+                    return;
                 } else {
                     self.started = true;
                     self.last = num;
@@ -755,8 +774,33 @@ fn real_images() {
         let info = parse(&g, POLICY).unwrap_or_else(|e| panic!("{path}: {e}"));
         std::println!("{path}: {info:x?}");
         let mut bl = SimBl::new(Faults::default());
-        let up = flash(&mut bl, &g).unwrap();
+        let up = flash(&mut bl, &g[..info.gbl_len as usize]).unwrap();
         assert!(bl.verified, "{path}");
         std::println!("{path}: {} blocks", up.xmodem.blocks);
     }
+}
+
+/// Padding after the end tag is not sent: the bootloader refuses a packet
+/// that comes after the end tag's (file error 0x4F), so an image whose
+/// padding crosses into another 128-byte block uploads only up to its end
+/// tag.
+#[test]
+fn padding_past_the_end_tags_block_is_not_sent() {
+    let mut g = COMMANDER_PLAIN.to_vec();
+    g.extend_from_slice(&[0xFF; 100]);
+    let info = parse(&g, POLICY).unwrap();
+    assert_eq!((info.size, info.gbl_len), (688, 588));
+    let mut bl = SimBl::new(Faults::default());
+    let e = flash(&mut bl, &g).unwrap_err();
+    assert_eq!(
+        e,
+        SessionError::Upload {
+            xmodem: Some(xmodem::XmodemError::Cancelled { block: 6 }),
+            code: Some(0x4F)
+        }
+    );
+    let mut bl = SimBl::new(Faults::default());
+    let up = flash(&mut bl, &g[..info.gbl_len as usize]).unwrap();
+    assert_eq!(up.xmodem.blocks, 5);
+    assert!(bl.verified);
 }

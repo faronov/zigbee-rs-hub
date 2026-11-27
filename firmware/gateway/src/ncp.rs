@@ -534,7 +534,9 @@ pub fn start(o: StartOpts) -> Result<J, ApiError> {
 fn job(image: &J, o: StartOpts) -> Result<String, String> {
     phase("checking the stored image");
     let info = verify_stored(image)?;
-    let size = info.size;
+    // Up to the end tag: padding after it would be refused by the
+    // bootloader in a packet of its own.
+    let size = info.gbl_len;
     JOB.lock().unwrap().total = size;
 
     // The network carried over: a backup kept hub-scoped.
