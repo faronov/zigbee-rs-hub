@@ -53,13 +53,14 @@ install instructions and the list of merged pull requests. A pre-release
   network whose counters the NCP does not report gets a margin of 2²⁰
   (note `counters_unknown`). A zigbee-rs NCP (ZRHP) already started above
   the counters it used.
-- **EZSP: a restore's frame counters start on a 4096 boundary, and the
-  report gives where the NCP resumed.** EmberZNet keeps the counters a
-  restore writes rounded down to 4096 and resumes from there after the
-  restore's reset (lab unit, 7.4.5: `nwk_fc_start` 96 058 reported, 94 208
-  in use), up to 4095 below the intended margin. The start is now rounded
-  up to the boundary, and `nwk_fc_start`/`aps_fc_start` are read back from
-  the NCP after that reset.
+- **EZSP: after a restore the NCP no longer reuses frame counters, and
+  the report gives where it resumed.** EmberZNet stores the counters a
+  restore writes truncated to 4096 and resumes from there at the restore's
+  reset (lab unit, 7.4.5: `nwk_fc_start` 96 058 reported, 94 208 in use):
+  up to 4095 below the intended margin, and below the counters the
+  restored network had already sent (devices drop such frames). The start
+  is now on the boundary, the NCP is reset a second time (resuming 4096
+  above it), and `nwk_fc_start`/`aps_fc_start` are read back after that.
 
 ## 0.4.0
 

@@ -982,11 +982,11 @@ fn ezsp_backup_restores_onto_a_new_dongle() {
     let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "confirm_ieee_write_once": true}));
     let rep = ok(&r);
     assert_eq!((&rep["pan_id"], &rep["channel"]), (&json!(0x1A62), &json!(15)), "{rep}");
-    assert_eq!(rep["nwk_fc_start"], 61_440, "the backup's counter plus 10 000, on the NCP's 4096 boundary");
+    assert_eq!(rep["nwk_fc_start"], 65_536, "the backup's counter plus 10 000 on the NCP's 4096 boundary, then 4096 more (the second reset)");
     assert!(rep["notes"].as_array().unwrap().iter().any(|n| n["note"] == "ieee_written_once"), "{rep}");
     let n = sim.ncp(|n| n.config().clone());
     assert_eq!(n.custom_eui64, Some(Eui64::from_u64(0x000B_57FF_FE12_3456)));
-    assert_eq!((n.network_key, n.nwk_frame_counter, n.tc_link_key), ([0x6E; 16], 61_440, [0x3C; 16]));
+    assert_eq!((n.network_key, n.nwk_frame_counter, n.tc_link_key), ([0x6E; 16], 65_536, [0x3C; 16]));
     wait("the restored network owned", || {
         let i = info(&rig.app, sid, &rx);
         i["ownership"] == "owned" && i["registry"]["state"] == "owned"
@@ -1016,9 +1016,9 @@ fn ezsp_an_older_backup_of_the_running_network_keeps_its_newer_counters() {
     sim.ncp(|n| n.config_mut().nwk_frame_counter = 120_000);
     let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true}));
     let rep = ok(&r);
-    assert_eq!(rep["nwk_fc_start"], 131_072, "{rep}");
+    assert_eq!(rep["nwk_fc_start"], 135_168, "{rep}");
     assert!(rep["notes"].as_array().unwrap().iter().any(|n| n["note"] == "floor_raised"), "{rep}");
-    assert_eq!(sim.ncp(|n| n.config().nwk_frame_counter), 131_072);
+    assert_eq!(sim.ncp(|n| n.config().nwk_frame_counter), 135_168);
     rig.finish();
 }
 

@@ -470,10 +470,14 @@ checks of step 0 alone, without changing anything):
 3. `setValue(NWK_FRAME_COUNTER)` and `setValue(APS_FRAME_COUNTER)` (0x23,
    0x24, u32; without a network) to the counters of step 0 plus the margins
    (hub-app: 10 000 each, zigpy's default `counter_increment`; APS 2²⁰
-   without a TCLK counter), rounded up to a multiple of 4096: EmberZNet
-   keeps a counter set this way in its NVM rounded down to 4096 and resumes
-   from there after a reset (lab unit, 7.4.5: NWK 96 058 set, 94 208 after
-   step 9), so a start on the boundary is where it resumes. Refused → the
+   without a TCLK counter), rounded up to a multiple of 4096. EmberZNet
+   keeps the counter in its NVM truncated to 0x1000: `setValue` stores it
+   truncated, `formNetwork` does not advance it, and each initialization
+   (`networkInit`) resumes from the stored value and stores it plus 0x1000
+   for the next one (Silicon Labs, host-NCP to RCP migration notes; lab
+   unit, 7.4.5: NWK 96 058 set, 94 208 after the restore's reset). On the
+   boundary the stored value is the start itself (the APS counter is
+   assumed to behave alike: 7.4.5 does not report it). Refused → the
    restore fails (forming with counters from 0 would make the devices drop
    the coordinator's frames).
 4. `setInitialSecurityState`: as forming (0x1B84: global TC link key,
@@ -505,12 +509,18 @@ checks of step 0 alone, without changing anything):
    11 bytes, `tokTypeStackChildTable`: EUI64, node ID, flags) is read back
    and, when it is exactly this child, written with 0x80.
 9. An NCP reset (a new session, `networkInit`): the restored network must
-   come back with the backup's EPID, PAN ID and key ID. The counters it
-   resumed from are read back: the report's `nwk_fc_start` and
-   `aps_fc_start` (those of step 3 where the NCP does not report them; a
-   warning if one is below what step 3 wrote).
+   come back with the backup's EPID, PAN ID and key ID. This first
+   initialization resumes at the start of step 3 again, below the counters
+   the network used since `formNetwork` (its concentrator's MTORR, link
+   status, ZDO answers, steps 7 and 8), which devices may have heard.
+10. Another NCP reset: the second initialization resumes 0x1000 above
+    the start, past every counter used before; the network must come back
+    again. The counters it resumed from are read back: the report's
+    `nwk_fc_start` and `aps_fc_start` (those of step 3 where the NCP does
+    not report them; a warning if the NWK counter is not above the one
+    read just before step 9).
 
-The NCP resets of steps 2 and 9 end the session and start a new one from
+The NCP resets of steps 2, 9 and 10 end the session and start a new one from
 the worker's loop (`Session::Down`, `Up` with a new epoch); the restore
 waits and goes on there, so the session start does not run on top of the
 job's stack (the worker has 16 KB). hub-app's records decide nothing while
