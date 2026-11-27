@@ -468,6 +468,53 @@ fn a_partial_interview_resumes_on_the_devices_announcement() {
     }
 }
 
+/// A sleepy sensor's Device_annce, which the ZRHP NCP forwards as an APS
+/// indication (ZDO 0x0013), counts as the device awake: what was queued
+/// for it after a hub restart (a binding table read) goes out at once, as
+/// on any other frame from it. Before, it waited for the next frame (here:
+/// the answer to the identity re-read, which this sensor does not give;
+/// on hardware, within an hour of the last read, nothing).
+#[test]
+fn a_sleepy_devices_announcement_sends_what_waits_for_it() {
+    const SENSOR: u64 = 0x5A52_5300_0000_0002;
+    const SENSOR_NWK: u16 = 0x5A02;
+    const ID: &str = "zb:5a52530000000002";
+    let sensor = || {
+        SimDevice::new(SENSOR, SENSOR_NWK, LogicalType::EndDevice, false, 0x1234)
+            .endpoint(1, 0x0104, 0x0302, &[0x0000, 0x0001, 0x0402], &[])
+            .basic("zigbee-rs", "SIM-TH", 3)
+            .attr(1, 0x0402, 0x0000, TypedValue::int(ZclType::I16, 2137))
+    };
+    let mut rig = Rig::zrhp(true);
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    let devs = Arc::new(Mutex::new(vec![sensor()]));
+    rig.devices_shared(devs.clone(), answered.clone());
+    let (sid, rx) = session(&rig.app);
+    rig.link.join(SENSOR, SENSOR_NWK);
+    wait("interviewed", || state(&rig.app, sid, &rx, &format!("{ID}:1:temperature")) == json!(21.37));
+
+    // Restarted: the sensor sleeps, a read of its binding table waits. It
+    // will not answer the identity re-read its announcement brings (an
+    // answer would be a frame from it).
+    devs.lock().unwrap()[0].silent_attrs.insert((0x0000, 0x0006));
+    let mut rig = rig.restart_zrhp();
+    rig.devices_shared(devs.clone(), answered.clone());
+    let (sid, rx) = session(&rig.app);
+    wait("restored", || rig.app.status().restored == 1);
+    answered.lock().unwrap().clear();
+    let reading = || ok(&call(&rig.app, sid, &rx, 4, json!({"type": "bindings/list", "device": ID})))[0]["reading"].clone();
+    ok(&call(&rig.app, sid, &rx, 3, json!({"type": "bindings/read", "device": ID})));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(reading(), json!(true), "queued while it sleeps");
+    assert!(!answered.lock().unwrap().iter().any(|r| r.profile == 0 && r.cluster == 0x0033));
+
+    let annce = hub_devices::zdo::device_annce(1, SENSOR_NWK, SENSOR, 0x80);
+    rig.link.indicate(&sensor().ind(0, 0, 0x0013, annce));
+    wait("the binding table read", || reading() == json!(false));
+    assert!(answered.lock().unwrap().iter().any(|r| r.profile == 0 && r.cluster == 0x0033));
+    rig.finish();
+}
+
 #[test]
 fn groups_and_permit_join() {
     for kind in BOTH {

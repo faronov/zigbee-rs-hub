@@ -184,7 +184,7 @@ progress{width:12em}
 <!-- gateway:end -->
 <section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
 <div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
-<div class="row acts" id="tzr"><label>Time zone <input id="tzn" list="tzl" size="20" placeholder="e.g. Europe/Kyiv"></label><button id="tzu">Use this browser's zone</button><datalist id="tzl"></datalist></div>
+<div class="row acts" id="tzr"><label>Time zone <input id="tzn" list="tzl" size="20" placeholder="e.g. Europe/Berlin"></label><button id="tzu">Use this browser's zone</button><datalist id="tzl"></datalist></div>
 <div class="row acts"><label>Advanced: POSIX string <input id="tzi" size="20"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button><span class="mut" id="tzm"></span></div>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <!-- devmode:start -->
@@ -398,7 +398,9 @@ const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/senso
  gn=d=>d.interview=="complete"&&!dL(d).length,
  // A lower-scoring definition while Zigbee2MQTT's needs what this firmware lacks.
  apx=d=>{const a=d.definition_approximate;return a?"Zigbee2MQTT uses "+a.better+", which needs "+a.needs.join(", ")+"; this hub uses "+(d.definition_model||"another definition")+" until it is supported":""},
- bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
+ // A sleepy device answers when it is awake: the hint while it is waited for.
+ WK="press a button on the device to wake it",
+ bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")+(d.sleepy?" · "+WK:"")),
   gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
   apx(d)?el("span",{class:"badge",title:apx(d)},"approx."):"",
   el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
@@ -633,9 +635,10 @@ $("#tzl").append(...tzZ.map(z=>new Option(z)));tzZ[0]||$("#tzr").classList.add("
 const tzShow=n=>{let s="";try{s=tzN&&"Hub time with "+tzN+": "+new Date().toLocaleString("sv",{timeZone:tzN})+(n?". "+n:"")}catch(e){s=tm.local?"Hub time "+tm.local:""}$("#tzm").textContent=s};
 function tzPick(){const z=$("#tzn").value.trim();tzN="";try{tzF(z)}catch(e){return tzShow()}
  const r=tzPosix(z);tzN=z;$("#tzi").value=r.tz;tzShow(r.fixed&&z+" has no yearly rule: today's offset is kept fixed")}
-$("#tzn").oninput=tzPick;$("#tzu").onclick=()=>{$("#tzn").value=Intl.DateTimeFormat().resolvedOptions().timeZone;tzPick()};
+const tzB=()=>Intl.DateTimeFormat().resolvedOptions().timeZone;
+$("#tzn").oninput=tzPick;$("#tzu").onclick=()=>{$("#tzn").value=tzB();tzPick()};
 $("#tzi").oninput=()=>{tzN=$("#tzn").value="";tzShow()};
-function loadTime(){call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys();tzShow()}).catch(()=>{})}
+function loadTime(){const z=tzB();if(z)$("#tzn").placeholder="e.g. "+z;call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys();tzShow()}).catch(()=>{})}
 $("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),tz_name:tzN,servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;toast("Time zone saved");loadSys();tzShow()})).catch(()=>{});
 function loadRep(){call("reporting/defaults/get").then(r=>{const t=$("#rpd");t.textContent="";for(const c of r.classes)t.append(el("tr",{},el("td",{},c.key),el("td",{},el("input",{size:12,"data-k":c.key,value:c.edited?rTxt(c.report):"",placeholder:rTxt(c.builtin)}))))}).catch(()=>{})}
 $("#rpb").onclick=()=>{const d={};for(const i of $("#rpd").querySelectorAll("input"))d[i.dataset.k]=rVal(i.value);act("reporting/defaults/set",{defaults:d}).then(()=>{toast("Saved");loadRep()},()=>{})};
@@ -889,7 +892,7 @@ function bindPanel(id){
  for(const g of Object.values(grps))dst.append(el("option",{value:"#"+g.id},g.name+" (group)"));
  const go=()=>{const v=dst.value,cl=(pre.value||cus.value).split(/[ ,]+/).filter(Boolean).map(c=>/^0x/i.test(c)?parseInt(c,16):+c),[d,p]=v.split("|");
   return act("bindings/create",{device:id,endpoint:+src.value,clusters:cl,target:v[0]=="#"?{group:+v.slice(1)}:{device:d,endpoint:+p}})};
- return el("div",{},el("h3",{},"Bindings"+(b.reading?" (reading…)":"")+(b.error?" · "+b.error:"")),ul,
+ return el("div",{},el("h3",{},"Bindings"+(b.reading?" (reading…"+(devs[id]&&devs[id].sleepy?" "+WK:"")+")":"")+(b.error?" · "+b.error:"")),ul,
   el("div",{class:"row acts"},src,pre,cus,"→",dst,bt("Bind",go,"p")),
   el("div",{class:"row acts"},bt("Read from device",()=>act("bindings/read",{device:id})),bt("Read groups",()=>act("groups/membership",{device:id}))));
 }

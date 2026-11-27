@@ -180,7 +180,7 @@ user "re-interview" request.
 | 1 | Node_Desc_req | logical type, manufacturer code, MAC capabilities (RxOnWhenIdle), max buffer sizes |
 | 2 | Active_EP_req | endpoint list |
 | 3 | Simple_Desc_req per endpoint, the GP endpoint 242 last | profile, device ID, version, input and output clusters; 242 (a GP proxy, profile 0xA1E0) is kept for matching only (zigbee-herdsman-converters' fingerprints list it): GP-profile endpoints get no entities, binds or reporting, and a failure on 242 does not make the interview partial |
-| 4 | Basic (0x0000) Read Attributes on the first endpoint with Basic: 0x0004 ManufacturerName, 0x0005 ModelIdentifier, 0x0007 PowerSource, then 0x0000 ZCLVersion, 0x0001 ApplicationVersion, 0x0002 StackVersion, 0x0003 HWVersion, 0x0006 DateCode, 0x4000 SWBuildID (one request per ≤ 5 attributes; UNSUPPORTED_ATTRIBUTE tolerated) | identity strings and versions |
+| 4 | Basic (0x0000) Read Attributes on the first endpoint with Basic, one attribute per request as zigbee-herdsman reads them (old Xiaomi devices do not answer a read of several): the identity first, 0x0005 ModelIdentifier, 0x0004 ManufacturerName, then the optional 0x0007 PowerSource, 0x0000 ZCLVersion, 0x0001 ApplicationVersion, 0x0002 StackVersion, 0x0003 HWVersion, 0x0006 DateCode, 0x4000 SWBuildID (UNSUPPORTED_ATTRIBUTE tolerated; a failed optional read, or a Default Response instead of the answer, does not make the interview partial) | identity strings and versions |
 | 5 | Resolve (3.3) with what is known so far | candidate definition |
 | 6 | Definition-requested reads (e.g. Tuya "magic packet", 10.4) | — |
 | 7 | If a server cluster is the zigbee-rs Device Schema cluster (12): read the schema hash, fetch the schema if not cached | self-description |
@@ -190,10 +190,39 @@ Sleepy end devices (Node descriptor RxOnWhenIdle = 0) are awake for a few
 seconds after joining; steps 1–8 run back to back with
 `APS_DATA_REQUEST.tx_options` bit5 (extended timeout). What does not finish
 is kept in a per-device **pending queue** and sent when the device next talks
-to the hub (any indication from it, a Poll Control Check-in, 5.3), like
-herdsman's `sendPolicy: "queue"`. Settings writes from the UI to sleepy
-devices use the same queue; the entity shows the requested value as
-`pending` until the write response arrives.
+to the hub, like herdsman's `sendPolicy: "queue"`: any frame from it counts
+(a report, a command it sends to a group or broadcasts, a ZDO answer, its
+Device_annce, a Poll Control Check-in, 5.3), and so does its rejoin (the
+coordinator's join event). Settings writes from the UI to sleepy devices
+use the same queue; the entity shows the requested value as `pending`
+until the write response arrives, and a binding or group request shows
+`queued` until it is sent (the web UI says "press a button on the device
+to wake it" while a sleepy device's interview or binding table read
+waits). A request that times out or is not delivered goes back into the
+queue for the device's next frame, so its tries are wake-ups: a sleepy
+device's request is sent at most 6 times for the Node descriptor, twice
+for the endpoint list, a Simple descriptor and each Basic attribute (the
+counts of zigbee-herdsman's interview), 3 times for anything else (as to
+a mains device), then it fails like any other (the step is skipped,
+configure records the failure, the binding table read ends with its
+error). A device that rejoined under a new short address (its join, its
+Device_annce, or a frame with its IEEE from the new address) gets what
+waited for it there, the ZDO descriptor requests with the new address of
+interest. The hub hears only frames: a device whose uplinks the NCP does
+not pass on (data polls; groupcasts to a group the coordinator is not a
+member of, e.g. an IKEA E1524/E1810 remote with firmware before 2.3.075,
+which sends its presses to a group) is never seen awake: neither coordinator
+backend reports a child's data poll to the hub yet.
+
+Basic attributes are learnt from any Read Attributes Response or Report
+Attributes of the device, not only the interview's reads: an interview
+read stores what it got, any other frame (Xiaomi devices report their
+ModelIdentifier unasked) only fills what is unknown; strings end at a NUL.
+A device whose endpoint list is unknown (Active_EP_req failed) gets a stub
+endpoint (device ID 0xFFFF, no clusters but Basic once Basic frames came
+from it) for each endpoint it sends from, as zigbee-herdsman creates
+endpoints on the fly: the Basic reads find it; stubs give no entities, a
+Simple descriptor replaces them, and a resumed interview asks for theirs.
 
 A device whose interview cannot complete gets tier-a entities from what is
 known (for example only the Node descriptor and Simple descriptors) and a
@@ -226,6 +255,44 @@ OTA upgrade (the OTA server sees the device run its target image, 14.11)
 and on a rejoin (Device_annce; at most once an hour after the last read)
 the hub reads both again, like Zigbee2MQTT after an upgrade; when they
 changed it stores the fingerprint and re-resolves the device (3.4).
+
+**Xiaomi (`lumi.*`) devices.** Old Xiaomi end devices (the WXKG01LM
+button, `lumi.sensor_switch`) answer an interview's ZDO and Basic requests
+poorly or not at all, but report their ModelIdentifier unasked: after
+joining and when the button is held until the LED blinks (which also
+rejoins it). The hub completes their interview from it, as
+zigbee-herdsman's `interviewQuirks` and zigpy's `XiaomiQuickInitDevice`
+do. A model of the hub's table (exact match, from zhaquirks' signatures:
+`lumi.sensor_switch` WXKG01LM, endpoint 1, profile 0x0104, device 0x0104,
+server 0x0000 0x0003 0x0019 0xFFFF, client 0x0000 0x0004 0x0003 0x0006
+0x0008 0x0005 0x0019; `lumi.sensor_magnet` MCCGQ01LM, the same with server
+0x0000 0x0003 0xFFFF 0x0019) as soon as a step of its interview has failed
+once (a timeout, before or after the model arrived); any other `lumi.`
+model once a step finally fails (its tries spent), with the stub endpoints
+it sent from. What the interview did not learn is filled in (manufacturer
+`LUMI`, code 0x1037; without a Node descriptor an end device, asleep when
+idle; battery unless the MAC says mains), the table's endpoints replace
+missing descriptors, the device resolves and the interview is done:
+`partial`, with `interview_quirk: "lumi"` in `devices/diagnostics` (this
+run), so its next rejoin resumes the real interview, which may refine it.
+Not when the resolution needs IAS enrollment, or binds or reporting a
+definition asks for: the interview then goes on. Lumi devices get no binds
+and no reporting configuration a definition does not ask for (5.3), and
+no DateCode/SWBuildID re-read on a rejoin (after an OTA upgrade and as an
+imported device's probe they are read). On the receive side, Basic 0xFF01 and
+0xFF02 come with any manufacturer code (often a bogus 0x1234) and are taken
+as standard attributes; Report Attributes frames are parsed leniently
+(records before a malformed one are kept, a tail too short for a record is
+ignored, a 0xFF01/0xFF02/0xFCC0 0x00F7 struct typed as a character string
+with a length byte one off is an octet string, the length taken that leaves
+a parsable rest, as zhaquirks does); a ZCL-structure 0xFF02 binds by element
+index (`struct: {…, tag: 1}`: the WXKG01LM's battery voltage, mV). A
+button's reports of its On/Off client cluster fire its remote events (5.4).
+zigbee-herdsman-converters' lumi definitions need the `lumi` vendor template
+(battery and voltage from these structs, the WXKG01LM's single, double and
+hold clicks from 0x0006 0x8000 and a timer), which this firmware does not
+implement yet: they are refused (`catalog_refused`) and lumi devices run on
+the generic tier.
 
 ### 3.2 Fingerprint
 
@@ -423,6 +490,7 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `name` | user name, else `model` | same | `name` (user-editable in HA) |
 | `via` | the hub | the hub | `via_device` |
 | `power` | mains / battery / energy_harvesting | battery / energy_harvesting | (diagnostic) |
+| `sleepy` | `true` only for a sleepy end device (requests wait until it is heard from) | — | — (web UI hint) |
 | `availability`, `last_seen`, `lqi`, `rssi` | 4.6 | 4.6 | device availability |
 | `warnings` | e.g. configure failures | `gp_unsecured` (13.1) | repair issues (15) |
 | `definition` | resolved layers, bottom (`generic`, always) to top: `source`, `id`, `revision`, `content_hash`; `partial: true` on a partially translated catalog definition (`x-partial`, 17.2: generic support gives what it lacks) | same | diagnostics only |
@@ -751,6 +819,11 @@ At configure (and when the configure hash changes), per endpoint:
    timeout 0x0028), then send the queue, then Fast Poll Stop (0x01).
 6. Definition `configure:` ops (6.8) after the generic ones.
 
+Xiaomi (`lumi.*`) devices report on their own and refuse most binds:
+they get the binds and reporting a definition asks for (its `configure:`
+ops and its entities' `report:`), none of the generic tier's, and no Poll
+Control bind.
+
 Every step is idempotent and its result is recorded per attribute, so a
 failed configure is retried (mains: after 60 s, then exponential up to 1 h;
 sleepy: on the next contact) without repeating what worked.
@@ -790,6 +863,13 @@ hub, received cluster commands become one `action` event entity per device
 | 0x0005: 0x05 Recall scene | `recall_<scene id>` for the scene IDs listed by the definition, else `recall_scene` with attribute `scene` |
 | 0x0300: 0x4B Move color temp, 0x4C Step color temp, 0x0A Move to color temp | `color_temperature_move_up`/`_down`/`_stop`, `color_temperature_step_up`/`_down`, `color_temperature_move` |
 | 0x0102: 0x00, 0x01, 0x02 | `open`, `close`, `stop` |
+
+Xiaomi buttons (WXKG01LM, also the MCCGQ01LM's contact) ignore the
+direction: they send Report Attributes of their On/Off *client* cluster's
+OnOff (0 pressed, 1 released) instead of commands. Such a report from an
+endpoint that has On/Off as a client cluster only is taken as the command
+it stands for (false Off, true On): the WXKG01LM's press is `off`, its
+release `on`.
 
 Event payload attributes are the decoded command fields (step size,
 transition time, rate). Duplicates (the same APS counter and ZCL sequence
@@ -2460,7 +2540,7 @@ code feels familiar:
 | `devices/remove` | `id`, `force` (skip Mgmt_Leave: the device is unreachable) | — (ZDO Mgmt_Leave_req unless `force`, then the coordinator purges the device either way: ZRHP `NWK_REMOVE_DEVICE` and `TBL_INVALIDATE` of its `DEVICE` entry, the host store's device record; EZSP an APS Remove-Device to a router of the neighbor table, else its key table entry is erased. The hub remembers the device as removed (network record `removed`, the last 64): the import of the NCP's devices skips it while the NCP still lists it (a child until it ages out, a router that ignored the leave), until it joins or announces itself again; forming, resetting or restoring the network forgets the list. GP: 13.7) |
 | `devices/reinterview` | `id` | progress events `interview_progress` |
 | `devices/reconfigure` | `id` | per-step results (binds, reporting, reads) |
-| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload, `interview_partial`, `interview_resumes` (partial interviews resumed on a rejoin this run, 3.1) |
+| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload, `interview_partial`, `interview_resumes` (partial interviews resumed on a rejoin this run, 3.1), `interview_quirk` (`lumi`: completed from the model this run, 3.1) |
 | `devices/pin_definition` | `id`, `definition` (id or null) | new resolution |
 
 Events (topic `devices`): `device_added`, `device_updated` (any registry field,

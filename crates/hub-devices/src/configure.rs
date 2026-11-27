@@ -71,7 +71,11 @@ pub fn build_ops(
     let mut reports: BTreeMap<(u8, u16, Option<u16>), Vec<ReportingConfig>> = BTreeMap::new();
     let mut reads: BTreeMap<(u8, u16, Option<u16>), Vec<u16>> = BTreeMap::new();
     let mut binds: Vec<(u8, u16)> = Vec::new();
+    // Xiaomi devices report on their own and refuse most binds: they get
+    // binds and reporting only where a definition asks (hub::lumi).
+    let lumi = crate::hub::lumi::is_lumi(&d.fp);
     for e in d.entities.iter().filter(|e| !e.orphaned) {
+        let asked = !lumi || e.r.source != LayerSource::Generic;
         for (_, v) in e.r.def.values() {
             let (cluster, attr, ty, mfr) = match &v.binding {
                 Binding::Zcl(z) => (z.cluster, z.attr, z.ty, z.mfr),
@@ -109,7 +113,7 @@ pub fn build_ops(
                 (_, Some(ReportSpec::Disable)) => Some((rec(0, 0xFFFF), false)),
                 _ => None,
             };
-            if let Some((rec, bind)) = rec {
+            if let Some((rec, bind)) = rec.filter(|_| asked) {
                 let l = reports.entry((ep, cluster, mfr)).or_default();
                 if !l.iter().any(|r| r.attr == attr) {
                     l.push(rec);
@@ -126,7 +130,7 @@ pub fn build_ops(
             }
         }
         // Client clusters whose commands become events (5.4).
-        for t in &e.r.def.triggers {
+        for t in e.r.def.triggers.iter().filter(|_| !lumi) {
             if let TriggerSource::Cmd { ep, cluster, .. } = t.source {
                 for epd in
                     d.fp.endpoints.iter().filter(|x| {
@@ -153,7 +157,7 @@ pub fn build_ops(
             .iter()
             .find(|e| e.in_clusters.contains(&cl::POLL_CONTROL))
             .map(|e| e.ep);
-    if let Some(ep) = has_poll {
+    if let Some(ep) = has_poll.filter(|_| !lumi) {
         binds.push((ep, cl::POLL_CONTROL));
     }
     if tuya.as_ref().is_some_and(|t| t.bind_basic) {

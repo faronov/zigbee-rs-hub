@@ -43,6 +43,12 @@ pub struct SimDevice {
     /// ZDO requests (by cluster) it answers with status NOT_SUPPORTED: an
     /// interview step that fails at once.
     pub zdo_failing: BTreeSet<u16>,
+    /// ZDO requests (by cluster) it never answers: an interview step that
+    /// times out.
+    pub zdo_silent: BTreeSet<u16>,
+    /// Read Attributes asking any of these `(cluster, attr)` get no
+    /// answer.
+    pub silent_attrs: BTreeSet<(u16, u16)>,
     /// Answer Default Responses for cluster commands with this status.
     pub cmd_status: Status,
     /// Group table `(ep, group)` (Groups cluster).
@@ -88,6 +94,8 @@ impl SimDevice {
             tuya_rx: Vec::new(),
             responsive: true,
             zdo_failing: BTreeSet::new(),
+            zdo_silent: BTreeSet::new(),
+            silent_attrs: BTreeSet::new(),
             cmd_status: Status::SUCCESS,
             groups: BTreeSet::new(),
             group_capacity: 8,
@@ -236,6 +244,9 @@ impl SimDevice {
         let mut out = Vec::new();
         if req.profile == 0 {
             let tsn = req.payload[0];
+            if self.zdo_silent.contains(&req.cluster) {
+                return out;
+            }
             if self.zdo_failing.contains(&req.cluster) {
                 let mut p = vec![tsn, 0x84];
                 p.extend_from_slice(&self.nwk.to_le_bytes());
@@ -337,6 +348,12 @@ impl SimDevice {
         let reply = match (h.frame_type, h.cmd) {
             (FrameType::Global, global::READ_ATTRIBUTES) => {
                 let attrs = zf::parse_read_attributes(&f.payload).unwrap_or_default();
+                if attrs
+                    .iter()
+                    .any(|a| self.silent_attrs.contains(&(req.cluster, *a)))
+                {
+                    return out;
+                }
                 let recs: Vec<ReadRecord> = attrs
                     .iter()
                     .map(|a| match self.attrs.get(&(ep, req.cluster, *a, h.mfr)) {

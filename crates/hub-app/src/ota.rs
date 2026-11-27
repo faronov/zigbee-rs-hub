@@ -915,6 +915,40 @@ mod tests {
         assert!(ota.block_data_text(1, r#"{"id":7,"type":"ota/block_data","data":"QU\/D"}"#).is_none());
     }
 
+    /// An upgrade reads Basic DateCode and SWBuildID again, also of a
+    /// lumi device (whose identity is otherwise not re-read): the new
+    /// SWBuildID becomes its `sw_version`.
+    #[test]
+    fn an_upgraded_lumi_device_reads_its_identity_again() {
+        use hub_devices::hub::HubConfig;
+        use hub_devices::resolve::MemoryCatalog;
+        use hub_devices::sim_device::{Sim, SimDevice};
+        use hub_devices::transport::{MockTransport, Sent};
+        use hub_devices::zcl::{TypedValue, ZclType, ZclValue};
+        use hub_devices::zdo::LogicalType;
+
+        let ieee = 0x54ef_4410_0000_0001;
+        let id = "zb:54ef441000000001";
+        let sw = |v: &str| TypedValue::new(ZclType::CHAR_STR, ZclValue::String(v.into()));
+        let mut engine = Engine::new(MockTransport::default(), HubConfig::default(), Box::new(MemoryCatalog::default()));
+        let mut sim = Sim::default();
+        sim.devices.push(
+            SimDevice::new(ieee, 0x5A01, LogicalType::Router, true, 0x115F)
+                .endpoint(1, 0x0104, 0x0051, &[0x0000, 0x0006, 0x0019], &[])
+                .basic("LUMI", "lumi.plug.maeu01", 1)
+                .attr(1, 0x0000, 0x4000, sw("0.0.0_0025")),
+        );
+        sim.join(&mut engine, ieee, 0);
+        sim.devices[0].attrs.insert((1, 0x0000, 0x4000, None), sw("0.0.0_0030"));
+        sim.log.clear();
+        let mut ota = Ota::new(&crate::AppConfig::default());
+        ota.exec(&mut engine, vec![Action::Upgraded { device: id.into() }], 1000);
+        let read = engine.transport.sent.iter().any(|s| matches!(s, Sent::Aps(a) if a.cluster == 0x0000 && a.payload[3..] == [0x06, 0x00, 0x00, 0x40]));
+        assert!(read, "{:?}", engine.transport.sent);
+        sim.run(&mut engine, 1000);
+        assert_eq!(engine.device(id).unwrap().fp.sw_build_id.as_deref(), Some("0.0.0_0030"));
+    }
+
     /// Loaded later (adopt): a job that ran meanwhile is kept with the
     /// stored policy; a stored `off` ends it and stays stored.
     #[test]

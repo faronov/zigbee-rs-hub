@@ -281,6 +281,9 @@ pub struct Queued {
     pub purpose: crate::hub::Purpose,
     /// ZCL/ZDO TSN.
     pub tsn: u8,
+    /// Times it was sent already (a request parked after a timeout or a
+    /// failed delivery keeps its count: the sleepy retries are bounded).
+    pub tries: u8,
 }
 
 /// GP specifics of a device.
@@ -717,6 +720,11 @@ impl Device {
         // their fields.
         if self.left {
             v["unavailable_reason"] = "left".into();
+        }
+        // Sleepy: requests wait until it is next heard from (the web UI's
+        // "press a button" hint).
+        if self.sleepy() {
+            v["sleepy"] = true.into();
         }
         if let Some(a) = self.approximate_json() {
             v["definition_approximate"] = a;
