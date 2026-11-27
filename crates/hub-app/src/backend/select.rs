@@ -308,23 +308,24 @@ where
 {
     use hub_ncp::{DriverConfig, SessionState};
     let n = lines.len().max(1) as u32;
+    // The driver's own threads and stacks, as the backend runs them (a
+    // smaller driver stack overflowed on the classic ESP32).
     let cfg = DriverConfig {
         host_name: "zigbee-rs-hub probe".into(),
         lines,
         hunt_after: times.zrhp_per_line,
         ready_timeout: std::time::Duration::from_millis(300),
         auto_ready: true,
-        stack_size: 16 * 1024,
         ..DriverConfig::default()
     };
     let (client, _events) = hub_ncp::driver::start(cfg, rx, tx, cookie.max(1));
     let got = client.wait_state(times.zrhp_per_line * n, |s| matches!(s, SessionState::Ready | SessionState::Incompatible));
     let session = client.session();
-    client.shutdown();
-    // The port is the next probe's or the backend's: the driver stops
-    // writing first, the reader after its current read (100 ms).
-    client.wait_state(std::time::Duration::from_secs(1), |s| s == SessionState::Stopped);
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // The port is the next probe's or the backend's: both threads have
+    // ended before the probe returns.
+    if !client.shutdown_and_wait(std::time::Duration::from_secs(2)) {
+        return Err("the ZRHP probe's threads did not stop".into());
+    }
     match (got, session) {
         (Some(SessionState::Ready), Some(s)) => Ok(Found::Zrhp {
             fw: s.negotiated.fw.clone(),
@@ -335,6 +336,39 @@ where
         }),
         (Some(SessionState::Incompatible), _) => Err("a ZRHP NCP of an incompatible protocol version".into()),
         _ => Err("no ZRHP session".into()),
+    }
+}
+
+/// Consecutive boots a ZRHP code path (the probe, the backend's first
+/// minute) crashed before the boot stops running it ([`zrhp_guard`]).
+pub const ZRHP_CRASH_LIMIT: u32 = 2;
+
+/// The crash guard of the ZRHP code paths at boot. The firmware arms a
+/// marker before them and clears it once they returned (the backend: after
+/// its first minute); a boot that finds it armed after a crash (`crashed`:
+/// panic or watchdog reset) counts one more in `streak`, a boot that finds
+/// it armed after another reset (a power cut) counts nothing. Returns the
+/// new streak and whether ZRHP is skipped in this boot: at
+/// [`ZRHP_CRASH_LIMIT`] crashes in a row nothing ZRHP runs
+/// ([`apply_zrhp_guard`]) until the operator clears it, so a probe or a
+/// backend that crashes can never boot-loop the hub.
+pub fn zrhp_guard(armed: bool, crashed: bool, streak: u32) -> (u32, bool) {
+    let streak = if armed && crashed { streak.saturating_add(1) } else { streak };
+    (streak, streak >= ZRHP_CRASH_LIMIT)
+}
+
+/// Why ZRHP is skipped ([`apply_zrhp_guard`]).
+pub const ZRHP_GUARD_WHY: &str = "the ZRHP probe or backend crashed the hub at every boot: ZRHP is skipped and the UART parked; \
+     flash another image (ncp/update/start) or clear it (ncp/update/reset)";
+
+/// A guarded boot ([`zrhp_guard`]) never starts the ZRHP backend: EZSP,
+/// with the UART parked (nothing is sent to an NCP the hub cannot talk
+/// to), and why.
+pub fn apply_zrhp_guard(d: &mut Detection) {
+    if d.backend == BackendKind::Zrhp || d.found.as_ref().and_then(Found::backend) != Some(BackendKind::Ezsp) {
+        d.backend = BackendKind::Ezsp;
+        d.park = true;
+        d.why = ZRHP_GUARD_WHY;
     }
 }
 
@@ -485,9 +519,20 @@ pub fn restore_after_flash(at_start: &str) -> &'static str {
 }
 
 /// Whether `ncp/update/restore` is offered: a network kept, its restore
-/// not done, not pending, not held for an application image.
+/// not done, not pending, not held for an application image (`wanted`: a
+/// flash that did not finish; the caller refuses while one runs).
 pub fn restore_offered(state: &J) -> bool {
-    state["backup_epid"].is_string() && matches!(state["restore"].as_str(), Some("none" | "failed"))
+    state["backup_epid"].is_string() && matches!(state["restore"].as_str(), Some("none" | "failed" | "wanted"))
+}
+
+/// At boot after an update that did not finish (`interrupted`, `failed`):
+/// when an application answers (`app`), a `wanted` restore becomes
+/// `pending`, as after a completed flash. The flash may have been complete
+/// (a crash or a power cut during the check of the new firmware), and
+/// [`after_switch`] restores only onto an NCP without a network: onto the
+/// old firmware with its network nothing happens.
+pub fn restore_after_interruption(restore: &str, app: bool) -> Option<&'static str> {
+    (app && restore == "wanted").then_some("pending")
 }
 
 #[cfg(test)]
@@ -653,6 +698,41 @@ mod tests {
         assert!(restore_offered(&json!({"backup_epid": "dd", "restore": "failed"})));
         assert!(restore_offered(&json!({"backup_epid": "dd", "restore": "none"})));
         assert!(!restore_offered(&json!({"backup_epid": "dd", "restore": "pending"})));
+    }
+
+    /// HIL of 974b3241: the flash completed, the hub crashed while it
+    /// asked the new firmware; the kept network is restored once the
+    /// firmware answers at a later boot (and by hand meanwhile).
+    #[test]
+    fn a_flash_cut_short_after_the_upload_still_restores_the_kept_network() {
+        let st = json!({"phase": "interrupted", "backup_epid": "e4358e4f02edf019", "restore": "wanted"});
+        assert!(restore_offered(&st));
+        assert_eq!(restore_after_interruption("wanted", true), Some("pending"));
+        assert_eq!(restore_after_interruption("wanted", false), None, "no application answers: nothing yet");
+        assert_eq!(restore_after_interruption("held", true), None);
+        assert_eq!(restore_after_interruption("done", true), None);
+    }
+
+    /// A ZRHP path that crashed at two boots in a row is skipped: the hub
+    /// starts on EZSP with the UART parked (an EmberZNet NCP found still
+    /// runs normally); a power cut while armed counts nothing.
+    #[test]
+    fn a_crashing_zrhp_path_cannot_boot_loop_the_hub() {
+        assert_eq!(zrhp_guard(true, true, 0), (1, false));
+        assert_eq!(zrhp_guard(true, true, 1), (2, true));
+        assert_eq!(zrhp_guard(true, false, 1), (1, false), "a power cut while armed");
+        assert_eq!(zrhp_guard(false, true, 2), (2, true), "stays until cleared");
+        assert_eq!(zrhp_guard(false, false, 0), (0, false));
+        // Guarded: ZRHP never starts, whatever answered or was set.
+        for (setting, found) in [(Setting::Zrhp, None), (Setting::Auto, Some(Probe::Bootloader)), (Setting::Auto, None)] {
+            let mut s = ncp(false, false, found == Some(Probe::Bootloader));
+            let mut d = detect(setting, Some(BackendKind::Zrhp), false, &mut s);
+            apply_zrhp_guard(&mut d);
+            assert_eq!((d.backend, d.park, d.why), (BackendKind::Ezsp, true, ZRHP_GUARD_WHY), "{setting:?}");
+        }
+        let mut d = detect(Setting::Auto, Some(BackendKind::Zrhp), false, &mut ncp(true, false, false));
+        apply_zrhp_guard(&mut d);
+        assert_eq!((d.backend, d.park, d.why), (BackendKind::Ezsp, false, "detected"), "EmberZNet found: runs");
     }
 
     #[test]

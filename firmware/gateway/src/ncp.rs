@@ -46,6 +46,16 @@
 //! calls it `interrupted`, looks for the bootloader first and offers to
 //! flash the stored image again.
 //!
+//! **Crash guard**: a ZRHP code path (the probe, at boot or after a flash,
+//! and the ZRHP backend's first minute) runs armed (NVS `zrh/ncp_zarm`);
+//! a boot that finds it armed after a panic or watchdog reset counts a
+//! crash (`zrh/ncp_zcrash`). At `select::ZRHP_CRASH_LIMIT` crashes in a row
+//! the boot skips every ZRHP path and starts EZSP with the UART parked
+//! (`select::apply_zrhp_guard`), so nothing ZRHP can boot-loop the hub;
+//! `ncp/update/reset`, `ncp/backend/set` and a successful flash clear it.
+//! The detection runs on a thread of its own (16 KiB), not on the 8 KiB
+//! main task.
+//!
 //! **After a switch** ([`after_start`]): on the new backend, once its NCP
 //! session is up, the kept network goes onto the NCP (`network/restore`
 //! with `confirm`) when the NCP has none and takes the backup's
@@ -56,6 +66,7 @@
 //! without pairing again: same network key, PAN, channel, frame counters
 //! from the backup's plus 10 000, the same Trust Center IEEE.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -112,6 +123,73 @@ const KNOWN_IMAGES: [(&str, &str); 3] = [
 
 /// What the boot decided.
 static DETECTION: OnceLock<Detection> = OnceLock::new();
+
+/// NVS: a ZRHP code path (the probe, the backend's first minute) runs.
+const ARM_KEY: &str = "ncp_zarm";
+/// NVS: boots in a row a ZRHP code path crashed (`select::zrhp_guard`).
+const STREAK_KEY: &str = "ncp_zcrash";
+/// The backend's first minute is guarded.
+const BACKEND_GUARD: Duration = Duration::from_secs(60);
+/// ZRHP is skipped in this boot (the crash guard tripped).
+static ZRHP_SKIPPED: AtomicBool = AtomicBool::new(false);
+
+fn streak() -> u32 {
+    settings::get(STREAK_KEY).and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+fn set_streak(n: u32) {
+    let text = n.to_string();
+    if let Err(e) = settings::set(STREAK_KEY, (n > 0).then_some(text.as_str())) {
+        warn!("ncp: {STREAK_KEY} not stored: {e}");
+    }
+}
+
+/// A ZRHP code path starts: a crash before [`disarm`] counts at the next
+/// boot.
+fn arm() {
+    if let Err(e) = settings::set(ARM_KEY, Some("1")) {
+        warn!("ncp: {ARM_KEY} not stored: {e}");
+    }
+}
+
+/// The ZRHP code path returned: the crash streak ends.
+fn disarm() {
+    let _ = settings::set(ARM_KEY, None);
+    if streak() > 0 {
+        set_streak(0);
+    }
+}
+
+/// The last boot ended in a panic or a watchdog reset.
+fn crash_reset() -> bool {
+    use esp_idf_svc::sys;
+    matches!(
+        unsafe { sys::esp_reset_reason() },
+        sys::esp_reset_reason_t_ESP_RST_PANIC
+            | sys::esp_reset_reason_t_ESP_RST_INT_WDT
+            | sys::esp_reset_reason_t_ESP_RST_TASK_WDT
+            | sys::esp_reset_reason_t_ESP_RST_WDT
+    )
+}
+
+/// The operator clears the crash guard (`ncp/update/reset`,
+/// `ncp/backend/set`), and a successful flash does.
+fn clear_guard() {
+    let _ = settings::set(ARM_KEY, None);
+    set_streak(0);
+}
+
+/// The ZRHP backend starts: its first minute is guarded like the probe.
+pub fn guard_backend_start() {
+    arm();
+    let spawned = std::thread::Builder::new().name("ncp-guard".into()).stack_size(3072).spawn(|| {
+        std::thread::sleep(BACKEND_GUARD);
+        disarm();
+    });
+    if spawned.is_err() {
+        disarm();
+    }
+}
 
 fn api(code: &str, msg: impl Into<String>) -> ApiError {
     ApiError::new(code, msg)
@@ -191,7 +269,13 @@ impl Prober for UartProber {
                 uart::set_baud(self.ezsp_baud);
                 select::probe_ezsp(ezsp::Port, hub_ezsp::SystemClock::default(), ProbeTimes::default())
             }
-            Probe::Zrhp => select::probe_zrhp(zrhp::Rx(zrhp::Gate::Probe), zrhp::Tx(zrhp::Gate::Probe), zrhp::LINES.to_vec(), cookie(), ProbeTimes::default()),
+            Probe::Zrhp if ZRHP_SKIPPED.load(Ordering::Relaxed) => Err("skipped: the crash guard (ZRHP crashed the hub at every boot)".into()),
+            Probe::Zrhp => {
+                arm();
+                let r = select::probe_zrhp(zrhp::Rx(zrhp::Gate::Probe), zrhp::Tx(zrhp::Gate::Probe), zrhp::LINES.to_vec(), cookie(), ProbeTimes::default());
+                disarm();
+                r
+            }
             Probe::Bootloader => {
                 uart::set_baud(gecko::BAUD);
                 match gecko::probe(&mut GeckoPort::default()) {
@@ -215,8 +299,43 @@ impl Prober for Busy {
     }
 }
 
-/// At boot, before the hub takes the UART: the backend to start.
+/// Stack of the boot's detection thread: the EZSP probe keeps its host on
+/// the stack (the main task has 8 KiB).
+const DETECT_STACK: usize = 16 * 1024;
+
+/// At boot, before the hub takes the UART: the backend to start (on a
+/// thread of its own, joined).
 pub fn boot_detect(board: &BoardProfile) -> Detection {
+    let b = *board;
+    let run = std::thread::Builder::new().name("ncp-detect".into()).stack_size(DETECT_STACK).spawn(move || detect_now(&b));
+    match run.map(|h| h.join()) {
+        Ok(Ok(d)) => d,
+        Ok(Err(_)) | Err(_) => {
+            // No probe ran (or it panicked): the last backend, parked.
+            error!("ncp: the backend detection failed; the UART stays parked");
+            uart::park_from_boot();
+            let backend = settings::get(SEEN_KEY).and_then(|s| kind_of(&s)).unwrap_or(BackendKind::Ezsp);
+            let d = Detection { setting: setting(), backend, found: None, tried: Vec::new(), park: true, why: "the backend detection failed" };
+            let _ = DETECTION.set(d.clone());
+            d
+        }
+    }
+}
+
+fn detect_now(board: &BoardProfile) -> Detection {
+    // The crash guard first: a ZRHP path that crashed the last boots
+    // does not run again.
+    let armed = settings::get(ARM_KEY).is_some();
+    let before = streak();
+    let (streak, skip) = select::zrhp_guard(armed, crash_reset(), before);
+    if armed {
+        let _ = settings::set(ARM_KEY, None);
+    }
+    if streak != before {
+        set_streak(streak);
+        warn!("ncp: a ZRHP path crashed the last boot ({streak} in a row)");
+    }
+    ZRHP_SKIPPED.store(skip, Ordering::Relaxed);
     let setting = setting();
     let hint = settings::get(SEEN_KEY).and_then(|s| kind_of(&s));
     let mut st = state();
@@ -228,10 +347,14 @@ pub fn boot_detect(board: &BoardProfile) -> Detection {
         warn!("ncp: the last MG24 update was interrupted");
     }
     let suspect = matches!(phase.as_str(), "flashing" | "interrupted" | "failed") && st["in_bootloader"] != false;
-    let d = match uart::claim(uart::User::Updater) {
+    let mut d = match uart::claim(uart::User::Updater) {
         Ok(_claim) => select::detect(setting, hint, suspect, &mut UartProber { ezsp_baud: board.uart.line.baud }),
         Err(u) => select::detect(setting, hint, suspect, &mut Busy(u)),
     };
+    if skip {
+        select::apply_zrhp_guard(&mut d);
+        error!("ncp: {}", select::ZRHP_GUARD_WHY);
+    }
     uart::set_baud(board.uart.line.baud);
     if let Some(b) = d.found.as_ref().and_then(Found::backend)
         && hint != Some(b)
@@ -241,6 +364,12 @@ pub fn boot_detect(board: &BoardProfile) -> Detection {
     }
     if st.is_object() && matches!(phase.as_str(), "flashing" | "interrupted" | "failed") {
         st["in_bootloader"] = d.park.into();
+        // The flash may have completed (cut short while the new firmware
+        // was asked): an application answers, the kept network follows.
+        let app = d.found.as_ref().and_then(Found::backend).is_some();
+        if let Some(r) = select::restore_after_interruption(st["restore"].as_str().unwrap_or_default(), app) {
+            st["restore"] = r.into();
+        }
         save_state(&st);
     }
     if d.park {
@@ -701,6 +830,8 @@ fn job(image: &J, o: StartOpts) -> Result<String, String> {
     }
     .into();
     save_state(&st);
+    // A new firmware: crashes of the old one's path no longer count.
+    clear_guard();
     phase("restarting the hub on the new firmware");
     restart_hub();
     Ok(st["message"].as_str().unwrap_or_default().to_string())
@@ -839,7 +970,8 @@ pub fn status_json() -> J {
         "job": {"running": j.running, "phase": j.phase, "attempt": j.attempt, "sent": j.sent, "total": j.total, "message": j.message},
         "update": state(),
         "restoring": *RESTORING.lock().unwrap(),
-        "restore_offered": select::restore_offered(&state()),
+        "restore_offered": !flashing() && select::restore_offered(&state()),
+        "zrhp_guard": {"crashes": streak(), "skipped": ZRHP_SKIPPED.load(Ordering::Relaxed)},
         "chunk": CHUNK_MAX,
     })
 }
@@ -880,6 +1012,7 @@ pub fn status_text() -> String {
 
 /// Stores the backend setting (applied at the next boot).
 pub fn set_backend(s: Setting) -> Result<(), String> {
+    clear_guard();
     settings::set(SETTING_KEY, Some(s.as_str()))
 }
 
@@ -888,6 +1021,9 @@ pub fn restore_request() -> Result<(), ApiError> {
     let st = state();
     if st["backup_epid"].as_str().is_none() {
         return Err(api("not_found", "no network was kept before an NCP update"));
+    }
+    if flashing() {
+        return Err(api("busy", "the MG24 is being flashed"));
     }
     if !select::restore_offered(&st) {
         return Err(api(
@@ -914,6 +1050,7 @@ pub fn reset_request() -> Result<(), ApiError> {
     if flashing() {
         return Err(api("busy", "the MG24 is being flashed"));
     }
+    clear_guard();
     lines::reset_to_app();
     std::thread::Builder::new().stack_size(8192).spawn(restart_hub).map(drop).map_err(|e| api("failed", format!("thread: {e}")))
 }

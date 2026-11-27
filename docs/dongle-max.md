@@ -648,7 +648,10 @@ during the flash** leaves `flashing` stored: the next boot calls it
 `interrupted`, asks the bootloader first and, when the MG24 waits there,
 starts the hub with the UART parked (it runs, shows the state, and never
 sends anything to the bootloader's menu: no boot loop) and offers to flash
-the stored image again; the kept network is restored afterwards.
+the stored image again; the kept network is restored afterwards. When an
+application answers instead (the flash had completed and was cut short
+while the new firmware was asked), the kept network is restored onto it
+at that boot, as after a completed flash.
 
 ### Which backend runs
 
@@ -668,6 +671,20 @@ frames with bad CRCs (and the EZSP probe's reset restarts its link); the
 bootloader probe is a newline. `ncp/update/status` `backend` and `hub` on
 the console show the setting, what answered, every probe and why this
 backend.
+
+**Crash guard.** The ZRHP probe (at boot and after a flash) and the
+ZRHP backend's first minute run armed (NVS `zrh/ncp_zarm`). A boot that
+finds the marker after a panic or a watchdog reset counts a crash
+(`zrh/ncp_zcrash`; a power cut counts nothing); after 2 in a row the boot
+runs nothing ZRHP: EZSP starts with the UART parked (an EmberZNet NCP that
+answers runs normally), `ncp/update/status` `backend.why` and
+`zrhp_guard` say so, and the hub stays reachable to flash another image.
+`ncp/update/reset`, `ncp/backend/set` and a successful flash clear it.
+(HIL of 974b3241: the probe's ZRHP link driver ran on a 16 KiB stack and
+its thread entry alone reserved 16 240 B, an inlined `Link::new` that only
+another link profile needs; the overflow crashed the hub during the
+post-flash check and at every boot after. The entry is 720 B now and the
+probe runs the driver as the backend does, on its 32 KiB stack.)
 
 ### The way back to SONOFF's firmware
 
@@ -718,13 +735,13 @@ the MG24 runs EmberZNet again.
 
 | Request | Fields | Result |
 |---|---|---|
-| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`held`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`, `restore_offered`; also in `hub/system` `ncp_update` |
+| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `zrhp_guard` (`crashes`, `skipped`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`held`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`, `restore_offered`; also in `hub/system` `ncp_update` |
 | `ncp/update/begin` | `size`, `sha256` (hex, optional) | `chunk` (4096), `store`; refused while the hub's data are in RAM (the area is SONOFF's until the claim) |
 | `ncp/update/chunk` | `offset`, `data` (base64, at most 4096 bytes) | `written`; an invalid image is refused (and the upload aborted) as soon as its bytes show it |
 | `ncp/update/end` | | the image (as `image` above) and a `note` |
 | `ncp/update/abort` | | |
 | `ncp/update/start` | `confirm` (true), `foreign` (any image but a ZRHP NCP application), `force` (no backup required), `restore` (default true; a maintenance image never restores) | `state: started`; follow `ncp/update/status` |
-| `ncp/update/restore` | `confirm` (true) | `state: restoring`: the kept network onto the NCP now (as after a switch); only when `restore_offered` (the restore failed or was not asked; `invalid_state` while it is pending or held for an application image) |
+| `ncp/update/restore` | `confirm` (true) | `state: restoring`: the kept network onto the NCP now (as after a switch); only when `restore_offered` (the restore failed, was not asked, or the flash did not finish; `invalid_state` while it is pending or held for an application image) |
 | `ncp/update/reset` | `confirm` (true) | the MG24 reset into its application, the hub restarts |
 | `ncp/backend/set` | `backend`: `auto`, `ezsp`, `zrhp` | from the next boot |
 

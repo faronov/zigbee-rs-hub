@@ -40,6 +40,15 @@ install instructions and the list of merged pull requests. A pre-release
 
 ### Fixes
 
+- **Dongle Max: the hub no longer crashes when it asks the MG24 for the
+  zigbee-rs NCP.** The probe ran the ZRHP link driver on a stack smaller
+  than the driver needs (its thread entry reserved 16 KB for code it never
+  ran), so the check after flashing the zigbee-rs NCP, and every boot
+  after it, crashed the hub. The driver's entry now takes 720 bytes and
+  the probe runs it as the hub's own ZRHP backend does. A ZRHP probe or
+  backend that crashes the hub at two boots in a row is now skipped: the
+  hub starts without it (UART parked), says why, and stays reachable to
+  flash another image.
 - **Dongle Max: `mg24 bootloader` shows the whole menu.** The bootloader
   prints its menu by itself on entry; the wait for the menu after the
   newline stopped at that first copy and cut the second one short.
