@@ -327,4 +327,5 @@ One document format keeps the hub's part small (no YAML, no SQLite, no
 per-source quirks in the firmware) and testable; each converter is tested
 against generated files of its source (`tools/hubctl/src/import`,
 `crates/hub-web/web/ui/mig.html`,
-`integrations/home-assistant/custom_components/zigbee_rs_hub/migrate.py`).
+`custom_components/zigbee_rs_hub/migrate.py` of
+[ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)).

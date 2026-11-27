@@ -77,6 +77,11 @@ class NotesTests(unittest.TestCase):
         self.assertLess(check, text.index("**SONOFF's web console**"))
         self.assertLess(check, app)
         self.assertIn("experimental: bring-up tested; full hub HIL pending", text)
+        # The Home Assistant integration: its own repository and the release to use.
+        ha, v = "https://github.com/faronov/ha-zigbee-rs-hub", release_notes.HA_INTEGRATION_VERSION
+        self.assertIn(f"**Home Assistant integration:** install via HACS from [faronov/ha-zigbee-rs-hub]({ha}) "
+                      f"(HACS > Custom repositories, type Integration), version [{v}]({ha}/releases/tag/v{v})",
+                      text)
         self.assertNotIn("erase-flash", text)
         self.assertIn("`tbr-bridge-0.2.4-app.bin`: tbr-bridge app.", text)
 

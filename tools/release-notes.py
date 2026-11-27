@@ -4,8 +4,9 @@
 The notes are the release's section of CHANGELOG.md (`## X.Y.Z`; a
 pre-release X.Y.Z-rc.N uses its own section if there is one, else X.Y.Z's),
 then the install part generated from release-manifest.json: the asset table,
-the esptool commands and, when the release has it, the SONOFF Dongle Max
-part. GitHub's generated list of merged pull requests follows them
+the esptool commands, when the release has it, the SONOFF Dongle Max
+part, and the Home Assistant integration to use with it. GitHub's
+generated list of merged pull requests follows them
 (`gh release create --generate-notes`).
 
     tools/release-notes.py --manifest dist/release-manifest.json [--changelog CHANGELOG.md] [--require-changelog]
@@ -22,6 +23,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 HEADING = re.compile(r"^## \[?v?([0-9][0-9A-Za-z.+-]*)\]?(?:\s.*)?$")
+# The Home Assistant integration has its own repository and releases (HACS);
+# the notes name the version to use with this hub release. Raise it when a
+# hub release needs a newer integration.
+HA_INTEGRATION_REPO = "faronov/ha-zigbee-rs-hub"
+HA_INTEGRATION_VERSION = "0.6.1"
 
 
 class NotesError(Exception):
@@ -119,6 +125,10 @@ def install_notes(m: dict) -> list[str]:
                    f"(`token` prints the API token). Details: {doc}")
     for f in m.get("extra_files", []):
         out.append(f"\n`{f['name']}`: {f['role']}.")
+    ha = f"https://github.com/{HA_INTEGRATION_REPO}"
+    out.append(f"\n**Home Assistant integration:** install via HACS from [{HA_INTEGRATION_REPO}]({ha}) "
+               f"(HACS > Custom repositories, type Integration), version "
+               f"[{HA_INTEGRATION_VERSION}]({ha}/releases/tag/v{HA_INTEGRATION_VERSION}) or newer.")
     out.append("\nVerify downloads with `SHA256SUMS`; `release-manifest.json` describes every image.")
     return out
 

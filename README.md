@@ -265,7 +265,6 @@ compiler prototype: [`tools/zdefc-proto/`](tools/zdefc-proto/).
 | `definitions/examples/` | Example device definitions (YAML source form) |
 | `tools/herdsman-coverage/` | Coverage and size measurement of zigbee-herdsman-converters definitions (Node + Python) |
 | `tools/zdefc-proto/` | Python prototype of the definition compiler (YAML → CBOR, expression bytecode) |
-| `integrations/home-assistant/` | Home Assistant custom integration `zigbee_rs_hub` over the WebSocket API (config flow, push updates, all entity platforms), its tests and install guide |
 
 ## Framework choice: esp-idf-svc (`std`), not esp-hal
 
@@ -1299,7 +1298,8 @@ UI and the HA integration see.
   equal); renaming anywhere (MQTT, web UI, HA) clears the old retained
   topics, like Zigbee2MQTT.
 - **Home Assistant**: use **either** the hub's integration
-  (`integrations/home-assistant`) **or** MQTT discovery (opt-in), not both
+  ([ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)) **or**
+  MQTT discovery (opt-in), not both
   — each creates the same devices. Discovery follows Zigbee2MQTT
   (`unique_id` `<ieee>_<object>_<base>`, availability via `bridge/state`
   and the device topic).
@@ -1375,8 +1375,20 @@ app-slot lock. zigbee-rs devices advertise OTA manufacturer code 0x6D6B
 
 ## Home Assistant integration
 
-`integrations/home-assistant/custom_components/zigbee_rs_hub` is a custom
-integration for Home Assistant: one persistent WebSocket connection to
+The custom integration `zigbee_rs_hub` has its own repository,
+**[faronov/ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)**
+(up to its 0.6.0 it was `integrations/home-assistant` here), and installs
+and updates through HACS: HACS › ⋮ › *Custom repositories*, add
+`https://github.com/faronov/ha-zigbee-rs-hub` with the type *Integration*,
+download *zigbee-rs hub*, restart Home Assistant, then *Settings › Devices &
+services › Add integration › zigbee-rs hub* (host, port `80`, the API token
+from the hub console `token`). A copied install moves to HACS without losing
+its config entry (same domain). Each hub release's notes name the
+integration version to use; the integration's README has the compatibility
+table, the installation and migration steps, tests (end to end against
+`hubctl --sim serve` built from a hub release) and the API mapping.
+
+In short: one persistent WebSocket connection to
 `ws://<hub>/api` (token from the hub console `token`), a HA device per
 Zigbee/GP device, entities created from the hub's entity model (device-support
 section 4) with live state pushed by the hub, commands through
@@ -1384,9 +1396,7 @@ section 4) with live state pushed by the hub, commands through
 diagnostics. It identifies the hub by `hub/info` (`coordinator_ieee`, added for
 it; minor API addition). Zigbee groups of the hub appear as devices with a
 group light or switch and their scenes as HA scenes (device-support 14.9);
-deleting a group device in HA deletes the group. Installation, tests and the
-API mapping:
-[integrations/home-assistant/README.md](integrations/home-assistant/README.md).
+deleting a group device in HA deletes the group.
 
 The integration is also a catalog client: since the hub downloads nothing,
 Home Assistant fetches the signed release files from the mirror set on the
