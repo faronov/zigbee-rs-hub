@@ -225,7 +225,6 @@ SoftAP и Zigbee OTA этим изменением не добавляются. 
 | `definitions/examples/` | Примеры определений устройств (исходная форма YAML) |
 | `tools/herdsman-coverage/` | Замер покрытия и размеров определений zigbee-herdsman-converters (Node + Python) |
 | `tools/zdefc-proto/` | Прототип компилятора определений на Python (YAML → CBOR, байткод выражений) |
-| `integrations/home-assistant/` | Пользовательская интеграция Home Assistant `zigbee_rs_hub` поверх WebSocket API (config flow, push-обновления, все платформы сущностей), её тесты и инструкция по установке |
 
 ## Выбор фреймворка: esp-idf-svc (`std`), а не esp-hal
 
@@ -1279,7 +1278,7 @@ openHAB, MQTT discovery Home Assistant, скрипты. `crates/hub-mqtt` —
   совпадают); переименование где угодно (MQTT, веб-интерфейс, HA) очищает
   старые retained-топики, как в Zigbee2MQTT.
 - **Home Assistant**: используйте **либо** интеграцию хаба
-  (`integrations/home-assistant`), **либо** MQTT discovery (включается
+  ([ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)), **либо** MQTT discovery (включается
   явно), не оба сразу — каждый создаёт те же устройства. Discovery как у
   Zigbee2MQTT (`unique_id` `<ieee>_<object>_<base>`, доступность через
   `bridge/state` и топик устройства).
@@ -1362,8 +1361,21 @@ OTA-клиент за симулированным NCP, Home Assistant скво�
 
 ## Интеграция с Home Assistant
 
-`integrations/home-assistant/custom_components/zigbee_rs_hub` — пользовательская
-интеграция для Home Assistant: одно постоянное WebSocket-соединение с
+У пользовательской интеграции `zigbee_rs_hub` свой репозиторий —
+**[faronov/ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)**
+(до версии 0.6.0 включительно она лежала здесь, в
+`integrations/home-assistant`); устанавливается и обновляется через HACS:
+HACS › ⋮ › *Custom repositories*, добавить
+`https://github.com/faronov/ha-zigbee-rs-hub` с типом *Integration*, скачать
+*zigbee-rs hub*, перезапустить Home Assistant, затем *Настройки › Устройства и
+службы › Добавить интеграцию › zigbee-rs hub* (адрес, порт `80`, API-токен —
+команда консоли хаба `token`). Скопированная вручную установка переходит на
+HACS без потери записи интеграции (тот же домен). Версия интеграции для
+каждого релиза хаба указана в его release notes; в README интеграции (на
+английском) — таблица совместимости, установка и переход, тесты (сквозные —
+против `hubctl --sim serve` из релиза хаба) и соответствие API.
+
+Коротко: одно постоянное WebSocket-соединение с
 `ws://<хаб>/api` (токен — команда консоли хаба `token`), устройство HA на
 каждое Zigbee/GP-устройство, сущности из модели сущностей хаба (раздел 4
 device-support) с живым состоянием, которое присылает хаб, команды через
@@ -1372,9 +1384,7 @@ device-support) с живым состоянием, которое присыл�
 добавлен для неё; минорное расширение API). Zigbee-группы хаба видны как
 устройства со световой сущностью или выключателем группы, их сцены — как
 сцены HA (device-support 14.9); удаление устройства группы в HA удаляет
-группу. Установка, тесты и соответствие API:
-[integrations/home-assistant/README.md](integrations/home-assistant/README.md)
-(на английском).
+группу.
 
 Интеграция также клиент каталога: хаб сам ничего не скачивает, поэтому Home
 Assistant берёт подписанные файлы релиза с зеркала, заданного на хабе

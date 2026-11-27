@@ -63,32 +63,6 @@ jobs:
       - name: Firmware build selection, release image checks, size accounting
         run: python3 -m unittest tools/test_hub_build.py tools/test_release_images.py tools/test_release_notes.py tools/test_size_report.py tools/test_make_otadata.py
 
-  home-assistant:
-    name: Home Assistant integration (ruff, pytest, e2e against hubctl --sim serve)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: integrations/home-assistant
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          # pytest-homeassistant-custom-component follows HA's Python.
-          python-version: "3.14"
-          cache: pip
-          cache-dependency-path: integrations/home-assistant/requirements-test.txt
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install -r requirements-test.txt
-      - run: ruff check .
-      - run: ruff format --check .
-      - name: Build hubctl and zdefc (the end-to-end tests run its simulated hub and sign a test catalog)
-        working-directory: .
-        run: cargo build -p hubctl -p zdefc
-      - name: pytest
-        run: HUBCTL="$GITHUB_WORKSPACE/target/debug/hubctl" python -m pytest -v
-      - name: End to end on the EZSP backend (hubctl --backend ezsp --sim serve)
-        run: HUBCTL="$GITHUB_WORKSPACE/target/debug/hubctl" HUBCTL_BACKEND=ezsp python -m pytest -v tests/test_e2e_hubctl.py
-
   hub-devices:
     name: hub-devices (engine host tests, clippy, fmt)
     runs-on: ubuntu-latest

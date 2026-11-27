@@ -49,6 +49,18 @@ install instructions and the list of merged pull requests. A pre-release
   EmberZNet devices are admitted by the zigbee-rs NCP's Trust Center;
   late LOG credit is delivered at once).
 
+### Home Assistant
+
+- **The integration has its own repository,
+  [faronov/ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub),
+  and installs and updates through HACS** (HACS › Custom repositories,
+  type Integration). Its version 0.6.1 is 0.6.0 with the new links (no
+  functional change). The domain stays `zigbee_rs_hub`: a copied install
+  moves to HACS without losing its config entry, devices or entities (the
+  steps and a table of integration versions and hub firmware are in its
+  README). `integrations/home-assistant` is gone from this repository; the
+  release notes name the integration version to use.
+
 ### Fixes
 
 - **Dongle Max: the hub no longer crashes when it asks the MG24 for the
