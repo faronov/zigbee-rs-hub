@@ -48,10 +48,11 @@ install instructions and the list of merged pull requests. A pre-release
   the frame counters back.** The restore started from the backup's NWK
   and APS frame counters plus 10 000; the coordinator sends thousands of
   frames a day, so a backup a day or two old made the devices drop its
-  frames. Over the backup's network (the same extended PAN ID and network
-  key) it now starts from the running network's counters when they are
-  higher (note `floor_raised`). A zigbee-rs NCP (ZRHP) already started
-  above the counters it used.
+  frames. It now starts from the NCP's own counters when they are higher
+  (read before the network is left; note `floor_raised`), and a stored
+  network whose counters the NCP does not report gets a margin of 2²⁰
+  (note `counters_unknown`). A zigbee-rs NCP (ZRHP) already started above
+  the counters it used.
 
 ## 0.4.0
 

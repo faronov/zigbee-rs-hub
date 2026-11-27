@@ -454,51 +454,115 @@ fn exhausted_frame_counters_and_incomplete_backups_change_nothing() {
     a.finish();
 }
 
-/// An older backup of the network the NCP runs: its devices have seen
-/// the newer frame counters, so the restore starts from those plus the
-/// margins; another network's counters do not count.
+/// A restore never starts below the NCP's own frame counters: an older
+/// backup of the network it runs (restored directly, or after the leave
+/// hub-app does first), another network's higher counters, a stored
+/// network that is not up.
 #[test]
-fn an_older_backup_of_the_running_network_starts_from_its_newer_frame_counters() {
+fn a_restore_starts_above_the_ncps_own_frame_counters() {
     let mut a = Rig::new(source(13));
     a.next_up();
+    // NWK 50 000, APS 700.
     let items = export(&mut a, true);
+    a.finish();
+    let restore = |cfg: SimConfig, leave_first: bool| {
+        let mut r = Rig::new(cfg);
+        r.next_up();
+        if leave_first {
+            r.admin.leave_reset().unwrap();
+        }
+        let report = r
+            .admin
+            .backup_restore(blob(&items), margins(10_000))
+            .unwrap();
+        let n = r.sim.ncp(|n| n.config().clone());
+        assert_eq!(
+            (n.nwk_frame_counter, n.aps_frame_counter),
+            (report.nwk_fc_start, report.aps_fc_start)
+        );
+        assert_eq!(n.network_key, NKEY);
+        r.finish();
+        report
+    };
     // Days of traffic since the backup.
-    a.sim.ncp(|n| {
-        n.config_mut().nwk_frame_counter = 120_000;
-        n.config_mut().aps_frame_counter = 5_000;
-    });
-    let r = a
+    let newer = SimConfig {
+        nwk_frame_counter: 120_000,
+        aps_frame_counter: 5_000,
+        ..source(13)
+    };
+    for leave_first in [false, true] {
+        let r = restore(newer.clone(), leave_first);
+        assert_eq!(
+            (r.nwk_fc_start, r.aps_fc_start),
+            (130_000, 15_000),
+            "leave first: {leave_first}"
+        );
+        assert!(r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
+    }
+    let other = SimConfig {
+        network_key: LINK,
+        nwk_frame_counter: 900_000,
+        ..source(13)
+    };
+    let r = restore(other, false);
+    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (910_000, 10_700));
+    // networkInit failed: the network is stored, not up.
+    let down = SimConfig {
+        network_init_fails: true,
+        ..newer.clone()
+    };
+    let mut d = Rig::new(down);
+    d.next_up();
+    assert_eq!(d.coord().status().network_state, NetState::FormedDown);
+    d.sim.ncp(|n| n.config_mut().network_init_fails = false);
+    let r = d
         .admin
         .backup_restore(blob(&items), margins(10_000))
         .unwrap();
     assert_eq!((r.nwk_fc_start, r.aps_fc_start), (130_000, 15_000));
-    assert!(
-        r.notes.contains(&(0, restore_note::FLOOR_RAISED)),
-        "{:?}",
-        r.notes
-    );
-    let n = a.sim.ncp(|n| n.config().clone());
-    assert_eq!(
-        (n.nwk_frame_counter, n.aps_frame_counter),
-        (130_000, 15_000)
-    );
-    assert_eq!(n.network_key, NKEY);
-    a.finish();
-
-    // Another network with higher counters: the backup's plus the margins.
-    let mut c = Rig::new(SimConfig {
-        network_key: LINK,
-        nwk_frame_counter: 900_000,
-        ..source(13)
-    });
-    c.next_up();
-    let r = c
-        .admin
-        .backup_restore(blob(&items), margins(10_000))
-        .unwrap();
+    d.finish();
+    // Lower own counters: the backup's.
+    let r = restore(source(13), false);
     assert_eq!((r.nwk_fc_start, r.aps_fc_start), (60_000, 10_700));
     assert!(!r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
-    c.finish();
+}
+
+/// A stored network whose frame counters the NCP does not report (or
+/// reports as 0 while it is not up) gets a margin of 2^20 over the
+/// backup's, with a note.
+#[test]
+fn counters_the_ncp_does_not_report_get_a_large_margin() {
+    let mut a = Rig::new(source(13));
+    a.next_up();
+    let items = export(&mut a, true);
+    a.finish();
+    let silent = SimConfig {
+        nwk_frame_counter_readable: false,
+        aps_frame_counter_readable: false,
+        ..source(13)
+    };
+    let not_up = SimConfig {
+        network_init_fails: true,
+        nwk_frame_counter: 0,
+        aps_frame_counter: 0,
+        ..source(13)
+    };
+    for cfg in [silent, not_up] {
+        let mut b = Rig::new(cfg);
+        b.next_up();
+        b.sim.ncp(|n| n.config_mut().network_init_fails = false);
+        let r = b
+            .admin
+            .backup_restore(blob(&items), margins(10_000))
+            .unwrap();
+        assert_eq!(
+            (r.nwk_fc_start, r.aps_fc_start),
+            (50_000 + (1 << 20), 700 + (1 << 20))
+        );
+        assert!(r.notes.contains(&(0, restore_note::COUNTERS_UNKNOWN)));
+        assert!(!r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
+        b.finish();
+    }
 }
 
 #[test]

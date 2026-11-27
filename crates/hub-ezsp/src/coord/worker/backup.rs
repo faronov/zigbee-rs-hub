@@ -29,13 +29,61 @@ pub(super) enum Step {
     Verify { update_id_written: bool },
 }
 
-/// The first frame counters of a restore.
-#[derive(Debug, Clone, Copy)]
+/// The first frame counters of a restore ([`start_counters`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Counters {
     nwk_start: u32,
     aps_start: u32,
-    /// From the running network's counters, higher than the backup's.
+    /// The NCP's own counters were higher than the backup's.
     raised: bool,
+    /// The NCP stored a network and did not report its counters.
+    unknown: bool,
+}
+
+/// The NCP's own outgoing frame counters ([`Worker::read_live`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Live {
+    pub(super) nwk: Option<u32>,
+    pub(super) aps: Option<u32>,
+}
+
+/// The margin over a counter the NCP stored but did not report, as for a
+/// backup without an APS counter: ~150 days of a busy coordinator's frames.
+const UNKNOWN_MARGIN: u32 = 1 << 20;
+
+/// The first frame counters of a restore: the backup's (`nwk`, `aps`) plus
+/// the margins, from the NCP's own (`live`: `None` when it stores no
+/// network) where those are higher, whatever network they belong to (a
+/// higher counter is always safe; an older backup of the running network
+/// would otherwise go back below what its devices have seen, and they
+/// drop such frames). A counter of a stored network that the NCP does not
+/// report gets a margin of at least 2²⁰ instead.
+pub(super) fn start_counters(
+    (nwk, aps): (u32, u32),
+    live: Option<Live>,
+    o: RestoreOptions,
+) -> Result<Counters, CoordError> {
+    let pick = |backup: u32, own: Option<Option<u32>>, margin: u32| match own {
+        Some(Some(c)) => (backup.max(c), margin, c > backup, false),
+        Some(None) => (backup, margin.max(UNKNOWN_MARGIN), false, true),
+        None => (backup, margin, false, false),
+    };
+    let (n, n_margin, n_raised, n_unknown) = pick(nwk, live.map(|l| l.nwk), o.nwk_margin);
+    let (a, a_margin, a_raised, a_unknown) = pick(aps, live.map(|l| l.aps), o.aps_margin);
+    let Some(nwk_start) = n.checked_add(n_margin) else {
+        return Err(refused(
+            "the network key's frame counter plus the margin passes 2^32: the network needs a new network key first",
+        ));
+    };
+    let Some(aps_start) = a.checked_add(a_margin) else {
+        return Err(refused("the APS frame counter plus the margin passes 2^32"));
+    };
+    Ok(Counters {
+        nwk_start,
+        aps_start,
+        raised: n_raised || a_raised,
+        unknown: n_unknown || a_unknown,
+    })
 }
 
 /// A restore in progress across NCP resets.
@@ -346,63 +394,41 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         }
     }
 
-    /// The first NWK and APS frame counters of a restore: the backup's
-    /// plus the margins, or the running network's plus the margins when
-    /// it is the backup's network and its counters are higher (an older
-    /// backup restored over it: its devices have seen the newer ones, and
-    /// a counter that goes back is dropped by every one of them).
+    /// The first NWK and APS frame counters of a restore
+    /// ([`start_counters`]), with the NCP's own: of the network it stores,
+    /// or of the one it left for the restore ([`Self::leave_reset`]).
     fn restore_counters(&mut self, plan: &Plan, o: RestoreOptions) -> Result<Counters, CoordError> {
-        let live = self.live_counters(plan);
-        let live = live.map_err(|e| self.admin_error(e))?;
+        let live = if self.net != NetState::None {
+            let r = self.read_live();
+            Some(r.map_err(|e| self.admin_error(e))?)
+        } else {
+            self.left
+        };
         let backup = (plan.nwk_counter, plan.tc_link.map_or(0, |t| t.tx_counter));
-        let (nwk, aps) = live.map_or(backup, |(n, a)| {
-            (backup.0.max(n), a.map_or(backup.1, |a| backup.1.max(a)))
-        });
-        let Some(nwk_start) = nwk.checked_add(o.nwk_margin) else {
-            return Err(refused(
-                "the network key's frame counter plus the margin passes 2^32: the network needs a new network key first",
-            ));
-        };
-        let Some(aps_start) = aps.checked_add(o.aps_margin) else {
-            return Err(refused("the APS frame counter plus the margin passes 2^32"));
-        };
-        Ok(Counters {
-            nwk_start,
-            aps_start,
-            raised: (nwk, aps) != backup,
-        })
+        start_counters(backup, live, o)
     }
 
     /// The outgoing NWK and APS frame counters of the network the NCP
-    /// runs, if it is the backup's: the same extended PAN ID and, when
-    /// the NCP exports it, the same network key (the extended PAN ID
-    /// alone otherwise, as for the ownership).
-    fn live_counters(&mut self, plan: &Plan) -> Result<Option<(u32, Option<u32>)>, HostError> {
-        if self.net != NetState::Up {
-            return Ok(None);
-        }
-        let p = match self.host.get_network_parameters() {
-            Ok((_, p)) => p,
-            Err(e) if is_link_error(&e) => return Err(e),
-            Err(_) => return Ok(None),
-        };
-        if p.extended_pan_id != plan.ext_pan_id
-            || self
-                .export_key(SecManContext::network_key())?
-                .is_some_and(|k| k != plan.network_key)
-        {
-            return Ok(None);
-        }
-        let nwk = match self.try_call(&Command::GetNetworkKeyInfo)? {
+    /// stores, each `None` where it does not answer. A 0 of a network that
+    /// is not up counts as no answer: UNVERIFIED whether EmberZNet reports
+    /// them before `networkInit` brought the network up.
+    pub(super) fn read_live(&mut self) -> Result<Live, HostError> {
+        let up = self.net == NetState::Up;
+        let known = |v: Option<u32>| v.filter(|&c| up || c != 0);
+        let info = match self.try_call(&Command::GetNetworkKeyInfo)? {
             Some(Response::GetNetworkKeyInfo { status, info })
                 if status.is_success() && info.network_key_set =>
             {
                 Some(info.network_key_frame_counter)
             }
-            _ => self.value_u32(ValueId::NWK_FRAME_COUNTER)?,
+            _ => None,
         };
-        let Some(nwk) = nwk else { return Ok(None) };
-        Ok(Some((nwk, self.value_u32(ValueId::APS_FRAME_COUNTER)?)))
+        let nwk = match known(info) {
+            Some(n) => Some(n),
+            None => known(self.value_u32(ValueId::NWK_FRAME_COUNTER)?),
+        };
+        let aps = known(self.value_u32(ValueId::APS_FRAME_COUNTER)?);
+        Ok(Live { nwk, aps })
     }
 
     fn ieee_plan(
@@ -541,6 +567,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                             .notes
                             .push((0, restore_note::UPDATE_ID_NOT_RESTORED));
                     }
+                    self.left = None;
                     info!(
                         "ezsp: network restored (PAN 0x{:04X}, channel {}, {} link keys, {} children)",
                         r.plan.pan_id, r.plan.channel, r.report.link_keys_on_ncp, r.report.children
@@ -579,10 +606,17 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         };
         if c.raised {
             info!(
-                "ezsp: the NCP runs the backup's network with newer frame counters: the restore starts from them (NWK {}, APS {})",
+                "ezsp: the NCP's frame counters are newer than the backup's: the restore starts from them (NWK {}, APS {})",
                 c.nwk_start, c.aps_start
             );
             report.notes.push((0, restore_note::FLOOR_RAISED));
+        }
+        if c.unknown {
+            warn!(
+                "ezsp: the NCP stores a network whose frame counters it does not report: the restore adds 2^20 (NWK {}, APS {})",
+                c.nwk_start, c.aps_start
+            );
+            report.notes.push((0, restore_note::COUNTERS_UNKNOWN));
         }
         if self.net != NetState::None || self.ownership != NetworkOwnership::NoNetwork {
             self.leave_reset()?;

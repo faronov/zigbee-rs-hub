@@ -1533,7 +1533,7 @@ impl Admin {
 
 /// The API name of a [`hub_coord::restore_note`].
 fn note_name(n: u8) -> &'static str {
-    ["", "host_backed", "child_demoted", "ignored", "floor_raised", "ieee_kept", "ieee_written_once", "ieee_rewritten", "tclk_root_generated", "update_id_not_restored"]
+    ["", "host_backed", "child_demoted", "ignored", "floor_raised", "ieee_kept", "ieee_written_once", "ieee_rewritten", "tclk_root_generated", "update_id_not_restored", "counters_unknown"]
         .get(usize::from(n))
         .copied()
         .unwrap_or("unknown")

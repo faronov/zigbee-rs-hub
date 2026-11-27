@@ -1001,6 +1001,27 @@ fn ezsp_backup_restores_onto_a_new_dongle() {
     rig.finish();
 }
 
+/// EZSP: an older backup restored over its own running network through the
+/// API (the app leaves the network before the backend restores it): the
+/// frame counters start from the network's newer ones, not the backup's.
+#[test]
+fn ezsp_an_older_backup_of_the_running_network_keeps_its_newer_counters() {
+    let mut src = ezsp_sim(true, 0xDD);
+    src.nwk_frame_counter = 50_000;
+    let rig = Rig::ezsp(src, Store::volatile());
+    let sim = rig.ezsp.clone().unwrap();
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    let backup = ok(&call(&rig.app, sid, &rx, 1, json!({"type": "network/backup"}))).clone();
+    sim.ncp(|n| n.config_mut().nwk_frame_counter = 120_000);
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true}));
+    let rep = ok(&r);
+    assert_eq!(rep["nwk_fc_start"], 130_000, "{rep}");
+    assert!(rep["notes"].as_array().unwrap().iter().any(|n| n["note"] == "floor_raised"), "{rep}");
+    assert_eq!(sim.ncp(|n| n.config().nwk_frame_counter), 130_000);
+    rig.finish();
+}
+
 /// EZSP (`NcpNv`): a restore over a network the NCP stores needs `force`,
 /// over records of another network `confirm` (they are re-tagged);
 /// refused, neither the NCP nor the records change. Confirmed, the records

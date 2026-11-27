@@ -471,13 +471,12 @@ stock and SONOFF's original files read back).
    backup (Settings › Backup: the network, its devices and keys, the
    hub's groups) onto the same network, Settings › Backup and restore ›
    Restore from a file (`network/restore`; it asks for `force`, as the
-   MG24 runs the network). Over the backup's own network a restore starts
-   the frame counters from the running network's when they are higher
-   than the backup's (EZSP since 0.4.1, note `floor_raised`:
-   `docs/ezsp-backend.md`; a zigbee-rs NCP always starts above the
-   counters it used), so an older backup does not roll them back (the
-   coordinator sends thousands of frames a day, and devices drop frames
-   whose counter went back). Names, areas, automations and the app's
+   MG24 runs the network). A restore starts the frame counters from the
+   NCP's own when they are higher than the backup's (EZSP since 0.4.1,
+   note `floor_raised`: `docs/ezsp-backend.md`; a zigbee-rs NCP always
+   starts above the counters it used), so an older backup does not roll
+   them back (the coordinator sends thousands of frames a day, and devices
+   drop frames whose counter went back). Names, areas, automations and the app's
    settings are not in the backup: set them again (or import the names
    from Zigbee2MQTT or ZHA files if the network came from there:
    `docs/migration.md`).

@@ -439,12 +439,18 @@ checks of step 0 alone, without changing anything):
 0. Checks: the backup's coordinator, network (security level 5, channel
    11–26) and network key; both frame counters plus their margins below
    2³²; the coordinator IEEE (below). A refusal leaves the NCP as it is.
-   When the NCP runs the backup's own network (the same extended PAN ID,
-   and the same network key when the NCP exports it), the counters start
-   from the running network's NWK and APS frame counters
+   The counters start from the NCP's own NWK and APS frame counters
    (`getNetworkKeyInfo`, `getValue`) where they are higher than the
-   backup's (an older backup: the devices have seen the newer counters),
-   note `floor_raised`.
+   backup's, whatever network they belong to (a higher counter is always
+   safe; an older backup of the running network would otherwise go back
+   below what its devices have seen): of the network the NCP stores, up
+   or not, or of the one it left just before (hub-app leaves first; the
+   backend reads them before every leave), note `floor_raised`. A stored
+   network whose counter the NCP does not report (or reports as 0 while
+   it is not up: UNVERIFIED whether EmberZNet has it before
+   `networkInit`) gets a margin of at least 2²⁰ over the backup's (note
+   `counters_unknown`; the margin used for a backup without an APS
+   counter, ~150 days of a busy coordinator's frames).
 1. hub-app tags the records with the backup's extended PAN ID (after
    leaving the network the NCP stores, as for `network/reset`), then the
    backend leaves any network left and clears the key table

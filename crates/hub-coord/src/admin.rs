@@ -404,6 +404,9 @@ pub mod restore_note {
     pub const TCLK_ROOT_GENERATED: u8 = 8;
     /// The NWK update ID could not be restored (the NCP formed with 0).
     pub const UPDATE_ID_NOT_RESTORED: u8 = 9;
+    /// The NCP stored (or had just left) a network whose outgoing frame
+    /// counter it did not report: the restore added a margin of 2²⁰.
+    pub const COUNTERS_UNKNOWN: u8 = 10;
 }
 
 /// Outcome of a restore.
