@@ -556,6 +556,35 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.zg_event("bindings_updated", body);
     }
 
+    /// A sleepy device's groups or bindings requests left its send queue
+    /// (it woke up) or went back into it: the records whose `queued`
+    /// changed are published again.
+    pub(crate) fn zg_queue_changed(&mut self, dev: &str) {
+        if self
+            .zg
+            .bindings
+            .iter()
+            .any(|b| b.device == dev && (b.reading || !b.ops.is_empty()))
+        {
+            self.bindings_event(dev);
+        }
+        let groups: Vec<u16> = self
+            .zg
+            .groups
+            .iter()
+            .filter(|g| {
+                g.members.iter().any(|m| {
+                    m.device == dev
+                        && matches!(m.state, MemberState::Pending | MemberState::Removing)
+                })
+            })
+            .map(|g| g.id)
+            .collect();
+        for g in groups {
+            self.group_event(g);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Group devices and entities (in `devices/*` and `entities/*`).
 

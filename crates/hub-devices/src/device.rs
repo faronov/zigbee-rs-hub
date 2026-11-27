@@ -281,6 +281,9 @@ pub struct Queued {
     pub purpose: crate::hub::Purpose,
     /// ZCL/ZDO TSN.
     pub tsn: u8,
+    /// Times it was sent already (a request parked after a timeout or a
+    /// failed delivery keeps its count: the sleepy retries are bounded).
+    pub tries: u8,
 }
 
 /// GP specifics of a device.
@@ -371,6 +374,10 @@ pub struct Device {
     pub interview_resumes: u8,
     /// The next resumption is not before this time; not persisted.
     pub interview_resume_at: Millis,
+    /// The interview was completed by a quirk (`"lumi"`: the Xiaomi
+    /// identity and endpoint layout filled in, `hub::lumi`) instead of
+    /// the device's answers; not persisted.
+    pub interview_quirk: Option<&'static str>,
     /// Attribute knowledge.
     pub attrs: AttrCache,
     /// Current resolution.
@@ -479,6 +486,7 @@ impl Device {
             interview_partial: false,
             interview_resumes: 0,
             interview_resume_at: 0,
+            interview_quirk: None,
             attrs: AttrCache::default(),
             resolution: Resolution::default(),
             entities: Vec::new(),
@@ -717,6 +725,11 @@ impl Device {
         // their fields.
         if self.left {
             v["unavailable_reason"] = "left".into();
+        }
+        // Sleepy: requests wait until it is next heard from (the web UI's
+        // "press a button" hint).
+        if self.sleepy() {
+            v["sleepy"] = true.into();
         }
         if let Some(a) = self.approximate_json() {
             v["definition_approximate"] = a;

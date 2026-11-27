@@ -530,6 +530,79 @@ pub fn parse_report_attributes(p: &[u8]) -> Result<Vec<(u16, TypedValue)>, Codec
     parse_write_attributes(p)
 }
 
+/// Xiaomi's structs that come typed as a character string: Basic 0xFF01,
+/// 0xFF02 and Lumi 0xFCC0/0x00F7.
+fn xiaomi_blob(cluster: u16, attr: u16) -> bool {
+    matches!(
+        (cluster, attr),
+        (0x0000, 0xFF01 | 0xFF02) | (0xFCC0, 0x00F7)
+    )
+}
+
+/// `rest` is records up to a tail too short for one (zhaquirks' check of
+/// a length guess: what follows it parses).
+fn records_parse(rest: &[u8]) -> bool {
+    let mut r = Reader::new(rest);
+    while r.remaining() >= 3 {
+        let ok = r.u16().is_ok()
+            && r.u8()
+                .is_ok_and(|t| decode_value(ZclType(t), &mut r).is_ok());
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// Parses Report Attributes leniently, for what devices send: the records
+/// before a malformed one are kept, a remainder too short for a record is
+/// ignored. Xiaomi's structs ([`xiaomi_blob`]) typed as a character string
+/// are octet strings whose length byte may be one off (zhaquirks tries the
+/// length, one less and one more, and takes the first that leaves a
+/// parsable rest; zigbee-herdsman skips a trailing byte); typed as a ZCL
+/// structure, the elements before a malformed one are kept.
+pub fn parse_report_lenient(cluster: u16, p: &[u8]) -> Vec<(u16, TypedValue)> {
+    let mut r = Reader::new(p);
+    let mut out = Vec::new();
+    while r.remaining() >= 3 {
+        let (Ok(attr), Ok(t)) = (r.u16(), r.u8()) else {
+            break;
+        };
+        let ty = ZclType(t);
+        let value = match t {
+            0x41 | 0x42 if xiaomi_blob(cluster, attr) => {
+                let Ok(n) = r.u8() else { break };
+                let rest = r.rest();
+                let n = usize::from(n);
+                let len = [n, n.wrapping_sub(1), n + 1]
+                    .into_iter()
+                    .find(|&l| l <= rest.len() && records_parse(&rest[l..]))
+                    .unwrap_or(n.min(rest.len()));
+                let Ok(b) = r.take(len) else { break };
+                TypedValue::new(ZclType::OCTET_STR, ZclValue::Octets(b.to_vec()))
+            }
+            0x4C if xiaomi_blob(cluster, attr) => {
+                let Ok(n) = r.u16() else { break };
+                let mut items = Vec::new();
+                for _ in 0..n {
+                    let Ok(et) = r.u8().map(ZclType) else { break };
+                    match decode_value(et, &mut r) {
+                        Ok(v) => items.push((et, v)),
+                        Err(_) => break,
+                    }
+                }
+                TypedValue::new(ty, ZclValue::Struct(items))
+            }
+            _ => match decode_value(ty, &mut r) {
+                Ok(v) => TypedValue::new(ty, v),
+                Err(_) => break,
+            },
+        };
+        out.push((attr, value));
+    }
+    out
+}
+
 /// Encodes Report Attributes.
 pub fn report_attributes(records: &[(u16, TypedValue)]) -> Result<Vec<u8>, CodecError> {
     write_attributes(records)
@@ -661,5 +734,47 @@ mod tests {
         let back = read_reporting_config_rsp(&[recs[0].clone(), recs[1].clone()]).unwrap();
         assert_eq!(back, p[..15]);
         assert!(parse_read_reporting_config_rsp(&[0x00, 0x00, 0x00]).is_err());
+    }
+
+    /// Xiaomi's Basic 0xFF01 as a character string whose length byte is one
+    /// off, followed by another record or by a stray byte; a malformed
+    /// record keeps the ones before it.
+    #[test]
+    fn lenient_reports_take_xiaomi_structs() {
+        let tlv = [0x01, 0x21, 0xBD, 0x0B, 0x64, 0x10, 0x01];
+        let ff01 = |len: u8| [&[0x01, 0xFF, 0x42, len][..], &tlv].concat();
+        let model = [0x05, 0x00, 0x42, 0x02, b'l', b'u'];
+        for len in [7, 6, 8] {
+            let recs = parse_report_lenient(0x0000, &[ff01(len), model.to_vec()].concat());
+            assert_eq!(recs.len(), 2, "length byte {len}");
+            assert_eq!(
+                recs[0].1.value,
+                ZclValue::Octets(tlv.to_vec()),
+                "length byte {len}"
+            );
+            assert_eq!(recs[1].1.value, ZclValue::String("lu".into()));
+        }
+        let recs = parse_report_lenient(0x0000, &[ff01(7), vec![0x00]].concat());
+        assert_eq!(recs.len(), 1);
+        // Another cluster's string is a string.
+        assert_eq!(
+            parse_report_lenient(0x0006, &[0x01, 0xFF, 0x42, 0x01, b'a'])[0]
+                .1
+                .ty,
+            ZclType::CHAR_STR
+        );
+        // A truncated second record: the first stays.
+        let recs = parse_report_lenient(
+            0x0402,
+            &[0x00, 0x00, 0x29, 0x59, 0x08, 0x01, 0x00, 0x29, 0x59],
+        );
+        assert_eq!(
+            recs,
+            vec![(0, TypedValue::new(ZclType::I16, ZclValue::Int(2137)))]
+        );
+        assert!(
+            parse_report_attributes(&[0x00, 0x00, 0x29, 0x59, 0x08, 0x01, 0x00, 0x29, 0x59])
+                .is_err()
+        );
     }
 }

@@ -32,6 +32,7 @@ use crate::zdo::{self, ZdoMessage};
 
 pub(crate) mod control;
 pub mod import;
+pub(crate) mod lumi;
 pub mod zgroups;
 
 /// Hub configuration.
@@ -360,10 +361,48 @@ pub(crate) struct Pending {
     pub(crate) device: String,
     pub(crate) purpose: Purpose,
     sent_at: Millis,
+    /// Times it was sent before this transmission (a sleepy device's
+    /// request keeps the count while parked, [`Queued::tries`]).
     retries: u8,
     req: ApsRequest,
     /// The request in flight (a retry has its own).
     rid: RequestId,
+}
+
+/// How many times a request is sent before it fails, timeouts and failed
+/// deliveries alike. A sleepy device's request waits for the device's
+/// next frame between its tries, so for it these bound the wake-ups one
+/// interview step takes; zigbee-herdsman's interview tries the Node
+/// descriptor 6 times, the endpoint list and each Basic attribute twice
+/// (a Simple descriptor: its ZDO request's own retry, also 2 here).
+fn max_tries(purpose: &Purpose, sleepy: bool) -> u8 {
+    use InterviewStep::{ActiveEp, Basic, NodeDesc, SimpleDesc};
+    match purpose {
+        Purpose::Check => 1,
+        Purpose::Interview(NodeDesc) if sleepy => 6,
+        Purpose::Interview(ActiveEp | SimpleDesc(_) | Basic(_)) if sleepy => 2,
+        _ => 3,
+    }
+}
+
+/// A request to a device goes to its current address when it is sent
+/// again (a retry, a request parked for a sleeping device): after a
+/// rejoin under a new NWK address, also the address of interest of the
+/// ZDO descriptor requests about it (Node, Power, Simple, Active EP).
+fn readdress(req: &mut ApsRequest, nwk: Option<u16>) {
+    let (ApsDst::Nwk(old), Some(nwk)) = (req.dst, nwk) else {
+        return;
+    };
+    if old == nwk {
+        return;
+    }
+    req.dst = ApsDst::Nwk(nwk);
+    if req.profile == 0
+        && (0x0002..=0x0005).contains(&req.cluster)
+        && req.payload.get(1..3) == Some(&old.to_le_bytes()[..])
+    {
+        req.payload[1..3].copy_from_slice(&nwk.to_le_bytes());
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -416,6 +455,10 @@ const INTERVIEW_RESUMES: u8 = 5;
 /// announces.
 const INTERVIEW_RESUME_MS: Millis = 10 * 60_000;
 const MAINS_SILENCE_MS: Millis = 10 * 60_000;
+/// The interview's Basic reads of the identity (ModelIdentifier,
+/// ManufacturerName) come first; a failure of a later one does not make
+/// the interview partial.
+const BASIC_IDENTITY: usize = 2;
 const DEDUP_MS: Millis = 2_000;
 const HOUR_S: u64 = 3600;
 
@@ -807,6 +850,21 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.nwk_index.insert(nwk, id.to_string());
     }
 
+    /// A Zigbee device's NWK address (a join, its Device_annce, a frame
+    /// with its IEEE): what waits for it is sent to the new address
+    /// ([`readdress`]), the old one no longer finds it.
+    fn renumber(&mut self, id: &str, nwk: u16) {
+        let Some(DeviceKind::Zigbee { nwk: n, .. }) = self.devices.get_mut(id).map(|d| &mut d.kind)
+        else {
+            return;
+        };
+        let old = std::mem::replace(n, nwk);
+        if old != nwk && self.nwk_index.get(&old).is_some_and(|x| x == id) {
+            self.nwk_index.remove(&old);
+        }
+        self.nwk_index.insert(nwk, id.to_string());
+    }
+
     /// A `network` topic event from the host core, e.g.
     /// `{"topic": "permit_join", "remaining_s": 180}`.
     pub fn network_event(&mut self, body: J) {
@@ -876,21 +934,31 @@ impl<T: ZigbeeTransport> Hub<T> {
             return Err(CoordError::Other("unknown device".into()));
         };
         if dev.sleepy() && now > dev.awake_until {
-            dev.queue.push_back(Queued { req, purpose, tsn });
+            dev.queue.push_back(Queued {
+                req,
+                purpose,
+                tsn,
+                tries: 0,
+            });
             return Ok(None);
         }
-        self.transmit(dev_id, req, purpose, tsn, zdo, now).map(Some)
+        self.transmit(dev_id, req, purpose, tsn, zdo, 0, now)
+            .map(Some)
     }
 
+    /// Sends a request; `tries`: times it was sent before.
+    #[allow(clippy::too_many_arguments)]
     fn transmit(
         &mut self,
         dev_id: &str,
-        req: ApsRequest,
+        mut req: ApsRequest,
         purpose: Purpose,
         tsn: u8,
         zdo: bool,
+        tries: u8,
         now: Millis,
     ) -> Result<RequestId, CoordError> {
+        readdress(&mut req, self.devices.get(dev_id).and_then(Device::nwk));
         let rid = match self.transport.submit(Request::Aps(req.clone())) {
             Ok(rid) => rid,
             Err(e) => {
@@ -920,7 +988,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                         device: dev_id.to_string(),
                         purpose,
                         sent_at: now,
-                        retries: 0,
+                        retries: tries,
                         req,
                         rid,
                     },
@@ -1001,11 +1069,19 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         };
         let q: Vec<Queued> = dev.queue.drain(..).collect();
+        let groups = q.iter().any(|i| matches!(i.purpose, Purpose::Group(_)));
         for item in q {
             let zdo = item.req.profile == 0;
             let (app, cluster) = (matches!(item.purpose, Purpose::App), item.req.cluster);
-            if let Err(e) = self.transmit(dev_id, item.req, item.purpose, item.tsn, zdo, now)
-                && app
+            if let Err(e) = self.transmit(
+                dev_id,
+                item.req,
+                item.purpose,
+                item.tsn,
+                zdo,
+                item.tries,
+                now,
+            ) && app
             {
                 self.app_outcomes.push(AppOutcome {
                     device: dev_id.to_string(),
@@ -1014,6 +1090,39 @@ impl<T: ZigbeeTransport> Hub<T> {
                     terminal: Terminal::Refused(e),
                 });
             }
+        }
+        // Their records say `queued` no more.
+        if groups {
+            self.zg_queue_changed(dev_id);
+        }
+    }
+
+    /// Parks a sleepy device's request that timed out or was not
+    /// delivered until the device is next heard from (one more try
+    /// counted), or fails it once it had its tries.
+    fn park_or_fail(&mut self, mut p: Pending, tsn: u8, err: ApiError, now: Millis) {
+        let dev = p.device.clone();
+        p.retries += 1;
+        let parked = p.retries < max_tries(&p.purpose, true);
+        if parked {
+            let group = matches!(p.purpose, Purpose::Group(_));
+            if let Some(d) = self.devices.get_mut(&dev) {
+                d.queue.push_back(Queued {
+                    req: p.req,
+                    purpose: p.purpose.clone(),
+                    tsn,
+                    tries: p.retries,
+                });
+            }
+            if group {
+                self.zg_queue_changed(&dev);
+            }
+        } else {
+            self.fail_purpose(&dev, &p.purpose, err, now);
+        }
+        // A lumi device stuck in its interview (hub::lumi).
+        if parked && matches!(p.purpose, Purpose::Interview(_)) {
+            self.lumi_quirk(&dev, false, now);
         }
     }
 
@@ -1024,17 +1133,16 @@ impl<T: ZigbeeTransport> Hub<T> {
     pub fn on_device_joined(&mut self, ieee: u64, nwk: u16, now: Millis) {
         let id = zigbee_id(ieee);
         if let Some(d) = self.devices.get_mut(&id) {
-            if let DeviceKind::Zigbee { nwk: n, .. } = &mut d.kind {
-                *n = nwk;
-            }
             d.awake_until = now + AWAKE_AFTER_JOIN_MS;
             let left = d.left;
-            self.nwk_index.insert(nwk, id.clone());
+            self.renumber(&id, nwk);
             // A device that had left is back.
             if left {
                 self.seen(&id, None, None, now);
             }
             self.on_rejoin(&id, now);
+            // Awake: what waits for it goes out (to its new address).
+            self.flush_queue(&id, now);
             return;
         }
         let mut d = Device::new(id.clone(), DeviceKind::Zigbee { ieee, nwk }, now);
@@ -1058,6 +1166,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             ));
         }
         d.interview_partial = false;
+        d.interview_quirk = None;
         // Asked for: the automatic resumptions start over.
         d.interview_resumes = 0;
         d.interview_resume_at = 0;
@@ -1170,6 +1279,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.interview_resume_at = now + (INTERVIEW_RESUME_MS << d.interview_resumes);
         d.interview_resumes += 1;
         d.interview_partial = false;
+        d.interview_quirk = None;
         let step = resume_step(d);
         self.interview_step(id, step, now);
         true
@@ -1195,9 +1305,13 @@ impl<T: ZigbeeTransport> Hub<T> {
         });
     }
 
-    const BASIC_BATCHES: [&'static [u16]; 2] = [
-        &[0x0004, 0x0005, 0x0007, 0x0000, 0x0001],
-        &[0x0002, 0x0003, 0x0006, 0x4000],
+    /// Basic attributes the interview reads, one per request as
+    /// zigbee-herdsman does (some devices, old Xiaomi ones among them, do
+    /// not answer a read of several): the identity first
+    /// ([`BASIC_IDENTITY`] of them), then the rest, which are optional (a
+    /// failure does not make the interview partial).
+    const BASIC_ATTRS: [u16; 9] = [
+        0x0005, 0x0004, 0x0007, 0x0000, 0x0001, 0x0002, 0x0003, 0x0006, 0x4000,
     ];
 
     fn interview_step(&mut self, id: &str, step: InterviewStep, now: Millis) {
@@ -1246,13 +1360,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                         .iter()
                         .find(|e| e.in_clusters.contains(&cl::BASIC))
                         .map(|e| e.ep);
-                match (ep, Self::BASIC_BATCHES.get(i)) {
-                    (Some(ep), Some(attrs)) => self.read_attrs(
+                match (ep, Self::BASIC_ATTRS.get(i)) {
+                    (Some(ep), Some(attr)) => self.read_attrs(
                         id,
                         ep,
                         cl::BASIC,
                         None,
-                        attrs,
+                        &[*attr],
                         Purpose::Interview(step),
                         now,
                     ),
@@ -1317,19 +1431,18 @@ impl<T: ZigbeeTransport> Hub<T> {
         {
             let did = zigbee_id(ieee);
             if self.devices.contains_key(&did) {
-                if let Some(DeviceKind::Zigbee { nwk: n, .. }) =
-                    self.devices.get_mut(&did).map(|d| &mut d.kind)
-                {
-                    *n = nwk;
-                }
-                self.nwk_index.insert(nwk, did.clone());
+                self.renumber(&did, nwk);
                 if let Some(d) = self.devices.get_mut(&did) {
                     d.awake_until = now + AWAKE_AFTER_RX_MS;
                     if capability & 0x08 == 0 {
                         d.fp.rx_on_when_idle = Some(false);
                     }
                 }
+                // An uplink like any other: heard from, awake, what waits
+                // for it goes out (after the interview's own resumption).
+                self.seen(&did, Some(ind.lqi), Some(ind.rssi), now);
                 self.on_rejoin(&did, now);
+                self.flush_queue(&did, now);
             } else {
                 self.on_device_joined(ieee, nwk, now);
             }
@@ -1423,7 +1536,14 @@ impl<T: ZigbeeTransport> Hub<T> {
                 self.interview_step(id, next, now);
             }
             (step, _) => {
-                // Failed status: continue with what is known.
+                // Failed status: continue with what is known (a lumi
+                // device: its quirk, hub::lumi).
+                if !gp_step(d, step) && self.lumi_quirk(id, true, now) {
+                    return;
+                }
+                let Some(d) = self.devices.get_mut(id) else {
+                    return;
+                };
                 d.interview_partial |= !gp_step(d, step);
                 let next = match step {
                     InterviewStep::NodeDesc => InterviewStep::ActiveEp,
@@ -1644,6 +1764,17 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         let Some(id) = id else { return };
+        // Its IEEE with another short address: it rejoined unseen.
+        if ind.src_ieee.map(zigbee_id).as_ref() == Some(&id)
+            && ind.src_nwk < 0xFFF8
+            && self
+                .devices
+                .get(&id)
+                .and_then(Device::nwk)
+                .is_some_and(|n| n != ind.src_nwk)
+        {
+            self.renumber(&id, ind.src_nwk);
+        }
         #[cfg(feature = "advanced")]
         self.tap_rx(&id, &ind, now);
         self.seen(&id, Some(ind.lqi), Some(ind.rssi), now);
@@ -1741,6 +1872,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.console_answer(id, &frame);
         let h = frame.header;
         let ep = ind.src_ep;
+        self.stub_endpoint(id, ep, ind.profile, ind.cluster);
         let mut needs_default_rsp = !h.disable_default_response && ind.group.is_none();
         match (h.frame_type, h.cmd) {
             (FrameType::Global, global::READ_ATTRIBUTES_RSP) => {
@@ -1770,6 +1902,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                         }
                     }
                 }
+                // Identity strings and versions from any answer (an
+                // interview read stores them, others only fill gaps).
+                if ind.cluster == cl::BASIC && purpose != Some(Purpose::Identity) {
+                    let solicited =
+                        matches!(purpose, Some(Purpose::Interview(InterviewStep::Basic(_))));
+                    structural |= self.learn_basic(id, &values, solicited, now);
+                }
                 match purpose {
                     Some(Purpose::Interview(step)) => {
                         self.interview_read(id, step, ind.cluster, &recs, now)
@@ -1787,17 +1926,22 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
             (FrameType::Global, global::REPORT_ATTRIBUTES) => {
-                let recs = zf::parse_report_attributes(&frame.payload).unwrap_or_default();
+                let recs = zf::parse_report_lenient(ind.cluster, &frame.payload);
+                let mfr = lumi::report_mfr(ind.cluster, h.mfr, &recs);
                 let mut structural = false;
                 if let Some(d) = self.devices.get_mut(id) {
                     for (a, v) in &recs {
-                        let (sc, vc) =
-                            d.attrs
-                                .set(ep, ind.cluster, *a, h.mfr, Some(v.value.clone()));
+                        let (sc, vc) = d.attrs.set(ep, ind.cluster, *a, mfr, Some(v.value.clone()));
                         structural |= sc || (vc && is_structural(ind.cluster, *a));
                     }
                 }
-                self.dispatch_attrs(id, ep, ind.cluster, h.mfr, &recs, now);
+                if ind.cluster == cl::BASIC {
+                    structural |= self.learn_basic(id, &recs, false, now);
+                }
+                self.dispatch_attrs(id, ep, ind.cluster, mfr, &recs, now);
+                if ind.cluster == cl::ON_OFF {
+                    self.client_on_off(id, ep, h.tsn, &recs, now);
+                }
                 if structural {
                     self.maybe_reresolve(id, now);
                 }
@@ -1945,6 +2089,130 @@ impl<T: ZigbeeTransport> Hub<T> {
             .map_or(0, |p| (p % 254) as u8)
     }
 
+    /// A frame from an endpoint of a device whose endpoint list the
+    /// interview has not got: kept as a stub endpoint (zigbee-herdsman
+    /// creates endpoints the same way), with Basic as a server cluster
+    /// once Basic frames came from it, so that the interview's Basic reads
+    /// find it. Stubs ([`STUB_DEVICE_ID`]) give no entities; a Simple
+    /// descriptor replaces them.
+    fn stub_endpoint(&mut self, id: &str, ep: u8, profile: u16, cluster: u16) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        if !d.active_eps.is_empty()
+            || !d.fp.endpoints.iter().all(is_stub)
+            || d.gp.is_some()
+            || !(1..=240).contains(&ep)
+        {
+            return;
+        }
+        let basic = cluster == cl::BASIC;
+        match d.fp.endpoints.iter_mut().find(|e| e.ep == ep) {
+            Some(e) if is_stub(e) && basic && !e.in_clusters.contains(&cl::BASIC) => {
+                e.in_clusters.push(cl::BASIC)
+            }
+            Some(_) => {}
+            None => d.fp.endpoints.push(EndpointFp {
+                ep,
+                profile,
+                device_id: STUB_DEVICE_ID,
+                in_clusters: if basic { vec![cl::BASIC] } else { Vec::new() },
+                out_clusters: Vec::new(),
+            }),
+        }
+    }
+
+    /// Basic attributes into the fingerprint, from any Read Attributes
+    /// Response or Report Attributes: an interview read (`solicited`)
+    /// stores what it got, any other frame only fills what is unknown
+    /// (lumi devices report their ModelIdentifier unasked, and may never
+    /// answer a read). `true`: the identity changed; outside the interview
+    /// the device record follows.
+    fn learn_basic(
+        &mut self,
+        id: &str,
+        recs: &[(u16, TypedValue)],
+        solicited: bool,
+        now: Millis,
+    ) -> bool {
+        let Some(d) = self.devices.get_mut(id) else {
+            return false;
+        };
+        let fp = &mut d.fp;
+        let mut changed = false;
+        for (attr, v) in recs {
+            let n = v.value.as_i64().map(|x| x as u32);
+            let mut text = |slot: &mut Option<String>| {
+                if let Some(t) = basic_text(&v.value)
+                    && (solicited || slot.is_none())
+                    && slot.as_deref() != Some(t.as_str())
+                {
+                    *slot = Some(t);
+                    changed = true;
+                }
+            };
+            match attr {
+                0x0004 => text(&mut fp.manufacturer_name),
+                0x0005 => text(&mut fp.model_id),
+                0x0006 => text(&mut fp.date_code),
+                0x4000 => text(&mut fp.sw_build_id),
+                _ => {
+                    let slot = match attr {
+                        0x0000 => &mut fp.zcl_version,
+                        0x0001 => &mut fp.app_version,
+                        0x0002 => &mut fp.stack_version,
+                        0x0003 => &mut fp.hw_version,
+                        0x0007 => {
+                            let p = n.map(|x| x as u8);
+                            if p.is_some() && (solicited || fp.power_source.is_none()) {
+                                changed |= fp.power_source != p;
+                                fp.power_source = p;
+                            }
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    if n.is_some() && (solicited || slot.is_none()) {
+                        changed |= *slot != n;
+                        *slot = n;
+                    }
+                }
+            }
+        }
+        if !changed {
+            return false;
+        }
+        let interviewing = matches!(
+            d.interview,
+            InterviewStep::NodeDesc
+                | InterviewStep::ActiveEp
+                | InterviewStep::SimpleDesc(_)
+                | InterviewStep::Basic(_)
+        );
+        if interviewing {
+            // A lumi device stuck in its interview: now known.
+            if !solicited && self.interview_stuck(id) {
+                self.lumi_quirk(id, false, now);
+            }
+        } else {
+            self.emit(HubEvent::DeviceUpdated(id.to_string()));
+        }
+        true
+    }
+
+    /// An interview request of the device failed at least once (it waits
+    /// parked for the device, or was sent again).
+    pub(crate) fn interview_stuck(&self, id: &str) -> bool {
+        self.devices.get(id).is_some_and(|d| {
+            d.queue
+                .iter()
+                .any(|q| matches!(q.purpose, Purpose::Interview(_)) && q.tries > 0)
+        }) || self
+            .pending
+            .values()
+            .any(|p| p.device == id && matches!(p.purpose, Purpose::Interview(_)) && p.retries > 0)
+    }
+
     fn check_in(&mut self, id: &str, ep: u8, tsn: u8, now: Millis) {
         let fast = self
             .devices
@@ -2026,6 +2294,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             Purpose::Configure(key) => self.configure_done(id, &key, true, st.name().into(), now),
             Purpose::Group(op) => self.zg_status(id, op, st),
             r @ Purpose::Reporting { .. } => self.reporting_failed(id, &r, Ok(st), now),
+            // A Default Response instead of the answer of an interview
+            // read (UNSUP_GENERAL_COMMAND …): the step failed, the
+            // interview goes on.
+            i @ Purpose::Interview(_) => self.fail_purpose(id, &i, ApiError::zcl(st), now),
             _ => {}
         }
     }
@@ -2039,25 +2311,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         now: Millis,
     ) {
         match step {
+            // What it answered is stored already (`learn_basic`).
             InterviewStep::Basic(i) if cluster == cl::BASIC => {
                 if let Some(d) = self.devices.get_mut(id) {
-                    for r in recs {
-                        let Some(v) = &r.value else { continue };
-                        let s = || basic_text(&v.value);
-                        let n = v.value.as_i64().map(|x| x as u32);
-                        match r.attr {
-                            0x0004 => d.fp.manufacturer_name = s(),
-                            0x0005 => d.fp.model_id = s(),
-                            0x0007 => d.fp.power_source = n.map(|x| x as u8),
-                            0x0000 => d.fp.zcl_version = n,
-                            0x0001 => d.fp.app_version = n,
-                            0x0002 => d.fp.stack_version = n,
-                            0x0003 => d.fp.hw_version = n,
-                            0x0006 => d.fp.date_code = s(),
-                            0x4000 => d.fp.sw_build_id = s(),
-                            _ => {}
-                        }
-                    }
                     d.identity_read_at = Some(now);
                 }
                 self.interview_step(id, InterviewStep::Basic(i + 1), now);
@@ -2072,12 +2328,14 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// when they changed (zigbee-herdsman-converters selects definitions
     /// and white labels by them; Zigbee2MQTT reads them after an OTA
     /// upgrade). `force`: after an upgrade; otherwise (a rejoin) at most
-    /// once an hour. Interviewed Zigbee devices with Basic only.
+    /// once an hour. Interviewed Zigbee devices with Basic only, not lumi
+    /// ones (they answer few reads; `hub::lumi`).
     pub fn refresh_identity(&mut self, id: &str, force: bool, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
         if !matches!(d.kind, DeviceKind::Zigbee { .. })
+            || lumi::is_lumi(&d.fp)
             || !matches!(d.interview, InterviewStep::Done | InterviewStep::Configure)
             || (!force
                 && d.identity_read_at
@@ -2326,6 +2584,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                                 .into_iter()
                                 .find(|(t, _)| t == tag)
                                 .map_or(Value::Null, |(_, v)| values::from_zcl(&v.value)),
+                            // A ZCL structure (Xiaomi Basic 0xFF02): the
+                            // tag is the element's index.
+                            ZclValue::Struct(items) => items
+                                .get(usize::from(*tag))
+                                .map_or(Value::Null, |(_, v)| values::from_zcl(v)),
                             _ => Value::Null,
                         },
                         _ => values::from_zcl(&tv.value),
@@ -2566,21 +2829,24 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
         if sleepy {
-            if let Some(d) = self.devices.get_mut(&p.device) {
-                d.queue.push_back(Queued {
-                    req: p.req,
-                    purpose: p.purpose,
-                    tsn: k.1,
-                });
-            }
+            self.park_or_fail(p, k.1, err, now);
             return;
         }
         if p.retries == 0 && p.purpose != Purpose::Check {
             p.retries = 1;
             p.sent_at = now;
+            readdress(
+                &mut p.req,
+                self.devices.get(&p.device).and_then(Device::nwk),
+            );
             if let Ok(rid) = self.transport.submit(Request::Aps(p.req.clone())) {
                 p.rid = rid;
+                let (dev, interview) =
+                    (p.device.clone(), matches!(p.purpose, Purpose::Interview(_)));
                 self.pending.insert(k, p);
+                if interview {
+                    self.lumi_quirk(&dev, false, now);
+                }
                 return;
             }
         }
@@ -2617,32 +2883,31 @@ impl<T: ZigbeeTransport> Hub<T> {
             let Some(mut p) = self.pending.remove(&k) else {
                 continue;
             };
-            let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
-            if p.retries < 2 && p.purpose != Purpose::Check {
+            let timeout = ApiError::new("timeout", "no response from the device");
+            if self.devices.get(&p.device).is_some_and(Device::sleepy) {
+                self.park_or_fail(p, k.1, timeout, now);
+                continue;
+            }
+            if p.retries + 1 < max_tries(&p.purpose, false) {
                 p.retries += 1;
                 p.sent_at = now;
-                if sleepy {
-                    // Park until the device talks again.
-                    if let Some(d) = self.devices.get_mut(&p.device) {
-                        d.queue.push_back(Queued {
-                            req: p.req.clone(),
-                            purpose: p.purpose.clone(),
-                            tsn: k.1,
-                        });
-                    }
-                } else if let Ok(rid) = self.transport.submit(Request::Aps(p.req.clone())) {
+                readdress(
+                    &mut p.req,
+                    self.devices.get(&p.device).and_then(Device::nwk),
+                );
+                if let Ok(rid) = self.transport.submit(Request::Aps(p.req.clone())) {
                     p.rid = rid;
+                    let (dev, interview) =
+                        (p.device.clone(), matches!(p.purpose, Purpose::Interview(_)));
                     self.pending.insert(k, p);
+                    if interview {
+                        self.lumi_quirk(&dev, false, now);
+                    }
                 }
                 continue;
             }
             let dev = p.device.clone();
-            self.fail_purpose(
-                &dev,
-                &p.purpose,
-                ApiError::new("timeout", "no response from the device"),
-                now,
-            );
+            self.fail_purpose(&dev, &p.purpose, timeout, now);
         }
         // Tickets waiting for Tuya dataResponse.
         let late: Vec<u64> = self
@@ -2673,8 +2938,23 @@ impl<T: ZigbeeTransport> Hub<T> {
     fn fail_purpose(&mut self, id: &str, purpose: &Purpose, err: ApiError, now: Millis) {
         match purpose {
             Purpose::Interview(step) => {
+                let optional = matches!(*step, InterviewStep::Basic(i) if i >= BASIC_IDENTITY);
+                let descriptor = matches!(
+                    *step,
+                    InterviewStep::NodeDesc
+                        | InterviewStep::ActiveEp
+                        | InterviewStep::SimpleDesc(_)
+                        | InterviewStep::Basic(_)
+                );
+                if descriptor
+                    && !optional
+                    && !self.devices.get(id).is_some_and(|d| gp_step(d, *step))
+                    && self.lumi_quirk(id, true, now)
+                {
+                    return;
+                }
                 if let Some(d) = self.devices.get_mut(id) {
-                    d.interview_partial |= !gp_step(d, *step);
+                    d.interview_partial |= !gp_step(d, *step) && !optional;
                 }
                 let next = match *step {
                     InterviewStep::NodeDesc => InterviewStep::ActiveEp,
@@ -3239,7 +3519,7 @@ fn lacking(d: &Device, from: InterviewStep) -> InterviewStep {
     let missing = interview_eps(d)
         .iter()
         .skip(first)
-        .position(|&ep| d.fp.endpoint(ep).is_none());
+        .position(|&ep| d.fp.endpoint(ep).is_none_or(is_stub));
     missing.map_or(Basic(0), |j| SimpleDesc(first + j))
 }
 
@@ -3253,6 +3533,15 @@ fn next_asked(d: &Device, next: InterviewStep) -> InterviewStep {
     } else {
         next
     }
+}
+
+/// Device ID of a stub endpoint ([`Hub::stub_endpoint`]): one frames came
+/// from while the device's endpoint list is unknown.
+pub const STUB_DEVICE_ID: u16 = 0xFFFF;
+
+/// An endpoint known from frames only, not from its Simple descriptor.
+pub fn is_stub(e: &EndpointFp) -> bool {
+    e.device_id == STUB_DEVICE_ID
 }
 
 /// The interview step asks the GP endpoint's descriptor: optional, a
@@ -3270,16 +3559,19 @@ fn schema_endpoint(d: &Device) -> Option<u8> {
         .map(|e| e.ep)
 }
 
-/// Attributes whose value changes the generic entity set or capabilities.
-/// A Basic character string as the fingerprint keeps it (trailing NULs and
-/// spaces stripped).
+/// A Basic character string as the fingerprint keeps it: up to a NUL,
+/// trailing spaces stripped; nothing when empty.
 fn basic_text(v: &ZclValue) -> Option<String> {
     match v {
-        ZclValue::String(s) => Some(s.trim_end_matches(['\0', ' ']).to_string()),
+        ZclValue::String(s) => {
+            let t = s.split('\0').next().unwrap_or("").trim_end();
+            (!t.is_empty()).then(|| t.to_string())
+        }
         _ => None,
     }
 }
 
+/// Attributes whose value changes the generic entity set or capabilities.
 fn is_structural(cluster: u16, attr: u16) -> bool {
     matches!(
         (cluster, attr),
@@ -3499,6 +3791,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             "schema_error": d.schema.error,
             "interview_partial": d.interview_partial,
             "interview_resumes": d.interview_resumes,
+            "interview_quirk": d.interview_quirk,
         }))
     }
 }

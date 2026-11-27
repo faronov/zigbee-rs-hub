@@ -398,7 +398,9 @@ const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/senso
  gn=d=>d.interview=="complete"&&!dL(d).length,
  // A lower-scoring definition while Zigbee2MQTT's needs what this firmware lacks.
  apx=d=>{const a=d.definition_approximate;return a?"Zigbee2MQTT uses "+a.better+", which needs "+a.needs.join(", ")+"; this hub uses "+(d.definition_model||"another definition")+" until it is supported":""},
- bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")),
+ // A sleepy device answers when it is awake: the hint while it is waited for.
+ WK="press a button on the device to wake it",
+ bdg=d=>[d.interview=="complete"?"":el("span",{class:"badge"},d.interview=="partial"?"partial interview":"interviewing"+(d.step?": "+d.step:"")+(d.sleepy?" · "+WK:"")),
   gn(d)?el("span",{class:"badge",title:"No device definition matched: generic support only"},"generic"):"",
   apx(d)?el("span",{class:"badge",title:apx(d)},"approx."):"",
   el("span",{class:"badge "+(d.available?"ok":"bad")},d.available?"online":"offline")],
@@ -889,7 +891,7 @@ function bindPanel(id){
  for(const g of Object.values(grps))dst.append(el("option",{value:"#"+g.id},g.name+" (group)"));
  const go=()=>{const v=dst.value,cl=(pre.value||cus.value).split(/[ ,]+/).filter(Boolean).map(c=>/^0x/i.test(c)?parseInt(c,16):+c),[d,p]=v.split("|");
   return act("bindings/create",{device:id,endpoint:+src.value,clusters:cl,target:v[0]=="#"?{group:+v.slice(1)}:{device:d,endpoint:+p}})};
- return el("div",{},el("h3",{},"Bindings"+(b.reading?" (reading…)":"")+(b.error?" · "+b.error:"")),ul,
+ return el("div",{},el("h3",{},"Bindings"+(b.reading?" (reading…"+(devs[id]&&devs[id].sleepy?" "+WK:"")+")":"")+(b.error?" · "+b.error:"")),ul,
   el("div",{class:"row acts"},src,pre,cus,"→",dst,bt("Bind",go,"p")),
   el("div",{class:"row acts"},bt("Read from device",()=>act("bindings/read",{device:id})),bt("Read groups",()=>act("groups/membership",{device:id}))));
 }

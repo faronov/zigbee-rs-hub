@@ -715,3 +715,150 @@ fn configure_group_step_follows_the_membership_outcome() {
     assert!(d.warnings.is_empty(), "{:?}", d.warnings);
     assert_eq!(d.interview, InterviewStep::Done);
 }
+
+/// The `bindings_updated` events' pending states of the remote.
+fn pending_states(events: &[HubEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            HubEvent::Groups { kind, body }
+                if kind == "bindings_updated" && body["device"] == IDR =>
+            {
+                Some(
+                    body["pending"]
+                        .as_array()?
+                        .iter()
+                        .map(|p| p["state"].as_str().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn bind_to_l1(hub: &mut Hub<MockTransport>, t: u64) {
+    let r = hub
+        .zg_request(
+            "bindings/create",
+            &json!({"device": IDR, "endpoint": 1, "cluster": 6, "target": {"device": ID1, "endpoint": 11}}),
+            t,
+        )
+        .unwrap();
+    assert_eq!(r["pending"][0]["state"], "queued");
+}
+
+/// Any uplink of a sleepy remote counts as awake: its Device_annce sends
+/// what waits for it (the record says `pending` at once, no longer
+/// `queued`), and so does a command it sends to a group.
+#[test]
+fn a_sleepy_remote_s_queue_goes_out_on_any_uplink() {
+    let (mut hub, mut sim) = setup();
+    let t = T0 + 120_000;
+    bind_to_l1(&mut hub, t);
+    hub.drain_events();
+    let s = sim.dev(REMOTE).clone();
+    let annce = crate::zdo::device_annce(1, s.nwk, REMOTE, s.node.mac_capabilities);
+    hub.on_aps_indication(s.ind(0, 0, 0x0013, annce), t + 1000);
+    assert_eq!(pending_states(&hub.drain_events()), ["pending"]);
+    sim.run(&mut hub, t + 1000);
+    assert!(
+        sim.dev(REMOTE)
+            .bind_table
+            .contains(&(1, 6, BindDst::Ieee(L1, 11)))
+    );
+
+    // Asleep again; a binding table read waits, a groupcast press sends it.
+    sim.dev(REMOTE).bind_table.clear();
+    let t = t + 60_000;
+    hub.bindings_read(IDR, t).unwrap();
+    sim.run(&mut hub, t);
+    assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], true);
+    let mut press = s.zcl(
+        1,
+        6,
+        crate::zcl::FrameType::Cluster,
+        None,
+        0x11,
+        0x02,
+        vec![],
+    );
+    press.group = Some(0x0001);
+    press.src_ieee = None;
+    hub.on_aps_indication(press, t + 1000);
+    sim.run(&mut hub, t + 1000);
+    assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], false);
+}
+
+/// A remote that rejoined under another short address gets what waited
+/// for it there: after the trust center's join, and after a frame that
+/// shows the new address with its IEEE (also inside the ZDO requests
+/// about it).
+#[test]
+fn a_new_nwk_address_readdresses_the_queue() {
+    use crate::zdo::cluster::NODE_DESC_REQ;
+    let (mut hub, mut sim) = setup();
+    let t = T0 + 120_000;
+    bind_to_l1(&mut hub, t);
+    sim.dev(REMOTE).nwk = 0x4444;
+    hub.on_device_joined(REMOTE, 0x4444, t + 1000);
+    sim.run(&mut hub, t + 1000);
+    assert!(
+        sim.dev(REMOTE)
+            .bind_table
+            .contains(&(1, 6, BindDst::Ieee(L1, 11)))
+    );
+    assert_eq!(hub.device(IDR).unwrap().nwk(), Some(0x4444));
+
+    // An interview request parked for it, then it is heard from elsewhere.
+    sim.dev(REMOTE).responsive = false;
+    let t = t + 60_000;
+    hub.reinterview(IDR, t).unwrap();
+    hub.tick(t + 21_000);
+    sim.run(&mut hub, t + 21_000);
+    sim.log.clear();
+    sim.dev(REMOTE).nwk = 0x5555;
+    let s = sim.dev(REMOTE).clone();
+    hub.on_aps_indication(s.report(1, 1, None, &[]), t + 30_000);
+    let nd: Vec<_> = hub
+        .transport
+        .aps()
+        .into_iter()
+        .filter(|a| a.profile == 0 && a.cluster == NODE_DESC_REQ)
+        .cloned()
+        .collect();
+    assert_eq!(nd.len(), 1, "{nd:?}");
+    assert_eq!(nd[0].dst, ApsDst::Nwk(0x5555));
+    assert_eq!(nd[0].payload[1..3], 0x5555u16.to_le_bytes());
+    assert_eq!(hub.device(IDR).unwrap().nwk(), Some(0x5555));
+}
+
+/// A request a sleepy remote never answers fails after its tries (each
+/// sent when it was heard from): the binding table read ends with an
+/// error instead of `reading` for ever, and a bind fails.
+#[test]
+fn a_sleepy_remote_s_requests_fail_after_their_tries() {
+    let (mut hub, mut sim) = setup();
+    sim.dev(REMOTE).responsive = false;
+    let t = T0 + 120_000;
+    bind_to_l1(&mut hub, t);
+    hub.bindings_read(IDR, t).unwrap();
+    let s = sim.dev(REMOTE).clone();
+    for k in 0..5u64 {
+        let tk = t + k * 60_000;
+        hub.on_aps_indication(s.report(1, 1, None, &[]), tk + 1000);
+        hub.tick(tk + 30_000);
+        sim.run(&mut hub, tk + 30_000);
+    }
+    let sent = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0 && a.cluster == crate::zdo::cluster::BIND_REQ)
+        .count();
+    assert_eq!(sent, 3);
+    let b = &hub.bindings_list(Some(IDR))[0];
+    assert_eq!(b["reading"], false);
+    assert!(b["error"].is_string(), "{b}");
+    assert_eq!(b["pending"][0]["state"], "failed");
+}

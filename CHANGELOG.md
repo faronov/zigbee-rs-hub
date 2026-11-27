@@ -51,6 +51,53 @@ install instructions and the list of merged pull requests. A pre-release
 
 ### Fixes
 
+- **Old Xiaomi buttons and sensors finish their interview.** A WXKG01LM
+  (`lumi.sensor_switch`) stayed at "interviewing: basic_0" or
+  "active_endpoints" for ever: it answers the interview's requests poorly,
+  and each request was sent again at every frame from the device, without
+  end. Now, as zigbee-herdsman and zigpy do, the model the device reports
+  unasked completes the interview: the WXKG01LM and the MCCGQ01LM
+  (`lumi.sensor_magnet`) get their endpoints from zhaquirks' signatures as
+  soon as a request of their interview has failed once, other `lumi.`
+  models when a step finally fails; the missing identity is filled in
+  (LUMI, code 0x1037, a sleepy end device on battery) and the interview
+  ends `partial`, with `interview_quirk: "lumi"` in `devices/diagnostics`;
+  the next rejoin resumes the real interview. The button's presses (reports
+  of its On/Off client cluster) fire the `action` event (`off` pressed, `on`
+  released). Xiaomi devices get no binds or reporting a definition does not
+  ask for, and their Basic 0xFF01/0xFF02 structs are accepted with any
+  manufacturer code and with the malformed lengths they come with.
+  Battery, voltage and the single/double/hold clicks need
+  zigbee-herdsman-converters' `lumi` template, not in this firmware yet.
+  If a button stays stuck, hold it until its LED blinks: it rejoins and
+  reports its model.
+- **Sleepy devices: retries are bounded, and any frame wakes the queue.**
+  A request to a sleeping device that timed out went back into its queue
+  as new, so a step the device never answers was retried at every wake-up
+  for ever. Now its tries count across wake-ups: 6 for the Node
+  descriptor, 2 for the endpoint list, a Simple descriptor and each Basic
+  attribute, 3 for anything else; then the step is skipped (the interview
+  ends `partial` and resumes at the next rejoin), a bind fails and a
+  binding table read ends with its error instead of "reading…". A
+  device's Device_annce and its rejoin now send what waits for it (they
+  only resumed the interview), and after a rejoin under a new short
+  address what waited goes to the new one (also when a frame with its IEEE
+  shows the new address). A binding or group request no longer shows
+  "until it wakes" after it was sent. The web UI says "press a button on
+  the device to wake it" while a sleepy device's interview or binding
+  table read waits. An IKEA E1524/E1810 remote with old firmware (before
+  2.3.075) sends its presses to a group the coordinator is not in: the
+  NCP does not pass them on, so the hub never sees it awake; the
+  zigbee-herdsman-converters remote configure (bind to a group the hub
+  joins) is not supported yet.
+- **Basic attributes are read one per request** (identity first), as
+  zigbee-herdsman does: some devices do not answer a read of several. A
+  failed optional attribute (power source, versions, date code, build ID)
+  no longer makes the interview partial, and a Default Response instead of
+  the answer no longer stalls it. The manufacturer, model and versions are
+  also taken from any Basic report or read answer when the interview has
+  not got them (strings end at a NUL); a device whose endpoint list is
+  unknown gets stub endpoints from the frames it sends.
 - **Dongle Max: the hub no longer crashes when it asks the MG24 for the
   zigbee-rs NCP.** The probe ran the ZRHP link driver on a stack smaller
   than the driver needs (its thread entry reserved 16 KB for code it never

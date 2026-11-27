@@ -8,6 +8,7 @@ mod console;
 mod gp;
 mod groups;
 mod import;
+mod lumi;
 mod merge;
 mod plain;
 mod props;
