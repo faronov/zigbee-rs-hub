@@ -568,7 +568,12 @@ firmware console: `hub` on the Dongle Max.
 - Beacons of an active scan carry no sender address (0xFFFF).
 - Child table entries have no time since the last poll (0).
 - Backup and restore (an export and a same-network restore ran on the
-  lab unit, not checked frame by frame; the rest from the simulator):
+  lab unit, not checked frame by frame; with 0.4.1 a same-network restore
+  wrote the start 110 592 and the NCP resumed at 118 785 after the second
+  reset, one 0x1000 step above the model, the safe side; its counter was
+  at or above the start 1 and 5 min later, a sleepy end device reported
+  and answered reads after it, a normal reboot resumed ahead; the rest
+  from the simulator):
   whether the stock "1.0.0" image has
   the token interface (`getTokenData`) and which key it takes (creator or
   NVM3 key); `getValue(APS_FRAME_COUNTER)` does not answer on the lab

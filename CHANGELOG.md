@@ -6,7 +6,13 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
-## 0.4.1
+## 0.4.1 (2026-11-27)
+
+A fix release for 0.4.0: an interview that ended partial finishes when the
+device rejoins, backups restore routers as routers and no longer roll the
+frame counters back on the Dongle Max, and the Dongle Max can take its
+storage back after SONOFF's firmware reformatted it. Same boards, images
+and web flasher entries as 0.4.0; an update keeps all data.
 
 ### Fixes
 
@@ -53,14 +59,130 @@ install instructions and the list of merged pull requests. A pre-release
   network whose counters the NCP does not report gets a margin of 2²⁰
   (note `counters_unknown`). A zigbee-rs NCP (ZRHP) already started above
   the counters it used.
-- **EZSP: after a restore the NCP no longer reuses frame counters, and
-  the report gives where it resumed.** EmberZNet stores the counters a
-  restore writes truncated to 4096 and resumes from there at the restore's
-  reset (lab unit, 7.4.5: `nwk_fc_start` 96 058 reported, 94 208 in use):
-  up to 4095 below the intended margin, and below the counters the
-  restored network had already sent (devices drop such frames). The start
-  is now on the boundary, the NCP is reset a second time (resuming 4096
-  above it), and `nwk_fc_start`/`aps_fc_start` are read back after that.
+- **EZSP: after a restore the NCP resumes above the frame counters used
+  before it, and the report says where.** EmberZNet stores the counters a
+  restore writes truncated to 4096 and resumed from there at the
+  restore's reset (lab unit, 7.4.5: `nwk_fc_start` 96 058 reported,
+  94 208 in use): up to 4095 below the intended margin, and below the
+  counters the restored network had already sent (devices drop such
+  frames). The start is now on a 4096 boundary and the NCP is reset a
+  second time: the session after that reset starts above every counter
+  used before (lab Dongle Max: start 110 592 written, the NCP resumed at
+  118 785), and `nwk_fc_start`/`aps_fc_start` are read back then. The
+  short session between the two resets may still reuse a few counters
+  (its many-to-one route requests and link status only).
+- **Backups restore routers as routers.** A zigbee-rs NCP (the Thread BR
+  board's H2) lists a router that joined directly through the coordinator
+  as its child, and `network/backup` wrote it so (`is_child`). Restoring
+  that backup made the router a sleepy end-device child: the NCP held
+  every frame to it for a poll a router never sends (seen on hardware: the
+  interview hung, ZCL requests got no APS ACK, `devices/remove` never
+  reached it). New backups write such a router as a plain device (as
+  zigpy and Zigbee2MQTT mean `is_child`), and a restore or import of an
+  older file gives no child entry to a device the hub knows as a router
+  (its node descriptor) or the file lists as one (`type: "router"`), on
+  both backends. End devices stay children.
+
+### Upgrading from 0.4.0
+
+- **Data:** an update keeps `nvs` (Wi-Fi, mode, API token) and the hub's
+  data (`hubdata` on the S3, the claimed `files` region on the Dongle
+  Max), as from 0.3.0 to 0.4.0. The web flasher has the same entries as
+  for 0.4.0.
+- **Make a new backup after the update** (Settings › Backup). A backup
+  made by 0.4.0 or earlier on the Thread BR board lists routers that
+  joined directly through the coordinator as children. 0.4.1 restores
+  such a file correctly onto a hub that knows those devices as routers
+  (e.g. the same hub, its devices interviewed); restored onto an empty
+  hub, such a router would still become a sleepy child.
+- **Frame counters on restore:** a restore starts the network's frame
+  counters from the higher of the backup's and the NCP's own counters,
+  plus a margin (10 000; 2²⁰ for a counter the NCP stores but does not
+  report, note `counters_unknown`). The NCP's counters count on EZSP
+  since 0.4.1 (note `floor_raised`); a zigbee-rs NCP already kept them.
+  On EZSP the start is rounded up to a multiple of 4096 and the NCP
+  resumes above it after the restore's second reset, so the reported
+  `nwk_fc_start` is higher than with 0.4.0. An older backup restored
+  onto the same network is therefore safe. A restore
+  onto another radio cannot know what the old coordinator sent after the
+  backup: take the backup last and do not run the old coordinator again.
+- **SONOFF Dongle Max:** download a hub backup (Settings › Backup) before
+  every update over USB or through SONOFF's web console, and prefer the
+  hub's self-update (Settings › Hub firmware; the first one with *Replace
+  SONOFF's firmware* ticked): the bootloader's fallback is then a hub
+  image, not SONOFF's firmware, which would reformat the hub's region. If
+  that happened (`storage/status` and the banner say `reformatted`):
+  [Recovery after SONOFF's firmware reformatted `files`](https://github.com/faronov/zigbee-rs-hub/blob/hub-v0.4.1/docs/dongle-max.md#recovery-after-sonoffs-firmware-reformatted-files).
+- **Home Assistant:** integration **0.6.0** as in 0.4.0 (unchanged).
+  **tbr-bridge 0.2.6** as in 0.4.0 (unchanged, the same bytes).
+
+### Tested on hardware
+
+- Thread BR board (lab S3, zigbee-rs NCP on the H2): install, devices,
+  `interview_resumes` in `devices/diagnostics`, a backup (an end device
+  listed as a child) and a `network/restore` of a fresh backup.
+- SONOFF Dongle Max (stock EmberZNet 7.4.5): the new `storage/status`
+  fields, the claim refusals `confirm_required` and `already_claimed`; a
+  restore over its own network: start 110 592 written, the NCP resumed at
+  118 785 after the second reset (one 4096 step above the model, the safe
+  side), its counter at or above the start 1 and 5 min later, a sleepy
+  end device (C6) reporting and answering reads after it, a normal reboot
+  resuming ahead.
+
+### Known limitations
+
+- The 8 MB images (and the OTA image store) have not run on an 8 MB board
+  yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
+  quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio, so Zigbee
+  on a quad-PSRAM board is still untested.
+- Resuming a partial interview is tested on the simulated backends only
+  (a failing interview step cannot be forced on hardware).
+- Migration: host-tested on both simulated backends (ZRHP and EZSP) with
+  Zigbee2MQTT and ZHA files. On hardware a Zigbee2MQTT-format import of
+  the Dongle Max's own network ran (preview `same`, names applied, devices
+  complete); an import onto another radio or network and a ZHA import
+  have not. Green Power devices are not imported (commission them again);
+  after a change of the coordinator IEEE some devices keep the old trust
+  center address (prefer a radio that takes the backup's IEEE); Z2M/ZHA
+  per-device settings and external converters are not imported
+  (`docs/migration.md`, Limits).
+- No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
+  from the console or the browser console).
+- Definitions that need the vendor template `tuya` are not run yet
+  (TS011F devices for which Zigbee2MQTT picks `TS011F_plug_2`/`_3`,
+  multi-gang strips, DIN relays): they use `TS011F_plug_1`, marked
+  **approx.**, and the device's diagnostics name Zigbee2MQTT's definition.
+- An rx-on end device restored or imported from a backup becomes a
+  sleepy child of the coordinator (the backup format has no capability).
+- A zigbee-rs NCP (the Thread BR board's H2) may keep a stale child table
+  entry for a device that moved to another network: backups list it, and
+  a restore re-creates it as a partial device (remove it with
+  `devices/remove`; a fix is tracked).
+- SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
+  joining and interviews, reports, a network backup export and restore
+  onto the same network (0.3.0; the joined sensor kept working), the hub
+  name and version, a Zigbee2MQTT-format import of its own network, the
+  0.4.1 items above. Not yet run: Ethernet, `stock confirm`, the
+  self-update, installation through SONOFF's web console, a restore or
+  import onto another radio, the recovery claim of 0.4.1 itself (it needs
+  a region SONOFF's firmware reformatted; host-tested, also with real
+  LittleFS). The stock EmberZNet 7.4.5 does not report the APS frame
+  counter: its backups have no TCLK counter, and a restore gives the APS
+  counter a margin of 2²⁰ (note `counters_unknown`). No Green Power, no
+  MG24 firmware update; at most 8 groups on the hub's endpoint (the NCP's
+  multicast table); if the first boot cannot claim SONOFF's `files`
+  partition the hub keeps its data in RAM only (the banner says why). Not
+  offered by the web flasher (its erase option would wipe SONOFF's
+  firmware): use SONOFF's web console or esptool with the two USB parts,
+  after the otadata check.
+- SONOFF Dongle Max, while SONOFF's firmware is still in `ota_0` (USB or
+  web-console install): a hub image in `ota_1` that fails to boot (e.g. an
+  interrupted USB write) makes the bootloader start SONOFF's firmware,
+  which reformats the `files` partition. The hub's devices, names,
+  automations and settings are lost (the Zigbee network stays in the MG24
+  and the devices come back through the NCP import, unnamed). The
+  recovery claim and a hub backup bring back the devices and groups;
+  names, areas, automations and settings have to be set again.
 
 ## 0.4.0
 

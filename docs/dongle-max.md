@@ -716,7 +716,11 @@ stored network (the hub's backend calls it at every session start).
 
 Done on the lab unit: 1 (4 blocks claimed), 2 (session start 2.6 s), the
 Wi-Fi part of 3, forming and a sleepy end device's join and interview of
-5, `restart bringup` and the MG24 probes of 9.
+5, `restart bringup` and the MG24 probes of 9. With 0.4.1 (2026-11-27):
+the new `storage/status` fields and the claim refusals
+`confirm_required` and `already_claimed` (not yet the recovery of 10),
+and a restore over its own network (`docs/ezsp-backend.md`, "Not
+verified").
 
 1. Flash the hub image over USB as above (`ota_1`, `otadata` sector 1);
    boot log: PSRAM 2 MB, `memory mode psram`, stock table `Foreign`,
