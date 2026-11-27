@@ -184,7 +184,7 @@ progress{width:12em}
 <!-- gateway:end -->
 <section class="card"><h2>Hub</h2><dl class="kv" id="ssys"></dl>
 <div class="row acts f-wifi"><input id="wss" placeholder="Wi-Fi SSID" maxlength="32"><input id="wpw" type="password" placeholder="Wi-Fi password"><button id="wb">Save Wi-Fi</button></div>
-<div class="row acts" id="tzr"><label>Time zone <input id="tzn" list="tzl" size="20" placeholder="e.g. Europe/Kyiv"></label><button id="tzu">Use this browser's zone</button><datalist id="tzl"></datalist></div>
+<div class="row acts" id="tzr"><label>Time zone <input id="tzn" list="tzl" size="20" placeholder="e.g. Europe/Berlin"></label><button id="tzu">Use this browser's zone</button><datalist id="tzl"></datalist></div>
 <div class="row acts"><label>Advanced: POSIX string <input id="tzi" size="20"></label><label>SNTP <input id="ntp" size="22" placeholder="pool.ntp.org"></label><button id="tzb">Save time</button><span class="mut" id="tzm"></span></div>
 <div class="row"><label><input type="checkbox" id="pics"> Load device pictures from zigbee2mqtt.io (this browser)</label></div>
 <!-- devmode:start -->
@@ -635,9 +635,10 @@ $("#tzl").append(...tzZ.map(z=>new Option(z)));tzZ[0]||$("#tzr").classList.add("
 const tzShow=n=>{let s="";try{s=tzN&&"Hub time with "+tzN+": "+new Date().toLocaleString("sv",{timeZone:tzN})+(n?". "+n:"")}catch(e){s=tm.local?"Hub time "+tm.local:""}$("#tzm").textContent=s};
 function tzPick(){const z=$("#tzn").value.trim();tzN="";try{tzF(z)}catch(e){return tzShow()}
  const r=tzPosix(z);tzN=z;$("#tzi").value=r.tz;tzShow(r.fixed&&z+" has no yearly rule: today's offset is kept fixed")}
-$("#tzn").oninput=tzPick;$("#tzu").onclick=()=>{$("#tzn").value=Intl.DateTimeFormat().resolvedOptions().timeZone;tzPick()};
+const tzB=()=>Intl.DateTimeFormat().resolvedOptions().timeZone;
+$("#tzn").oninput=tzPick;$("#tzu").onclick=()=>{$("#tzn").value=tzB();tzPick()};
 $("#tzi").oninput=()=>{tzN=$("#tzn").value="";tzShow()};
-function loadTime(){call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys();tzShow()}).catch(()=>{})}
+function loadTime(){const z=tzB();if(z)$("#tzn").placeholder="e.g. "+z;call("hub/time").then(t=>{tm=t;const f=document.activeElement;if(f!=$("#tzi")&&f!=$("#tzn")){$("#tzi").value=t.tz;$("#tzn").value=tzN=t.tz_name||""}if(f!=$("#ntp"))$("#ntp").value=t.servers.join(", ");loadSys();tzShow()}).catch(()=>{})}
 $("#tzb").onclick=e=>busy(e.target,act("hub/time/set",{tz:$("#tzi").value.trim(),tz_name:tzN,servers:$("#ntp").value.split(/[ ,;]+/).filter(Boolean)}).then(t=>{tm=t;toast("Time zone saved");loadSys();tzShow()})).catch(()=>{});
 function loadRep(){call("reporting/defaults/get").then(r=>{const t=$("#rpd");t.textContent="";for(const c of r.classes)t.append(el("tr",{},el("td",{},c.key),el("td",{},el("input",{size:12,"data-k":c.key,value:c.edited?rTxt(c.report):"",placeholder:rTxt(c.builtin)}))))}).catch(()=>{})}
 $("#rpb").onclick=()=>{const d={};for(const i of $("#rpd").querySelectorAll("input"))d[i.dataset.k]=rVal(i.value);act("reporting/defaults/set",{defaults:d}).then(()=>{toast("Saved");loadRep()},()=>{})};

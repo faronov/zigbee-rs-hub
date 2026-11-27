@@ -2335,14 +2335,16 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// when they changed (zigbee-herdsman-converters selects definitions
     /// and white labels by them; Zigbee2MQTT reads them after an OTA
     /// upgrade). `force`: after an upgrade; otherwise (a rejoin) at most
-    /// once an hour. Interviewed Zigbee devices with Basic only, not lumi
-    /// ones (they answer few reads; `hub::lumi`).
+    /// once an hour, and never for lumi devices (they answer few reads;
+    /// `hub::lumi`), which are read only when forced (an upgrade, an
+    /// imported device's probe). Interviewed Zigbee devices with Basic
+    /// only.
     pub fn refresh_identity(&mut self, id: &str, force: bool, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
         if !matches!(d.kind, DeviceKind::Zigbee { .. })
-            || lumi::is_lumi(&d.fp)
+            || (!force && lumi::is_lumi(&d.fp))
             || !matches!(d.interview, InterviewStep::Done | InterviewStep::Configure)
             || (!force
                 && d.identity_read_at

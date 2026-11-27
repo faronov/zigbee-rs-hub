@@ -278,7 +278,8 @@ run), so its next rejoin resumes the real interview, which may refine it.
 Not when the resolution needs IAS enrollment, or binds or reporting a
 definition asks for: the interview then goes on. Lumi devices get no binds
 and no reporting configuration a definition does not ask for (5.3), and
-no DateCode/SWBuildID re-reads. On the receive side, Basic 0xFF01 and
+no DateCode/SWBuildID re-read on a rejoin (after an OTA upgrade and as an
+imported device's probe they are read). On the receive side, Basic 0xFF01 and
 0xFF02 come with any manufacturer code (often a bogus 0x1234) and are taken
 as standard attributes; Report Attributes frames are parsed leniently
 (records before a malformed one are kept, a tail too short for a record is

@@ -98,6 +98,8 @@ install instructions and the list of merged pull requests. A pre-release
   also taken from any Basic report or read answer when the interview has
   not got them (strings end at a NUL); a device whose endpoint list is
   unknown gets stub endpoints from the frames it sends.
+- Settings › Hub: the time zone field's example is the browser's own
+  zone.
 - **Dongle Max: the hub no longer crashes when it asks the MG24 for the
   zigbee-rs NCP.** The probe ran the ZRHP link driver on a stack smaller
   than the driver needs (its thread entry reserved 16 KB for code it never

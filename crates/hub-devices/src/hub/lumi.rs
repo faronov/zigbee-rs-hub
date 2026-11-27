@@ -27,7 +27,8 @@
 //! `zcl::frame::parse_report_lenient`; a button's On/Off client-cluster
 //! reports fire its remote events ([`Hub::client_on_off`]). Configure
 //! sends lumi devices no binds or reporting a definition does not ask for
-//! (`configure::build_ops`), and the identity refresh reads nothing.
+//! (`configure::build_ops`), and their identity is re-read only when
+//! forced (an upgrade, an imported device's probe), not on a rejoin.
 
 use super::*;
 use crate::zdo::LogicalType;

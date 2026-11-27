@@ -135,6 +135,39 @@ fn a_mains_device_is_probed_and_verified_without_reconfigure() {
     assert_eq!(snap.imported, 0);
 }
 
+/// A mains Xiaomi device (an Aqara plug) is probed like any other (the
+/// lumi devices' identity is re-read only when forced, and the probe
+/// forces it): its answer verifies it and its configure runs again.
+#[test]
+fn a_mains_lumi_device_is_probed_and_configured_again() {
+    let p = SimDevice::new(PLUG, 0x5A01, LogicalType::Router, true, 0x115F)
+        .endpoint(1, 0x0104, 0x0051, &[0x0000, 0x0003, 0x0006], &[])
+        .basic("LUMI", "lumi.plug.maeu01", 1);
+    let mut sim = Sim::default();
+    sim.devices.push(p.clone());
+    let mut hub = hub_with(&[]);
+    hub.import_device(&imported(&p), IMPORT_RECONFIGURE, T0)
+        .unwrap();
+    hub.tick(T0 + 1000);
+    let probe: Vec<Vec<u8>> = hub
+        .transport
+        .aps()
+        .iter()
+        .filter(|a| a.profile != 0 && a.cluster == 0x0000)
+        .map(|a| a.payload[3..].to_vec())
+        .collect();
+    assert_eq!(probe, [vec![0x06, 0x00, 0x00, 0x40]], "DateCode, SWBuildID");
+    let mut t = T0 + 1000;
+    for _ in 0..10 {
+        sim.run(&mut hub, t);
+        t += 1000;
+        hub.tick(t);
+    }
+    assert_eq!(hub.imported_pending(), 0);
+    let d = hub.device("zb:5a52530000000001").unwrap();
+    assert_eq!((d.interview, d.imported), (InterviewStep::Done, 0));
+}
+
 #[test]
 fn another_coordinator_ieee_configures_again_two_at_a_time() {
     let mut sim = Sim::default();
