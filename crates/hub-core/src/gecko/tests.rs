@@ -240,27 +240,44 @@ fn application_and_program_rules() {
         parse(&gbl_with(0, &[app(1), app(1)]), POLICY),
         Err(GblError::DuplicateApplication)
     );
-    // Type 0 (none given), as Nerivec's NVM3 clear.
-    assert!(
+    // Type 0 (none given), as Nerivec's NVM3 clear: a maintenance image.
+    assert_eq!(
         parse(
             &gbl_with(0, &[app(0), prog(TAG_PROG, 0x0817_6000, 16)]),
             POLICY
         )
-        .is_ok()
+        .map(|i| i.kind()),
+        Ok(ImageKind::Maintenance)
     );
     assert_eq!(
         parse(&gbl_with(0, &[app(1)]), POLICY),
         Err(GblError::NoProgram)
     );
-    // An NVM3 clear (data only, at the top of flash): another image.
+    // An NVM3 clear (data only, at the top of flash): a maintenance image.
     let nvm3 = gbl_with(0, &[prog(TAG_PROG, 0x0817_6000, 0x8000)]);
     let info = parse(&nvm3, POLICY).unwrap();
     assert_eq!(
         (info.kind(), info.app, info.prog_end),
-        (ImageKind::Other, None, 0x0817_E000)
+        (ImageKind::Maintenance, None, 0x0817_E000)
     );
-    // A ZRHP image stays below its NV journals.
-    let high = gbl_with(0, &[zrhp_meta(1, "x"), prog(TAG_PROG, 0x0815_7FF0, 32)]);
+    // zigbee-rs `efr32mg24-nv-clear.gbl`: 0xFF over the NV journals, no
+    // application tag (with or without the ZRHP record).
+    for meta in [None, Some(zrhp_meta(1, "nv-clear"))] {
+        let mut tags: Vec<(u32, Vec<u8>)> = meta.into_iter().collect();
+        let mut clear = 0x0815_8000u32.to_le_bytes().to_vec();
+        clear.resize(4 + 0x2_8000, 0xFF);
+        tags.push((TAG_ERASEPROG, clear));
+        let info = parse(&gbl_with(0, &tags), POLICY).unwrap();
+        assert_eq!(
+            (info.kind(), info.prog_start, info.prog_end),
+            (ImageKind::Maintenance, 0x0815_8000, 0x0818_0000)
+        );
+    }
+    // A ZRHP application stays below its NV journals.
+    let high = gbl_with(
+        0,
+        &[app(1), zrhp_meta(1, "x"), prog(TAG_PROG, 0x0815_7FF0, 32)],
+    );
     assert_eq!(
         parse(&high, POLICY),
         Err(GblError::BeyondZrhpWindow { end: 0x0815_8010 })
@@ -772,7 +789,7 @@ fn real_images() {
     for path in list.split(',') {
         let g = std::fs::read(path).unwrap();
         let info = parse(&g, POLICY).unwrap_or_else(|e| panic!("{path}: {e}"));
-        std::println!("{path}: {info:x?}");
+        std::println!("{path}: {:?} {info:x?}", info.kind());
         let mut bl = SimBl::new(Faults::default());
         let up = flash(&mut bl, &g[..info.gbl_len as usize]).unwrap();
         assert!(bl.verified, "{path}");

@@ -15,9 +15,10 @@
 //! no encryption or compression, the end tag's CRC) and described in NVS
 //! (`ncp_image`).
 //!
-//! **Flash** (`ncp/update/start`, `"confirm": true`; `foreign` for an
-//! image without the ZRHP record, e.g. SONOFF's EmberZNet for the way
-//! back; `force` without a backup; `restore`, default true), on a thread:
+//! **Flash** (`ncp/update/start`, `"confirm": true`; `foreign` for any
+//! image but a ZRHP NCP application: SONOFF's EmberZNet, an NV clear for
+//! the way back; `force` without a backup; `restore`, default true), on a
+//! thread:
 //!
 //! 1. the stored image read back and validated again (its SHA-256 too);
 //! 2. the running network backed up with keys and kept hub-scoped
@@ -33,9 +34,10 @@
 //!    upload leaves the MG24 in its bootloader (which survives every
 //!    upload) and the UART parked: flash again, or another image;
 //! 4. `2` (run), the new firmware asked for (ZRHP: its `build_id` and
-//!    version must be the image's ZRHP record; EZSP: its version), the NCP
-//!    seen remembered (`ncp_seen`), and the hub restarts on it (the
-//!    registry saved first).
+//!    version must be the image's ZRHP record; EZSP: its version; after a
+//!    maintenance image without an application, the application that was
+//!    there), the NCP seen remembered (`ncp_seen`), and the hub restarts on
+//!    it (the registry saved first).
 //!
 //! A power cut during the flash leaves `flashing` in NVS: the next boot
 //! calls it `interrupted`, looks for the bootloader first and offers to
@@ -86,16 +88,20 @@ pub const CHUNK_MAX: usize = 4096;
 const ATTEMPTS: u32 = 3;
 
 /// Images known by their SHA-256 (the files of `docs/dongle-max.md`,
-/// "Replacing the MG24 firmware"): named in the status; any other image
-/// without the ZRHP record is flashed only with `foreign` too.
-const KNOWN_IMAGES: [(&str, &str); 2] = [
+/// "Replacing the MG24 firmware"): named in the status; any image but a
+/// ZRHP NCP application is flashed only with `foreign` too.
+const KNOWN_IMAGES: [(&str, &str); 3] = [
     (
         "44b81c1ecf81032b98d625388ae44c10d7c8a6abd1dcea10b2e2d934d7a311fa",
         "SONOFF's stock EmberZNet 7.4.5 NCP for the Dongle-M (zigbee_ncp_uart_hw_donglem_v7.4.5.gbl)",
     ),
     (
         "59a8130a2be7e7d967b627747492dd5db3dcf57df2d91d2db1e928ba223a0e9a",
-        "Nerivec's NVM3 clear for the EFR32MG24A420F1536IM48 (NVM3 32 KiB at 0x08176000)",
+        "Nerivec's NVM3 clear for the EFR32MG24A420F1536IM48, 32 KiB (0x08176000..0x0817E000)",
+    ),
+    (
+        "06b7e7e2f6718cd2e1ecfd2f1f7e9121462a49fac6b9261e986149834ea4f9c6",
+        "Nerivec's NVM3 clear for the EFR32MG24A420F1536IM48, 40 KiB (0x08176000..0x08180000)",
     ),
 ];
 
@@ -361,13 +367,17 @@ fn end() -> Result<J, ApiError> {
     store(IMAGE_KEY, &image);
     info!("ncp: MG24 image stored: {image}");
     let mut r = image;
-    r["note"] = match (info.kind(), info.signed) {
-        (ImageKind::Zrhp, _) => "a zigbee-rs ZRHP NCP image: ncp/update/start flashes it".into(),
-        (ImageKind::Other, false) => "not a zigbee-rs ZRHP image (EmberZNet or another firmware): ncp/update/start needs foreign".into(),
-        (ImageKind::Other, true) => {
-            "a signed image: a bootloader without its signing key refuses it; not a ZRHP image (ncp/update/start needs foreign)".into()
+    r["note"] = match info.kind() {
+        ImageKind::Zrhp => "a zigbee-rs ZRHP NCP image: ncp/update/start flashes it",
+        ImageKind::Other => "not a zigbee-rs ZRHP image (EmberZNet or another firmware): ncp/update/start needs foreign",
+        ImageKind::Maintenance => {
+            "a maintenance image without an application (e.g. an NV clear): the MG24's application stays; ncp/update/start needs foreign"
         }
-    };
+    }
+    .into();
+    if info.signed {
+        r["note"] = format!("{}; signed: a bootloader without its signing key refuses it", r["note"].as_str().unwrap_or_default()).into();
+    }
     Ok(r)
 }
 
@@ -496,8 +506,8 @@ pub fn start(o: StartOpts) -> Result<J, ApiError> {
     if image["kind"] != "zrhp" && !o.foreign {
         return Err(api(
             "confirm_required",
-            "the stored image is not a zigbee-rs ZRHP NCP image (EmberZNet or another firmware): after it the hub runs on EZSP if the NCP \
-             answers EZSP. Send again with \"foreign\": true.",
+            "the stored image is not a zigbee-rs ZRHP NCP application (EmberZNet, another firmware, or a maintenance image such as an \
+             NV clear): after it the hub runs on what the MG24 answers. Send again with \"foreign\": true.",
         ));
     }
     {
@@ -646,12 +656,15 @@ fn job(image: &J, o: StartOpts) -> Result<String, String> {
         lines::reset_to_app();
     }
     std::thread::sleep(Duration::from_millis(1500));
-    phase("asking the new firmware");
-    let found = verify_running(&info);
+    phase("asking the firmware");
+    let kind = info.kind();
+    let found = verify_running(kind, from);
     let detected = found.as_ref().ok().and_then(Found::backend);
-    let verified = match (&found, info.zrhp) {
-        (Ok(Found::Zrhp { fw, build_id, .. }), Some(z)) => *build_id == z.build_id && fw.as_bytes() == z.fw_bytes(),
-        (Ok(Found::Ezsp { .. }), None) => true,
+    let verified = match (&found, kind, info.zrhp) {
+        (Ok(Found::Zrhp { fw, build_id, .. }), ImageKind::Zrhp, Some(z)) => *build_id == z.build_id && fw.as_bytes() == z.fw_bytes(),
+        (Ok(Found::Ezsp { .. }), ImageKind::Other, _) => true,
+        // No new firmware: the application that was there answers.
+        (Ok(_), ImageKind::Maintenance, _) => detected.is_some(),
         _ => false,
     };
     if let Some(b) = detected
@@ -670,10 +683,14 @@ fn job(image: &J, o: StartOpts) -> Result<String, String> {
     if st["restore"] == "wanted" {
         st["restore"] = if detected.is_some() { "pending" } else { "none" }.into();
     }
-    st["message"] = match (&found, verified) {
-        (Ok(_), true) => format!("flashed and running: {said}"),
-        (Ok(_), false) => format!("flashed; the NCP answers but not as the image says: {said}"),
-        (Err(_), _) => format!("flashed; the new firmware answers neither EZSP nor ZRHP ({said})"),
+    st["message"] = match (&found, verified, kind) {
+        (Ok(_), true, ImageKind::Maintenance) => format!("written (no application in the image); the MG24's application runs: {said}"),
+        (Err(_), _, ImageKind::Maintenance) => {
+            format!("written (no application in the image); the MG24's application answers neither EZSP nor ZRHP ({said})")
+        }
+        (Ok(_), true, _) => format!("flashed and running: {said}"),
+        (Ok(_), false, _) => format!("flashed; the NCP answers but not as the image says: {said}"),
+        (Err(_), _, _) => format!("flashed; the new firmware answers neither EZSP nor ZRHP ({said})"),
     }
     .into();
     save_state(&st);
@@ -682,9 +699,15 @@ fn job(image: &J, o: StartOpts) -> Result<String, String> {
     Ok(st["message"].as_str().unwrap_or_default().to_string())
 }
 
-/// The new firmware's answer (the image's protocol first).
-fn verify_running(info: &GblInfo) -> Result<Found, String> {
-    let order = if info.kind() == ImageKind::Zrhp { [Probe::Zrhp, Probe::Ezsp] } else { [Probe::Ezsp, Probe::Zrhp] };
+/// The firmware's answer after the flash: the image's protocol first; for
+/// a maintenance image, the backend's that ran before.
+fn verify_running(kind: ImageKind, from: Option<BackendKind>) -> Result<Found, String> {
+    let zrhp_first = match kind {
+        ImageKind::Zrhp => true,
+        ImageKind::Other => false,
+        ImageKind::Maintenance => from == Some(BackendKind::Zrhp),
+    };
+    let order = if zrhp_first { [Probe::Zrhp, Probe::Ezsp] } else { [Probe::Ezsp, Probe::Zrhp] };
     let mut prober = UartProber { ezsp_baud: crate::board().uart.line.baud };
     let mut why = String::new();
     for _ in 0..3 {

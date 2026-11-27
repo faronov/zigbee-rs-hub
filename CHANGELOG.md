@@ -21,9 +21,11 @@ install instructions and the list of merged pull requests. A pre-release
   firmware and puts the network back, under the same coordinator IEEE, so
   the devices keep working without pairing again. A failed or interrupted
   flash leaves the MG24 in its bootloader, which is never written: the hub
-  starts anyway, says so and flashes again. The way back to SONOFF's
-  firmware (two files, with their checksums) is in `docs/dongle-max.md`.
-  The zigbee-rs NCP for the Dongle-M is not ready yet (its radio).
+  starts anyway, says so and flashes again. Images without an
+  application (an NV clear) write data only and leave the MG24's
+  application running. The way back to SONOFF's firmware (an NV clear,
+  then SONOFF's GBL, with their checksums) is in `docs/dongle-max.md`. The
+  zigbee-rs NCP needs its Dongle-M radio (38.4 MHz, in review).
 - **Dongle Max: the hub runs on either NCP firmware.** The image carries
   both coordinator backends (EZSP and ZRHP); at boot it asks the MG24
   which firmware it runs (setting `auto`, the default; `ezsp` or `zrhp` to

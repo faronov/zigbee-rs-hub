@@ -12,7 +12,7 @@
 //! | Tag | Record | Here |
 //! |---|---|---|
 //! | `0x03A617EB` | header: `u32 version` (major `0x03`), `u32 type` (bit 0 AES-CCM encrypted, bit 8 ECDSA signed) | first; encrypted refused, signed noted |
-//! | `0xF40A0AF4` | application: `ApplicationData_t` (type, version, capabilities, product ID) | at most once; a Zigbee application (or type 0, none given) |
+//! | `0xF40A0AF4` | application: `ApplicationData_t` (type, version, capabilities, product ID) | at most once; a Zigbee application, or type 0 (none: a maintenance image) |
 //! | `0x76A617EB` | version dependency | accepted |
 //! | `0xF60808F6` | metadata | accepted; the ZRHP record parsed |
 //! | `0xFE0101FE`, `0xFD0303FD` | program, erase-and-program: `u32 address`, data | only inside the application area |
@@ -26,10 +26,14 @@
 //! zigbee-rs ZRHP NCP images carry a metadata record (zigbee-rs
 //! `docs/book/src/advanced/host-protocol.md` 7.9, written by
 //! `tools/efr32-gbl`): `"ZRHP", u8 version = 1, [8] build_id, u8 n, n
-//! bytes firmware version` ([`ZrhpRecord`]). Such an image must program
-//! only the ZRHP application window ([`Policy::zrhp_app_end`]: its NV
-//! journals sit above it); any other image (EmberZNet, a recovery image
-//! such as an NVM3 clear) may program up to the end of flash.
+//! bytes firmware version` ([`ZrhpRecord`]). Such an application image
+//! must program only the ZRHP application window ([`Policy::zrhp_app_end`]:
+//! its NV journals sit above it); any other image may program up to the
+//! end of flash. An image without an application (no application tag, or
+//! one of type 0) is a maintenance image ([`ImageKind::Maintenance`]): it
+//! writes data only, e.g. zigbee-rs `efr32mg24-nv-clear.gbl` (`0xFF` over
+//! the NV journals) or Nerivec's NVM3 clears; the application already on
+//! the chip stays and boots after it.
 
 use core::fmt;
 
@@ -177,10 +181,13 @@ impl ZrhpRecord {
 /// What the image is, for the hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
-    /// A zigbee-rs ZRHP NCP image (it carries the ZRHP record).
+    /// A zigbee-rs ZRHP NCP application (it carries the ZRHP record).
     Zrhp,
-    /// Anything else: EmberZNet (EZSP), a recovery image.
+    /// Another application: EmberZNet (EZSP), a zigbee-rs router.
     Other,
+    /// No application: data only (an NV or NVM3 clear); the application
+    /// on the chip stays.
+    Maintenance,
 }
 
 impl ImageKind {
@@ -189,6 +196,7 @@ impl ImageKind {
         match self {
             ImageKind::Zrhp => "zrhp",
             ImageKind::Other => "other",
+            ImageKind::Maintenance => "maintenance",
         }
     }
 }
@@ -228,9 +236,16 @@ pub struct GblInfo {
 }
 
 impl GblInfo {
-    /// zigbee-rs ZRHP NCP or another image.
+    /// An application image: an application tag of a type other than 0.
+    pub fn has_application(&self) -> bool {
+        self.app.is_some_and(|a| a.app_type != 0)
+    }
+
+    /// zigbee-rs ZRHP NCP, another application, or a maintenance image.
     pub fn kind(&self) -> ImageKind {
-        if self.zrhp.is_some() {
+        if !self.has_application() {
+            ImageKind::Maintenance
+        } else if self.zrhp.is_some() {
             ImageKind::Zrhp
         } else {
             ImageKind::Other
@@ -277,8 +292,8 @@ pub enum GblError {
         /// Its end.
         end: u32,
     },
-    /// A ZRHP image programming above its application window (its NV
-    /// journals).
+    /// A ZRHP application image programming above its application window
+    /// (its NV journals).
     BeyondZrhpWindow {
         /// The image's highest end.
         end: u32,
@@ -725,7 +740,8 @@ impl GblParser {
         if info.prog_tags == 0 {
             return Err(GblError::NoProgram);
         }
-        if info.zrhp.is_some() && info.prog_end > self.policy.zrhp_app_end {
+        if info.zrhp.is_some() && info.has_application() && info.prog_end > self.policy.zrhp_app_end
+        {
             return Err(GblError::BeyondZrhpWindow { end: info.prog_end });
         }
         info.size = self.offset;

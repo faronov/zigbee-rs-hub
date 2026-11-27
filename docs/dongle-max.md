@@ -534,10 +534,10 @@ items 11–14 below). The hub can replace the MG24's application through its
 resident Gecko bootloader, from the ESP32, without USB: SONOFF's EmberZNet
 NCP by the zigbee-rs ZRHP NCP, and back. The bootloader itself is never
 written, so a failed or interrupted update can always be repeated. The
-zigbee-rs side is not ready for the Dongle-M yet: its MG24 radio has no
-38.4 MHz crystal tables enabled (zigbee-rs `docs/book/src/platform-guides/
-efr32.md`: "the radio returns `Unsupported` on the Dongle-M"); until it
-has, flashing ZRHP onto a Dongle-M in service is pointless.
+zigbee-rs NCP for the Dongle-M needs its 38.4 MHz radio (feature
+`hfxo-38m4hz`, zigbee-rs PR #21, in review; its tables match the stock
+image byte for byte); zigbee-rs releases before it return `Unsupported`
+for the radio on the Dongle-M.
 
 ### Before: what the MG24 has
 
@@ -546,17 +546,19 @@ the version and the network state, the two manufacturing tokens that matter
 for a replacement:
 
 - **EUI-64 and the custom EUI-64 token** (`EZSP_MFG_CUSTOM_EUI_64`): unset
-  means the EUI-64 in use is the chip's own (DEVINFO), which the zigbee-rs
-  NCP also uses (`efr32s2-hal` `devinfo::eui64`, the same byte order). The
-  devices know the Trust Center by this IEEE (APS security, the TC address),
-  so the network moves to the new firmware only under the same IEEE (below).
-  A set token means the stock firmware uses another IEEE than the chip's:
-  the zigbee-rs MG24 NCP cannot take it (no `IEEE_REWRITABLE` yet), and the
-  hub then does not restore the network onto it by itself.
+  means the EUI-64 in use is the chip's own (DEVINFO). The devices know the
+  Trust Center by this IEEE (APS security, the TC address), so the network
+  moves to the new firmware only under the same IEEE (below). The
+  zigbee-rs NCP takes its IEEE as EmberZNet does: the custom EUI-64 token
+  (user data page `0x0FE0_0002`) unless it is all `FF`, else DEVINFO; so the
+  coordinator IEEE stays the same either way (lab unit
+  `B0E8E8FFFE5D4D03`). It has no IEEE override from the host
+  (`IEEE_REWRITABLE`) yet.
 - **`EZSP_MFG_CTUNE`**: the crystal tuning SONOFF measured (unset: DEVINFO
   or the firmware's default, 100 on this board). The token lives in the
-  user data page, outside every GBL, so it survives the update; the new
-  firmware must read it to keep the radio's frequency accurate.
+  user data page (`0x0FE0_0100`), outside every GBL, so it survives the
+  update. The zigbee-rs NCP uses DEVINFO `MODXOCAL`, then `MFG_CTUNE`
+  (`0xFFFF` = unset), then 100, as EmberZNet, and logs the value at boot.
 
 `mg24 bootloader` shows the bootloader (lab unit: Gecko Bootloader
 v2.04.02; on entry it prints its banner and menu by itself, followed by a
@@ -579,10 +581,11 @@ the flash (`hub_core::gecko::gbl`):
 | no encryption (header type bit 0, `0xFB0505FB`/`0xFA0606FA`/`0xF90707F9`) | the bootloader has no key for it |
 | no LZ4/LZMA program records | their size is unknown before decompression; the stock bootloader may lack the decompressor |
 | program records only from `0x0800_6000` (the application base) to the end of the 1536 KiB flash | nothing below the application base: the bootloader stays |
-| an image with the ZRHP record only below `0x0815_8000` | the ZRHP NCP's NV journals above it survive its updates |
-| an application tag, if any, of a Zigbee application (or type 0) | not a Thread, Bluetooth or bootloader image |
+| an application image with the ZRHP record only below `0x0815_8000` | the ZRHP NCP's NV journals above it survive its updates |
+| an application tag, if any, of a Zigbee application | not a Thread, Bluetooth or bootloader image |
+| no application (no application tag, or one of type 0): a **maintenance** image, anywhere above the application base | data only, e.g. zigbee-rs `efr32mg24-nv-clear.gbl` or Nerivec's NVM3 clears: the application on the MG24 stays and boots after it |
 | signature tags accepted, reported (`signed`) | a bootloader without the signing key refuses the image: the stock one enforces no signature (its own and the community GBLs carry none) |
-| an image without the ZRHP record needs `foreign` | EmberZNet or another firmware: the hub then runs on EZSP |
+| any image but a ZRHP NCP application needs `foreign` | EmberZNet, another firmware, a maintenance image: the hub then runs on what the MG24 answers |
 
 ### Flashing
 
@@ -609,8 +612,10 @@ the image uploaded through the API). What happens, on a thread of its own:
    from a new bootloader entry.
 4. `2` (run); the new firmware is asked: a ZRHP NCP must report the
    image's build ID and version (`SYS_NEGOTIATE`), an EmberZNet NCP its EZSP
-   version. The NCP seen is remembered (`zrh/ncp_seen`) and the hub
-   restarts on it (the registry saved first).
+   version; after a maintenance image no new firmware is expected, the
+   application that was there must answer. The NCP seen is remembered
+   (`zrh/ncp_seen`) and the hub restarts on it (the registry saved
+   first).
 5. On the new backend, once its NCP session is up, the kept network goes
    onto the NCP (`network/restore` with `confirm`) when the NCP has no
    network and reports the backup's coordinator IEEE (or none):
@@ -658,17 +663,29 @@ backend.
 
 The zigbee-rs NCP's NV journals (`0x0815_8000..0x0818_0000`) overlap
 EmberZNet's NVM3 (`0x0817_6000..0x0817_E000`, 32 KiB), which does not
-expect them there. Two images, both flashed with `foreign`:
+expect them there (the other way round, the zigbee-rs NCP recognises
+EmberZNet's NVM3 headers and wipes its window at its first boot). Two
+images, both flashed with `foreign`:
 
-1. **Nerivec's NVM3 clear** for this chip, flashed without the restore
-   (`ncp flash confirm foreign norestore`, or `"restore": false`): the
-   network is backed up and kept, the NVM3 area erased.
-   `EFR32MG24A420F1536IM48_nvm3_clear_134217728_1572864_8192_134242304_32768.gbl`
+1. **The NV clear, without the restore** (`ncp flash confirm foreign
+   norestore`, or `"restore": false`): the network is backed up and kept,
+   the zigbee-rs NCP's whole NV window is erased; its application stays.
+   zigbee-rs `efr32mg24-nv-clear.gbl` (the `efr32mg24-firmware` CI
+   artifact of `products/efr32mg24`, ~164 KB: one erase-and-program of
+   `0xFF` over `0x0815_8000..0x0818_0000`, no application tag). Whether
+   Gecko Bootloader v2.04.02 takes a GBL without an application tag is
+   checked on hardware (HIL 14); until then, or as an alternative,
+   Nerivec's 40 KiB NVM3 clear for this chip (`0x0817_6000..0x0818_0000`,
+   an application tag of type 0):
+   `EFR32MG24A420F1536IM48_nvm3_clear_134217728_1572864_8192_134242304_40960.gbl`
    from [Nerivec/silabs-firmware-recovery](https://github.com/Nerivec/silabs-firmware-recovery)
-   `gbl-builds` (commit `f74fc9b1b0aa`), 32 844 B, SHA-256
-   `59a8130a2be7e7d967b627747492dd5db3dcf57df2d91d2db1e928ba223a0e9a`
-   (programs `0x0817_6000..0x0817_E000`). Its "app clear" sibling (1.5 MB)
-   does not fit the image store.
+   `gbl-builds` (commit `f74fc9b1b0aa`), 41 036 B, SHA-256
+   `06b7e7e2f6718cd2e1ecfd2f1f7e9121462a49fac6b9261e986149834ea4f9c6`.
+   Its 32 KiB sibling (`…_32768.gbl`, 32 844 B, SHA-256
+   `59a8130a2be7e7d967b627747492dd5db3dcf57df2d91d2db1e928ba223a0e9a`,
+   `0x0817_6000..0x0817_E000`) clears only EmberZNet's NVM3: the minimum
+   for EmberZNet to start clean. The "app clear" images (1.5 MB) do not fit
+   the image store.
 2. **SONOFF's stock EmberZNet 7.4.5 NCP**
    (`zigbee_ncp_uart_hw_donglem_v7.4.5.gbl`, 251 808 B, SHA-256
    `44b81c1ecf81032b98d625388ae44c10d7c8a6abd1dcea10b2e2d934d7a311fa`,
@@ -676,24 +693,26 @@ expect them there. Two images, both flashed with `foreign`:
    [SONOFF's forum](https://forum.ewelink.cc/uploads/short-url/xpoAcAdJLxbujbp7uSVCT2TsiE4.gbl)
    or the [iHost flasher add-on](https://raw.githubusercontent.com/iHost-Open-Source-Project/hassio-ihost-sonoff-dongle-flasher/136ab2fe736a1e5e9c880c2334d2c95adf1e2f25/firmware-build/donglem_mg24_zigbee_stable_1.0.0_115200_7.4.5.gbl):
    the hub restarts on EZSP and restores the kept network onto EmberZNet
-   (same chip, same EUI-64).
+   (the same IEEE: custom token or DEVINFO, as before).
 
-The hub names both images by their SHA-256 (`image.known`); the files are
-not part of this repository. A network kept by an update and not restored
-yet stays the one to restore through the next update (the second image of
-the way back, a retry after a failed upload). Back to SONOFF's ESP32
-firmware as well: `stock confirm`, after the MG24 runs EmberZNet again.
+The hub names SONOFF's and Nerivec's images by their SHA-256
+(`image.known`); none of the files is part of this repository. A network
+kept by an update and not restored yet stays the one to restore through
+the next update (here the stock image after the NV clear, after which the
+zigbee-rs NCP runs no network to back up; also a retry after a failed
+upload). Back to SONOFF's ESP32 firmware as well: `stock confirm`, after
+the MG24 runs EmberZNet again.
 
 ### API (`ncp/*`, maintenance feature `ncp_update`)
 
 | Request | Fields | Result |
 |---|---|---|
-| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`; also in `hub/system` `ncp_update` |
+| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`; also in `hub/system` `ncp_update` |
 | `ncp/update/begin` | `size`, `sha256` (hex, optional) | `chunk` (4096), `store`; refused while the hub's data are in RAM (the area is SONOFF's until the claim) |
 | `ncp/update/chunk` | `offset`, `data` (base64, at most 4096 bytes) | `written`; an invalid image is refused (and the upload aborted) as soon as its bytes show it |
 | `ncp/update/end` | | the image (as `image` above) and a `note` |
 | `ncp/update/abort` | | |
-| `ncp/update/start` | `confirm` (true), `foreign` (an image without the ZRHP record), `force` (no backup), `restore` (default true) | `state: started`; follow `ncp/update/status` |
+| `ncp/update/start` | `confirm` (true), `foreign` (any image but a ZRHP NCP application), `force` (no backup), `restore` (default true) | `state: started`; follow `ncp/update/status` |
 | `ncp/update/restore` | `confirm` (true) | `state: restoring`: the kept network onto the NCP now (as after a switch) |
 | `ncp/update/reset` | `confirm` (true) | the MG24 reset into its application, the hub restarts |
 | `ncp/backend/set` | `backend`: `auto`, `ezsp`, `zrhp` | from the next boot |
@@ -878,8 +897,9 @@ stored network (the hub's backend calls it at every session start).
   flashes; images are checked by their structure and write ranges, and
   named when known by their SHA-256, not checked against a per-version
   allow-list manifest (`coordinator-profiles.md`); the zigbee-rs MG24 NCP
-  has no 38.4 MHz radio yet (zigbee-rs) and cannot take another IEEE than
-  its chip's (`IEEE_REWRITABLE`).
+  needs its 38.4 MHz radio (zigbee-rs PR #21) and keeps the IEEE EmberZNet
+  used (the custom token, else DEVINFO), with no IEEE override from the
+  host.
 - A SONOFF file system that the LittleFS walk cannot read is counted by
   its written blocks (refused above 29); more than 29 blocks in use is
   refused either way (RAM only, the reason in the banner).
@@ -942,10 +962,13 @@ verified").
     the hub back on EZSP with the network restored or kept; then a power cut
     in the middle of an upload: `interrupted`, the bootloader found at the
     next boot, the hub up with the UART parked, the flash repeated.
-13. With a zigbee-rs MG24 NCP whose radio runs on the Dongle-M: EZSP → ZRHP
+13. With the zigbee-rs MG24 NCP for the Dongle-M (38.4 MHz radio, zigbee-rs PR #21): EZSP → ZRHP
     with a joined device: the build ID verified, the hub on ZRHP
     (`ncp/update/status` `backend.running`), the network restored under the
     same IEEE, the device controlled without pairing again; boot time of
     `auto` with each NCP.
-14. The way back: the NVM3 clear (`norestore`), then SONOFF's stock GBL:
-    EZSP with the network restored; `stock confirm` afterwards.
+14. The way back: zigbee-rs `efr32mg24-nv-clear.gbl` (`norestore`; does
+    Gecko Bootloader v2.04.02 take a GBL without an application tag? else
+    Nerivec's 40 KiB NVM3 clear), the zigbee-rs NCP still answering after
+    it; then SONOFF's stock GBL: EZSP with the network restored; `stock
+    confirm` afterwards.

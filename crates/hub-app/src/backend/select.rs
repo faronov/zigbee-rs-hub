@@ -354,9 +354,10 @@ pub enum AfterSwitch {
 /// the new NCP now, given its `network/info`. Only onto an NCP without a
 /// network, and only under the backup's coordinator IEEE: the devices know
 /// the Trust Center by it (APS security, the TC address), so a new NCP
-/// that cannot take it (no IEEE override, e.g. the zigbee-rs MG24 NCP
-/// today) would leave them unable to talk to it; that is the operator's
-/// decision.
+/// under another IEEE (one without an IEEE override from the host, as the
+/// zigbee-rs MG24 NCP, which takes EmberZNet's: the custom EUI-64 token,
+/// else DEVINFO) would leave them unable to talk to it; that is the
+/// operator's decision.
 pub fn after_switch(info: &J, backup: &J) -> AfterSwitch {
     let epid = backup["extended_pan_id"].as_str().unwrap_or_default().to_ascii_lowercase();
     if epid.is_empty() || backup["network_key"]["key"].as_str().is_none() {
