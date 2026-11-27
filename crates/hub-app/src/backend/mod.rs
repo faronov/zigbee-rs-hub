@@ -7,6 +7,9 @@
 //! |---|---|---|
 //! | ZRHP (`hub-ncp`) | `zrhp` | the host core's store; the backend decides ownership (`HostStore`) |
 //! | EZSP (`hub-ezsp`) | `ezsp` | [`NcpNvRecords`]: the app decides ownership from what the NCP reports (`NcpNv`) |
+//!
+//! [`select`]: which backend a board whose NCP firmware can change starts
+//! (setting, probes, the restore after an NCP update).
 
 use std::io;
 use std::sync::Arc;
@@ -20,6 +23,7 @@ use hub_store::KvStore;
 #[cfg(feature = "ezsp")]
 pub mod ezsp;
 mod ncpnv;
+pub mod select;
 #[cfg(feature = "zrhp")]
 mod zrhp;
 

@@ -1448,3 +1448,172 @@ fn removed_device_stays_removed(kind: Kind, force: bool) {
     assert_eq!(devices_list(&rig.app, sid, &rx), [plug_id], "{what}");
     rig.finish();
 }
+
+// ---- the Dongle-M's NCP replaced: backend probes and the switch ----
+
+/// A byte port shared by the probes (and, between them, a simulated NCP's
+/// line): the EZSP probe's transport, the ZRHP probe's halves.
+struct Line2<R, W>(Arc<Mutex<R>>, Arc<Mutex<W>>);
+
+impl<R, W> Clone for Line2<R, W> {
+    fn clone(&self) -> Self {
+        Line2(self.0.clone(), self.1.clone())
+    }
+}
+
+trait ReadBytes: Send {
+    fn read_bytes(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize>;
+}
+trait WriteBytes: Send {
+    fn write_bytes(&mut self, data: &[u8]) -> std::io::Result<()>;
+}
+
+impl ReadBytes for hub_ncp::transport::pipe::Rx {
+    fn read_bytes(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+        hub_ncp::transport::PortRx::read(self, buf, timeout)
+    }
+}
+impl WriteBytes for hub_ncp::transport::pipe::Tx {
+    fn write_bytes(&mut self, data: &[u8]) -> std::io::Result<()> {
+        hub_ncp::transport::PortTx::write_all(self, data)
+    }
+}
+impl WriteBytes for Arc<Mutex<hub_ezsp::sim::SimTransport>> {
+    fn write_bytes(&mut self, data: &[u8]) -> std::io::Result<()> {
+        hub_ezsp::Transport::write_all(&mut *self.lock().unwrap(), data)
+    }
+}
+impl ReadBytes for Arc<Mutex<hub_ezsp::sim::SimTransport>> {
+    fn read_bytes(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+        // Short slices: the writer gets the transport between them.
+        let t0 = Instant::now();
+        loop {
+            let n = hub_ezsp::Transport::read(&mut *self.lock().unwrap(), buf, Duration::from_millis(5))?;
+            if n > 0 || t0.elapsed() >= timeout {
+                return Ok(n);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+impl<R: ReadBytes, W: WriteBytes> hub_ncp::transport::PortRx for Line2<R, W> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+        self.0.lock().unwrap().read_bytes(buf, timeout)
+    }
+}
+impl<R: ReadBytes, W: WriteBytes> hub_ncp::transport::PortTx for Line2<R, W> {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.1.lock().unwrap().write_bytes(data)
+    }
+    fn set_line(&mut self, _: hub_ncp::transport::Line) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<R: ReadBytes, W: WriteBytes> hub_ezsp::Transport for Line2<R, W> {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.1.lock().unwrap().write_bytes(data)
+    }
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+        self.0.lock().unwrap().read_bytes(buf, timeout)
+    }
+}
+
+fn quick() -> crate::backend::select::ProbeTimes {
+    crate::backend::select::ProbeTimes { ezsp_rstack_ms: 600, ezsp_reset_retries: 0, zrhp_per_line: Duration::from_millis(1500) }
+}
+
+/// Each probe finds its own simulated NCP, and a probe of the other
+/// protocol first leaves it as it was: the ZRHP NCP gets no request but
+/// the session's own, the EmberZNet NCP keeps its network and answers the
+/// EZSP probe after the ZRHP one.
+#[test]
+fn backend_probes_find_their_ncp_and_leave_the_other_unchanged() {
+    use crate::backend::select::{Found, probe_ezsp, probe_zrhp};
+    let lines = vec![hub_ncp::transport::Line::BR_FALLBACK, hub_ncp::transport::Line::BR_DEFAULT];
+
+    // The zigbee-rs NCP.
+    let (host, ncp_end) = hub_ncp::transport::pipe::pair();
+    let zsim = hub_ncp::sim::SimNcp::start(ncp_end);
+    let (rx, tx) = host.split();
+    let port = Line2(Arc::new(Mutex::new(rx)), Arc::new(Mutex::new(tx)));
+    let e = probe_ezsp(port.clone(), hub_ezsp::SystemClock::default(), quick()).unwrap_err();
+    assert!(e.contains("no EZSP answer"), "{e}");
+    let found = probe_zrhp(port.clone(), port.clone(), lines.clone(), 0x5EED_0001, quick()).unwrap();
+    let Found::Zrhp { fw, build_id, ieee, .. } = &found else { panic!("{found:?}") };
+    assert_eq!((fw.as_str(), *build_id), ("sim-ncp 0.1.0", [0x51; 8]));
+    assert_eq!(*ieee, Some([0x5A, 0x51, 0, 0, 0, 0, 1, 2]));
+    let asked: Vec<u16> = zsim.with(|s| s.log.iter().map(|(id, _)| *id).collect());
+    assert!(asked.iter().all(|id| *id < 0x0100), "SYSTEM requests only: {asked:04X?}");
+    // Asked again (the backend's session later): it answers as before.
+    assert_eq!(probe_zrhp(port.clone(), port, lines.clone(), 0x5EED_0002, quick()).unwrap(), found);
+    zsim.stop();
+
+    // SONOFF's EmberZNet NCP.
+    let (sim, transport, clock) = hub_ezsp::sim::Sim::new(ezsp_sim(true, 0xDD), hub_ezsp::sim::Faults::none());
+    sim.set_pace(Some(1));
+    let shared = Arc::new(Mutex::new(transport));
+    let port = Line2(Arc::new(Mutex::new(shared.clone())), Arc::new(Mutex::new(shared)));
+    assert_eq!(probe_zrhp(port.clone(), port.clone(), lines, 0x5EED_0003, quick()).unwrap_err(), "no ZRHP session");
+    let found = probe_ezsp(port, clock, quick()).unwrap();
+    let Found::Ezsp { version, eui64 } = &found else { panic!("{found:?}") };
+    assert!(version.starts_with("EZSP 13"), "{version}");
+    assert_eq!(*eui64, Some(0x000B_57FF_FE12_3456u64.to_le_bytes()));
+    assert!(sim.ncp(|n| n.config().network_formed && n.config().network.extended_pan_id == [0xDD; 8]), "the network kept");
+}
+
+/// The SONOFF Dongle-M's MG24 gets the zigbee-rs NCP (EZSP → ZRHP): the
+/// backup kept before the flash (`network/backup` with `keep`) survives
+/// the backend change (hub-scoped), the new backend finds the records
+/// another backend's (foreign), the kept network goes onto the empty NCP
+/// under the same coordinator IEEE (the same chip), and the device works
+/// on without pairing again, name and all.
+#[test]
+fn the_network_and_its_devices_move_from_the_ezsp_ncp_to_the_zrhp_ncp() {
+    use crate::backend::select::{AfterSwitch, after_switch};
+    // The ZRHP simulator's IEEE: the chip's own EUI-64 under both firmwares.
+    const CHIP_EUI64: [u8; 8] = [0x5A, 0x51, 0, 0, 0, 0, 1, 2];
+    let flash = SharedFlash::new();
+    let mut c = ezsp_sim(true, 0xDD);
+    c.eui64 = Eui64(CHIP_EUI64);
+    c.nwk_frame_counter = 70_000;
+    let mut rig = Rig::ezsp(c, flash.store());
+    rig.devices(vec![plug()], Arc::new(Mutex::new(Vec::new())));
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    rig.link.join(PLUG, PLUG_NWK);
+    wait("the plug interviewed", || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+    ok(&call(&rig.app, sid, &rx, 1, json!({"type": "devices/update", "device": "zb:5a52530000000001", "name": "Kettle"})));
+    let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/backup", "keep": true, "keys": false}));
+    assert!(r["error"]["message"].as_str().unwrap().contains("keys true"), "{r}");
+    let backup = ok(&call(&rig.app, sid, &rx, 3, json!({"type": "network/backup", "keep": true}))).clone();
+    assert_eq!(backup["coordinator_ieee"], "020100000000515a");
+    rig.finish();
+
+    // The new firmware: the same store, an NCP without a network.
+    let mut rig = Rig::zrhp_with(flash.store(), false);
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered.clone());
+    let (sid, rx) = session(&rig.app);
+    let i = info(&rig.app, sid, &rx);
+    assert_eq!((&i["state"], &i["registry"]["state"], &i["registry"]["backend"]), (&json!("none"), &json!("foreign"), &json!("ezsp")), "{i}");
+    let kept = ok(&call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced", "ext_pan_id": "dddddddddddddddd"})))["backup"].clone();
+    assert_eq!(kept, backup, "kept through the backend change");
+    assert_eq!(after_switch(&i, &kept), AfterSwitch::Restore);
+    let r = call(&rig.app, sid, &rx, 5, json!({"type": "network/restore", "backup": kept, "confirm": true}));
+    let rep = ok(&r);
+    assert!(rep["nwk_fc_start"].as_u64().unwrap() >= 80_000, "the backup's counter plus the margin: {rep}");
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ownership"] == "owned" && i["registry"]["state"] == "owned" && i["ext_pan_id"] == "dddddddddddddddd"
+    });
+    assert_eq!(after_switch(&info(&rig.app, sid, &rx), &kept), AfterSwitch::Done);
+    wait("the registry loaded", || devices_list(&rig.app, sid, &rx).len() == 1);
+    let dev = ok(&call(&rig.app, sid, &rx, 6, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+    assert_eq!((&dev["name"], &dev["interview"]), (&json!("Kettle"), &json!("complete")), "{dev}");
+    ok(&call(&rig.app, sid, &rx, 7, json!({"type": "entities/command", "uid": SWITCH, "command": "turn_on"})));
+    wait("On reached the plug through the ZRHP NCP", || {
+        answered.lock().unwrap().iter().any(|r| r.cluster == 0x0006 && r.payload.get(2) == Some(&0x01))
+    });
+    rig.finish();
+}

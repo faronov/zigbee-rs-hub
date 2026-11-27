@@ -350,6 +350,10 @@ struct TopologyReq {
 
 struct BackupReq {
     keys: bool,
+    /// Also keep it as `bkp/replaced/<ext_pan_id>` (hub-scoped: it
+    /// survives a backend change, e.g. before the NCP's firmware is
+    /// replaced).
+    keep: bool,
 }
 
 /// A restore being staged: the network's records and the device batches
@@ -453,7 +457,7 @@ impl TopologyReq {
 
 impl BackupReq {
     fn from(v: &J) -> Result<Self, ApiError> {
-        Ok(Self { keys: flag(v, "keys", true)? })
+        Ok(Self { keys: flag(v, "keys", true)?, keep: flag(v, "keep", false)? })
     }
 }
 
@@ -1229,6 +1233,9 @@ impl Admin {
                 if q.keys && !keys_may_leave(ctx.api) {
                     return fail(ApiError::new("unauthorized", "backups with keys need an API token"));
                 }
+                if q.keep && !q.keys {
+                    return fail(bad("keep: a kept backup holds the network key (keys true)"));
+                }
                 if !ctx.status.caps.as_ref().is_some_and(|c| c.backup.export) {
                     return fail(ApiError::new("unsupported", "the NCP has no BACKUP_RESTORE"));
                 }
@@ -1236,7 +1243,11 @@ impl Admin {
                 let source = self.source.clone();
                 let now_s = ctx.now_s;
                 self.spawn("backup", out, sid, id, move |_| {
-                    take_backup(&*net, &*records, q.keys, &known, &source, now_s, id).map(|b| Reply::Frame(b.frame))
+                    let b = take_backup(&*net, &*records, q.keys, &known, &source, now_s, id)?;
+                    if q.keep {
+                        keep_replaced(&*records, &b)?;
+                    }
+                    Ok(Reply::Frame(b.frame))
                 })
             }
             "network/reset" => self.reset(ctx, sid, id, v, false),
