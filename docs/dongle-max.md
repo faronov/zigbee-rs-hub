@@ -308,9 +308,13 @@ is kept in NVS (`zrh/files_auto`: `claimed`, or `refused: <why>`): a
 refusal is not retried at every boot, an interrupted first claim is
 resumed, a claim cut short after its commit is finished (any boot), a
 return to stock cut short is left for `stock confirm`
-(`hub_store::files::boot_action`, host-tested). A completed `stock
-confirm` forgets the attempt, so a later installation is a first boot
-again.
+(`hub_store::files::boot_action`, host-tested). Every boot that finds the
+region the hub's writes `claimed` if NVS does not say so yet (a claim
+finished at boot after a power cut, a power cut between a claim and its
+record, an earlier refusal followed by a claim by hand:
+`hub_store::files::boot_record`): the recovery below relies on it. A
+completed `stock confirm` forgets the attempt, so a later installation is
+a first boot again.
 
 **If the claim is refused, the hub runs with its data in RAM only**, and
 says so loudly: the boot log (`!!!`), `files`, `hub` and `info` on the
@@ -420,9 +424,9 @@ partition would leave a plain claim instead, of SONOFF's new files: the
 original ones would be gone). `hub_store::files` names that state: no claim record, a complete copy of
 SONOFF's data that verifies, and SONOFF's blocks changed since, the claim
 blocks too. The plain claim refuses it (it cannot tell which SONOFF data
-are newer); `zrh/files_auto` = `claimed` in NVS (written when the hub's
-claim completed, cleared by `stock confirm`) tells the hub that it had
-claimed the region, so the file system is the reformat's.
+are newer); `zrh/files_auto` = `claimed` in NVS (written by every boot
+that found the region the hub's, cleared by `stock confirm`) tells the hub
+that it had claimed the region, so the file system is the reformat's.
 
 **Which SONOFF data are kept: the copy.** The copy is what the hub's claim
 took from SONOFF's original file system (its settings, device info, MG24
@@ -463,13 +467,19 @@ stock and SONOFF's original files read back).
 4. The hub takes the MG24's network: an empty store is untagged, so the
    first session's network becomes the hub's (`network/info` ownership
    `owned`), and the devices the NCP knows are imported, without names.
-5. The hub backup (Settings › Backup: the network, its devices and keys,
-   the hub's groups) restored onto the same network brings back the groups
-   and the devices the NCP no longer lists: Settings › Backup and restore
-   › Restore from a file (`network/restore`; it asks for `force`, as the
-   MG24 runs the network). Names, areas, automations and the app's
-   settings are not in it: set them again (or import the names from
-   Zigbee2MQTT or ZHA files if the network came from there:
+5. Only if groups or devices are missing: restore the most recent hub
+   backup (Settings › Backup: the network, its devices and keys, the
+   hub's groups) onto the same network, Settings › Backup and restore ›
+   Restore from a file (`network/restore`; it asks for `force`, as the
+   MG24 runs the network). Over the backup's own network a restore starts
+   the frame counters from the running network's when they are higher
+   than the backup's (EZSP since 0.4.1, note `floor_raised`:
+   `docs/ezsp-backend.md`; a zigbee-rs NCP always starts above the
+   counters it used), so an older backup does not roll them back (the
+   coordinator sends thousands of frames a day, and devices drop frames
+   whose counter went back). Names, areas, automations and the app's
+   settings are not in the backup: set them again (or import the names
+   from Zigbee2MQTT or ZHA files if the network came from there:
    `docs/migration.md`).
 
 ## The hub on the dongle

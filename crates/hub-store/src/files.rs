@@ -329,6 +329,21 @@ pub fn claim_check(need: Need, recover: bool, claimed_before: bool) -> Result<()
     }
 }
 
+/// The hub's record of its claim, outside the region (the gateway's NVS):
+/// [`claim_check`]'s `claimed_before`.
+pub const CLAIM_RECORD: &str = "claimed";
+
+/// The record to write after a boot (`None`: leave it as it is):
+/// [`CLAIM_RECORD`] whenever the region is the hub's in this boot
+/// (`ready`: a `ready` claim record proves the claim) and `record` does not
+/// say so yet: a claim finished at boot after a power cut, a power cut
+/// between the claim and its record, a refusal recorded before a claim by
+/// hand, a firmware that did not keep it. A region that is not the hub's
+/// leaves it (a refusal stays; after a reformat it is the proof).
+pub fn boot_record(ready: bool, record: Option<&str>) -> Option<&'static str> {
+    (ready && record != Some(CLAIM_RECORD)).then_some(CLAIM_RECORD)
+}
+
 /// The hub claims the region by itself on its first boot: `attempted` says
 /// an earlier boot tried (the claim was made or refused). A return to
 /// stock cut short (`restoring`) is not undone by a boot; `stock confirm`
@@ -1388,5 +1403,37 @@ mod tests {
             d[(block * BLOCK) as usize + 12] ^= 0xFF;
         }
         refused(d, Need::Changed { copy_ok: true, content_ok: false }, "unknown_content");
+    }
+
+    /// A claim completed without the gateway's record of it (here: its
+    /// commit cut short, finished at the next boot) gets the record at that
+    /// boot, so that a later reformat by SONOFF's firmware can be
+    /// recovered.
+    #[test]
+    fn the_claim_record_is_written_once_the_region_is_the_hubs() {
+        let original = sonoff(&[]);
+        let mut r = region(original.clone());
+        r.claim().unwrap();
+        r.flash.erase(1).unwrap();
+        let cut = r.into_inner().data;
+        for record in [None, Some("refused: flash: power cut")] {
+            let mut r = region(cut.clone());
+            let st = r.status().unwrap();
+            assert_eq!(boot_action(&st, record.is_some()), BootAction::Finish);
+            r.claim().unwrap();
+            let written = boot_record(true, record);
+            assert_eq!(written, Some(CLAIM_RECORD), "{record:?}");
+            assert_eq!(boot_record(true, written), None, "written once");
+            // Later SONOFF's firmware reformats the region.
+            use_region(&mut r);
+            let mut d = r.into_inner().data;
+            reformat(&mut d);
+            let need = region(d).assess().unwrap();
+            assert_eq!(claim_check(need, true, written == Some(CLAIM_RECORD)).map_err(|e| e.code()), Ok(()));
+        }
+        // Not the hub's region: the record stays as it is.
+        assert_eq!(boot_record(false, Some(CLAIM_RECORD)), None);
+        assert_eq!(boot_record(false, Some("refused: x")), None);
+        assert_eq!(boot_record(false, None), None);
     }
 }

@@ -32,16 +32,26 @@ install instructions and the list of merged pull requests. A pre-release
   code and a message, in the request's error and in `storage/status`
   `last` (now `{"code", "message"}`); 0.4.0 refused the claim after such
   a reformat without a word. That state (the hub's claim recorded in NVS,
-  SONOFF's new file system over the hub's data, the claim's copy of
-  SONOFF's files intact) is shown as `reformatted` in `storage/status`
+  which every boot that finds the region the hub's now writes if it is
+  missing; SONOFF's new file system over the hub's data; the claim's copy
+  of SONOFF's files intact) is shown as `reformatted` in `storage/status`
   and in the RAM-only banner, and `storage/claim` with `"recover": true`
   (console `files recover confirm`; Settings › Storage asks for it)
   claims the region again, keeping the copy of SONOFF's original files
   for `stock confirm`. The hub restarts with an empty store, takes the
-  MG24's network and imports its devices; the hub backup brings back the
-  rest it holds (`docs/dongle-max.md`, "Recovery after SONOFF's firmware
+  MG24's network and imports its devices; the most recent hub backup
+  restored onto it brings back its groups and devices (not names or
+  automations: `docs/dongle-max.md`, "Recovery after SONOFF's firmware
   reformatted `files`"). Make the first update a self-update: the
   bootloader's fallback is then a hub image, not SONOFF's firmware.
+- **EZSP: a backup restored over its own running network no longer rolls
+  the frame counters back.** The restore started from the backup's NWK
+  and APS frame counters plus 10 000; the coordinator sends thousands of
+  frames a day, so a backup a day or two old made the devices drop its
+  frames. Over the backup's network (the same extended PAN ID and network
+  key) it now starts from the running network's counters when they are
+  higher (note `floor_raised`). A zigbee-rs NCP (ZRHP) already started
+  above the counters it used.
 
 ## 0.4.0
 

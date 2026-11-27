@@ -439,6 +439,12 @@ checks of step 0 alone, without changing anything):
 0. Checks: the backup's coordinator, network (security level 5, channel
    11–26) and network key; both frame counters plus their margins below
    2³²; the coordinator IEEE (below). A refusal leaves the NCP as it is.
+   When the NCP runs the backup's own network (the same extended PAN ID,
+   and the same network key when the NCP exports it), the counters start
+   from the running network's NWK and APS frame counters
+   (`getNetworkKeyInfo`, `getValue`) where they are higher than the
+   backup's (an older backup: the devices have seen the newer counters),
+   note `floor_raised`.
 1. hub-app tags the records with the backup's extended PAN ID (after
    leaving the network the NCP stores, as for `network/reset`), then the
    backend leaves any network left and clears the key table
@@ -456,7 +462,7 @@ checks of step 0 alone, without changing anything):
    NCP's IEEE with `allow_ieee_change: false`: note `ieee_kept`). The NCP
    is reset (a new session) and must report the backup's IEEE.
 3. `setValue(NWK_FRAME_COUNTER)` and `setValue(APS_FRAME_COUNTER)` (0x23,
-   0x24, u32; without a network) to the backup's counters plus the margins
+   0x24, u32; without a network) to the counters of step 0 plus the margins
    (hub-app: 10 000 each, zigpy's default `counter_increment`; APS 2²⁰
    without a TCLK counter). Refused → the restore fails (forming with
    counters from 0 would make the devices drop the coordinator's frames).

@@ -9,8 +9,10 @@
 //! system is untouched and the next boot claims again, after it the next
 //! boot finishes the claim. The attempt is kept in NVS (`zrh/files_auto`:
 //! `claimed`, or `refused: <why>`), so a refusal is not retried at every
-//! boot; a completed `stock confirm` clears it (a later installation is a
-//! first boot again).
+//! boot; every boot that finds the region the hub's writes `claimed` if it
+//! is not there yet (`hub_store::files::boot_record`: a claim finished at
+//! boot, a power cut before the record); a completed `stock confirm` clears
+//! it (a later installation is a first boot again).
 //!
 //! **If the claim is refused** (more than 29 blocks in use, SONOFF's file
 //! system in `stock_copy`, unknown content) the hub keeps its data in RAM
@@ -46,7 +48,7 @@ use std::time::Duration;
 
 use hub_core::layout::dongle_files::{self as layout, Content};
 use hub_devices::hub::ApiError;
-use hub_store::files::{BootAction, Claimed, CopyState, FilesError, FilesRegion, Need, Restored, SLOTS, ScanMethod, Status};
+use hub_store::files::{BootAction, CLAIM_RECORD, Claimed, CopyState, FilesError, FilesRegion, Need, Restored, SLOTS, ScanMethod, Status};
 use hub_store::{Gated, WriteGate};
 use log::{error, info, warn};
 use serde_json::{Value as J, json};
@@ -93,7 +95,7 @@ fn auto() -> Option<String> {
 
 /// The hub claimed the region (and has not given it back since).
 fn claimed_before() -> bool {
-    auto().as_deref() == Some("claimed")
+    auto().as_deref() == Some(CLAIM_RECORD)
 }
 
 fn set_last(code: &'static str, msg: String) {
@@ -157,7 +159,6 @@ pub fn boot() -> bool {
                     let text = claimed_text(c);
                     info!("files: {text}");
                     set_last("claimed", text);
-                    remember("claimed");
                     true
                 }
                 // A flash error: the next boot tries again.
@@ -184,6 +185,9 @@ pub fn boot() -> bool {
         }
     };
     IN_USE.store(ready, Ordering::Relaxed);
+    if let Some(r) = hub_store::files::boot_record(ready, auto().as_deref()) {
+        remember(r);
+    }
     if let Some(why) = ram_only_reason() {
         warn!("files: !!! the hub's data stay in RAM, lost at every restart: {why} (`files claim` on the console, Settings › Storage)");
     }
@@ -358,7 +362,7 @@ fn spawn_claim(recover: bool) -> Result<(), Refusal> {
                 };
                 info!("files: {text}");
                 set_last(if recover { "recovered" } else { "claimed" }, text);
-                remember("claimed");
+                remember(CLAIM_RECORD);
                 info!("files: restarting to use the region");
                 std::thread::sleep(Duration::from_secs(2));
                 crate::restart();

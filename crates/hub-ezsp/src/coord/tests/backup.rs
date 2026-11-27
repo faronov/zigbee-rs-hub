@@ -454,6 +454,53 @@ fn exhausted_frame_counters_and_incomplete_backups_change_nothing() {
     a.finish();
 }
 
+/// An older backup of the network the NCP runs: its devices have seen
+/// the newer frame counters, so the restore starts from those plus the
+/// margins; another network's counters do not count.
+#[test]
+fn an_older_backup_of_the_running_network_starts_from_its_newer_frame_counters() {
+    let mut a = Rig::new(source(13));
+    a.next_up();
+    let items = export(&mut a, true);
+    // Days of traffic since the backup.
+    a.sim.ncp(|n| {
+        n.config_mut().nwk_frame_counter = 120_000;
+        n.config_mut().aps_frame_counter = 5_000;
+    });
+    let r = a
+        .admin
+        .backup_restore(blob(&items), margins(10_000))
+        .unwrap();
+    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (130_000, 15_000));
+    assert!(
+        r.notes.contains(&(0, restore_note::FLOOR_RAISED)),
+        "{:?}",
+        r.notes
+    );
+    let n = a.sim.ncp(|n| n.config().clone());
+    assert_eq!(
+        (n.nwk_frame_counter, n.aps_frame_counter),
+        (130_000, 15_000)
+    );
+    assert_eq!(n.network_key, NKEY);
+    a.finish();
+
+    // Another network with higher counters: the backup's plus the margins.
+    let mut c = Rig::new(SimConfig {
+        network_key: LINK,
+        nwk_frame_counter: 900_000,
+        ..source(13)
+    });
+    c.next_up();
+    let r = c
+        .admin
+        .backup_restore(blob(&items), margins(10_000))
+        .unwrap();
+    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (60_000, 10_700));
+    assert!(!r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
+    c.finish();
+}
+
 #[test]
 fn another_stacks_backup_gets_a_new_link_key_root_and_the_large_aps_margin() {
     let mut a = Rig::new(source(13));
