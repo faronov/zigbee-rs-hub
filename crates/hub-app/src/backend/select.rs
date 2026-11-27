@@ -339,29 +339,132 @@ where
     }
 }
 
-/// Consecutive boots a ZRHP code path (the probe, the backend's first
-/// minute) crashed before the boot stops running it ([`zrhp_guard`]).
+/// Boots in a row whose ZRHP code path crashed before the boot stops
+/// running it ([`ZrhpGuard`]).
 pub const ZRHP_CRASH_LIMIT: u32 = 2;
 
-/// The crash guard of the ZRHP code paths at boot. The firmware arms a
-/// marker before them and clears it once they returned (the backend: after
-/// its first minute); a boot that finds it armed after a crash (`crashed`:
-/// panic or watchdog reset) counts one more in `streak`, a boot that finds
-/// it armed after another reset (a power cut) counts nothing. Returns the
-/// new streak and whether ZRHP is skipped in this boot: at
-/// [`ZRHP_CRASH_LIMIT`] crashes in a row nothing ZRHP runs
-/// ([`apply_zrhp_guard`]) until the operator clears it, so a probe or a
-/// backend that crashes can never boot-loop the hub.
-pub fn zrhp_guard(armed: bool, crashed: bool, streak: u32) -> (u32, bool) {
-    let streak = if armed && crashed { streak.saturating_add(1) } else { streak };
-    (streak, streak >= ZRHP_CRASH_LIMIT)
+/// A boot that skipped ZRHP and ran this long without a crash: the next
+/// boot tries ZRHP once more ([`ZrhpGuard::clean_uptime`]).
+pub const ZRHP_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The ZRHP backend's start is guarded until its session is up and
+/// [`ZRHP_BACKEND_SETTLE`] later (the first exchanges), at most this long.
+pub const ZRHP_BACKEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// See [`ZRHP_BACKEND_WINDOW`].
+pub const ZRHP_BACKEND_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The crash guard of the ZRHP code paths at boot (the probe, the ZRHP
+/// backend's start; and the check of a freshly flashed firmware), so that
+/// nothing ZRHP can boot-loop the hub. The firmware keeps it in NVS and
+/// stores every change before the code it guards runs ([`GuardCell`]).
+///
+/// - A ZRHP code path runs [`armed`](Self::armed); a boot that finds the
+///   marker after a panic or watchdog reset counts a crash
+///   ([`boot`](Self::boot)), after a power cut nothing.
+/// - Only the end of the boot's whole ZRHP path ends the streak
+///   ([`end_streak`](Self::end_streak): the ZRHP backend's start window
+///   passed, or the boot chose another backend without skipping ZRHP); a
+///   probe that answered does not, since the backend after it may crash.
+/// - At [`ZRHP_CRASH_LIMIT`] the boot skips every ZRHP path and starts
+///   EZSP with the UART parked ([`apply_zrhp_guard`]); a skipping boot that
+///   ran [`ZRHP_RETRY_AFTER`] without a crash lets the next boot try ZRHP
+///   once more.
+/// - Another hub firmware (`firmware`, the running image's ELF SHA-256)
+///   starts afresh: a hub-side crash is fixed by a hub update. The
+///   operator (`ncp/update/reset`, `ncp/backend/set`) and a new NCP image
+///   end the streak too.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ZrhpGuard {
+    /// A ZRHP code path runs: a crash now counts at the next boot.
+    pub armed: bool,
+    /// Boots in a row whose ZRHP path crashed.
+    pub crashes: u32,
+    /// The hub firmware the crashes are of.
+    pub firmware: String,
+    /// The next boot tries ZRHP once although the guard tripped.
+    pub retry: bool,
+}
+
+impl ZrhpGuard {
+    /// From its stored form (anything else: a fresh guard).
+    pub fn from_json(v: &J) -> ZrhpGuard {
+        ZrhpGuard {
+            armed: v["armed"] == true,
+            crashes: v["crashes"].as_u64().map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
+            firmware: v["firmware"].as_str().unwrap_or_default().to_string(),
+            retry: v["retry"] == true,
+        }
+    }
+
+    /// Its stored form.
+    pub fn to_json(&self) -> J {
+        serde_json::json!({"armed": self.armed, "crashes": self.crashes, "firmware": self.firmware, "retry": self.retry})
+    }
+
+    /// At [`ZRHP_CRASH_LIMIT`].
+    pub fn tripped(&self) -> bool {
+        self.crashes >= ZRHP_CRASH_LIMIT
+    }
+
+    /// At boot, before any ZRHP path: `crashed`, the last boot ended in a
+    /// panic or a watchdog reset; `firmware`, the running hub firmware's
+    /// identity. Whether this boot skips ZRHP.
+    pub fn boot(&mut self, crashed: bool, firmware: &str) -> bool {
+        if self.firmware != firmware {
+            *self = ZrhpGuard { firmware: firmware.to_string(), ..ZrhpGuard::default() };
+            return false;
+        }
+        if std::mem::take(&mut self.armed) && crashed {
+            self.crashes = self.crashes.saturating_add(1);
+        }
+        self.tripped() && !std::mem::take(&mut self.retry)
+    }
+
+    /// A ZRHP code path starts.
+    pub fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    /// It returned; the streak goes on until the boot's ZRHP path ended.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// The boot's detection is over: a boot that did not skip ZRHP and
+    /// does not start the ZRHP backend ran all of its ZRHP path.
+    pub fn detected(&mut self, skipped: bool, backend: BackendKind) {
+        if !skipped && backend != BackendKind::Zrhp {
+            self.end_streak();
+        }
+    }
+
+    /// The boot's ZRHP path ended without a crash (or the operator, or a
+    /// new NCP image).
+    pub fn end_streak(&mut self) {
+        *self = ZrhpGuard { firmware: std::mem::take(&mut self.firmware), ..ZrhpGuard::default() };
+    }
+
+    /// A boot that skipped ZRHP ran [`ZRHP_RETRY_AFTER`] without a crash.
+    pub fn clean_uptime(&mut self) {
+        if self.tripped() {
+            self.retry = true;
+        }
+    }
+}
+
+/// Where the [`ZrhpGuard`] lives (the firmware's NVS): `update` stores the
+/// change before it returns.
+pub trait GuardCell {
+    /// Changes the guard.
+    fn update(&self, f: &mut dyn FnMut(&mut ZrhpGuard));
 }
 
 /// Why ZRHP is skipped ([`apply_zrhp_guard`]).
 pub const ZRHP_GUARD_WHY: &str = "the ZRHP probe or backend crashed the hub at every boot: ZRHP is skipped and the UART parked; \
-     flash another image (ncp/update/start) or clear it (ncp/update/reset)";
+     flash another image (ncp/update/start), clear it (ncp/update/reset), or update the hub";
 
-/// A guarded boot ([`zrhp_guard`]) never starts the ZRHP backend: EZSP,
+/// A guarded boot ([`ZrhpGuard`]) never starts the ZRHP backend: EZSP,
 /// with the UART parked (nothing is sent to an NCP the hub cannot talk
 /// to), and why.
 pub fn apply_zrhp_guard(d: &mut Detection) {
@@ -370,6 +473,57 @@ pub fn apply_zrhp_guard(d: &mut Detection) {
         d.park = true;
         d.why = ZRHP_GUARD_WHY;
     }
+}
+
+/// `inner` with its ZRHP probe guarded: armed around it, or not asked at
+/// all (`skip`).
+pub struct GuardedProber<'a> {
+    /// The probes.
+    pub inner: &'a mut dyn Prober,
+    /// The guard.
+    pub cell: &'a dyn GuardCell,
+    /// The guard tripped in this boot.
+    pub skip: bool,
+}
+
+impl Prober for GuardedProber<'_> {
+    fn probe(&mut self, p: Probe) -> Result<Found, String> {
+        if p != Probe::Zrhp {
+            return self.inner.probe(p);
+        }
+        if self.skip {
+            return Err("skipped: the crash guard (ZRHP crashed the hub at every boot)".into());
+        }
+        self.cell.update(&mut ZrhpGuard::arm);
+        let r = self.inner.probe(p);
+        self.cell.update(&mut ZrhpGuard::disarm);
+        r
+    }
+}
+
+/// The boot's [`detect`] under the crash guard ([`ZrhpGuard`]): `crashed`,
+/// the last boot ended in a panic or a watchdog reset; `firmware`, the
+/// running hub firmware's identity. The detection and whether ZRHP is
+/// skipped in this boot. The caller arms the guard again when it starts
+/// the ZRHP backend and ends the streak once its start window passed.
+pub fn detect_guarded(
+    setting: Setting,
+    hint: Option<BackendKind>,
+    suspect_bootloader: bool,
+    prober: &mut dyn Prober,
+    cell: &dyn GuardCell,
+    crashed: bool,
+    firmware: &str,
+) -> (Detection, bool) {
+    let mut skip = false;
+    cell.update(&mut |g| skip = g.boot(crashed, firmware));
+    let mut d = detect(setting, hint, suspect_bootloader, &mut GuardedProber { inner: prober, cell, skip });
+    if skip {
+        apply_zrhp_guard(&mut d);
+    }
+    let backend = d.backend;
+    cell.update(&mut |g| g.detected(skip, backend));
+    (d, skip)
 }
 
 /// What to do once the hub runs on the NCP that replaced another
@@ -713,26 +867,158 @@ mod tests {
         assert_eq!(restore_after_interruption("done", true), None);
     }
 
-    /// A ZRHP path that crashed at two boots in a row is skipped: the hub
-    /// starts on EZSP with the UART parked (an EmberZNet NCP found still
-    /// runs normally); a power cut while armed counts nothing.
-    #[test]
-    fn a_crashing_zrhp_path_cannot_boot_loop_the_hub() {
-        assert_eq!(zrhp_guard(true, true, 0), (1, false));
-        assert_eq!(zrhp_guard(true, true, 1), (2, true));
-        assert_eq!(zrhp_guard(true, false, 1), (1, false), "a power cut while armed");
-        assert_eq!(zrhp_guard(false, true, 2), (2, true), "stays until cleared");
-        assert_eq!(zrhp_guard(false, false, 0), (0, false));
-        // Guarded: ZRHP never starts, whatever answered or was set.
-        for (setting, found) in [(Setting::Zrhp, None), (Setting::Auto, Some(Probe::Bootloader)), (Setting::Auto, None)] {
-            let mut s = ncp(false, false, found == Some(Probe::Bootloader));
-            let mut d = detect(setting, Some(BackendKind::Zrhp), false, &mut s);
-            apply_zrhp_guard(&mut d);
-            assert_eq!((d.backend, d.park, d.why), (BackendKind::Ezsp, true, ZRHP_GUARD_WHY), "{setting:?}");
+    /// The guard in NVS: every change stored at once.
+    #[derive(Default)]
+    struct Nvs(std::cell::RefCell<ZrhpGuard>);
+
+    impl GuardCell for Nvs {
+        fn update(&self, f: &mut dyn FnMut(&mut ZrhpGuard)) {
+            f(&mut self.0.borrow_mut());
         }
-        let mut d = detect(Setting::Auto, Some(BackendKind::Zrhp), false, &mut ncp(true, false, false));
-        apply_zrhp_guard(&mut d);
-        assert_eq!((d.backend, d.park, d.why), (BackendKind::Ezsp, false, "detected"), "EmberZNet found: runs");
+    }
+
+    impl Nvs {
+        fn get(&self) -> ZrhpGuard {
+            self.0.borrow().clone()
+        }
+    }
+
+    /// Where a boot crashes.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Crash {
+        Nowhere,
+        /// In the ZRHP probe (HIL of 974b3241).
+        Probe,
+        /// In the ZRHP backend's start window.
+        Backend,
+    }
+
+    /// The NCP of a boot; a crash in the ZRHP probe ends the boot with
+    /// what NVS held then.
+    struct Mg24<'a> {
+        nvs: &'a Nvs,
+        ezsp: bool,
+        zrhp: bool,
+        crash: Crash,
+        crashed_with: Option<ZrhpGuard>,
+        asked: Vec<Probe>,
+    }
+
+    impl Prober for Mg24<'_> {
+        fn probe(&mut self, p: Probe) -> Result<Found, String> {
+            self.asked.push(p);
+            match p {
+                Probe::Zrhp if self.crash == Crash::Probe => {
+                    self.crashed_with = Some(self.nvs.get());
+                    Err("crashed".into())
+                }
+                Probe::Zrhp if self.zrhp => Ok(Found::Zrhp { fw: "0.1.0".into(), build_id: [1; 8], chip: 12, ieee: None, baud: 460_800 }),
+                Probe::Ezsp if self.ezsp => Ok(Found::Ezsp { version: "EZSP 13".into(), eui64: None }),
+                _ => Err("no answer".into()),
+            }
+        }
+    }
+
+    struct Boot {
+        d: Option<Detection>,
+        skipped: bool,
+        crashed: bool,
+        asked: Vec<Probe>,
+    }
+
+    /// One boot as the firmware runs it (`ncp::detect_now`, then the ZRHP
+    /// backend's start window: armed, the streak ended once it passed).
+    fn boot(nvs: &Nvs, last_crashed: bool, fw: &str, hint: Option<BackendKind>, ezsp: bool, zrhp: bool, crash: Crash) -> Boot {
+        let mut mg24 = Mg24 { nvs, ezsp, zrhp, crash, crashed_with: None, asked: Vec::new() };
+        let (d, skipped) = detect_guarded(Setting::Auto, hint, false, &mut mg24, nvs, last_crashed, fw);
+        let asked = std::mem::take(&mut mg24.asked);
+        if let Some(at) = mg24.crashed_with {
+            *nvs.0.borrow_mut() = at;
+            return Boot { d: None, skipped, crashed: true, asked };
+        }
+        if d.backend == BackendKind::Zrhp {
+            nvs.update(&mut ZrhpGuard::arm);
+            if crash == Crash::Backend {
+                return Boot { d: Some(d), skipped, crashed: true, asked };
+            }
+            nvs.update(&mut ZrhpGuard::end_streak);
+        }
+        Boot { d: Some(d), skipped, crashed: false, asked }
+    }
+
+    /// Review of #106: under `auto` with the ZRHP NCP seen last, the probe
+    /// answers at every boot and the backend after it crashes; the probe
+    /// must not end the streak, the guard trips at the third boot.
+    #[test]
+    fn a_crashing_zrhp_backend_trips_the_guard_under_auto() {
+        let nvs = Nvs::default();
+        let zrhp = Some(BackendKind::Zrhp);
+        let mut last = false;
+        for n in 1..=2 {
+            let b = boot(&nvs, last, "fw1", zrhp, false, true, Crash::Backend);
+            assert!(!b.skipped && b.crashed, "boot {n}");
+            assert_eq!(b.d.unwrap().backend, BackendKind::Zrhp);
+            assert_eq!(nvs.get().crashes, n - 1, "the probe's answer keeps the count");
+            last = b.crashed;
+        }
+        let b = boot(&nvs, last, "fw1", zrhp, false, true, Crash::Backend);
+        let d = b.d.unwrap();
+        assert!(b.skipped && !b.crashed);
+        assert_eq!((d.backend, d.park, d.why), (BackendKind::Ezsp, true, ZRHP_GUARD_WHY));
+        assert!(!b.asked.contains(&Probe::Zrhp), "nothing ZRHP runs: {:?}", b.asked);
+        // Skipped again at the next boots, crash-free (a power cut).
+        assert!(boot(&nvs, false, "fw1", zrhp, false, true, Crash::Backend).skipped);
+        // A skipping boot ran 10 minutes: the next boot tries ZRHP once;
+        // it crashes again, the one after skips.
+        nvs.update(&mut ZrhpGuard::clean_uptime);
+        let b = boot(&nvs, false, "fw1", zrhp, false, true, Crash::Backend);
+        assert!(!b.skipped && b.crashed, "the retry");
+        assert!(boot(&nvs, true, "fw1", zrhp, false, true, Crash::Backend).skipped);
+        assert_eq!(nvs.get().crashes, 3);
+        // A hub update starts afresh; its backend gets through its start.
+        let b = boot(&nvs, false, "fw2", zrhp, false, true, Crash::Nowhere);
+        assert!(!b.skipped && !b.crashed);
+        assert_eq!(nvs.get(), ZrhpGuard { firmware: "fw2".into(), ..ZrhpGuard::default() });
+    }
+
+    /// HIL of 974b3241: the ZRHP probe itself crashed at every boot.
+    #[test]
+    fn a_crashing_zrhp_probe_trips_the_guard() {
+        let nvs = Nvs::default();
+        let ezsp = Some(BackendKind::Ezsp);
+        let b = boot(&nvs, false, "fw", ezsp, false, true, Crash::Probe);
+        assert!(b.crashed && b.d.is_none());
+        assert!(nvs.get().armed, "a crash in the probe leaves the marker");
+        assert!(boot(&nvs, true, "fw", ezsp, false, true, Crash::Probe).crashed);
+        let b = boot(&nvs, true, "fw", ezsp, false, true, Crash::Probe);
+        assert!(b.skipped && !b.crashed);
+        assert_eq!(b.asked, [Probe::Ezsp, Probe::Bootloader], "the ZRHP probe is not asked");
+        // An EmberZNet NCP found in a skipping boot runs normally.
+        let b = boot(&nvs, false, "fw", ezsp, true, false, Crash::Nowhere);
+        assert_eq!((b.d.unwrap().backend, b.skipped), (BackendKind::Ezsp, true));
+        assert!(nvs.get().tripped(), "a skipping boot ends nothing");
+    }
+
+    #[test]
+    fn a_zrhp_path_that_ran_through_ends_the_streak() {
+        let nvs = Nvs::default();
+        let zrhp = Some(BackendKind::Zrhp);
+        assert!(boot(&nvs, false, "fw", zrhp, false, true, Crash::Backend).crashed);
+        // A power cut while armed counts nothing.
+        assert!(boot(&nvs, false, "fw", zrhp, false, true, Crash::Backend).crashed);
+        assert_eq!(nvs.get().crashes, 0);
+        // The backend got through its start window after a crash.
+        let b = boot(&nvs, true, "fw", zrhp, false, true, Crash::Nowhere);
+        assert!(!b.crashed && !b.skipped);
+        assert_eq!(nvs.get().crashes, 0);
+        // Another backend chosen without skipping: ended too.
+        boot(&nvs, false, "fw", zrhp, false, true, Crash::Backend);
+        boot(&nvs, true, "fw", zrhp, true, false, Crash::Nowhere);
+        assert_eq!((nvs.get().crashes, nvs.get().armed), (0, false));
+        // Stored form.
+        let g = ZrhpGuard { armed: true, crashes: 2, firmware: "ab".into(), retry: true };
+        assert_eq!(ZrhpGuard::from_json(&g.to_json()), g);
+        assert_eq!(ZrhpGuard::from_json(&J::Null), ZrhpGuard::default());
     }
 
     #[test]

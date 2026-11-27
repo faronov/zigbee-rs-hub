@@ -673,13 +673,19 @@ the console show the setting, what answered, every probe and why this
 backend.
 
 **Crash guard.** The ZRHP probe (at boot and after a flash) and the
-ZRHP backend's first minute run armed (NVS `zrh/ncp_zarm`). A boot that
-finds the marker after a panic or a watchdog reset counts a crash
-(`zrh/ncp_zcrash`; a power cut counts nothing); after 2 in a row the boot
-runs nothing ZRHP: EZSP starts with the UART parked (an EmberZNet NCP that
-answers runs normally), `ncp/update/status` `backend.why` and
-`zrhp_guard` say so, and the hub stays reachable to flash another image.
-`ncp/update/reset`, `ncp/backend/set` and a successful flash clear it.
+ZRHP backend's start (until its session is up and 10 s later, at most a
+minute) run armed (NVS `zrh/ncp_zguard`). A boot that finds the marker
+after a panic or a watchdog reset counts a crash (a power cut counts
+nothing); only a boot whose ZRHP path ran through ends the streak (a probe
+that answered does not: the backend after it may still crash). After 2 in
+a row the boot runs nothing ZRHP: EZSP starts with the UART parked (an
+EmberZNet NCP that answers runs normally), `ncp/update/status`
+`backend.why` and `zrhp_guard` say so, and the hub stays reachable to
+flash another image. After 10 minutes without a crash the next boot tries
+ZRHP once more (`zrhp_guard.retry_next_boot`). The count belongs to the
+hub firmware (its ELF SHA-256): a hub update starts afresh.
+`ncp/update/reset`, `ncp/backend/set` and a new NCP image end the streak;
+the check of a freshly flashed firmware runs even while ZRHP is skipped.
 (HIL of 974b3241: the probe's ZRHP link driver ran on a 16 KiB stack and
 its thread entry alone reserved 16 240 B, an inlined `Link::new` that only
 another link profile needs; the overflow crashed the hub during the
@@ -735,7 +741,7 @@ the MG24 runs EmberZNet again.
 
 | Request | Fields | Result |
 |---|---|---|
-| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `zrhp_guard` (`crashes`, `skipped`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`held`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`, `restore_offered`; also in `hub/system` `ncp_update` |
+| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `zrhp_guard` (`crashes`, `armed`, `skipped`, `retry_next_boot`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`held`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`, `restore_offered`; also in `hub/system` `ncp_update` |
 | `ncp/update/begin` | `size`, `sha256` (hex, optional) | `chunk` (4096), `store`; refused while the hub's data are in RAM (the area is SONOFF's until the claim) |
 | `ncp/update/chunk` | `offset`, `data` (base64, at most 4096 bytes) | `written`; an invalid image is refused (and the upload aborted) as soon as its bytes show it |
 | `ncp/update/end` | | the image (as `image` above) and a `note` |

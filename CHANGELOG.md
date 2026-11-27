@@ -48,7 +48,8 @@ install instructions and the list of merged pull requests. A pre-release
   the probe runs it as the hub's own ZRHP backend does. A ZRHP probe or
   backend that crashes the hub at two boots in a row is now skipped: the
   hub starts without it (UART parked), says why, and stays reachable to
-  flash another image.
+  flash another image; after 10 minutes without a crash the next boot
+  tries ZRHP once more, and a hub update starts afresh.
 - **Dongle Max: `mg24 bootloader` shows the whole menu.** The bootloader
   prints its menu by itself on entry; the wait for the menu after the
   newline stopped at that first copy and cut the second one short.
