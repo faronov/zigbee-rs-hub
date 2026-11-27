@@ -41,6 +41,17 @@
 //! very end), then `stock_copy` erased (its index last). Blocks SONOFF's
 //! file system had freed come back erased. A claim that never committed is
 //! only undone (its copy erased); SONOFF's blocks were never touched.
+//!
+//! **SONOFF's firmware may reformat a claimed region** (the bootloader
+//! falls back to it in `ota_0` when the hub's image does not boot): its
+//! mount fails on the claim records, it formats the region and writes its
+//! default files, over the hub's data; `stock_copy` stays. The claim
+//! refuses that state ([`FilesError::Inconsistent`]: SONOFF's data changed
+//! after the copy). [`FilesRegion::assess`] names it
+//! ([`Need::Changed`]) and [`FilesRegion::recover`] claims it again,
+//! keeping the copy made by the first claim (SONOFF's original files; the
+//! new file system only holds the defaults of the format), once the caller
+//! knows the hub had claimed the region ([`claim_check`]).
 
 use std::io;
 
@@ -276,6 +287,63 @@ pub enum BootAction {
     RamOnly,
 }
 
+/// What a claim by hand would do ([`FilesRegion::assess`], without the
+/// scan: the claim may still refuse after it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// The hub's region already.
+    Nothing,
+    /// [`FilesRegion::claim`]: a first claim, or one cut short (before or
+    /// after its commit), or a return to stock given up.
+    Claim,
+    /// No claim record, a complete copy of SONOFF's data, and SONOFF's
+    /// blocks changed since, the claim blocks too: [`FilesRegion::claim`]
+    /// refuses ([`FilesError::Inconsistent`]). After a claim it is SONOFF's
+    /// firmware that reformatted the region: [`FilesRegion::recover`].
+    Changed {
+        /// The copy verifies.
+        copy_ok: bool,
+        /// Blocks 0 and 1 hold SONOFF's LittleFS, erased flash or a torn
+        /// record of [`FilesRegion::recover`]: not unknown data, nor two
+        /// records that do not verify.
+        content_ok: bool,
+    },
+}
+
+/// Whether a claim by hand may start in the state `need`
+/// ([`FilesRegion::assess`]): `recover` asks for [`FilesRegion::recover`],
+/// `claimed_before` says the hub claimed this region earlier (its own
+/// record of it, outside the region). Without that record a changed
+/// region is ambiguous: SONOFF's data in the copy or those in the file
+/// system may be the newer ones.
+pub fn claim_check(need: Need, recover: bool, claimed_before: bool) -> Result<(), FilesError> {
+    match need {
+        Need::Nothing => Err(FilesError::AlreadyClaimed),
+        Need::Claim if recover => Err(FilesError::NotReformatted),
+        Need::Claim => Ok(()),
+        Need::Changed { .. } if !claimed_before => Err(FilesError::Inconsistent),
+        Need::Changed { copy_ok: false, .. } => Err(FilesError::CopyDamaged),
+        Need::Changed { content_ok: false, .. } => Err(FilesError::UnknownContent),
+        Need::Changed { .. } if !recover => Err(FilesError::Reformatted),
+        Need::Changed { .. } => Ok(()),
+    }
+}
+
+/// The hub's record of its claim, outside the region (the gateway's NVS):
+/// [`claim_check`]'s `claimed_before`.
+pub const CLAIM_RECORD: &str = "claimed";
+
+/// The record to write after a boot (`None`: leave it as it is):
+/// [`CLAIM_RECORD`] whenever the region is the hub's in this boot
+/// (`ready`: a `ready` claim record proves the claim) and `record` does not
+/// say so yet: a claim finished at boot after a power cut, a power cut
+/// between the claim and its record, a refusal recorded before a claim by
+/// hand, a firmware that did not keep it. A region that is not the hub's
+/// leaves it (a refusal stays; after a reformat it is the proof).
+pub fn boot_record(ready: bool, record: Option<&str>) -> Option<&'static str> {
+    (ready && record != Some(CLAIM_RECORD)).then_some(CLAIM_RECORD)
+}
+
 /// The hub claims the region by itself on its first boot: `attempted` says
 /// an earlier boot tried (the claim was made or refused). A return to
 /// stock cut short (`restoring`) is not undone by a boot; `stock confirm`
@@ -337,6 +405,32 @@ pub enum FilesError {
         /// The block.
         block: u32,
     },
+    /// The region is the hub's already.
+    AlreadyClaimed,
+    /// SONOFF's firmware reformatted the region after the hub's claim:
+    /// [`FilesRegion::recover`] is the way ([`claim_check`]).
+    Reformatted,
+    /// [`FilesRegion::recover`] asked for a region that is not in the
+    /// state it is for ([`Need::Changed`]).
+    NotReformatted,
+}
+
+impl FilesError {
+    /// A short machine code (the API's error and `last` codes).
+    pub fn code(&self) -> &'static str {
+        match self {
+            FilesError::Io(_) => "flash_error",
+            FilesError::UnknownContent => "unknown_content",
+            FilesError::TooManyBlocks { .. } => "too_many_blocks",
+            FilesError::CopyAreaInUse { .. } => "copy_area_in_use",
+            FilesError::CopyDamaged => "copy_damaged",
+            FilesError::Inconsistent => "changed_since_copy",
+            FilesError::Verify { .. } => "verify_failed",
+            FilesError::AlreadyClaimed => "already_claimed",
+            FilesError::Reformatted => "sonoff_reformatted",
+            FilesError::NotReformatted => "not_reformatted",
+        }
+    }
 }
 
 impl std::fmt::Display for FilesError {
@@ -354,8 +448,19 @@ impl std::fmt::Display for FilesError {
             FilesError::CopyDamaged => {
                 f.write_str("the copy of SONOFF's data does not verify; the way back is USB (SONOFF Dongle Flasher or a backup)")
             }
-            FilesError::Inconsistent => f.write_str("SONOFF's data changed after the claim began, not through the hub"),
+            FilesError::Inconsistent => f.write_str(
+                "SONOFF's data changed after their copy was made, not through the hub, and the hub has no record of its claim: \
+                 which are newer is unknown (restore `files` from a USB backup)",
+            ),
             FilesError::Verify { block } => write!(f, "block {block} reads back different from what was written"),
+            FilesError::AlreadyClaimed => f.write_str("the files partition is the hub's already"),
+            FilesError::Reformatted => f.write_str(
+                "SONOFF's firmware reformatted the files partition after the hub's claim (the hub's data on it are gone): \
+                 claim it again with recover, which keeps the copy of SONOFF's original files",
+            ),
+            FilesError::NotReformatted => {
+                f.write_str("recover is only for a files partition SONOFF's firmware reformatted after the hub's claim: claim without it")
+            }
         }
     }
 }
@@ -664,6 +769,59 @@ impl<F: Flash> FilesRegion<F> {
         self.copy_and_commit()
     }
 
+    /// What a claim by hand would do (reads the claim blocks, the index
+    /// and, with a complete copy and no record, the copy and its blocks; no
+    /// scan of the whole region). The same decisions as
+    /// [`FilesRegion::claim`].
+    pub fn assess(&mut self) -> io::Result<Need> {
+        Ok(self.assess_copy()?.0)
+    }
+
+    fn assess_copy(&mut self) -> io::Result<(Need, Option<Index>)> {
+        if let Some((_, rec)) = self.record()? {
+            return Ok((if rec.state == ClaimState::Ready { Need::Nothing } else { Need::Claim }, None));
+        }
+        let ix = match self.copy_state()?.0 {
+            CopyState::Hub(ix) if ix.done => ix,
+            _ => return Ok((Need::Claim, None)),
+        };
+        if self.claim_blocks_intact(&ix)? {
+            return Ok((Need::Claim, None));
+        }
+        let copy_ok = self.slots_verify(&ix)?;
+        if copy_ok && self.matches(&ix, &[0, 1])? {
+            return Ok((Need::Claim, None));
+        }
+        let mut magic = 0;
+        for block in 0..2 {
+            let mut m = [0u8; 4];
+            self.flash.read(block * BLOCK, &mut m)?;
+            magic += usize::from(m == RECORD_MAGIC);
+        }
+        let content_ok = self.content()? != Content::Unknown && magic < 2;
+        Ok((Need::Changed { copy_ok, content_ok }, Some(ix)))
+    }
+
+    /// Claims again a region SONOFF's firmware reformatted after the
+    /// hub's claim ([`Need::Changed`], with a copy that verifies and no
+    /// unknown content; the caller checks with [`claim_check`] that the
+    /// hub had claimed it): the copy made by that claim is kept, SONOFF's
+    /// new file system is dropped, and the region is the hub's again, its
+    /// areas erased (whatever SONOFF's firmware left of the hub's data is
+    /// not trusted). Refuses, writing nothing, in any other state; a valid
+    /// claim record is never touched. A power cut: run it again, or, once
+    /// the first record is written, [`FilesRegion::claim`] finishes it (as
+    /// a boot does).
+    pub fn recover(&mut self) -> Result<Claimed, FilesError> {
+        match self.assess_copy()? {
+            (Need::Changed { copy_ok: true, content_ok: true }, Some(ix)) => self.commit(&ix),
+            (Need::Changed { copy_ok: false, .. }, _) => Err(FilesError::CopyDamaged),
+            (Need::Changed { .. }, _) => Err(FilesError::UnknownContent),
+            (Need::Nothing, _) => Err(FilesError::AlreadyClaimed),
+            (Need::Claim, _) => Err(FilesError::NotReformatted),
+        }
+    }
+
     fn copy_and_commit(&mut self) -> Result<Claimed, FilesError> {
         let scan = self.scan()?;
         if !matches!(scan.content, Content::LittleFs | Content::Blank) {
@@ -909,10 +1067,11 @@ mod tests {
         let extra: Vec<u32> = (100..100 + SLOTS as u32 - 2).collect();
         let full = sonoff(&extra);
         let mut r = region(full.clone());
-        match r.claim() {
-            Err(FilesError::TooManyBlocks { used }) => assert_eq!(used, SLOTS + 1),
-            other => panic!("{other:?}"),
-        }
+        // The scan refuses: a claim by hand starts, its refusal has a code.
+        assert_eq!(r.assess().unwrap(), Need::Claim);
+        let e = r.claim().unwrap_err();
+        assert!(matches!(e, FilesError::TooManyBlocks { used } if used == SLOTS + 1), "{e:?}");
+        assert_eq!(e.code(), "too_many_blocks");
         assert!(bytes(&r) == full);
         // Exactly as many fit.
         let fits = sonoff(&extra[1..]);
@@ -925,10 +1084,9 @@ mod tests {
         // SONOFF's file system uses a block of stock_copy.
         let taken = sonoff(&[INDEX_BLOCK + 5]);
         let mut r = region(taken.clone());
-        match r.claim() {
-            Err(FilesError::CopyAreaInUse { blocks }) => assert_eq!(blocks, [INDEX_BLOCK + 5]),
-            other => panic!("{other:?}"),
-        }
+        let e = r.claim().unwrap_err();
+        assert!(matches!(&e, FilesError::CopyAreaInUse { blocks } if *blocks == [INDEX_BLOCK + 5]), "{e:?}");
+        assert_eq!(e.code(), "copy_area_in_use");
         assert!(bytes(&r) == taken);
         // ... or its first block, which is no index of the hub's.
         let taken = sonoff(&[INDEX_BLOCK]);
@@ -942,7 +1100,9 @@ mod tests {
         unknown[..64].fill(0);
         let mut r = region(unknown.clone());
         assert_eq!(r.status().unwrap().content, Content::Unknown);
-        assert!(matches!(r.claim(), Err(FilesError::UnknownContent)));
+        let e = r.claim().unwrap_err();
+        assert!(matches!(e, FilesError::UnknownContent), "{e:?}");
+        assert_eq!(e.code(), "unknown_content");
         assert!(bytes(&r) == unknown);
     }
 
@@ -1100,5 +1260,180 @@ mod tests {
         assert_claimed(&mut r, &after, 4, true);
         r.restore().unwrap();
         assert!(bytes(&r) == after);
+    }
+
+    /// SONOFF's firmware on a claimed region (the bootloader fell back to
+    /// it): its mount fails on the claim records, it formats the region and
+    /// writes its default files: new superblocks in blocks 0 and 1, a file
+    /// block at 411. The hub's other blocks and `stock_copy` stay.
+    fn reformat(data: &mut [u8]) {
+        for block in [0u32, 1, 411] {
+            let s = (block * BLOCK) as usize;
+            data[s..s + BLOCK as usize].fill(0xFF);
+            let len = if block < 2 { 300 } else { 1000 };
+            data[s..s + len].copy_from_slice(&noise(block + 1000, len));
+            if block < 2 {
+                data[s..s + 8].copy_from_slice(&[1, 0, 0, 0, 0xF0, 0x0F, 0xFF, 0xF7]);
+                data[s + 8..s + 16].copy_from_slice(b"littlefs");
+            }
+        }
+    }
+
+    /// SONOFF's original data claimed, the region used by the hub, then
+    /// reformatted by SONOFF's firmware.
+    fn reformatted() -> (Vec<u8>, Vec<u8>) {
+        let original = sonoff(&[]);
+        let mut r = region(original.clone());
+        r.claim().unwrap();
+        use_region(&mut r);
+        let mut d = r.into_inner().data;
+        reformat(&mut d);
+        (original, d)
+    }
+
+    const RECOVERABLE: Need = Need::Changed { copy_ok: true, content_ok: true };
+
+    #[test]
+    fn a_region_sonoffs_firmware_reformatted_is_claimed_again_keeping_the_first_copy() {
+        let (original, d) = reformatted();
+        let mut r = region(d.clone());
+        let st = r.status().unwrap();
+        assert_eq!((st.content, st.record), (Content::LittleFs, None));
+        assert!(matches!(st.copy, CopyState::Hub(Index { done: true, .. })));
+        assert_eq!(boot_action(&st, true), BootAction::RamOnly, "not claimed again at boot");
+        assert_eq!(r.assess().unwrap(), RECOVERABLE);
+        // The plain claim refuses it, writing nothing.
+        let e = r.claim().unwrap_err();
+        assert!(matches!(e, FilesError::Inconsistent), "{e:?}");
+        assert!(bytes(&r) == d);
+        // A claim by hand: with the hub's record of its claim, recover;
+        // without it, ambiguous.
+        let check = |recover, before| claim_check(RECOVERABLE, recover, before).map_err(|e| e.code());
+        assert_eq!(check(false, true), Err("sonoff_reformatted"));
+        assert_eq!(check(true, true), Ok(()));
+        assert_eq!(check(true, false), Err("changed_since_copy"));
+        assert_eq!(check(false, false), Err("changed_since_copy"));
+        // The first claim's copy (SONOFF's original data) is kept, SONOFF's
+        // new file system and the hub's old data are erased.
+        assert_eq!(r.recover().unwrap(), Claimed::Now { copied: 3 });
+        assert_claimed(&mut r, &original, 3, true);
+        assert_eq!(r.assess().unwrap(), Need::Nothing);
+        assert!(matches!(r.recover(), Err(FilesError::AlreadyClaimed)));
+        // `stock confirm` gives SONOFF's original data back.
+        use_region(&mut r);
+        assert_eq!(r.restore().unwrap(), Restored::Restored { blocks: 3 });
+        assert!(bytes(&r) == original);
+    }
+
+    #[test]
+    fn a_power_cut_anywhere_in_the_recovery_then_the_boot_or_recover_again() {
+        let (original, d) = reformatted();
+        let total = ops(&d, |r| {
+            r.recover().unwrap();
+        });
+        for k in cut_points(total) {
+            for torn in [0, 9, 2048] {
+                let mut r = FilesRegion::new(CutFlash::new(d.clone()).cut_at(k, torn));
+                assert!(r.recover().is_err(), "cut at {k}");
+                r.flash.power_on();
+                let st = r.status().unwrap();
+                match boot_action(&st, true) {
+                    BootAction::Use => {}
+                    BootAction::Finish => assert_eq!(r.claim().unwrap(), Claimed::Now { copied: 3 }),
+                    BootAction::RamOnly => {
+                        assert_eq!(r.assess().unwrap(), RECOVERABLE, "cut at {k}/{torn}");
+                        r.recover().unwrap_or_else(|e| panic!("recover after a cut at {k}/{torn}: {e}"));
+                    }
+                    BootAction::Claim => panic!("cut at {k}/{torn}: {st:?}"),
+                }
+                assert_claimed(&mut r, &original, 3, true);
+                r.restore().unwrap();
+                assert!(bytes(&r) == original, "restore after a cut at {k}/{torn}");
+            }
+        }
+    }
+
+    /// Recover refuses, writing nothing, in every other state: never over
+    /// a valid claim record, a copy that does not verify or unknown data.
+    #[test]
+    fn recover_refuses_any_other_state() {
+        let refused = |data: Vec<u8>, need: Need, code: &str| {
+            let mut r = region(data.clone());
+            assert_eq!(r.assess().unwrap(), need, "{code}");
+            assert_eq!(claim_check(need, true, true).map_err(|e| e.code()), Err(code));
+            assert_eq!(r.recover().map_err(|e| e.code()), Err(code));
+            assert!(bytes(&r) == data, "{code}: nothing written");
+        };
+        // Never claimed (SONOFF's or erased): the plain claim.
+        refused(sonoff(&[]), Need::Claim, "not_reformatted");
+        refused(vec![0xFF; layout::SIZE as usize], Need::Claim, "not_reformatted");
+        assert_eq!(claim_check(Need::Claim, false, true).map_err(|e| e.code()), Ok(()));
+        // The hub's region with its data.
+        let mut r = region(sonoff(&[]));
+        r.claim().unwrap();
+        use_region(&mut r);
+        let hubs = r.into_inner().data;
+        refused(hubs.clone(), Need::Nothing, "already_claimed");
+        assert_eq!(claim_check(Need::Nothing, false, true).map_err(|e| e.code()), Err("already_claimed"));
+        // A committed claim cut short: the plain claim (or the boot)
+        // finishes it.
+        let mut erasing = hubs.clone();
+        erasing[BLOCK as usize..2 * BLOCK as usize].fill(0xFF);
+        refused(erasing, Need::Claim, "not_reformatted");
+        // An interrupted copy.
+        let mut r = FilesRegion::new(CutFlash::new(sonoff(&[])).cut_at(3, 100));
+        assert!(r.claim().is_err());
+        r.flash.power_on();
+        refused(r.into_inner().data, Need::Claim, "not_reformatted");
+        // Reformatted, but a slot of the copy changed.
+        let (_, mut d) = reformatted();
+        let slot = ((INDEX_BLOCK + 2) * BLOCK) as usize;
+        d[slot] ^= 0xFF;
+        refused(d, Need::Changed { copy_ok: false, content_ok: true }, "copy_damaged");
+        // Reformatted into something that is not LittleFS.
+        let (_, mut d) = reformatted();
+        for block in 0..2 {
+            d[(block * BLOCK) as usize + 8] = b'X';
+        }
+        refused(d, Need::Changed { copy_ok: true, content_ok: false }, "unknown_content");
+        // The hub's region whose two records both fail to verify: its data
+        // stay.
+        let mut d = hubs;
+        for block in 0..2 {
+            d[(block * BLOCK) as usize + 12] ^= 0xFF;
+        }
+        refused(d, Need::Changed { copy_ok: true, content_ok: false }, "unknown_content");
+    }
+
+    /// A claim completed without the gateway's record of it (here: its
+    /// commit cut short, finished at the next boot) gets the record at that
+    /// boot, so that a later reformat by SONOFF's firmware can be
+    /// recovered.
+    #[test]
+    fn the_claim_record_is_written_once_the_region_is_the_hubs() {
+        let original = sonoff(&[]);
+        let mut r = region(original.clone());
+        r.claim().unwrap();
+        r.flash.erase(1).unwrap();
+        let cut = r.into_inner().data;
+        for record in [None, Some("refused: flash: power cut")] {
+            let mut r = region(cut.clone());
+            let st = r.status().unwrap();
+            assert_eq!(boot_action(&st, record.is_some()), BootAction::Finish);
+            r.claim().unwrap();
+            let written = boot_record(true, record);
+            assert_eq!(written, Some(CLAIM_RECORD), "{record:?}");
+            assert_eq!(boot_record(true, written), None, "written once");
+            // Later SONOFF's firmware reformats the region.
+            use_region(&mut r);
+            let mut d = r.into_inner().data;
+            reformat(&mut d);
+            let need = region(d).assess().unwrap();
+            assert_eq!(claim_check(need, true, written == Some(CLAIM_RECORD)).map_err(|e| e.code()), Ok(()));
+        }
+        // Not the hub's region: the record stays as it is.
+        assert_eq!(boot_record(false, Some(CLAIM_RECORD)), None);
+        assert_eq!(boot_record(false, Some("refused: x")), None);
+        assert_eq!(boot_record(false, None), None);
     }
 }

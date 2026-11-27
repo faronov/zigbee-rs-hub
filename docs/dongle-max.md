@@ -218,17 +218,24 @@ loses the hub's data** (found on the lab unit, 2026-11-26, main
 d179c4c). After a USB or web-console install, `ota_0` still holds
 SONOFF's application. If the image in `ota_1` does not boot (e.g. an
 interrupted USB write), the bootloader starts SONOFF's firmware, which
-reformats the `files` partition, the hub's data region since the claim:
-the hub's devices, names, automations and settings are gone. The Zigbee
-network stays in the MG24, so once a hub image runs again the devices
-come back through the NCP import, without their names. So:
+cannot mount the claimed `files` partition and reformats it as its own
+LittleFS, over the hub's data: the hub's devices, names, automations and
+settings are gone. `stock_copy` (SONOFF's original files, copied by the
+claim) stays, and so do the Zigbee network in the MG24 and the hub's
+`nvs` (API token, Wi-Fi, MQTT). So:
 
 - **before updating over USB, download a hub backup** (Settings ›
   Backup), and write the app before the `otadata` sector as above;
-- after a hub self-update (`ota_0` replaced by a hub image) the fallback
-  is the previous hub image instead, which keeps the region;
-- after such a reformat the claim can be refused (fix in progress): the
-  hub then runs with its data in RAM only (banner).
+- **make the first update a self-update** (Settings › Hub firmware, with
+  *Replace SONOFF's firmware* ticked): it puts a hub image into `ota_0`, so from
+  then on the fallback of an image that does not boot is the previous hub
+  image, which keeps the region. The price: the way back to SONOFF's
+  firmware is then USB only (SONOFF Dongle Flasher, or the esprom backup);
+- after such a reformat the hub boots with its data in RAM only, says so
+  (`storage/status` `reformatted`, banner) and refuses a plain claim
+  (`sonoff_reformatted`): claim with `"recover": true`, then restore what
+  the backup holds ("Recovery after SONOFF's firmware reformatted
+  `files`" below). 0.4.0 refused the claim without saying why.
 
 ### Self-update
 
@@ -301,9 +308,13 @@ is kept in NVS (`zrh/files_auto`: `claimed`, or `refused: <why>`): a
 refusal is not retried at every boot, an interrupted first claim is
 resumed, a claim cut short after its commit is finished (any boot), a
 return to stock cut short is left for `stock confirm`
-(`hub_store::files::boot_action`, host-tested). A completed `stock
-confirm` forgets the attempt, so a later installation is a first boot
-again.
+(`hub_store::files::boot_action`, host-tested). Every boot that finds the
+region the hub's writes `claimed` if NVS does not say so yet (a claim
+finished at boot after a power cut, a power cut between a claim and its
+record, an earlier refusal followed by a claim by hand:
+`hub_store::files::boot_record`): the recovery below relies on it. A
+completed `stock confirm` forgets the attempt, so a later installation is
+a first boot again.
 
 **If the claim is refused, the hub runs with its data in RAM only**, and
 says so loudly: the boot log (`!!!`), `files`, `hub` and `info` on the
@@ -327,7 +338,17 @@ it: `confirm_required`), Settings › Storage › Claim storage. A claim by
 hand runs on its own thread and restarts the hub when it is done (the RAM
 data of this boot are lost). `storage/status` reports `content`,
 `claimed`, `state`, `copy`, `in_use`, `ram_only`, `first_boot_claim`,
-`busy`, `last`.
+`reformatted` (next sections), `busy`, `last`.
+
+**Every refusal is reported** with a code and a message: as the
+request's error, and in `storage/status` `last` (`{"code", "message"}`,
+also for a claim that ended: `claimed`, `recovered`; `null` while one
+runs and before the first). Before the claim starts: `confirm_required`,
+`busy`, `already_claimed`, `sonoff_reformatted`, `not_reformatted`,
+`changed_since_copy`, `copy_damaged`, `unknown_content`, `no_partition`,
+`flash_error`, `thread`; after its scan (only in `last`):
+`too_many_blocks`, `copy_area_in_use`, `unknown_content`,
+`verify_failed`, `flash_error`. The first boot's claim fills `last` too.
 
 1. **Scan.** SONOFF's blocks are those its LittleFS uses: from the
    superblock pair {0, 1} the metadata pairs are followed through their
@@ -388,10 +409,77 @@ system had freed come back erased. A power cut anywhere:
 region again: the copy stays until the return is complete); the hub boots
 with its data in RAM meanwhile. A copy that does not verify is never
 written back: the way back is then USB. **To verify on hardware:** SONOFF's
-firmware mounts the restored blocks (what it does with a `files` region
-that is not a valid LittleFS is presumably a format with factory settings:
-web and AP passwords, device name, the MG24 info and factory IEEE config
-files gone).
+firmware mounts the restored blocks. A `files` region that is not a valid
+LittleFS it formats (seen on the lab unit, 2026-11-26: next section), so
+its factory settings come back then (web and AP passwords, device name;
+the MG24 info and factory IEEE config files are gone).
+
+### Recovery after SONOFF's firmware reformatted `files`
+
+SONOFF's firmware, started by the bootloader's fallback (a hub image that
+does not boot while SONOFF's application is in `ota_0`, above), formats
+the claimed region and writes its default files over the hub's blocks;
+`stock_copy` stays (on the lab unit; a format that erased the whole
+partition would leave a plain claim instead, of SONOFF's new files: the
+original ones would be gone). `hub_store::files` names that state: no claim record, a complete copy of
+SONOFF's data that verifies, and SONOFF's blocks changed since, the claim
+blocks too. The plain claim refuses it (it cannot tell which SONOFF data
+are newer); `zrh/files_auto` = `claimed` in NVS (written by every boot
+that found the region the hub's, cleared by `stock confirm`) tells the hub
+that it had claimed the region, so the file system is the reformat's.
+
+**Which SONOFF data are kept: the copy.** The copy is what the hub's claim
+took from SONOFF's original file system (its settings, device info, MG24
+info and factory IEEE config); the new file system holds only what
+SONOFF's firmware wrote after its format (defaults, without the factory
+files). The recovery keeps the copy and drops the new file system, so a
+later `stock confirm` gives back SONOFF's data as they were before the
+hub's installation. Whatever is left of the hub's data on the region is
+erased as in every claim (SONOFF's blocks overwrote parts of it).
+
+Refused, writing nothing (code in brackets): without the NVS record
+(`changed_since_copy`: e.g. NVS erased; the way out is restoring `files`
+from a USB backup), when the copy does not verify (`copy_damaged`), when
+blocks 0 and 1 hold neither LittleFS, erased flash nor one torn record of
+the recovery itself (`unknown_content`, which also covers a hub region
+whose two claim records both fail to verify), in any state a plain claim
+handles (`not_reformatted`) and on the hub's region (`already_claimed`).
+A valid claim record is never touched. A power cut during the recovery:
+run it again, or the next boot finishes it once its first record is
+written (host-tested at every write and erase; and with real littlefs: a
+claimed image formatted and written by littlefs, recovered, returned to
+stock and SONOFF's original files read back).
+
+**Procedure:**
+
+1. Install a hub image again (USB: the app, then the `otadata` sector, as
+   in "Installation"). It boots with its data in RAM only: the banner and
+   `storage/status` say so (`reformatted: true`, `ram_only`: why,
+   `first_boot_claim: "claimed"`); the console's `files` too.
+2. If you have a full flash backup taken while the hub ran (after its
+   claim), writing its `files` partition back over USB (0xC60000, 0x3A0000
+   bytes) brings back the hub's data as they were then: no recovery
+   needed (the region is the hub's again at the next boot).
+3. Otherwise: `storage/claim` with `{"confirm": true, "recover": true}`
+   (console `files recover`, then `files recover confirm`; Settings ›
+   Storage › Claim storage sends `recover` itself). The hub restarts with
+   an empty store on the claimed region (`storage/status` `in_use: true`).
+4. The hub takes the MG24's network: an empty store is untagged, so the
+   first session's network becomes the hub's (`network/info` ownership
+   `owned`), and the devices the NCP knows are imported, without names.
+5. Only if groups or devices are missing: restore the most recent hub
+   backup (Settings › Backup: the network, its devices and keys, the
+   hub's groups) onto the same network, Settings › Backup and restore ›
+   Restore from a file (`network/restore`; it asks for `force`, as the
+   MG24 runs the network). A restore starts the frame counters from the
+   NCP's own when they are higher than the backup's (EZSP since 0.4.1,
+   note `floor_raised`: `docs/ezsp-backend.md`; a zigbee-rs NCP always
+   starts above the counters it used), so an older backup does not roll
+   them back (the coordinator sends thousands of frames a day, and devices
+   drop frames whose counter went back). Names, areas, automations and the app's
+   settings are not in the backup: set them again (or import the names
+   from Zigbee2MQTT or ZHA files if the network came from there:
+   `docs/migration.md`).
 
 ## The hub on the dongle
 
@@ -585,6 +673,7 @@ comes first: SONOFF's firmware on a claimed region would format it.
 | `files` | what `files` holds: claimed, interrupted, the copy; where the hub's data are; a running claim |
 | `files claim` | what the claim would copy (reads the region: blocks used by the LittleFS walk or written), or why it is refused |
 | `files claim confirm` | the claim by hand when the first boot's was refused (own thread), then a restart |
+| `files recover` / `files recover confirm` | after SONOFF's firmware reformatted the claimed `files`: what the recovery would do, or why it is refused / the recovery claim (keeps the copy of SONOFF's original files), then a restart |
 | `board`, `board set <k=v …>`, `board clear` | profile pins; NCP wiring overrides (e.g. `baud=460800`), next boot. Overrides that take flash/PSRAM or console pins are refused; **holding the button while the dongle powers up or resets ignores stored overrides for that boot** (then `board clear`) |
 | `net`, `wifi set <ssid> [pw]`, `wifi clear` | Ethernet/Wi-Fi state; station credentials, used at once (the station runs when Ethernet has had no address for 10 s); `clear` from the next boot |
 | `led <0-100>` | LED brightness |
@@ -657,3 +746,9 @@ Wi-Fi part of 3, forming and a sleepy end device's join and interview of
    `ota_1`.
 9. `atomics`; `restart` with Ethernet up (GPIO0 clock at a software reset);
    `restart bringup` and the MG24 probes; `cpu` under API load.
+10. Recovery (0.4.1): on a unit whose `files` SONOFF's firmware
+    reformatted after the claim, `storage/status` `reformatted: true` and
+    a plain claim refused `sonoff_reformatted`; `storage/claim` with
+    `recover`: the hub restarts on the claimed region, takes the MG24's
+    network and imports its devices; later `stock confirm` brings back
+    SONOFF's original files.

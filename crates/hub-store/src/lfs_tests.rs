@@ -11,7 +11,7 @@ use std::ffi::{CString, c_int, c_void};
 
 use littlefs2_sys as sys;
 
-use crate::files::{BLOCK, BLOCKS, Claimed, CopyState, FilesError, FilesRegion, INDEX_BLOCK, Restored, SLOTS, ScanMethod};
+use crate::files::{BLOCK, BLOCKS, Claimed, CopyState, FilesError, FilesRegion, INDEX_BLOCK, Need, Restored, SLOTS, ScanMethod};
 use crate::flash::Flash;
 use crate::littlefs;
 use crate::testutil::{CutFlash, cut_points};
@@ -472,6 +472,46 @@ fn a_flash_read_error_is_not_a_fallback() {
     let (image, _, _) = with_freed_blocks();
     let mut r = FilesRegion::new(Failing(CutFlash::new(image)));
     assert!(r.scan().is_err());
+}
+
+/// The lab unit's case (2026-11-26): the hub claimed SONOFF's LittleFS and
+/// used the region, then SONOFF's firmware ran (the hub's image in `ota_1`
+/// did not boot): esp_littlefs cannot mount the claimed region, formats it
+/// and SONOFF writes its default files. The claim refuses that state;
+/// recover keeps the first claim's copy, and the return to stock mounts
+/// SONOFF's original files.
+#[test]
+fn a_region_reformatted_by_sonoffs_littlefs_is_recovered_with_the_original_files() {
+    let mut fs = Fs::new();
+    let mut files = BTreeMap::new();
+    sonoff_files(&mut fs, &mut files);
+    let mut r = FilesRegion::new(CutFlash::new(fs.unmount()));
+    let Ok(Claimed::Now { copied }) = r.claim() else { panic!("claim") };
+    let mut flash = r.into_inner();
+    // The hub's data all over its areas.
+    for block in (2..INDEX_BLOCK).step_by(7) {
+        flash.write(block * BLOCK, &pattern(block, 256)).unwrap();
+    }
+    let claimed = flash.data;
+    assert!(Fs::with(ESP, claimed.clone(), None, false).is_err(), "no LittleFS to mount");
+    let mut fs = Fs::on(claimed.clone(), true);
+    fs.write("/config.json", &pattern(3, 150));
+    fs.mkdir("/mg24");
+    fs.write("/mg24/info.json", &pattern(4, 700));
+    let reformatted = fs.unmount();
+    let copy_area = (INDEX_BLOCK * BLOCK) as usize..;
+    assert!(reformatted[copy_area.clone()] == claimed[copy_area], "stock_copy untouched");
+
+    let mut r = FilesRegion::new(CutFlash::new(reformatted.clone()));
+    assert_eq!(r.status().unwrap().content, hub_core::layout::dongle_files::Content::LittleFs);
+    assert!(matches!(r.claim(), Err(FilesError::Inconsistent)));
+    assert!(r.into_inner().data == reformatted, "nothing written");
+    let mut r = FilesRegion::new(CutFlash::new(reformatted));
+    assert_eq!(r.assess().unwrap(), Need::Changed { copy_ok: true, content_ok: true });
+    assert_eq!(r.recover().unwrap(), Claimed::Now { copied });
+    assert!(r.status().unwrap().ready());
+    r.restore().unwrap();
+    assert_files(r.into_inner().data, &files);
 }
 
 /// A small file system that relocates a directory every third compaction

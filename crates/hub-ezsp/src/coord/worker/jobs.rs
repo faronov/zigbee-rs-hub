@@ -232,6 +232,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             });
         }
         self.refresh_network();
+        self.left = None;
         self.network.ok_or_else(|| {
             CoordError::described(
                 CoordError::DeliveryUnknown,
@@ -243,6 +244,10 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// Leaves the network; the NCP clears it from its NVM. The multicast
     /// table (network-scoped) is cleared too.
     pub(super) fn leave_reset(&mut self) -> Result<(), CoordError> {
+        if self.net != NetState::None {
+            let r = self.read_live();
+            self.left = Some(r.map_err(|e| self.admin_error(e))?);
+        }
         self.emit(CoordEvent::NetworkState(NetChange::Leaving));
         let status = match self.host.call(&Command::LeaveNetwork { options: 0 }) {
             Ok(Response::LeaveNetwork { status }) => status,

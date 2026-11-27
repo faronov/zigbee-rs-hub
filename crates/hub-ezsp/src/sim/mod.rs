@@ -139,6 +139,9 @@ pub struct SimConfig {
     pub aps_frame_counter: u32,
     /// `getValue(APS_FRAME_COUNTER)` answers (else `ERROR_INVALID_ID`).
     pub aps_frame_counter_readable: bool,
+    /// `getNetworkKeyInfo` and `getValue(NWK_FRAME_COUNTER)` answer with
+    /// the NWK frame counter (else `NOT_FOUND` and `ERROR_INVALID_ID`).
+    pub nwk_frame_counter_readable: bool,
     /// `KEY_TABLE_SIZE` after a reset.
     pub key_table_size: u16,
     /// Key table entries: partner, key, metadata.
@@ -229,6 +232,7 @@ impl Default for SimConfig {
             nwk_frame_counter: 0x1000,
             aps_frame_counter: 0x0100,
             aps_frame_counter_readable: true,
+            nwk_frame_counter_readable: true,
             key_table_size: 0,
             key_table: Vec::new(),
             custom_eui64: None,
@@ -747,9 +751,17 @@ impl SimNcp {
                 };
                 Response::SetConfigurationValue { status }
             }
+            Command::GetValue { id }
+                if id == ValueId::NWK_FRAME_COUNTER && self.cfg.nwk_frame_counter_readable =>
+            {
+                Response::GetValue {
+                    status: Self::st(v, Ezsp, K::Success),
+                    value: self.cfg.nwk_frame_counter.to_le_bytes().to_vec(),
+                }
+            }
             Command::GetValue { id } if id == ValueId::NWK_FRAME_COUNTER => Response::GetValue {
-                status: Self::st(v, Ezsp, K::Success),
-                value: self.cfg.nwk_frame_counter.to_le_bytes().to_vec(),
+                status: Self::st(v, Ezsp, K::InvalidId),
+                value: vec![],
             },
             Command::GetValue { id }
                 if id == ValueId::APS_FRAME_COUNTER && self.cfg.aps_frame_counter_readable =>
@@ -1118,11 +1130,13 @@ impl SimNcp {
                 }
             }
             Command::GetNetworkKeyInfo => Response::GetNetworkKeyInfo {
-                status: Self::sl(if self.cfg.network_formed {
-                    SlStatus::OK
-                } else {
-                    SlStatus::NOT_FOUND
-                }),
+                status: Self::sl(
+                    if self.cfg.network_formed && self.cfg.nwk_frame_counter_readable {
+                        SlStatus::OK
+                    } else {
+                        SlStatus::NOT_FOUND
+                    },
+                ),
                 info: NetworkKeyInfo {
                     network_key_set: self.cfg.network_formed,
                     alternate_network_key_set: false,

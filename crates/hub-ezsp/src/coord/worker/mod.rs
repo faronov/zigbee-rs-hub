@@ -466,6 +466,10 @@ struct Worker<T: Transport, C: Clock> {
     refresh_pending: bool,
     /// A restore waiting for the session after its NCP reset.
     restoring: Option<Box<backup::Restoring>>,
+    /// The frame counters of the network [`Self::leave_reset`] left, until
+    /// a network is formed or restored: a restore right after the leave
+    /// (hub-app leaves first) starts above them.
+    left: Option<backup::Live>,
     stats: Stats,
     // Link report.
     /// The current start's phases; the last announced one's.
@@ -584,6 +588,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
             channel_changed: false,
             refresh_pending: false,
             restoring: None,
+            left: None,
             stats: Stats::default(),
             times: SessionTimes::default(),
             start: None,

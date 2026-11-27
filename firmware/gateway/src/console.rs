@@ -26,6 +26,8 @@ zigbee-rs-hub gateway console:\r
   files claim          what claiming it would copy, or why it is refused\r
   files claim confirm  claim it by hand (the first boot claims it unless that\r
                        is refused; SONOFF's files are saved first), restart\r
+  files recover [confirm] claim it again after SONOFF's firmware reformatted\r
+                       it, keeping the copy of SONOFF's files; restart\r
   board                pins of the board profile and stored overrides\r
   board set <k=v ...>  store NCP wiring overrides (tx rx rts cts reset reset_od\r
                        baud flow fallback), applied at the next boot; the\r
@@ -224,10 +226,11 @@ fn command(words: &[&str]) -> String {
             None => "no token yet (generated when the hub starts)\r\n".into(),
         },
         ["files"] => files::describe(),
-        ["files", "claim"] => files::plan(),
-        ["files", "claim", "confirm"] => match files::start_claim() {
-            Ok(()) => "claiming: SONOFF's files are copied first; the hub restarts when it is done (`files` shows progress)\r\n".into(),
-            Err(e) => format!("error: {e}\r\n"),
+        ["files", "claim"] => files::plan(false),
+        ["files", "recover"] => files::plan(true),
+        ["files", "claim" | "recover", "confirm"] => match files::start_claim(words[1] == "recover") {
+            Ok(()) => "claiming: the hub restarts when it is done (`files` shows progress)\r\n".into(),
+            Err((code, msg)) => format!("refused ({code}): {msg}\r\n"),
         },
         ["restart", "bringup"] => {
             reply("restarting once without the hub\r\n");
