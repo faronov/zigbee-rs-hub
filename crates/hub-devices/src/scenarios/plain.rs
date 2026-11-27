@@ -648,6 +648,235 @@ fn reinterview_keeps_uids_and_orphans_vanished_entities() {
     assert!(hub.delete_entity(&format!("{id}:1:temperature")).is_err());
 }
 
+/// The device announces itself (Device_annce through the NCP): awake now.
+fn announce(hub: &mut Hub<MockTransport>, sim: &mut Sim, ieee: u64, now: u64) {
+    let s = sim.dev(ieee).clone();
+    let cap = s.node.mac_capabilities;
+    hub.on_aps_indication(
+        s.ind(0, 0, 0x0013, crate::zdo::device_annce(1, s.nwk, ieee, cap)),
+        now,
+    );
+    sim.run(hub, now);
+}
+
+/// ZDO requests of `cluster` the hub sent, and the log cleared.
+fn zdo_sent(sim: &mut Sim, cluster: u16) -> usize {
+    let n = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0 && a.cluster == cluster)
+        .count();
+    sim.log.clear();
+    n
+}
+
+/// A sleepy sensor whose Simple descriptor failed at the join: its next
+/// Device_annce (the moment it is awake) resumes the interview where it
+/// failed, what was learnt stays, and the device gets its entities.
+#[test]
+fn a_partial_interview_resumes_when_the_device_announces_itself() {
+    use crate::zdo::cluster::{ACTIVE_EP_REQ, NODE_DESC_REQ, SIMPLE_DESC_REQ};
+    let id = "zb:00158d0001a2b3c4";
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    let mut s = sensor();
+    s.zdo_failing.insert(SIMPLE_DESC_REQ);
+    sim.devices.push(s);
+    sim.join(&mut hub, SENSOR, T0);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.record()["interview"], "partial");
+    assert!(d.entity(1, "temperature").is_none());
+
+    // Asleep an hour, then it rejoins (its descriptor answers now).
+    hub.device_mut(id).unwrap().user_name = Some("Bedroom".into());
+    sim.dev(SENSOR).zdo_failing.clear();
+    sim.log.clear();
+    let t = T0 + 3_600_000;
+    announce(&mut hub, &mut sim, SENSOR, t);
+    let sent: Vec<u16> = sim.aps().iter().map(|a| a.cluster).collect();
+    assert!(sent.contains(&SIMPLE_DESC_REQ), "{sent:04x?}");
+    assert!(
+        !sent.contains(&NODE_DESC_REQ) && !sent.contains(&ACTIVE_EP_REQ),
+        "resumed at the Simple descriptor: {sent:04x?}"
+    );
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.record()["interview"], "complete");
+    assert!(d.entity(1, "temperature").is_some());
+    assert_eq!(hub.diagnostics(id).unwrap()["interview_resumes"], 1);
+    assert_eq!(
+        hub.device(id).unwrap().user_name.as_deref(),
+        Some("Bedroom")
+    );
+}
+
+/// The likeliest partial interview: the Node descriptor was lost right
+/// after the join, the endpoints and their entities are fine. Resumed after
+/// a rejoin where a Simple descriptor request would fail, it asks only the
+/// Node descriptor: the endpoints and entities stay.
+#[test]
+fn a_resumed_interview_asks_only_what_the_device_lacks() {
+    use crate::zdo::cluster::{ACTIVE_EP_REQ, NODE_DESC_REQ, SIMPLE_DESC_REQ};
+    let id = "zb:0017880100aabbcc";
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    let mut l = light();
+    l.zdo_failing.insert(NODE_DESC_REQ);
+    sim.devices.push(l);
+    sim.join(&mut hub, LIGHT, T0);
+    let d = hub.device(id).unwrap();
+    assert!(d.interview_partial && d.entity(11, "light").is_some());
+    let eps = d.fp.endpoints.clone();
+
+    sim.dev(LIGHT).zdo_failing = [SIMPLE_DESC_REQ].into();
+    sim.log.clear();
+    announce(&mut hub, &mut sim, LIGHT, T0 + 60_000);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.fp.endpoints, eps);
+    assert!(d.entity(11, "light").is_some());
+    assert!(d.node_desc.is_some());
+    assert_eq!(d.record()["interview"], "complete");
+    let zdo: Vec<u16> = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0)
+        .map(|a| a.cluster)
+        .collect();
+    assert!(zdo.contains(&NODE_DESC_REQ), "{zdo:04x?}");
+    assert!(
+        !zdo.contains(&ACTIVE_EP_REQ) && !zdo.contains(&SIMPLE_DESC_REQ),
+        "{zdo:04x?}"
+    );
+}
+
+/// A resumption asks only the Simple descriptor the device lacks and
+/// stores it where a full interview would (the endpoints' order).
+#[test]
+fn a_resumed_interview_stores_a_descriptor_in_the_interview_order() {
+    use crate::zdo::cluster::SIMPLE_DESC_REQ;
+    let id = "zb:0017880100aabbcc";
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices
+        .push(light().endpoint(12, 0x0104, 0x0100, &[0x0000, 0x0006], &[]));
+    sim.join(&mut hub, LIGHT, T0);
+    let eps = hub.device(id).unwrap().fp.endpoints.clone();
+    assert_eq!(eps.iter().map(|e| e.ep).collect::<Vec<_>>(), [11, 12]);
+    // Endpoint 11's descriptor failed.
+    let d = hub.device_mut(id).unwrap();
+    d.fp.endpoints.remove(0);
+    d.interview_partial = true;
+
+    sim.log.clear();
+    announce(&mut hub, &mut sim, LIGHT, T0 + 60_000);
+    let asked: Vec<u8> = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0 && a.cluster == SIMPLE_DESC_REQ)
+        .map(|a| a.payload[3])
+        .collect();
+    assert_eq!(asked, [11]);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.fp.endpoints, eps);
+    assert_eq!(d.record()["interview"], "complete");
+}
+
+/// An Active_EP_rsp with an error status fails the step (it is not an
+/// empty endpoint list): partial, and resumed there.
+#[test]
+fn a_failed_active_endpoints_answer_makes_the_interview_partial() {
+    use crate::zdo::cluster::{ACTIVE_EP_REQ, NODE_DESC_REQ};
+    let id = "zb:0017880100aabbcc";
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    let mut l = light();
+    l.zdo_failing.insert(ACTIVE_EP_REQ);
+    sim.devices.push(l);
+    sim.join(&mut hub, LIGHT, T0);
+    assert_eq!(hub.device(id).unwrap().record()["interview"], "partial");
+    sim.dev(LIGHT).zdo_failing.clear();
+    sim.log.clear();
+    announce(&mut hub, &mut sim, LIGHT, T0 + 60_000);
+    assert_eq!(zdo_sent(&mut sim, NODE_DESC_REQ), 0);
+    let d = hub.device(id).unwrap();
+    assert_eq!(d.record()["interview"], "complete");
+    assert!(d.entity(11, "light").is_some());
+}
+
+/// A rejoin of a device whose interview completed interviews nothing.
+#[test]
+fn a_complete_interview_is_not_resumed_on_a_rejoin() {
+    use crate::zdo::cluster::{ACTIVE_EP_REQ, NODE_DESC_REQ, SIMPLE_DESC_REQ};
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(light());
+    sim.join(&mut hub, LIGHT, T0);
+    sim.log.clear();
+    let t = T0 + 3_600_000;
+    hub.on_device_joined(LIGHT, 0x2001, t);
+    announce(&mut hub, &mut sim, LIGHT, t);
+    let zdo: Vec<u16> = sim
+        .aps()
+        .iter()
+        .filter(|a| a.profile == 0)
+        .map(|a| a.cluster)
+        .collect();
+    assert!(
+        !zdo.iter()
+            .any(|c| [NODE_DESC_REQ, ACTIVE_EP_REQ, SIMPLE_DESC_REQ].contains(c)),
+        "{zdo:04x?}"
+    );
+    let d = hub.device("zb:0017880100aabbcc").unwrap();
+    assert_eq!(d.record()["interview"], "complete");
+    assert_eq!(d.interview_resumes, 0);
+}
+
+/// A router that keeps failing a step and keeps announcing itself: one
+/// resumption for the join and the Device_annce of one rejoin, then at
+/// most one per 10, 20, 40, 80 min, five per run; a requested
+/// re-interview starts over.
+#[test]
+fn resumptions_back_off_however_often_the_device_announces() {
+    use crate::zdo::cluster::NODE_DESC_REQ;
+    let id = "zb:0017880100aabbcc";
+    let min = 60_000;
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    let mut l = light();
+    l.zdo_failing.insert(NODE_DESC_REQ);
+    sim.devices.push(l);
+    sim.join(&mut hub, LIGHT, T0);
+    assert!(hub.device(id).unwrap().interview_partial);
+    sim.log.clear();
+
+    // A rejoin: the trust center's join, then its Device_annce.
+    let mut t = T0 + min;
+    hub.on_device_joined(LIGHT, 0x2001, t);
+    announce(&mut hub, &mut sim, LIGHT, t);
+    assert_eq!(zdo_sent(&mut sim, NODE_DESC_REQ), 1, "one interview");
+    let d = hub.device(id).unwrap();
+    assert!(d.interview_partial && d.interview == InterviewStep::Done);
+    for (wait, gap) in [(10, 5), (20, 15), (40, 30), (80, 60)] {
+        // Within the interval: nothing, however often.
+        for _ in 0..3 {
+            announce(&mut hub, &mut sim, LIGHT, t + gap * min);
+        }
+        assert_eq!(zdo_sent(&mut sim, NODE_DESC_REQ), 0, "before {wait} min");
+        t += wait * min;
+        announce(&mut hub, &mut sim, LIGHT, t);
+        assert_eq!(zdo_sent(&mut sim, NODE_DESC_REQ), 1, "after {wait} min");
+    }
+    assert_eq!(hub.device(id).unwrap().interview_resumes, 5);
+    announce(&mut hub, &mut sim, LIGHT, t + 24 * 60 * min);
+    assert_eq!(zdo_sent(&mut sim, NODE_DESC_REQ), 0, "five per run");
+
+    t += 25 * 60 * min;
+    hub.reinterview(id, t).unwrap();
+    sim.run(&mut hub, t);
+    sim.log.clear();
+    announce(&mut hub, &mut sim, LIGHT, t + min);
+    assert_eq!(zdo_sent(&mut sim, NODE_DESC_REQ), 1, "started over");
+}
+
 #[test]
 fn ias_contact_sensor_enrollment_and_notifications() {
     let ieee = 0x00158d00aaaa0001;

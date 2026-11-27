@@ -197,7 +197,21 @@ devices use the same queue; the entity shows the requested value as
 
 A device whose interview cannot complete gets tier-a entities from what is
 known (for example only the Node descriptor and Simple descriptors) and a
-`interview: partial` flag; resolution reruns when more is learned.
+`interview: partial` flag; resolution reruns when more is learned. When it
+next rejoins or announces itself (the coordinator's join event, or its
+`Device_annce`: the moment a sleepy device is awake) the hub resumes the
+interview asking only the answers it lacks (the Node descriptor, the
+endpoint list, the Simple descriptors it has not got, then the Basic reads
+again), so a failure then loses nothing it knew; descriptors are replaced
+only by a successful answer, and the user's names and settings stay. Then
+it resolves and configures as after a join. At most 5 times per device and
+hub run (not stored: a restart allows as many again), the first at once,
+the next ones at least 10, 20, 40 and 80 min after the previous one however
+often it announces; `devices/reinterview` starts over and resets the count.
+A rejoin during an interview sends its current step again only when no
+request of it is in flight to the device's current address.
+`devices/diagnostics` counts the resumptions (`interview_resumes`). A
+complete interview is never resumed.
 
 A device imported from another coordinator's records (`network/import`,
 [`docs/migration.md`](migration.md)) is resolved from the imported
@@ -2446,7 +2460,7 @@ code feels familiar:
 | `devices/remove` | `id`, `force` (skip Mgmt_Leave: the device is unreachable) | — (ZDO Mgmt_Leave_req unless `force`, then the coordinator purges the device either way: ZRHP `NWK_REMOVE_DEVICE` and `TBL_INVALIDATE` of its `DEVICE` entry, the host store's device record; EZSP an APS Remove-Device to a router of the neighbor table, else its key table entry is erased. The hub remembers the device as removed (network record `removed`, the last 64): the import of the NCP's devices skips it while the NCP still lists it (a child until it ages out, a router that ignored the leave), until it joins or announces itself again; forming, resetting or restoring the network forgets the list. GP: 13.7) |
 | `devices/reinterview` | `id` | progress events `interview_progress` |
 | `devices/reconfigure` | `id` | per-step results (binds, reporting, reads) |
-| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload |
+| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload, `interview_partial`, `interview_resumes` (partial interviews resumed on a rejoin this run, 3.1) |
 | `devices/pin_definition` | `id`, `definition` (id or null) | new resolution |
 
 Events (topic `devices`): `device_added`, `device_updated` (any registry field,

@@ -6,6 +6,27 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
+## 0.4.1
+
+### Fixes
+
+- **A partial interview resumes when the device rejoins.** A device whose
+  interview ended `partial` (a descriptor or Basic read failed or timed out,
+  e.g. a router busy right after its join) stayed so until
+  `devices/reinterview` was called by hand. Now its next rejoin or
+  Device_annce (the moment a sleepy device is awake) resumes the interview
+  asking only the answers it lacks (e.g. just the Node descriptor of a
+  device whose endpoints were read), so a failure then loses nothing it
+  knew; the user's names and settings stay. Works on both coordinator
+  backends. A device that keeps failing is retried at most 5 times per hub
+  run, the first at once, then no sooner than 10, 20, 40 and 80 min after
+  the previous try, however often it announces; a complete interview is
+  never repeated. `devices/diagnostics` counts the resumptions
+  (`interview_resumes`). A join and the Device_annce of the same rejoin no
+  longer send each interview request twice, and an Active_EP_rsp with an
+  error status now makes the interview partial (it was taken as a device
+  without endpoints).
+
 ## 0.4.0
 
 ### Highlights

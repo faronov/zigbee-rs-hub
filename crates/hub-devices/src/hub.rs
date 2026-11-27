@@ -405,6 +405,16 @@ const AWAKE_AFTER_RX_MS: Millis = 5_000;
 const AWAKE_AFTER_JOIN_MS: Millis = 30_000;
 /// A rejoin reads Basic DateCode and SWBuildID again at most this often.
 const IDENTITY_REREAD_MS: Millis = 3_600_000;
+/// A partial interview resumes when the device rejoins or announces itself
+/// (the moment a sleepy one is awake): at most this many times per device
+/// and hub run (the count is not stored, a restart allows as many again),
+/// so a device that keeps failing a step is not interviewed at every
+/// announcement ...
+const INTERVIEW_RESUMES: u8 = 5;
+/// ... the first at once, the next ones at least this long after the
+/// previous one, doubling (10, 20, 40, 80 min), however often it
+/// announces.
+const INTERVIEW_RESUME_MS: Millis = 10 * 60_000;
 const MAINS_SILENCE_MS: Millis = 10 * 60_000;
 const DEDUP_MS: Millis = 2_000;
 const HOUR_S: u64 = 3600;
@@ -1048,6 +1058,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             ));
         }
         d.interview_partial = false;
+        // Asked for: the automatic resumptions start over.
+        d.interview_resumes = 0;
+        d.interview_resume_at = 0;
         d.fp.endpoints.clear();
         d.awake_until = d.awake_until.max(now + AWAKE_AFTER_RX_MS);
         self.interview_step(id, InterviewStep::NodeDesc, now);
@@ -1066,7 +1079,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .is_some_and(|t| t.query_on_announce);
         let schema_ep = schema_endpoint(d);
         if interview != InterviewStep::Done && interview != InterviewStep::Configure {
-            self.interview_step(id, interview, now);
+            self.continue_interview(id, interview, now);
             return;
         }
         if self.devices.get(id).is_some_and(|d| d.imported != 0) {
@@ -1079,6 +1092,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         if tuya_announce {
             self.tuya_query(id, now);
+        }
+        if self.resume_interview(id, now) {
+            // Basic, the self-description and configure follow in it.
+            self.gp_target_announced(id, now);
+            return;
         }
         // New firmware (an OTA upgrade, a reflash) shows in these first.
         self.refresh_identity(id, false, now);
@@ -1096,6 +1114,65 @@ impl<T: ZigbeeTransport> Hub<T> {
 
         self.gp_target_announced(id, now);
         self.pump_configure(id, now);
+    }
+
+    /// A rejoin in the middle of the interview: its current step again.
+    /// A request of it in flight to the device's current address is waited
+    /// for instead (a join and the Device_annce of one rejoin both come
+    /// here: one chain of requests, not two); one parked for the sleeping
+    /// device or sent to its previous address is dropped and the step sent
+    /// now.
+    fn continue_interview(&mut self, id: &str, step: InterviewStep, now: Millis) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        d.queue
+            .retain(|q| !matches!(q.purpose, Purpose::Interview(_)));
+        let dst = ApsDst::Nwk(d.nwk().unwrap_or(0xFFFE));
+        let mut in_flight = false;
+        let mut stale = Vec::new();
+        for (k, p) in &self.pending {
+            if p.device == id && matches!(p.purpose, Purpose::Interview(_)) {
+                if p.req.dst == dst {
+                    in_flight = true;
+                } else {
+                    stale.push(*k);
+                }
+            }
+        }
+        for k in stale {
+            self.pending.remove(&k);
+        }
+        if !in_flight {
+            self.interview_step(id, step, now);
+        }
+    }
+
+    /// Resumes a partial interview when the device rejoins or announces
+    /// itself ([`INTERVIEW_RESUMES`]): only the answers it lacks are asked
+    /// ([`resume_step`], [`next_asked`]), so what is known stays, and so do
+    /// the user's names and settings. Once the interview is done (a device
+    /// still being configured finishes first), not for imported devices
+    /// (their verification comes first). `true`: resumed.
+    fn resume_interview(&mut self, id: &str, now: Millis) -> bool {
+        let Some(d) = self.devices.get_mut(id) else {
+            return false;
+        };
+        if !d.interview_partial
+            || d.interview != InterviewStep::Done
+            || d.gp.is_some()
+            || d.imported != 0
+            || d.interview_resumes >= INTERVIEW_RESUMES
+            || now < d.interview_resume_at
+        {
+            return false;
+        }
+        d.interview_resume_at = now + (INTERVIEW_RESUME_MS << d.interview_resumes);
+        d.interview_resumes += 1;
+        d.interview_partial = false;
+        let step = resume_step(d);
+        self.interview_step(id, step, now);
+        true
     }
 
     fn progress(&mut self, id: &str, step: InterviewStep) {
@@ -1296,27 +1373,54 @@ impl<T: ZigbeeTransport> Hub<T> {
                 d.fp.rx_on_when_idle = Some(nd.rx_on_when_idle());
                 d.fp.mac_mains = Some(nd.mains_powered());
                 d.node_desc = Some(nd);
-                self.interview_step(id, InterviewStep::ActiveEp, now);
+                let next = next_asked(d, InterviewStep::ActiveEp);
+                self.interview_step(id, next, now);
             }
-            (InterviewStep::ActiveEp, ZdoMessage::ActiveEp { endpoints, .. }) => {
+            (
+                InterviewStep::ActiveEp,
+                ZdoMessage::ActiveEp {
+                    status: 0,
+                    endpoints,
+                    ..
+                },
+            ) => {
+                // Descriptors of the endpoints it still has stay until
+                // read again (`reinterview` clears them all).
+                d.fp.endpoints.retain(|e| endpoints.contains(&e.ep));
                 d.active_eps = endpoints;
-                d.fp.endpoints.clear();
-                self.interview_step(id, InterviewStep::SimpleDesc(0), now);
+                let next = next_asked(d, InterviewStep::SimpleDesc(0));
+                self.interview_step(id, next, now);
             }
             (InterviewStep::SimpleDesc(i), ZdoMessage::SimpleDesc { desc, .. }) => {
                 if let Some(sd) = desc {
-                    d.fp.endpoints.retain(|e| e.ep != sd.endpoint);
-                    d.fp.endpoints.push(EndpointFp {
+                    let e = EndpointFp {
                         ep: sd.endpoint,
                         profile: sd.profile,
                         device_id: sd.device_id,
                         in_clusters: sd.in_clusters,
                         out_clusters: sd.out_clusters,
-                    });
+                    };
+                    // Replaced in place, else added in the interview's
+                    // order (as a full interview stores them); a failed
+                    // read keeps what was known.
+                    let order = interview_eps(d);
+                    let at = |ep: u8| order.iter().position(|x| *x == ep).unwrap_or(usize::MAX);
+                    let eps = &mut d.fp.endpoints;
+                    match eps.iter().position(|x| x.ep == e.ep) {
+                        Some(j) => eps[j] = e,
+                        None => {
+                            let j = eps
+                                .iter()
+                                .position(|x| at(x.ep) > at(e.ep))
+                                .unwrap_or(eps.len());
+                            eps.insert(j, e);
+                        }
+                    }
                 } else if !gp_step(d, step) {
                     d.interview_partial = true;
                 }
-                self.interview_step(id, InterviewStep::SimpleDesc(i + 1), now);
+                let next = next_asked(d, InterviewStep::SimpleDesc(i + 1));
+                self.interview_step(id, next, now);
             }
             (step, _) => {
                 // Failed status: continue with what is known.
@@ -1327,6 +1431,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     InterviewStep::SimpleDesc(i) => InterviewStep::SimpleDesc(i + 1),
                     s => s,
                 };
+                let next = next_asked(d, next);
                 self.interview_step(id, next, now);
             }
         }
@@ -2584,6 +2689,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     }
                     s => s,
                 };
+                let next = self.devices.get(id).map_or(next, |d| next_asked(d, next));
                 self.interview_step(id, next, now);
             }
             Purpose::Configure(key) => self.configure_done(id, key, false, err.code.clone(), now),
@@ -3111,6 +3217,44 @@ fn interview_eps(d: &Device) -> Vec<u8> {
     interview_endpoints(&d.active_eps)
 }
 
+/// Where a partial interview resumes: the first answer it lacks
+/// ([`lacking`]).
+fn resume_step(d: &Device) -> InterviewStep {
+    lacking(d, InterviewStep::NodeDesc)
+}
+
+/// The first descriptor step from `from` on whose answer the device lacks
+/// (the Node descriptor, the endpoint list, a Simple descriptor), else
+/// the Basic reads (which batch failed is not kept: both are read again);
+/// any later step as it is.
+fn lacking(d: &Device, from: InterviewStep) -> InterviewStep {
+    use InterviewStep::{ActiveEp, Basic, NodeDesc, SimpleDesc};
+    let first = match from {
+        NodeDesc if d.node_desc.is_none() => return NodeDesc,
+        NodeDesc | ActiveEp if d.active_eps.is_empty() => return ActiveEp,
+        NodeDesc | ActiveEp => 0,
+        SimpleDesc(i) => i,
+        s => return s,
+    };
+    let missing = interview_eps(d)
+        .iter()
+        .skip(first)
+        .position(|&ep| d.fp.endpoint(ep).is_none());
+    missing.map_or(Basic(0), |j| SimpleDesc(first + j))
+}
+
+/// The step asked after one, `next` in the interview's order: a resumed
+/// interview ([`Hub::resume_interview`]; `interview_resumes` is 0 in a
+/// new or requested one) asks only what the device lacks, from `next` on,
+/// so that a failure there loses nothing it knew.
+fn next_asked(d: &Device, next: InterviewStep) -> InterviewStep {
+    if d.interview_resumes > 0 {
+        lacking(d, next)
+    } else {
+        next
+    }
+}
+
 /// The interview step asks the GP endpoint's descriptor: optional, a
 /// failure does not make the interview partial.
 fn gp_step(d: &Device, step: InterviewStep) -> bool {
@@ -3354,6 +3498,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             "frames": d.diag.frames.iter().map(|(t, c, h)| json!({"time": ts(*t), "cluster": format!("0x{c:04x}"), "hex": h})).collect::<Vec<_>>(),
             "schema_error": d.schema.error,
             "interview_partial": d.interview_partial,
+            "interview_resumes": d.interview_resumes,
         }))
     }
 }

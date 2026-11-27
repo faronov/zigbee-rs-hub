@@ -326,14 +326,23 @@ impl Rig {
     }
 
     /// `devs` answer the hub's requests, as `answered` counts.
-    fn devices(&mut self, mut devs: Vec<SimDevice>, answered: Arc<Mutex<Vec<ApsRequest>>>) {
+    fn devices(&mut self, devs: Vec<SimDevice>, answered: Arc<Mutex<Vec<ApsRequest>>>) {
+        self.devices_shared(Arc::new(Mutex::new(devs)), answered);
+    }
+
+    /// [`Rig::devices`] that the test changes meanwhile.
+    fn devices_shared(&mut self, devs: Arc<Mutex<Vec<SimDevice>>>, answered: Arc<Mutex<Vec<ApsRequest>>>) {
         let (link, stop) = (self.link.clone(), self.stop.clone());
         self.pump = Some(thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 for req in link.requests() {
                     let ApsDst::Nwk(nwk) = req.dst else { continue };
-                    let Some(d) = devs.iter_mut().find(|d| d.nwk == nwk) else { continue };
-                    for i in d.answer(&req) {
+                    let inds = {
+                        let mut devs = devs.lock().unwrap();
+                        let Some(d) = devs.iter_mut().find(|d| d.nwk == nwk) else { continue };
+                        d.answer(&req)
+                    };
+                    for i in inds {
                         link.indicate(&i);
                     }
                     answered.lock().unwrap().push(req);
@@ -424,6 +433,37 @@ fn join_interview_command_and_report() {
             wait("the plug back", || get()["available"] == true);
             assert_eq!(get().get("unavailable_reason"), None);
         }
+        rig.finish();
+    }
+}
+
+/// A device whose interview ended partial (its Simple descriptor failed)
+/// is interviewed on from there when it announces itself: the Device_annce
+/// reaches the engine through either NCP.
+#[test]
+fn a_partial_interview_resumes_on_the_devices_announcement() {
+    use hub_devices::zdo::cluster::{NODE_DESC_REQ, SIMPLE_DESC_REQ};
+    for kind in BOTH {
+        let mut rig = Rig::new(kind, true);
+        let answered = Arc::new(Mutex::new(Vec::new()));
+        let mut p = plug();
+        p.zdo_failing.insert(SIMPLE_DESC_REQ);
+        let devs = Arc::new(Mutex::new(vec![p]));
+        rig.devices_shared(devs.clone(), answered.clone());
+        let (sid, rx) = session(&rig.app);
+        let interview =
+            || call(&rig.app, sid, &rx, 2, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))["result"]["interview"].clone();
+        rig.link.join(PLUG, PLUG_NWK);
+        wait(&format!("{kind:?}: interview partial"), || interview() == "partial");
+
+        devs.lock().unwrap()[0].zdo_failing.clear();
+        answered.lock().unwrap().clear();
+        let annce = hub_devices::zdo::device_annce(1, PLUG_NWK, PLUG, 0x8E);
+        rig.link.indicate(&plug().ind(0, 0, 0x0013, annce));
+        wait(&format!("{kind:?}: the plug's state"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+        assert_eq!(interview(), "complete", "{kind:?}");
+        let zdo: Vec<u16> = answered.lock().unwrap().iter().filter(|r| r.profile == 0).map(|r| r.cluster).collect();
+        assert!(zdo.contains(&SIMPLE_DESC_REQ) && !zdo.contains(&NODE_DESC_REQ), "{kind:?}: {zdo:04x?}");
         rig.finish();
     }
 }
