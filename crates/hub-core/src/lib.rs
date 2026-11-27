@@ -10,14 +10,20 @@
 //!   UART, reset/loader lines, Ethernet, LED, button, console, flash/PSRAM,
 //!   with a wiring check.
 //! - [`resources`]: buffer limits from the PSRAM detected at boot.
+//! - [`gecko`]: the Silicon Labs Gecko bootloader's UART XMODEM path to an
+//!   EFR32 NCP (the Dongle-M's MG24): GBL validation, XMODEM-CRC, the menu.
 //! - `zrhp` (feature `zrhp`): re-export of the `zigbee-zrhp` protocol crate.
 
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
 
 #[cfg(feature = "zrhp")]
 pub use zigbee_zrhp as zrhp;
 
 pub mod board;
+pub mod gecko;
 pub mod layout;
 pub mod lines;
 pub mod profile;

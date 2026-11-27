@@ -803,11 +803,22 @@ const DIFF="shard 44: SHA-256 differs from the installed manifest",BANK=["get ba
         }
     }
 
-    /// The gateway's cards (storage claim, the hub's own firmware,
-    /// Ethernet) only in the gateway's page.
+    /// The gateway's cards (storage claim, the hub's own firmware, the
+    /// MG24's firmware, Ethernet) only in the gateway's page.
     #[test]
     fn gateway_cards_only_in_the_gateway_page() {
-        let items = ["\"storage/claim\"", "\"firmware/begin\"", "\"firmware/chunk\"", "replace_stock", "s.ethernet", "id=\"gsb\"", "id=\"gsban\"", "gwBan("];
+        let items = [
+            "\"storage/claim\"",
+            "\"firmware/begin\"",
+            "\"firmware/chunk\"",
+            "replace_stock",
+            "s.ethernet",
+            "id=\"gsb\"",
+            "id=\"gsban\"",
+            "gwBan(",
+            "\"ncp/update/start\"",
+            "id=\"gnb\"",
+        ];
         for f in Features::all() {
             let page = text(f);
             for item in items {

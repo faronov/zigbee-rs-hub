@@ -9,6 +9,7 @@
 //! | stack version and build | `getValue(VERSION_INFO)` (0x00AA, value 0x11) |
 //! | EUI-64 | `getEui64` (0x0026) |
 //! | manufacturing string, board name | `getMfgToken` (0x000B, tokens 0x01, 0x02) |
+//! | custom EUI-64, crystal tuning (CTUNE) | `getMfgToken` (tokens 0x0C, 0x0D) |
 //! | network state | `networkState` (0x0018) |
 //! | node type, PAN, channel, … (joined only) | `getNetworkParameters` (0x0028), `getNodeId` (0x0027) |
 //!
@@ -32,8 +33,15 @@ use crate::{lines, uart};
 const GET_MFG_TOKEN: u16 = 0x000B;
 /// `EZSP_MFG_STRING`, `EZSP_MFG_BOARD_NAME` (same header).
 const MFG_TOKENS: [(&str, u8); 2] = [("mfg string", 0x01), ("board name", 0x02)];
+/// `EZSP_MFG_CUSTOM_EUI_64`: an EUI-64 that replaces the chip's own
+/// (DEVINFO) one; all `FF` when unset.
+const MFG_CUSTOM_EUI_64: u8 = 0x0C;
+/// `EZSP_MFG_CTUNE`: the HFXO tuning the board's manufacturer measured
+/// (`u16`); `FFFF` when unset (then DEVINFO or the firmware's default).
+const MFG_CTUNE: u8 = 0x0D;
 
-struct Port;
+/// The NCP UART for probes (no parking: the caller has the UART).
+pub(crate) struct Port;
 
 impl Transport for Port {
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
@@ -66,20 +74,32 @@ pub struct BackendPort {
 }
 
 impl BackendPort {
-    /// Takes the UART, or says who has it.
-    pub fn take() -> Result<Self, uart::User> {
-        Ok(Self { _claim: uart::claim(uart::User::Backend)? })
+    /// The backend's port on the UART it claimed.
+    pub fn from_claim(claim: uart::Claim) -> Self {
+        Self { _claim: claim }
     }
 }
 
+/// While the UART is parked (an NCP update): nothing goes out, nothing
+/// comes in (a silent NCP).
 impl Transport for BackendPort {
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        if uart::parked() {
+            return Ok(());
+        }
         Port.write_all(data)
     }
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        if uart::parked() {
+            std::thread::sleep(timeout.min(Duration::from_millis(100)));
+            return Ok(0);
+        }
         Port.read(buf, timeout)
     }
     fn discard_input(&mut self) -> io::Result<()> {
+        if uart::parked() {
+            return Ok(());
+        }
         Port.discard_input()
     }
     fn line_errors(&self) -> LineErrors {
@@ -162,15 +182,13 @@ fn probe(init: bool) -> String {
         Err(e) => out += &format!("EUI-64: {e}\r\n"),
     }
     for (name, token) in MFG_TOKENS {
-        match host.call(&Command::Raw { frame_id: GET_MFG_TOKEN, params: vec![token] }) {
-            Ok(Response::Raw { params, .. }) if !params.is_empty() => {
-                let len = usize::from(params[0]).min(params.len() - 1);
-                out += &format!("{name}: {:?}\r\n", printable(&params[1..1 + len]));
-            }
-            Ok(r) => out += &format!("{name}: {r:?}\r\n"),
+        match mfg_token(&mut host, token) {
+            Ok(t) => out += &format!("{name}: {:?}\r\n", printable(&t)),
             Err(e) => out += &format!("{name}: {e}\r\n"),
         }
     }
+    out += &custom_eui64(&mut host);
+    out += &ctune(&mut host);
     let mut state = host.network_state();
     if init && matches!(state, Ok(NetworkStatus::NO_NETWORK)) {
         match host.network_init(NetworkInitBitmask::NO_OPTIONS) {
@@ -231,6 +249,46 @@ fn probe(init: bool) -> String {
         out += "MG24 reset (the resumed network does not keep running without a host)\r\n";
     }
     out
+}
+
+fn mfg_token<T: Transport, C: hub_ezsp::host::Clock>(host: &mut EzspHost<T, C>, token: u8) -> Result<Vec<u8>, String> {
+    match host.call(&Command::Raw { frame_id: GET_MFG_TOKEN, params: vec![token] }) {
+        Ok(Response::Raw { params, .. }) if !params.is_empty() => {
+            let len = usize::from(params[0]).min(params.len() - 1);
+            Ok(params[1..1 + len].to_vec())
+        }
+        Ok(r) => Err(format!("{r:?}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The custom EUI-64 token: whether the EUI-64 in use is a token or the
+/// chip's own (a firmware that replaces EmberZNet must keep the coordinator
+/// IEEE the devices know).
+fn custom_eui64<T: Transport, C: hub_ezsp::host::Clock>(host: &mut EzspHost<T, C>) -> String {
+    match mfg_token(host, MFG_CUSTOM_EUI_64) {
+        Ok(t) if t.len() == 8 && t.iter().all(|&b| b == 0xFF) => {
+            "custom EUI-64 token: unset (the EUI-64 above is the chip's own, DEVINFO)\r\n".into()
+        }
+        Ok(t) if t.len() == 8 => {
+            let be: String = t.iter().rev().map(|b| format!("{b:02X}")).collect();
+            format!("custom EUI-64 token: {be} (the EUI-64 in use comes from this token, not from the chip)\r\n")
+        }
+        Ok(t) => format!("custom EUI-64 token: {} bytes {t:02X?}\r\n", t.len()),
+        Err(e) => format!("custom EUI-64 token: {e}\r\n"),
+    }
+}
+
+/// The CTUNE token (HFXO load capacitance tuning).
+fn ctune<T: Transport, C: hub_ezsp::host::Clock>(host: &mut EzspHost<T, C>) -> String {
+    match mfg_token(host, MFG_CTUNE) {
+        Ok(t) if t.len() >= 2 => match u16::from_le_bytes([t[0], t[1]]) {
+            0xFFFF => "MFG_CTUNE token: unset (the chip's DEVINFO value or the firmware's default applies)\r\n".into(),
+            v => format!("MFG_CTUNE token: {v} (0x{v:03X})\r\n"),
+        },
+        Ok(t) => format!("MFG_CTUNE token: {} bytes {t:02X?}\r\n", t.len()),
+        Err(e) => format!("MFG_CTUNE token: {e}\r\n"),
+    }
 }
 
 /// The configuration values `mg24 ezsp config` reads.

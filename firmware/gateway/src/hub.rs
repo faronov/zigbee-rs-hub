@@ -1,29 +1,39 @@
-//! The hub application (`hub-app`) on the EZSP backend
-//! (`hub_app::Backend::ezsp`) over the NCP UART: the same application,
-//! web UI, WebSocket API, MQTT bridge, catalog and automations as the S3
-//! hub (`firmware/hub`), with the gateway's platform
+//! The hub application (`hub-app`) over the NCP UART, on the backend the
+//! boot chose ([`ncp::boot_detect`](crate::ncp::boot_detect)): EZSP
+//! (`hub_app::Backend::ezsp`, SONOFF's EmberZNet NCP) or ZRHP
+//! (`hub_app::Backend::zrhp` on the ZRHP host core, the zigbee-rs NCP the
+//! hub flashed onto the MG24). The same application, web UI, WebSocket
+//! API, MQTT bridge, catalog and automations as the S3 hub
+//! (`firmware/hub`), with the gateway's platform
 //! ([`Gateway`](crate::platform::Gateway)), its data on SONOFF's `files`
 //! partition, claimed at the first boot ([`files`](crate::files), RAM only
 //! if that is refused), the Zigbee device OTA image store there too, the
-//! `storage/*` and `firmware/*` requests, and the button's permit join.
+//! `storage/*`, `firmware/*` and `ncp/*` requests, and the button's permit
+//! join. Both backends keep the hub's records in the same journal; the
+//! records say whose they are (a backend change makes them foreign until
+//! the kept network is restored, `ncp`).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hub_app::catalog::data::DataFlash;
 use hub_app::{App, AppConfig, Backend, CatalogSetup, OtaFlash, SessionSink};
+use hub_coord::BackendKind;
 use hub_core::profile::BoardProfile;
 use hub_ezsp::SystemClock;
 use hub_ezsp::coord::{EzspOptions, LinkReport};
+use hub_ncp::lifecycle::{Hub, HubConfig, Rng};
 use hub_store::Store;
 use log::{error, info, warn};
 use zrh_espapp::cpu;
 use zrh_espapp::mqtt::{SETTINGS_MAX, SettingsStore};
 
-use crate::{ezsp, files, platform, settings, update};
+use crate::{ezsp, files, ncp, platform, settings, uart, update, zrhp};
 
 /// The running application.
 pub static APP: OnceLock<App> = OnceLock::new();
+/// The ZRHP host core (the ZRHP backend only).
+static ZRHP: OnceLock<Hub> = OnceLock::new();
 static MQTT: OnceLock<hub_mqtt::MqttService> = OnceLock::new();
 /// What the EZSP worker reports of the link (`hub` on the console).
 static LINK: OnceLock<Arc<Mutex<LinkReport>>> = OnceLock::new();
@@ -67,8 +77,10 @@ pub fn token() -> String {
 /// Starts the application (before the network: the HTTP server starts
 /// when an interface has an address).
 pub fn start(board: &BoardProfile) -> Option<App> {
-    let port = match ezsp::BackendPort::take() {
-        Ok(p) => p,
+    // The backend first, while the UART is free (the probes use it).
+    let detection = ncp::boot_detect(board);
+    let claim = match uart::claim(uart::User::Backend) {
+        Ok(c) => c,
         Err(u) => {
             error!("hub not started: the MG24 UART is in use ({u:?})");
             return None;
@@ -116,18 +128,41 @@ pub fn start(board: &BoardProfile) -> Option<App> {
             extra_keys: Vec::new(),
         });
     }
-    let link = LINK.get_or_init(Arc::default).clone();
-    let opts = EzspOptions { baud: board.uart.line.baud, flow_control: board.uart.line.flow, link: Some(link), ..Default::default() };
-    let backend = Backend::ezsp(port, SystemClock::default(), opts, store);
+    let backend = match detection.backend {
+        BackendKind::Zrhp => {
+            // The UART stays the backend's for the whole boot.
+            std::mem::forget(claim);
+            let mut hc = HubConfig::default();
+            hc.driver.host_name = format!("zigbee-rs-hub {}", crate::esp::app_version());
+            hc.driver.lines = zrhp::LINES.to_vec();
+            let rng: Rng = Arc::new(crate::entropy::fill);
+            let hub = cpu::named(c"zrhp", || {
+                Hub::start(hc, zrhp::Rx(zrhp::Gate::Backend), zrhp::Tx(zrhp::Gate::Backend), Some(Box::new(zrhp::Mg24Lines)), store, rng)
+            });
+            let _ = ZRHP.set(hub.clone());
+            Backend::zrhp(hub)
+        }
+        _ => {
+            let port = ezsp::BackendPort::from_claim(claim);
+            let link = LINK.get_or_init(Arc::default).clone();
+            let opts = EzspOptions { baud: board.uart.line.baud, flow_control: board.uart.line.flow, link: Some(link), ..Default::default() };
+            Backend::ezsp(port, SystemClock::default(), opts, store)
+        }
+    };
     let app = cpu::named(c"hub-app", || App::start_backend(backend, cfg, catalog));
     app.add_hook(Box::new(files::StorageHook));
     app.add_hook(Box::new(update::FirmwareHook));
+    app.add_hook(Box::new(ncp::NcpHook));
     let _ = MQTT.set(zrh_espapp::mqtt::start(&app, r, Arc::new(MqttSettings)));
     if let Some(sid) = app.connect_trusted(Box::new(LocalSink)) {
         let _ = LOCAL.set(sid);
     }
     let _ = APP.set(app.clone());
-    info!("hub: application started on the EZSP backend ({} Bd)", board.uart.line.baud);
+    match detection.backend {
+        BackendKind::Zrhp => info!("hub: application started on the ZRHP backend (zigbee-rs NCP)"),
+        _ => info!("hub: application started on the EZSP backend ({} Bd)", board.uart.line.baud),
+    }
+    ncp::after_start();
     Some(app)
 }
 
@@ -187,10 +222,11 @@ pub fn status_text() -> String {
         return "hub: not running (bring-up boot, or no PSRAM)\r\n".into();
     };
     let a = app.status();
-    format!(
-        "hub: EZSP session {}, Zigbee network {}, permit join {} s\r\n\
+    let text = format!(
+        "hub: {} session {}, Zigbee network {}, permit join {} s\r\n\
          app: {} devices ({} restored, {} imported), {} API sessions, registry writes {} errors {}, APS ok {} busy {} failed {} delivered {} not delivered {} unconfirmed {}\r\n\
          store: {}\r\n",
+        ncp::running().map_or("-", BackendKind::as_str),
         if a.session_up { "up" } else { "down" },
         if a.network_up { "up" } else { "not up" },
         a.permit_join_s,
@@ -207,7 +243,24 @@ pub fn status_text() -> String {
         a.aps.not_delivered,
         a.aps.unconfirmed,
         files::ram_only_reason().map_or("files region".into(), |why| format!("!!! RAM only, lost at every restart: {why}")),
-    ) + &link_text()
+    );
+    ncp::status_text() + &text + &link_text() + &zrhp_text()
+}
+
+/// The ZRHP host core: session, NCP firmware, last error.
+fn zrhp_text() -> String {
+    let Some(h) = ZRHP.get() else { return String::new() };
+    let st = h.status();
+    let ncp = st.ncp.as_ref().map_or("-".into(), |s| {
+        format!("{} (build {})", s.negotiated.fw, s.negotiated.build_id.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    });
+    format!(
+        "zrhp: session {:?}, NCP {ncp}, {} resumes, {} NCP restarts{}\r\n",
+        st.session,
+        st.resumes,
+        st.ncp_restarts,
+        st.last_error.map_or(String::new(), |e| format!(", last error: {e}"))
+    )
 }
 
 /// The EZSP link: sessions, the last start's phases, counters, and the

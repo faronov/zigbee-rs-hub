@@ -11,10 +11,10 @@ use log::info;
 use serde_json::{Value as J, json};
 use zrh_espapp::logs;
 
-use crate::{board, files, net, settings, update};
+use crate::{board, files, ncp, net, settings, update};
 
 /// Cargo features of the image's hub (`hub/system` `build`).
-pub const FEATURES: &str = "ezsp,advanced,ota-store,mqtt";
+pub const FEATURES: &str = "ezsp,zrhp,advanced,ota-store,mqtt";
 
 /// The gateway platform.
 pub struct Gateway;
@@ -51,6 +51,7 @@ impl hub_app::Platform for Gateway {
             },
             "storage": files::status_json(),
             "firmware": update::status(),
+            "ncp_update": ncp::status_json(),
         })
     }
     fn heap(&self) -> Option<(usize, usize)> {

@@ -180,7 +180,8 @@ pub mod dongle_files {
     /// Zigbee device OTA images (the store of docs/ota.md); larger images
     /// are streamed from a client.
     pub const OTA_STORE: Area = Area { offset: 0x1E_2000, size: 0x10_0000 };
-    /// MG24 firmware image, reserved for the Gecko bootloader updater.
+    /// MG24 firmware image (a GBL) the hub flashes through the Gecko
+    /// bootloader (`firmware/gateway` `ncp`, `hub_core::gecko`).
     pub const RADIO: Area = Area { offset: 0x2E_2000, size: 0xA_0000 };
     /// SONOFF's LittleFS blocks in use at the claim (an index sector and up
     /// to 29 blocks), written back by "return to stock". The claim requires

@@ -13,13 +13,14 @@ use hub_core::profile::{BoardProfile, Console};
 
 use zrh_espapp::{cpanic, cpu};
 
-use crate::{board, esp, ezsp, files, gecko, hub, led, lines, net, settings, slots, uart};
+use crate::{board, esp, ezsp, files, gecko, hub, led, lines, ncp, net, settings, slots, uart};
 
 const HELP: &str = "\
 zigbee-rs-hub gateway console:\r
   info                 firmware, chip, memory, partitions, ota_0, files, straps,\r
                        last panics, hub status\r
-  hub                  hub status: EZSP session, Zigbee network, devices, store\r
+  hub                  hub status: NCP backend and session, Zigbee network,\r
+                       devices, store\r
   permit [s]           open joining for s seconds (default 180, 0 closes)\r
   token                the API token (WebSocket API, web UI, Home Assistant)\r
   files                what SONOFF's files partition holds (claim, copy)\r
@@ -49,6 +50,19 @@ zigbee-rs-hub gateway console:\r
                        values (NCP RAM only), read every value, reset the\r
                        MG24 (bring-up boot)\r
   mg24 baud <rate>     MG24 UART rate until the next boot (bring-up boot)\r
+  ncp                  the NCP backend (setting, what answered), the stored\r
+                       MG24 image, the last NCP update\r
+  ncp backend <auto|ezsp|zrhp> the backend from the next boot (auto: ask\r
+                       the MG24)\r
+  ncp flash confirm [foreign] [force] [norestore] flash the stored MG24\r
+                       image through the Gecko bootloader: the network is\r
+                       backed up and kept first (force: without), the hub\r
+                       restarts on the new firmware and restores it\r
+                       (norestore: not; a maintenance image never);\r
+                       foreign: any image but a ZRHP NCP application\r
+                       (SONOFF's EmberZNet, an NV clear)\r
+  ncp restore confirm  restore the network kept before the last NCP update\r
+  ncp reset confirm    reset the MG24 into its application, restart the hub\r
   stock                SONOFF's application in ota_0, and how to return to it\r
   stock confirm        give SONOFF's files back (if claimed), select ota_0 and\r
                        restart into SONOFF's firmware\r
@@ -210,6 +224,29 @@ fn command(words: &[&str]) -> String {
                 Err(u) => format!("MG24 UART in use ({u:?})\r\n"),
             },
             _ => "usage: mg24 baud <9600..3000000>\r\n".into(),
+        },
+        ["ncp"] => ncp::status_text(),
+        ["ncp", "backend", b] => match hub_app::backend::select::Setting::parse(b) {
+            Some(s) => stored(ncp::set_backend(s), &format!("backend {b} from the next boot (`restart`)")),
+            None => "usage: ncp backend <auto|ezsp|zrhp>\r\n".into(),
+        },
+        ["ncp" | "mg24", "flash", opts @ ..] => {
+            if !opts.contains(&"confirm") {
+                return "`ncp flash confirm [foreign] [force] [norestore]` replaces the MG24's firmware with the stored image (`ncp` shows it)\r\n".into();
+            }
+            let o = ncp::StartOpts { foreign: opts.contains(&"foreign"), force: opts.contains(&"force"), restore: !opts.contains(&"norestore") };
+            match ncp::start(o) {
+                Ok(_) => "flashing: `ncp` shows the progress; the hub restarts when it is done\r\n".into(),
+                Err(e) => format!("refused ({}): {}\r\n", e.code, e.message),
+            }
+        }
+        ["ncp", "restore", "confirm"] => match ncp::restore_request() {
+            Ok(()) => "restoring the kept network (`ncp` shows the result)\r\n".into(),
+            Err(e) => format!("refused ({}): {}\r\n", e.code, e.message),
+        },
+        ["ncp", "reset", "confirm"] => match ncp::reset_request() {
+            Ok(()) => "MG24 reset; the hub restarts\r\n".into(),
+            Err(e) => format!("refused ({}): {}\r\n", e.code, e.message),
         },
         ["stock"] => slots::stock(false),
         ["stock", "confirm"] => slots::stock(true),

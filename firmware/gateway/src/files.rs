@@ -36,8 +36,8 @@
 //! copy of SONOFF's original files (`hub_store::files`, `recover`).
 //!
 //! Once claimed: the host store journal and the catalog in the `hubdata`
-//! area, the Zigbee device OTA image store in `ota_store`; `radio` is
-//! reserved (MG24 updates, later). Every window handed to the hub writes
+//! area, the Zigbee device OTA image store in `ota_store`, the MG24
+//! firmware image of the NCP updater in `radio` ([`ncp`](crate::ncp)). Every window handed to the hub writes
 //! through one [`WriteGate`]: [`close_gate`] stops them all before
 //! `stock confirm` gives SONOFF's blocks back ([`restore`]).
 
@@ -226,6 +226,15 @@ pub fn catalog() -> Option<zrh_espapp::catalog::HubData> {
 /// The Zigbee device OTA image store, behind the gate.
 pub fn ota_store() -> Option<Gated<Region>> {
     Region::find(LABEL, layout::OTA_STORE.offset, layout::OTA_STORE.size).map(|r| Gated::new(r, GATE.clone()))
+}
+
+/// The MG24 image store (`radio`, the NCP updater's), behind the gate.
+/// Only while the hub uses the region: unclaimed, it is SONOFF's.
+pub fn radio() -> Option<Gated<Region>> {
+    if !in_use() {
+        return None;
+    }
+    Region::find(LABEL, layout::RADIO.offset, layout::RADIO.size).map(|r| Gated::new(r, GATE.clone()))
 }
 
 fn content_name(c: Content) -> &'static str {
