@@ -45,9 +45,9 @@ install instructions and the list of merged pull requests. A pre-release
   on the Dongle Max console) sets the level, kept across restarts;
   `network/diagnostics` shows it with its counters, and whether the NCP
   keeps an EmberZNet backup's hashed link key root (`ezsp_hashed_tclk`).
-- zigbee-rs crates at `7ef34d0c` (zigbee-rs PR #22: restored EmberZNet
-  devices are admitted by the zigbee-rs NCP's Trust Center; late LOG
-  credit is delivered at once).
+- zigbee-rs crates at master `0607d31` (zigbee-rs PR #22: restored
+  EmberZNet devices are admitted by the zigbee-rs NCP's Trust Center;
+  late LOG credit is delivered at once).
 
 ### Fixes
 
