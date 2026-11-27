@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "zigbee-rs-hub gateway firmware library for boards described by a hub-core board profile (SONOFF Dongle-M): the hub application on the EZSP backend over the NCP UART, data on SONOFF's files partition after a claim, Ethernet/Wi-Fi, web UI and WebSocket API, MQTT, Zigbee device OTA, self-update, LED, button, console"
+description = "zigbee-rs-hub gateway firmware library for boards described by a hub-core board profile (SONOFF Dongle-M): the hub application on the EZSP or ZRHP backend over the NCP UART, the MG24 firmware replaced through its Gecko bootloader, data on SONOFF's files partition after a claim, Ethernet/Wi-Fi, web UI and WebSocket API, MQTT, Zigbee device OTA, self-update, LED, button, console"
 publish = false
 
 [lib]
@@ -21,10 +21,14 @@ embedded-svc = "0.29"
 hub-core = { workspace = true }
 hub-store = { workspace = true }
 hub-ezsp = { workspace = true }
+# The ZRHP host core, for the zigbee-rs NCP on the MG24.
+hub-ncp = { workspace = true }
+hub-coord = { workspace = true }
 hub-devices = { workspace = true }
-# The application on the EZSP backend, with the advanced console and the
-# Zigbee OTA server with its image store (in the files region).
-hub-app = { workspace = true, features = ["ezsp", "advanced", "ota-store"] }
+# The application on the EZSP or the ZRHP backend (the boot picks one),
+# with the advanced console and the Zigbee OTA server with its image store
+# (in the files region).
+hub-app = { workspace = true, features = ["ezsp", "zrhp", "advanced", "ota-store"] }
 hub-web = { workspace = true, features = ["advanced", "ota-store", "gateway"] }
 hub-mqtt = { workspace = true }
 zrh-espapp = { path = "../espapp", features = ["app", "mqtt"] }

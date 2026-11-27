@@ -6,6 +6,9 @@ one lab unit** (results below; the rest of the HIL checklist at the end). It run
 application on SONOFF's stock EmberZNet NCP through
 the EZSP backend (`docs/ezsp-backend.md`), with its data on SONOFF's
 `files` partition once claimed, on SONOFF's unchanged partition table.
+The image also carries the ZRHP backend and can replace the MG24's
+firmware with the zigbee-rs NCP and back through the Gecko bootloader
+(host-tested, not yet on hardware: "Replacing the MG24 firmware").
 The board bring-up image (0.1.0) ran on one unit. Nothing here is a Zigbee
 or interoperability claim.
 
@@ -67,7 +70,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 
 | Feature | In the image |
 |---|---|
-| Hub application: devices, catalog, groups, bindings, reporting, automations | yes: `hub-app` on `Backend::ezsp` (features `ezsp`, `advanced`, `ota-store`) |
+| Hub application: devices, catalog, groups, bindings, reporting, automations | yes: `hub-app` on `Backend::ezsp` or `Backend::zrhp` (features `ezsp`, `zrhp`, `advanced`, `ota-store`) |
 | Web UI with the advanced console, WebSocket API | yes: the page with the gateway cards (`hub-web` feature `gateway`, 31,117 B of the 36 KiB budget; with its five tab modules 44,932 B of the 48 KiB total); the ZCL console with developer mode (Settings › Hub); a developer edition (devtools, feature `dev`, CI-built) has it always |
 | MQTT with Home Assistant discovery | yes (esp-mqtt, plain TCP; off until enabled, settings in NVS `zrh/mqtt`) |
 | Zigbee device OTA | yes: the 1 MiB image store in the claimed `files` region (`ota_store`), larger images streamed from a client; streamed only until the claim |
@@ -75,7 +78,8 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 | Ethernet (also PoE-powered) and Wi-Fi | yes: Ethernet first, the Wi-Fi station after 10 s without an Ethernet address |
 | Network backup/restore (Open Coordinator Backup) | yes: `network/backup` and `network/restore` on the EZSP backend, in the format zigpy/ZHA and Zigbee2MQTT use (`docs/ezsp-backend.md`, "Backup and restore"); host-tested against the simulated NCP (EZSP 13–18); an export and a restore onto the same network ran on the lab unit (0.3.0, the joined sensor kept working) |
 | Green Power through EZSP | later |
-| MG24 firmware update through the Gecko bootloader | later; the `radio` area is reserved, no code |
+| MG24 firmware update through the Gecko bootloader | yes, host-tested, not yet on hardware: a GBL uploaded into the `radio` area, validated, flashed over XMODEM after a kept network backup; SONOFF's EmberZNet ⇄ the zigbee-rs ZRHP NCP ("Replacing the MG24 firmware") |
+| Coordinator backend | EZSP (SONOFF's EmberZNet NCP) or ZRHP (the zigbee-rs NCP): both in the image, the boot picks one (`ncp_backend`: `auto` asks the MG24) |
 | Installation through SONOFF's web console | yes: **SONOFF's partition table and bootloader never change** |
 | TCP bridge to the MG24 UART (port 6638, as the stock firmware) | **no** |
 | Bluetooth / BLE | **no** (`CONFIG_BT_ENABLED=n`, its RAM stays with the heap) |
@@ -489,19 +493,19 @@ stock and SONOFF's original files read back).
 PSRAM heap, panic recorders, HTTP server, WebSocket API, log ring, SNTP,
 catalog flash, MQTT transport). Boot: NCP lines released (GPIO12 low),
 heap, panic recorders, console, settings, boot report, NCP UART and an MG24
-reset, `files` (a committed claim is finished), the hub, network, LED and
-button, console.
+reset, the backend chosen (`ncp_backend`; `auto` asks the MG24), `files` (a
+committed claim is finished), the hub, network, LED and button, console.
 
 | Part | What |
 |---|---|
-| Coordinator | `Backend::ezsp` on UART1 (TX GPIO17, RX GPIO13, 115 200 Bd, no flow control; the backend owns the UART for the whole boot), `EzspOptions` defaults (worker 16 KiB stack) |
+| Coordinator | the boot's choice ("Which backend runs"): `Backend::ezsp` on UART1 (TX GPIO17, RX GPIO13, 115 200 Bd, no flow control), `EzspOptions` defaults (worker 16 KiB stack), or `Backend::zrhp` on the ZRHP host core (460 800 Bd, then 115 200, no flow control; the MG24's reset line as its `NcpControl`). The backend owns the UART for the whole boot; the NCP updater borrows it (parked) |
 | Store | the host store journal in `files` `hubdata` once claimed, RAM before; `NcpNvRecords` decide ownership (`docs/ezsp-backend.md`) |
 | Catalog | the `hubdata` area mapped (`zrh_espapp::catalog::HubData::window`) once claimed |
 | Zigbee OTA | the server with streams (4 at once) and, once claimed, the image store in `ota_store` |
 | HTTP | esp_http_server on every interface from the first address: the page, the web tools, `/api` (7 sockets, LRU purge) |
 | MQTT | `zrh_espapp::mqtt` (esp-mqtt), settings in NVS `zrh/mqtt` |
 | Platform | `hub/system` with `board`, `ethernet`, `wifi`, `storage`, `firmware`; Wi-Fi set from the API at once; token rotation; reboot; logs; time; no boot modes |
-| Requests | `storage/*` (feature `storage`), `firmware/*` (feature `firmware`) besides the hub's own |
+| Requests | `storage/*` (feature `storage`), `firmware/*` (feature `firmware`), `ncp/*` (feature `ncp_update`) besides the hub's own |
 
 **Button**: a short press (under 3 s) opens joining for 180 s (as the web
 UI's Permit join; the LED blinks yellow while it is open). A press of 3 s
@@ -522,6 +526,176 @@ for that boot.
 | blue, blinking | no network (Ethernet and Wi-Fi without an address) |
 | cyan | network up, no Zigbee network (none formed yet: Settings › New network, or `network/form`) |
 | green | network and Zigbee network up |
+
+## Replacing the MG24 firmware (zigbee-rs ZRHP)
+
+**Status: implemented and host-tested, not yet run on hardware** (HIL
+items 11–14 below). The hub can replace the MG24's application through its
+resident Gecko bootloader, from the ESP32, without USB: SONOFF's EmberZNet
+NCP by the zigbee-rs ZRHP NCP, and back. The bootloader itself is never
+written, so a failed or interrupted update can always be repeated. The
+zigbee-rs side is not ready for the Dongle-M yet: its MG24 radio has no
+38.4 MHz crystal tables enabled (zigbee-rs `docs/book/src/platform-guides/
+efr32.md`: "the radio returns `Unsupported` on the Dongle-M"); until it
+has, flashing ZRHP onto a Dongle-M in service is pointless.
+
+### Before: what the MG24 has
+
+In a bring-up boot (`restart bringup`), `mg24 ezsp info` prints, besides
+the version and the network state, the two manufacturing tokens that matter
+for a replacement:
+
+- **EUI-64 and the custom EUI-64 token** (`EZSP_MFG_CUSTOM_EUI_64`): unset
+  means the EUI-64 in use is the chip's own (DEVINFO), which the zigbee-rs
+  NCP also uses (`efr32s2-hal` `devinfo::eui64`, the same byte order). The
+  devices know the Trust Center by this IEEE (APS security, the TC address),
+  so the network moves to the new firmware only under the same IEEE (below).
+  A set token means the stock firmware uses another IEEE than the chip's:
+  the zigbee-rs MG24 NCP cannot take it (no `IEEE_REWRITABLE` yet), and the
+  hub then does not restore the network onto it by itself.
+- **`EZSP_MFG_CTUNE`**: the crystal tuning SONOFF measured (unset: DEVINFO
+  or the firmware's default, 100 on this board). The token lives in the
+  user data page, outside every GBL, so it survives the update; the new
+  firmware must read it to keep the radio's frequency accurate.
+
+`mg24 bootloader` shows the bootloader (lab unit: Gecko Bootloader
+v2.04.02; on entry it prints its banner and menu by itself, followed by a
+NUL, and again after a newline).
+
+### The image
+
+A GBL file (GBL3) of the zigbee-rs NCP for the Dongle-M: zigbee-rs
+`products/efr32mg24` with the `sonoff-dongle-m` and `ncp` features,
+packaged by `tools/efr32-gbl app` (application base `0x0800_6000`, the ZRHP
+metadata record with the build ID and the firmware version). The hub
+uploads it into the `radio` area of the claimed `files` region (640 KiB;
+the NCP image is ~441 KiB) and checks it while it arrives and again before
+the flash (`hub_core::gecko::gbl`):
+
+| Rule | Why |
+|---|---|
+| a GBL3 header first, the end tag last with the CRC-32 of the file, at most 127 bytes of `0xFF` after it | a complete, undamaged file |
+| no bootloader (`0xF50909F5`) or Secure Engine (`0x5EA617EB`) upgrade | the bootloader is the way back: never replaced |
+| no encryption (header type bit 0, `0xFB0505FB`/`0xFA0606FA`/`0xF90707F9`) | the bootloader has no key for it |
+| no LZ4/LZMA program records | their size is unknown before decompression; the stock bootloader may lack the decompressor |
+| program records only from `0x0800_6000` (the application base) to the end of the 1536 KiB flash | nothing below the application base: the bootloader stays |
+| an image with the ZRHP record only below `0x0815_8000` | the ZRHP NCP's NV journals above it survive its updates |
+| an application tag, if any, of a Zigbee application (or type 0) | not a Thread, Bluetooth or bootloader image |
+| signature tags accepted, reported (`signed`) | a bootloader without the signing key refuses the image: the stock one enforces no signature (its own and the community GBLs carry none) |
+| an image without the ZRHP record needs `foreign` | EmberZNet or another firmware: the hub then runs on EZSP |
+
+### Flashing
+
+Settings › Zigbee radio firmware (MG24): choose the `.gbl`, Upload, then
+Flash…; or the API (`ncp/update/*`), or the console (`ncp flash confirm`,
+the image uploaded through the API). What happens, on a thread of its own:
+
+1. The stored image is read back and checked again (and its SHA-256).
+2. **The network is backed up with its keys and kept on the hub**
+   (`network/backup` with `keep`: `bkp/replaced/<ext_pan_id>`, hub-scoped,
+   readable whatever backend runs later): a new NCP firmware starts without
+   a network (the zigbee-rs NCP erases EmberZNet's NVM3 at its first boot),
+   and this backup carries it over. A failed backup changes nothing.
+   Without a backup (an NCP that does not answer, a bring-up boot) the
+   flash needs `force`; take one yourself too (Settings › Backup).
+3. The state `flashing` is stored (NVS `zrh/ncp_update`). The UART is
+   taken from the running backend (parked: it sends and receives nothing,
+   as with a silent NCP), the MG24 is reset into its bootloader (GPIO12
+   high across a GPIO15 pulse), the menu it prints taken, `1`, the image
+   over XMODEM-CRC (128-byte blocks, NAKs and lost answers retried, 10
+   sends per block), and the bootloader's verdict (`Serial upload
+   complete`, or `aborted` with its error code). Up to 3 attempts, each
+   from a new bootloader entry.
+4. `2` (run); the new firmware is asked: a ZRHP NCP must report the
+   image's build ID and version (`SYS_NEGOTIATE`), an EmberZNet NCP its EZSP
+   version. The NCP seen is remembered (`zrh/ncp_seen`) and the hub
+   restarts on it (the registry saved first).
+5. On the new backend, once its NCP session is up, the kept network goes
+   onto the NCP (`network/restore` with `confirm`) when the NCP has no
+   network and reports the backup's coordinator IEEE (or none):
+   `hub_app::backend::select::after_switch`. The records (devices, names,
+   groups, automations) stay in the hub's journal: they were the EZSP
+   backend's (foreign to ZRHP) and become the restored network's. The
+   network key, PAN ID, channel and frame counters (the backup's plus 10 000)
+   are the backup's, so **the devices keep working without pairing again**.
+   Otherwise the reason is shown (Settings, `ncp/update/status`
+   `update.restore_message`) and `ncp/update/restore` (the "Restore
+   network" button) tries again; any kept backup can also be restored by
+   hand (`network/backup/replaced`, `network/restore`).
+
+**Failures.** A bootloader whose menu never comes changes nothing: the
+MG24 is reset into its application and the backend gets the UART back. A
+failed upload leaves the MG24 in its bootloader (which survives every
+upload) and the backend parked: flash again, or another image, or
+`ncp/update/reset` (MG24 reset, hub restart). **A power cut or reset
+during the flash** leaves `flashing` stored: the next boot calls it
+`interrupted`, asks the bootloader first and, when the MG24 waits there,
+starts the hub with the UART parked (it runs, shows the state, and never
+sends anything to the bootloader's menu: no boot loop) and offers to flash
+the stored image again; the kept network is restored afterwards.
+
+### Which backend runs
+
+`ncp_backend` (NVS, `ncp/backend/set`, console `ncp backend`): `auto`
+(default), `ezsp` or `zrhp`, from the next boot. A fixed setting starts
+that backend without asking (but for the bootloader after an update that
+did not finish). `auto` asks the MG24 (`hub_app::backend::select`): the
+backend whose NCP answered last first (one probe at a normal boot; EZSP
+first without a history: the stock firmware), then the other, then the
+bootloader's menu. Nothing answering starts the last backend (it keeps
+trying). A probe of the wrong protocol changes nothing on the NCP: the EZSP
+probe is an ASH reset and the version command at 115 200 Bd, which a ZRHP
+NCP drops (no COBS delimiter, bad CRC; at its 460 800 Bd they are not even
+characters); the ZRHP probe is a link handshake and `SYS_NEGOTIATE`/
+`SYS_GET_INFO` at 460 800 then 115 200 Bd, which EmberZNet drops as ASH
+frames with bad CRCs (and the EZSP probe's reset restarts its link); the
+bootloader probe is a newline. `ncp/update/status` `backend` and `hub` on
+the console show the setting, what answered, every probe and why this
+backend.
+
+### The way back to SONOFF's firmware
+
+The zigbee-rs NCP's NV journals (`0x0815_8000..0x0818_0000`) overlap
+EmberZNet's NVM3 (`0x0817_6000..0x0817_E000`, 32 KiB), which does not
+expect them there. Two images, both flashed with `foreign`:
+
+1. **Nerivec's NVM3 clear** for this chip, flashed without the restore
+   (`ncp flash confirm foreign norestore`, or `"restore": false`): the
+   network is backed up and kept, the NVM3 area erased.
+   `EFR32MG24A420F1536IM48_nvm3_clear_134217728_1572864_8192_134242304_32768.gbl`
+   from [Nerivec/silabs-firmware-recovery](https://github.com/Nerivec/silabs-firmware-recovery)
+   `gbl-builds` (commit `f74fc9b1b0aa`), 32 844 B, SHA-256
+   `59a8130a2be7e7d967b627747492dd5db3dcf57df2d91d2db1e928ba223a0e9a`
+   (programs `0x0817_6000..0x0817_E000`). Its "app clear" sibling (1.5 MB)
+   does not fit the image store.
+2. **SONOFF's stock EmberZNet 7.4.5 NCP**
+   (`zigbee_ncp_uart_hw_donglem_v7.4.5.gbl`, 251 808 B, SHA-256
+   `44b81c1ecf81032b98d625388ae44c10d7c8a6abd1dcea10b2e2d934d7a311fa`,
+   programs `0x0800_6000..0x0804_3754`), from
+   [SONOFF's forum](https://forum.ewelink.cc/uploads/short-url/xpoAcAdJLxbujbp7uSVCT2TsiE4.gbl)
+   or the [iHost flasher add-on](https://raw.githubusercontent.com/iHost-Open-Source-Project/hassio-ihost-sonoff-dongle-flasher/136ab2fe736a1e5e9c880c2334d2c95adf1e2f25/firmware-build/donglem_mg24_zigbee_stable_1.0.0_115200_7.4.5.gbl):
+   the hub restarts on EZSP and restores the kept network onto EmberZNet
+   (same chip, same EUI-64).
+
+The hub names both images by their SHA-256 (`image.known`); the files are
+not part of this repository. A network kept by an update and not restored
+yet stays the one to restore through the next update (the second image of
+the way back, a retry after a failed upload). Back to SONOFF's ESP32
+firmware as well: `stock confirm`, after the MG24 runs EmberZNet again.
+
+### API (`ncp/*`, maintenance feature `ncp_update`)
+
+| Request | Fields | Result |
+|---|---|---|
+| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`; also in `hub/system` `ncp_update` |
+| `ncp/update/begin` | `size`, `sha256` (hex, optional) | `chunk` (4096), `store`; refused while the hub's data are in RAM (the area is SONOFF's until the claim) |
+| `ncp/update/chunk` | `offset`, `data` (base64, at most 4096 bytes) | `written`; an invalid image is refused (and the upload aborted) as soon as its bytes show it |
+| `ncp/update/end` | | the image (as `image` above) and a `note` |
+| `ncp/update/abort` | | |
+| `ncp/update/start` | `confirm` (true), `foreign` (an image without the ZRHP record), `force` (no backup), `restore` (default true) | `state: started`; follow `ncp/update/status` |
+| `ncp/update/restore` | `confirm` (true) | `state: restoring`: the kept network onto the NCP now (as after a switch) |
+| `ncp/update/reset` | `confirm` (true) | the MG24 reset into its application, the hub restarts |
+| `ncp/backend/set` | `backend`: `auto`, `ezsp`, `zrhp` | from the next boot |
 
 ## Image and sdkconfig
 
@@ -667,7 +841,8 @@ comes first: SONOFF's firmware on a claimed region would format it.
 | Command | What it does |
 |---|---|
 | `info` | firmware, chip, memory mode, partitions and layout verdict, running/boot slot, what `ota_0` holds, what `files` holds, straps, last panics, failed allocations, hub status |
-| `hub` | EZSP session, Zigbee network, permit join, devices, sessions, APS counters, where the data are; the EZSP link: sessions, failed starts, the last start phase by phase, ASH/EZSP/UART counters (retransmissions, NAKs, CRC errors, ACK timeouts, bad frames, callbacks with trailing bytes, overruns), the configuration values the NCP's memory did not hold |
+| `ncp`, `ncp backend <auto\|ezsp\|zrhp>`, `ncp flash confirm [foreign] [force] [norestore]`, `ncp restore confirm`, `ncp reset confirm` | the NCP backend (setting, what answered), the stored MG24 image, the last update; the backend from the next boot; flash the stored image (also `mg24 flash …`; in a bring-up boot only with `force`: nothing backs the network up); restore the kept network; MG24 reset and hub restart ("Replacing the MG24 firmware") |
+| `hub` | the NCP backend, its session, Zigbee network, permit join, devices, sessions, APS counters, where the data are; the EZSP link: sessions, failed starts, the last start phase by phase, ASH/EZSP/UART counters (retransmissions, NAKs, CRC errors, ACK timeouts, bad frames, callbacks with trailing bytes, overruns), the configuration values the NCP's memory did not hold |
 | `permit [s]` | open joining (default 180 s, 0 closes; the result is logged) |
 | `token` | the API token (generated at the first boot with the hub; `hub/token/rotate` changes it) |
 | `files` | what `files` holds: claimed, interrupted, the copy; where the hub's data are; a running claim |
@@ -678,7 +853,7 @@ comes first: SONOFF's firmware on a claimed region would format it.
 | `net`, `wifi set <ssid> [pw]`, `wifi clear` | Ethernet/Wi-Fi state; station credentials, used at once (the station runs when Ethernet has had no address for 10 s); `clear` from the next boot |
 | `led <0-100>` | LED brightness |
 | `mg24` | line levels, UART rate and errors |
-| `mg24 reset`, `mg24 bootloader`, `mg24 ezsp info [init]`, `mg24 ezsp config [ID=v …]`, `mg24 baud <rate>` | the bring-up probes (MG24 reset; Gecko bootloader banner and menu, nothing uploaded; read-only EZSP probe, `init` resumes a stored network then resets the MG24; every configuration value of the NCP, after setting the given ones in its RAM only (IDs hex or decimal, e.g. `0x06=16`), then an MG24 reset; UART rate): only in a bring-up boot, the hub's backend owns the UART otherwise |
+| `mg24 reset`, `mg24 bootloader`, `mg24 ezsp info [init]`, `mg24 ezsp config [ID=v …]`, `mg24 baud <rate>` | the bring-up probes (MG24 reset; Gecko bootloader banner and menu, nothing uploaded; read-only EZSP probe with the EUI-64, the custom EUI-64 and CTUNE tokens, `init` resumes a stored network then resets the MG24; every configuration value of the NCP, after setting the given ones in its RAM only (IDs hex or decimal, e.g. `0x06=16`), then an MG24 reset; UART rate): only in a bring-up boot, the hub's backend owns the UART otherwise |
 | `stock` | whether `ota_0` still holds SONOFF's application (project `Dongle-M`), what `stock confirm` does with `files`, or why it cannot |
 | `stock confirm` | SONOFF's `files` data back (if claimed), `ota_0` selected in `otadata` (ESP-IDF verifies the image first), restart into SONOFF's firmware |
 | `cpu [ms]`, `atomics` | CPU use per task; lost atomic updates between the cores (Rust atomics must lose none) |
@@ -697,12 +872,13 @@ stored network (the hub's backend calls it at every session start).
   token interface, a one-time custom EUI-64) and a ZHA import are
   host-tested only (`docs/ezsp-backend.md`, `docs/migration.md`).
 - **Green Power through EZSP**: GP frames are ignored.
-- **MG24 firmware updates** through the Gecko bootloader: the `donglem`
-  branch's updater (radio banks in its own `hubdata`, ZRHP-based
-  verification) does not port to an EZSP NCP, and the updater
-  requirements of `coordinator-profiles.md` (backup export first,
-  allow-list manifest, persisted state) are not met. Not compiled; the
-  `radio` area is reserved for it.
+- **MG24 firmware updates** ("Replacing the MG24 firmware"): not yet run
+  on hardware; one image at a time (640 KiB), so the way back takes two
+  flashes; images are checked by their structure and write ranges, and
+  named when known by their SHA-256, not checked against a per-version
+  allow-list manifest (`coordinator-profiles.md`); the zigbee-rs MG24 NCP
+  has no 38.4 MHz radio yet (zigbee-rs) and cannot take another IEEE than
+  its chip's (`IEEE_REWRITABLE`).
 - A SONOFF file system that the LittleFS walk cannot read is counted by
   its written blocks (refused above 29); more than 29 blocks in use is
   refused either way (RAM only, the reason in the banner).
@@ -756,3 +932,19 @@ verified").
     `recover`: the hub restarts on the claimed region, takes the MG24's
     network and imports its devices; later `stock confirm` brings back
     SONOFF's original files.
+
+11. `mg24 ezsp info` in a bring-up boot: the custom EUI-64 token (unset
+    expected: the EUI-64 is the chip's) and `MFG_CTUNE`; `mg24 bootloader`
+    shows the banner and the menu after the newline completely.
+12. NCP update round trip with SONOFF's stock GBL (EZSP → EZSP, `foreign`):
+    upload in the web UI, the backup kept, the flash (time, resent blocks),
+    the hub back on EZSP with the network restored or kept; then a power cut
+    in the middle of an upload: `interrupted`, the bootloader found at the
+    next boot, the hub up with the UART parked, the flash repeated.
+13. With a zigbee-rs MG24 NCP whose radio runs on the Dongle-M: EZSP → ZRHP
+    with a joined device: the build ID verified, the hub on ZRHP
+    (`ncp/update/status` `backend.running`), the network restored under the
+    same IEEE, the device controlled without pairing again; boot time of
+    `auto` with each NCP.
+14. The way back: the NVM3 clear (`norestore`), then SONOFF's stock GBL:
+    EZSP with the network restored; `stock confirm` afterwards.

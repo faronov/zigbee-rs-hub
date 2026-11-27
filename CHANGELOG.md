@@ -6,6 +6,41 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
+## Unreleased
+
+### New
+
+- **Dongle Max: the MG24's firmware can be replaced from the hub**
+  (experimental, not yet run on hardware). Settings › Zigbee radio
+  firmware (MG24) uploads a GBL file and flashes it through the MG24's
+  Gecko bootloader, from the ESP32, without USB: SONOFF's EmberZNet NCP by
+  the zigbee-rs ZRHP NCP, and back. The image is checked first (never one
+  that would write the bootloader, an encrypted or compressed one, or a
+  damaged one); the network is backed up with its keys and kept on the hub
+  before anything is written; after the flash the hub restarts on the new
+  firmware and puts the network back, under the same coordinator IEEE, so
+  the devices keep working without pairing again. A failed or interrupted
+  flash leaves the MG24 in its bootloader, which is never written: the hub
+  starts anyway, says so and flashes again. The way back to SONOFF's
+  firmware (two files, with their checksums) is in `docs/dongle-max.md`.
+  The zigbee-rs NCP for the Dongle-M is not ready yet (its radio).
+- **Dongle Max: the hub runs on either NCP firmware.** The image carries
+  both coordinator backends (EZSP and ZRHP); at boot it asks the MG24
+  which firmware it runs (setting `auto`, the default; `ezsp` or `zrhp` to
+  fix it). `hub` on the console and `ncp/update/status` show what answered.
+- **Dongle Max: `mg24 ezsp info` shows the custom EUI-64 and CTUNE
+  tokens** (bring-up boot): whether the coordinator IEEE is the chip's own,
+  and the crystal tuning, before the firmware is replaced.
+- `network/backup` takes `keep`: the backup is also kept on the hub as a
+  replaced network's (`network/backup/replaced`), whatever backend runs
+  later.
+
+### Fixes
+
+- **Dongle Max: `mg24 bootloader` shows the whole menu.** The bootloader
+  prints its menu by itself on entry; the wait for the menu after the
+  newline stopped at that first copy and cut the second one short.
+
 ## 0.4.1 (2026-11-27)
 
 A fix release for 0.4.0: an interview that ended partial finishes when the

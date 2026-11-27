@@ -12,7 +12,7 @@
 //! | Tag | Record | Here |
 //! |---|---|---|
 //! | `0x03A617EB` | header: `u32 version` (major `0x03`), `u32 type` (bit 0 AES-CCM encrypted, bit 8 ECDSA signed) | first; encrypted refused, signed noted |
-//! | `0xF40A0AF4` | application: `ApplicationData_t` (type, version, capabilities, product ID) | at most once; a Zigbee application |
+//! | `0xF40A0AF4` | application: `ApplicationData_t` (type, version, capabilities, product ID) | at most once; a Zigbee application (or type 0, none given) |
 //! | `0x76A617EB` | version dependency | accepted |
 //! | `0xF60808F6` | metadata | accepted; the ZRHP record parsed |
 //! | `0xFE0101FE`, `0xFD0303FD` | program, erase-and-program: `u32 address`, data | only inside the application area |
@@ -652,7 +652,9 @@ impl GblParser {
                     capabilities: word(8),
                     product_id,
                 };
-                if app.app_type & APP_TYPE_ZIGBEE == 0 {
+                // Type 0 (none given): recovery images such as Nerivec's
+                // NVM3 clear.
+                if app.app_type != 0 && app.app_type & APP_TYPE_ZIGBEE == 0 {
                     return Err(GblError::NotZigbee(app.app_type));
                 }
                 self.info.app = Some(app);

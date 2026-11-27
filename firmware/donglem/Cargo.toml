@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "zigbee-rs-hub for the SONOFF Dongle Max (Dongle-M: ESP32-D0WDR2-V3 + EFR32MG24 with SONOFF's EmberZNet NCP): the hub application on the EZSP backend, installed into ota_1 of SONOFF's partition table"
+description = "zigbee-rs-hub for the SONOFF Dongle Max (Dongle-M: ESP32-D0WDR2-V3 + EFR32MG24 with SONOFF's EmberZNet NCP or the zigbee-rs ZRHP NCP): the hub application on the EZSP or ZRHP backend, installed into ota_1 of SONOFF's partition table"
 publish = false
 
 [[bin]]

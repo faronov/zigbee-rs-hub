@@ -2,12 +2,18 @@
 //! low RX FIFO threshold and timeout so the ISR drains the FIFO early. No
 //! flow control (the Dongle-M has no RTS/CTS between the chips).
 //!
-//! One user at a time ([`claim`]): the hub's EZSP backend for the whole
-//! boot, or (in a bring-up boot without the hub) the console's probes.
+//! One user at a time ([`claim`]): the hub's backend for the whole boot,
+//! or (in a bring-up boot without the hub) the console's probes. The NCP
+//! updater ([`lease`]) borrows the UART from the backend by parking it
+//! ([`parked`]): the backend's ports then send nothing and receive nothing
+//! (its link sees a silent NCP, as when the MG24 resets) until the UART is
+//! given back ([`Lease::give_back`]) or the hub restarts. While the MG24
+//! sits in its bootloader the UART stays parked, so nothing of the
+//! backend's reaches the bootloader's menu.
 
 use std::io;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use esp_idf_svc::sys::{self, EspError, esp};
 use hub_core::profile::NcpUart;
@@ -31,8 +37,10 @@ pub static LINE_ERRORS: AtomicU32 = AtomicU32::new(0);
 pub enum User {
     /// A console command (probe, bootloader banner).
     Console,
-    /// The hub's EZSP backend.
+    /// The hub's backend (EZSP or ZRHP).
     Backend,
+    /// The NCP updater (in a boot without the hub).
+    Updater,
 }
 
 static OWNER: Mutex<Option<User>> = Mutex::new(None);
@@ -61,6 +69,76 @@ pub fn claim(user: User) -> Result<Claim, User> {
 /// Current user.
 pub fn owner() -> Option<User> {
     *OWNER.lock().unwrap()
+}
+
+/// The backend's ports are parked (the NCP updater has the UART).
+static PARKED: AtomicBool = AtomicBool::new(false);
+/// The rate the backend uses (restored when the UART is given back).
+static BACKEND_BAUD: AtomicU32 = AtomicU32::new(0);
+
+/// The backend's ports are parked.
+pub fn parked() -> bool {
+    PARKED.load(Ordering::Acquire)
+}
+
+/// The backend sets its line rate: now, or when the UART is given back.
+pub fn set_backend_baud(baud: u32) {
+    BACKEND_BAUD.store(baud, Ordering::Relaxed);
+    if !parked() {
+        set_baud(baud);
+    }
+}
+
+/// Parks the backend's ports from the start of the boot (the MG24 was
+/// found in its bootloader).
+pub fn park_from_boot() {
+    PARKED.store(true, Ordering::Release);
+}
+
+/// The NCP updater's use of the UART.
+pub enum Lease {
+    /// Borrowed from the backend (parked).
+    Parked,
+    /// Claimed (no backend in this boot).
+    Claimed(#[allow(dead_code)] Claim),
+}
+
+/// Takes the UART for the NCP updater: claimed when free, borrowed from
+/// the backend (parked) when the hub runs; the console's probes keep it.
+pub fn lease() -> Result<Lease, User> {
+    match claim(User::Updater) {
+        Ok(c) => Ok(Lease::Claimed(c)),
+        Err(User::Backend) => {
+            if !PARKED.swap(true, Ordering::AcqRel) {
+                if BACKEND_BAUD.load(Ordering::Relaxed) == 0 {
+                    BACKEND_BAUD.store(baud(), Ordering::Relaxed);
+                }
+                // Lets a write of the backend's in progress finish.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Some(p) = port() {
+                    unsafe { sys::uart_wait_tx_done(p, 100) };
+                }
+            }
+            Ok(Lease::Parked)
+        }
+        Err(u) => Err(u),
+    }
+}
+
+impl Lease {
+    /// Gives the UART back to the backend (at its rate). Dropping the
+    /// lease instead keeps a borrowed UART parked: the MG24 is in its
+    /// bootloader, nothing of the backend's may reach it.
+    pub fn give_back(self) {
+        if let Lease::Parked = self {
+            let b = BACKEND_BAUD.load(Ordering::Relaxed);
+            if b != 0 {
+                set_baud(b);
+            }
+            flush_input();
+            PARKED.store(false, Ordering::Release);
+        }
+    }
 }
 
 fn port() -> Option<sys::uart_port_t> {

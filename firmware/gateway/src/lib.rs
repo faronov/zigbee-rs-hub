@@ -1,6 +1,7 @@
 //! zigbee-rs-hub gateway firmware for host boards described by a
 //! [`BoardProfile`]: the SONOFF Dongle Max (Dongle-M: classic ESP32 +
-//! EFR32MG24 with SONOFF's EmberZNet NCP, Ethernet). The Thread BR board
+//! EFR32MG24 with SONOFF's EmberZNet NCP or, once the hub replaced it, the
+//! zigbee-rs ZRHP NCP; Ethernet). The Thread BR board
 //! keeps its own firmware (`firmware/hub`); what both need from ESP-IDF
 //! for the hub application is shared (`firmware/espapp`).
 //!
@@ -15,11 +16,14 @@
 //!    panic ([`esp`]);
 //! 3. the NCP UART at the profile's rate ([`uart`]) and an MG24 reset into
 //!    its application;
-//! 4. the hub ([`hub`]): the application on the EZSP backend over the NCP
-//!    UART, its data on SONOFF's `files` partition, claimed at the first
-//!    boot ([`files`]; RAM only if that is refused), the API token from an
-//!    entropy source ([`entropy`]), the `storage/*` and `firmware/*`
-//!    requests ([`update`]: self-update into the other app slot), MQTT;
+//! 4. the hub ([`hub`]): the backend chosen ([`ncp`]: the setting, or the
+//!    MG24 asked: EZSP, ZRHP, or its Gecko bootloader after an update that
+//!    did not finish), the application on it over the NCP UART, its data
+//!    on SONOFF's `files` partition, claimed at the first boot ([`files`];
+//!    RAM only if that is refused), the API token from an entropy source
+//!    ([`entropy`]), the `storage/*`, `firmware/*` ([`update`]: self-update
+//!    into the other app slot) and `ncp/*` requests ([`ncp`]: the MG24's
+//!    firmware replaced through its Gecko bootloader), MQTT;
 //! 5. network: Ethernet, Wi-Fi station as the fallback ([`net`]); the
 //!    HTTP server (web UI, WebSocket API) once an interface has an address;
 //! 6. LED and button ([`led`]: short press = permit join), then the
@@ -44,12 +48,14 @@ pub mod gecko;
 pub mod hub;
 pub mod led;
 pub mod lines;
+pub mod ncp;
 pub mod net;
 pub mod platform;
 pub mod settings;
 pub mod slots;
 pub mod uart;
 pub mod update;
+pub mod zrhp;
 
 use std::sync::OnceLock;
 use std::time::Duration;

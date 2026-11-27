@@ -240,6 +240,14 @@ fn application_and_program_rules() {
         parse(&gbl_with(0, &[app(1), app(1)]), POLICY),
         Err(GblError::DuplicateApplication)
     );
+    // Type 0 (none given), as Nerivec's NVM3 clear.
+    assert!(
+        parse(
+            &gbl_with(0, &[app(0), prog(TAG_PROG, 0x0817_6000, 16)]),
+            POLICY
+        )
+        .is_ok()
+    );
     assert_eq!(
         parse(&gbl_with(0, &[app(1)]), POLICY),
         Err(GblError::NoProgram)
@@ -730,4 +738,25 @@ fn a_source_failure_cancels() {
             code: Some(0x21)
         }
     );
+}
+
+/// Real images, kept out of the repository (SONOFF's stock GBL and
+/// Nerivec's NVM3 clear for the Dongle-M, `docs/dongle-max.md`), validated
+/// and uploaded to the simulated bootloader:
+/// `HUB_GBL_FILES=a.gbl,b.gbl cargo test -p hub-core -- --ignored real_images --nocapture`.
+#[test]
+#[ignore]
+fn real_images() {
+    let Ok(list) = std::env::var("HUB_GBL_FILES") else {
+        return;
+    };
+    for path in list.split(',') {
+        let g = std::fs::read(path).unwrap();
+        let info = parse(&g, POLICY).unwrap_or_else(|e| panic!("{path}: {e}"));
+        std::println!("{path}: {info:x?}");
+        let mut bl = SimBl::new(Faults::default());
+        let up = flash(&mut bl, &g).unwrap();
+        assert!(bl.verified, "{path}");
+        std::println!("{path}: {} blocks", up.xmodem.blocks);
+    }
 }
