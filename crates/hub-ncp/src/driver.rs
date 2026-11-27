@@ -57,10 +57,13 @@ static TEMPLATE: HostLink = HostLink::new(LinkConfig::embedded_host(), 1);
 
 /// A heap-allocated link. `Link::new` builds ~12 KB by value and needs
 /// 24–32 KiB of stack in unoptimised builds, so the default profile is
-/// copied from a static straight into the allocation instead.
+/// copied from a static straight into the allocation instead. Any other
+/// profile is built out of line ([`built_link`]): inlined here, its frame
+/// (16 240 B on the classic ESP32) was reserved by every caller, the
+/// driver thread's entry included, whichever branch ran.
 pub fn boxed_link(cfg: LinkConfig, cookie: u32) -> Box<HostLink> {
     if cfg != LinkConfig::embedded_host() {
-        return Box::new(HostLink::new(cfg, cookie));
+        return built_link(cfg, cookie);
     }
     let mut slot = Box::<HostLink>::new_uninit();
     // SAFETY: `Link` is plain data (no heap, no `Drop`: the crate is
@@ -71,6 +74,23 @@ pub fn boxed_link(cfg: LinkConfig, cookie: u32) -> Box<HostLink> {
         slot.assume_init()
     }
 }
+
+/// A link of another profile than the embedded host's (desktop tools):
+/// `Link::new` by value, with its ~12 KB frame, kept out of the callers.
+#[cold]
+#[inline(never)]
+fn built_link(cfg: LinkConfig, cookie: u32) -> Box<HostLink> {
+    Box::new(HostLink::new(cfg, cookie))
+}
+
+/// Stack of the driver thread ([`DriverConfig::stack_size`]), as the S3
+/// hub has always run it. Measured on the classic ESP32 (`-Z
+/// emit-stack-sizes`, zrh-donglem): the thread's entry 720 B, `run`
+/// 1 328 B, `drain_link` 848 B (the link's handling inlined), besides the
+/// channel and logging frames; before [`built_link`] was out of line the
+/// entry alone took 16 240 B. Callers keep this size (the NCP probe
+/// overflowed a 16 KiB stack).
+pub const DRIVER_STACK: usize = 32 * 1024;
 
 /// Driver settings.
 #[derive(Debug, Clone)]
@@ -107,7 +127,7 @@ impl Default for DriverConfig {
             ready_timeout: Duration::from_secs(2),
             resume_budget: Duration::from_secs(20),
             auto_ready: false,
-            stack_size: 32 * 1024,
+            stack_size: DRIVER_STACK,
         }
     }
 }
@@ -401,6 +421,8 @@ struct Shared {
     state: Mutex<SessionState>,
     cv: Condvar,
     stop: AtomicBool,
+    /// The reader thread has returned (it no longer reads the port).
+    reader_done: AtomicBool,
 }
 
 /// Handle to a running driver. Cheap to clone; every method is thread-safe.
@@ -503,6 +525,24 @@ impl Client {
     pub fn shutdown(&self) {
         self.shared.stop.store(true, Ordering::SeqCst);
         let _ = self.input.send(Input::Shutdown);
+    }
+
+    /// [`shutdown`](Self::shutdown), then wait until neither thread uses
+    /// the port any more: the driver stopped (no more writes) and the
+    /// reader returned (no more reads; it checks between reads of at most
+    /// 100 ms). Whether both ended within `timeout`; for a caller that
+    /// hands the port to someone else next (a probe before the backend).
+    pub fn shutdown_and_wait(&self, timeout: Duration) -> bool {
+        self.shutdown();
+        let deadline = Instant::now() + timeout;
+        let stopped = self.wait_state(timeout, |s| s == SessionState::Stopped).is_some();
+        while !self.shared.reader_done.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        stopped
     }
 
     /// Current negotiated session.
@@ -619,6 +659,7 @@ where
         state: Mutex::new(SessionState::Down),
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
+        reader_done: AtomicBool::new(false),
     });
     let client = Client {
         input: input.clone(),
@@ -648,6 +689,7 @@ where
                     }
                 }
             }
+            reader_shared.reader_done.store(true, Ordering::SeqCst);
         })
         .expect("zrhp reader thread");
 

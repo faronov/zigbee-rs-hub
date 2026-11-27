@@ -132,6 +132,8 @@ pub fn start(board: &BoardProfile) -> Option<App> {
         BackendKind::Zrhp => {
             // The UART stays the backend's for the whole boot.
             std::mem::forget(claim);
+            // Its first minute counts for the crash guard (ncp).
+            ncp::guard_backend_start();
             let mut hc = HubConfig::default();
             hc.driver.host_name = format!("zigbee-rs-hub {}", crate::esp::app_version());
             hc.driver.lines = zrhp::LINES.to_vec();

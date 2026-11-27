@@ -1695,3 +1695,53 @@ fn the_way_back_restores_the_zrhp_network_onto_emberznet() {
     });
     rig.finish();
 }
+
+/// A port that counts its use, for the probes' lifetime.
+#[derive(Clone)]
+struct Counted<P> {
+    port: P,
+    uses: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<P: hub_ncp::transport::PortRx> hub_ncp::transport::PortRx for Counted<P> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+        self.uses.fetch_add(1, Ordering::SeqCst);
+        self.port.read(buf, timeout)
+    }
+}
+
+impl<P: hub_ncp::transport::PortTx> hub_ncp::transport::PortTx for Counted<P> {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.uses.fetch_add(1, Ordering::SeqCst);
+        self.port.write_all(data)
+    }
+    fn set_line(&mut self, line: hub_ncp::transport::Line) -> std::io::Result<()> {
+        self.port.set_line(line)
+    }
+}
+
+/// The ZRHP probe's driver threads have ended when it returns, whether a
+/// ZRHP NCP answered or not: nothing reads or writes the port afterwards
+/// (it is the next probe's, or the backend's).
+#[test]
+fn the_zrhp_probe_leaves_no_thread_on_the_port() {
+    use crate::backend::select::probe_zrhp;
+    let lines = vec![hub_ncp::transport::Line::BR_FALLBACK];
+    for ncp in [true, false] {
+        let (host, ncp_end) = hub_ncp::transport::pipe::pair();
+        let zsim = ncp.then(|| hub_ncp::sim::SimNcp::start(ncp_end));
+        let (rx, tx) = host.split();
+        let uses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rx = Counted { port: rx, uses: uses.clone() };
+        let tx = Counted { port: tx, uses: uses.clone() };
+        let found = probe_zrhp(rx, tx, lines.clone(), 0x5EED_0010, quick());
+        assert_eq!(found.is_ok(), ncp, "{found:?}");
+        let after = uses.load(Ordering::SeqCst);
+        assert!(after > 0);
+        thread::sleep(Duration::from_millis(400));
+        assert_eq!(uses.load(Ordering::SeqCst), after, "the port used after the probe returned (ncp {ncp})");
+        if let Some(z) = zsim {
+            z.stop();
+        }
+    }
+}
