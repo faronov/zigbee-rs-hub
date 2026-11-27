@@ -218,6 +218,34 @@ pub fn permit_join(secs: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// `ncp log [on|off|level <0-5>]` on the console: the zigbee-rs NCP's log
+/// in the hub's (`network/ncp_log`).
+pub fn ncp_log(args: &[&str]) -> String {
+    let Some(hub) = ZRHP.get() else {
+        return "the NCP log comes with the ZRHP backend (the zigbee-rs NCP)\r\n".into();
+    };
+    let level = match args {
+        [] => None,
+        ["on"] => Some(3),
+        ["off"] => Some(0),
+        ["level", n] => match n.parse::<u8>() {
+            Ok(l) if l <= 5 => Some(l),
+            _ => return "usage: ncp log [on|off|level <0-5>]\r\n".into(),
+        },
+        _ => return "usage: ncp log [on|off|level <0-5>]\r\n".into(),
+    };
+    if let Some(l) = level
+        && let Err(e) = hub.set_ncp_log(l)
+    {
+        return format!("error: {e}\r\n");
+    }
+    let s = hub.ncp_log();
+    format!(
+        "NCP log level {} (0 off, 1 error ... 5 trace): {} records shown, {} over the rate limit, {} dropped by the NCP\r\n",
+        s.level, s.forwarded, s.suppressed, s.dropped
+    )
+}
+
 /// `hub` on the console.
 pub fn status_text() -> String {
     let Some(app) = APP.get() else {

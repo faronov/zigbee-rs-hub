@@ -42,6 +42,7 @@ pub const TYPES: &[&str] = &[
     "network/active_scan",
     "network/change_channel",
     "network/set_tx_power",
+    "network/ncp_log",
     "network/diagnostics",
     "network/topology",
     "network/backup",
@@ -343,6 +344,11 @@ struct DiagReq {
     groups: Option<u8>,
 }
 
+/// `network/ncp_log`: `level` 0 off, 1 error … 5 trace (absent: read).
+struct NcpLogReq {
+    level: Option<u8>,
+}
+
 struct TopologyReq {
     refresh: bool,
     routes: bool,
@@ -447,6 +453,20 @@ impl DiagReq {
     fn from(v: &J) -> Result<Self, ApiError> {
         Ok(Self { reset: flag(v, "reset", false)?, groups: num(v, "groups")? })
     }
+}
+
+impl NcpLogReq {
+    fn from(v: &J) -> Result<Self, ApiError> {
+        let level = num(v, "level")?;
+        if level.is_some_and(|l: u8| l > 5) {
+            return Err(bad("level: 0 (off) … 5 (trace)"));
+        }
+        Ok(Self { level })
+    }
+}
+
+fn ncp_log_json(l: &hub_coord::NcpLog) -> J {
+    json!({"level": l.level, "forwarded": l.forwarded, "suppressed": l.suppressed, "dropped": l.dropped})
 }
 
 impl TopologyReq {
@@ -1217,6 +1237,15 @@ impl Admin {
                     Ok(Reply::Json(json!({"requested_dbm": q.dbm, "applied_dbm": applied})))
                 })
             }
+            "network/ncp_log" => {
+                let q = match NcpLogReq::from(v) {
+                    Ok(q) => q,
+                    Err(e) => return fail(e),
+                };
+                self.spawn("NCP log", out, sid, id, move |_| {
+                    net.ncp_log(q.level).map(|l| Reply::Json(ncp_log_json(&l))).map_err(|e| ncp_error("NCP log", e))
+                })
+            }
             "network/diagnostics" => {
                 let q = match DiagReq::from(v) {
                     Ok(q) => q,
@@ -1682,6 +1711,13 @@ fn diagnostics(d: &Diagnostics, id: u64) -> Result<String, ApiError> {
         Some(p) => w.num(p),
         None => w.null(),
     };
+    if let Some(h) = d.ezsp_hashed_tclk {
+        w.key("ezsp_hashed_tclk").num(h);
+    }
+    if let Some(l) = &d.ncp_log {
+        w.key("ncp_log").obj().key("level").num(l.level).key("forwarded").num(l.forwarded);
+        w.key("suppressed").num(l.suppressed).key("dropped").num(l.dropped).end_obj();
+    }
     w.key("unsupported").arr();
     for u in &d.unsupported {
         w.str(u);

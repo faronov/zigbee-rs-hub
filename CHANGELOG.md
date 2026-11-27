@@ -37,6 +37,17 @@ install instructions and the list of merged pull requests. A pre-release
 - `network/backup` takes `keep`: the backup is also kept on the hub as a
   replaced network's (`network/backup/replaced`), whatever backend runs
   later.
+- **The zigbee-rs NCP's log in the hub's log** (ZRHP backend). The hub
+  now lets the NCP send its log: the records it kept since its reset
+  (crystal tuning, where its IEEE comes from, NV state) and the ones after
+  go into the hub's log (`hub/logs`, the console) as `ncp`, up to info by
+  default, rate-limited. `network/ncp_log` (and `ncp log on|off|level <n>`
+  on the Dongle Max console) sets the level, kept across restarts;
+  `network/diagnostics` shows it with its counters, and whether the NCP
+  keeps an EmberZNet backup's hashed link key root (`ezsp_hashed_tclk`).
+- zigbee-rs crates at master `0607d31` (zigbee-rs PR #22: restored
+  EmberZNet devices are admitted by the zigbee-rs NCP's Trust Center;
+  late LOG credit is delivered at once).
 
 ### Fixes
 

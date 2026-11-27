@@ -316,6 +316,8 @@ where
         hunt_after: times.zrhp_per_line,
         ready_timeout: std::time::Duration::from_millis(300),
         auto_ready: true,
+        // The NCP's log, its boot records first, is the backend's.
+        log_credits: 0,
         ..DriverConfig::default()
     };
     let (client, _events) = hub_ncp::driver::start(cfg, rx, tx, cookie.max(1));

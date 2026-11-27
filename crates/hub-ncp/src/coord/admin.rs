@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use hub_coord::{
     BackendKind, BackupSink, Beacon, ChannelChange, Child, Code, CoordError, CoordStatus,
-    DiagCounter, Diagnostics, EnergyChannel, FormParams, FrameCounters, NcpStatus, Neighbor,
-    NetworkAdmin, NetworkParams, RestoreBlob, RestoreEncoder, RestoreOptions, RestoreReport, Route,
-    TablesRead,
+    DiagCounter, Diagnostics, EnergyChannel, FormParams, FrameCounters, NcpLog, NcpStatus,
+    Neighbor, NetworkAdmin, NetworkParams, RestoreBlob, RestoreEncoder, RestoreOptions,
+    RestoreReport, Route, TablesRead,
 };
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication};
 use zigbee_zrhp::msg::ids;
@@ -198,6 +198,19 @@ impl NetworkAdmin for ZrhpAdmin {
         self.hub.stored_tx_power()
     }
 
+    fn ncp_log(&self, level: Option<u8>) -> Result<NcpLog, CoordError> {
+        if let Some(level) = level {
+            self.hub.set_ncp_log(level).map_err(coord_error)?;
+        }
+        let l = self.hub.ncp_log();
+        Ok(NcpLog {
+            level: l.level,
+            forwarded: l.forwarded,
+            suppressed: l.suppressed,
+            dropped: l.dropped,
+        })
+    }
+
     fn coordinator_tables(&self, routes: bool) -> TablesRead {
         let neighbors = self
             .hub
@@ -366,6 +379,8 @@ impl NetworkAdmin for ZrhpAdmin {
             host_link: host.into_iter().map(counter).collect(),
             coex: ncp.ncp_has(caps::PTA_COEX),
             tx_power_set: ncp.stored_tx_power(),
+            ezsp_hashed_tclk: Some(ncp.ncp_has(caps::EZSP_HASHED_TCLK)),
+            ncp_log: self.ncp_log(None).ok(),
             unsupported,
             errors,
         }

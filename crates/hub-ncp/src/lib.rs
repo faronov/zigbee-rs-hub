@@ -27,8 +27,8 @@ pub mod transport;
 
 pub use driver::{CallOpts, Client, DriverConfig, DriverEvent, Error, Message, NcpSession, SessionState};
 pub use lifecycle::{
-    ChannelChange, EnergyChannel, FormRequest, FwState, Hub, HubConfig, HubStatus, Ownership, ResumePolicy, RestoreOptions,
-    RestoreReport, Rng,
+    ChannelChange, EnergyChannel, FormRequest, FwState, Hub, HubConfig, HubStatus, NcpLogStats, Ownership, ResumePolicy,
+    RestoreOptions, RestoreReport, Rng,
 };
 pub use hub_store as store;
 pub use zigbee_zrhp as zrhp;
