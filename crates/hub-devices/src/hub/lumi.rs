@@ -179,7 +179,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.fp = q.fp;
         d.active_eps = q.active_eps;
         d.interview_partial = true;
-        d.interview_quirk = Some("lumi");
+        if !self.interview_quirks.iter().any(|x| x == id) {
+            self.interview_quirks.push(id.to_string());
+        }
         self.materialize(id, res, now);
         self.start_configure(id, now);
         true

@@ -531,6 +531,12 @@ pub struct Hub<T: ZigbeeTransport> {
     /// IEEE addresses of the Zigbee devices `devices/remove` removed, for
     /// the application ([`Hub::take_removed`]).
     removed: Vec<u64>,
+    /// Devices whose interview the lumi quirk completed ([`lumi`]) this
+    /// run: their diagnostics' `interview_quirk`. Not a [`Device`] field:
+    /// a larger `Device` hits the Xtensa LLVM backend's instruction
+    /// selection bug in the device map's B-tree code ("Cannot select:
+    /// Constant<12288>").
+    pub(crate) interview_quirks: Vec<String>,
 }
 
 /// A cluster command for the application (see [`Hub::app_clusters`]).
@@ -665,6 +671,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             import_queue: std::collections::VecDeque::new(),
             import_probe_last: None,
             removed: Vec::new(),
+            interview_quirks: Vec::new(),
         }
     }
 
@@ -1166,12 +1173,12 @@ impl<T: ZigbeeTransport> Hub<T> {
             ));
         }
         d.interview_partial = false;
-        d.interview_quirk = None;
         // Asked for: the automatic resumptions start over.
         d.interview_resumes = 0;
         d.interview_resume_at = 0;
         d.fp.endpoints.clear();
         d.awake_until = d.awake_until.max(now + AWAKE_AFTER_RX_MS);
+        self.interview_quirks.retain(|x| x != id);
         self.interview_step(id, InterviewStep::NodeDesc, now);
         Ok(())
     }
@@ -1279,8 +1286,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.interview_resume_at = now + (INTERVIEW_RESUME_MS << d.interview_resumes);
         d.interview_resumes += 1;
         d.interview_partial = false;
-        d.interview_quirk = None;
         let step = resume_step(d);
+        self.interview_quirks.retain(|x| x != id);
         self.interview_step(id, step, now);
         true
     }
@@ -3383,6 +3390,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         self.dispatch.remove(id);
         self.pending.retain(|_, p| p.device != id);
+        self.interview_quirks.retain(|x| x != id);
         self.emit(HubEvent::DeviceRemoved(id.to_string()));
     }
 
@@ -3791,7 +3799,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             "schema_error": d.schema.error,
             "interview_partial": d.interview_partial,
             "interview_resumes": d.interview_resumes,
-            "interview_quirk": d.interview_quirk,
+            "interview_quirk": self.interview_quirks.iter().any(|x| x == id).then_some("lumi"),
         }))
     }
 }
