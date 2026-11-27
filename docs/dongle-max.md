@@ -594,13 +594,18 @@ Flash…; or the API (`ncp/update/*`), or the console (`ncp flash confirm`,
 the image uploaded through the API). What happens, on a thread of its own:
 
 1. The stored image is read back and checked again (and its SHA-256).
-2. **The network is backed up with its keys and kept on the hub**
-   (`network/backup` with `keep`: `bkp/replaced/<ext_pan_id>`, hub-scoped,
-   readable whatever backend runs later): a new NCP firmware starts without
-   a network (the zigbee-rs NCP erases EmberZNet's NVM3 at its first boot),
-   and this backup carries it over. A failed backup changes nothing.
-   Without a backup (an NCP that does not answer, a bring-up boot) the
-   flash needs `force`; take one yourself too (Settings › Backup).
+2. **Any network the NCP holds is backed up with its keys and kept on
+   the hub** (`network/backup` with `keep`: `bkp/replaced/<ext_pan_id>`,
+   hub-scoped, readable whatever backend runs later), a network that is up
+   and one that is formed but not up alike (EZSP: `networkInit` without
+   NETWORK_UP, or failed otherwise than NOT_JOINED; ZRHP: formed, not
+   started): a new NCP firmware starts without a network (the zigbee-rs NCP
+   erases EmberZNet's NVM3 at its first boot), and this backup carries it
+   over. A failed backup refuses the flash and changes nothing (EZSP
+   exports only a network that is up); so does an NCP that does not answer
+   (whether it holds a network is unknown) and the bring-up boot, unless a
+   network kept by an earlier update waits to be restored, or `force`.
+   Take a backup yourself too (Settings › Backup).
 3. The state `flashing` is stored (NVS `zrh/ncp_update`). The UART is
    taken from the running backend (parked: it sends and receives nothing,
    as with a silent NCP), the MG24 is reset into its bootloader (GPIO12
@@ -627,7 +632,12 @@ the image uploaded through the API). What happens, on a thread of its own:
    Otherwise the reason is shown (Settings, `ncp/update/status`
    `update.restore_message`) and `ncp/update/restore` (the "Restore
    network" button) tries again; any kept backup can also be restored by
-   hand (`network/backup/replaced`, `network/restore`).
+   hand (`network/backup/replaced`, `network/restore`). **A maintenance
+   image restores nothing**, automatically or with the button: the
+   firmware that stays is often the one being replaced (on the way back the
+   zigbee-rs NCP, whose NV overlaps EmberZNet's NVM3); the kept network
+   waits (`restore: held`) for the next application image, whose flash
+   restores it.
 
 **Failures.** A bootloader whose menu never comes changes nothing: the
 MG24 is reset into its application and the backend gets the UART back. A
@@ -667,9 +677,10 @@ expect them there (the other way round, the zigbee-rs NCP recognises
 EmberZNet's NVM3 headers and wipes its window at its first boot). Two
 images, both flashed with `foreign`:
 
-1. **The NV clear, without the restore** (`ncp flash confirm foreign
-   norestore`, or `"restore": false`): the network is backed up and kept,
-   the zigbee-rs NCP's whole NV window is erased; its application stays.
+1. **The NV clear** (`ncp flash confirm foreign`): the network is backed
+   up and kept, the zigbee-rs NCP's whole NV window is erased; its
+   application stays, and nothing is restored onto it (a maintenance
+   image: the kept network is held for step 2).
    zigbee-rs `efr32mg24-nv-clear.gbl` (the `efr32mg24-firmware` CI
    artifact of `products/efr32mg24`, ~164 KB: one erase-and-program of
    `0xFF` over `0x0815_8000..0x0818_0000`, no application tag). Whether
@@ -707,13 +718,13 @@ the MG24 runs EmberZNet again.
 
 | Request | Fields | Result |
 |---|---|---|
-| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`; also in `hub/system` `ncp_update` |
+| `ncp/update/status` | | `backend` (`setting`, `running`, `found`, `why`, `bootloader`, `probes`, `seen`, `next_boot`, `uart_parked`), `image` (the stored image: `size`, `sha256`, `crc32`, `kind` `zrhp`/`other`/`maintenance`, `fw`, `build_id`, `app_type`, `app_version`, `program`, `signed`, `known`), `store`, `upload`, `job` (`running`, `phase`, `attempt`, `sent`, `total`, `message`), `update` (the stored state: `phase` `flashing`/`failed`/`interrupted`/`done`, `message`, `in_bootloader`, `found`, `verified`, `from`, `backup_epid`, `restore` `wanted`/`pending`/`held`/`done`/`failed`/`none`, `restore_message`, `attempts`), `restoring`, `restore_offered`; also in `hub/system` `ncp_update` |
 | `ncp/update/begin` | `size`, `sha256` (hex, optional) | `chunk` (4096), `store`; refused while the hub's data are in RAM (the area is SONOFF's until the claim) |
 | `ncp/update/chunk` | `offset`, `data` (base64, at most 4096 bytes) | `written`; an invalid image is refused (and the upload aborted) as soon as its bytes show it |
 | `ncp/update/end` | | the image (as `image` above) and a `note` |
 | `ncp/update/abort` | | |
-| `ncp/update/start` | `confirm` (true), `foreign` (any image but a ZRHP NCP application), `force` (no backup), `restore` (default true) | `state: started`; follow `ncp/update/status` |
-| `ncp/update/restore` | `confirm` (true) | `state: restoring`: the kept network onto the NCP now (as after a switch) |
+| `ncp/update/start` | `confirm` (true), `foreign` (any image but a ZRHP NCP application), `force` (no backup required), `restore` (default true; a maintenance image never restores) | `state: started`; follow `ncp/update/status` |
+| `ncp/update/restore` | `confirm` (true) | `state: restoring`: the kept network onto the NCP now (as after a switch); only when `restore_offered` (the restore failed or was not asked; `invalid_state` while it is pending or held for an application image) |
 | `ncp/update/reset` | `confirm` (true) | the MG24 reset into its application, the hub restarts |
 | `ncp/backend/set` | `backend`: `auto`, `ezsp`, `zrhp` | from the next boot |
 
@@ -967,7 +978,8 @@ verified").
     (`ncp/update/status` `backend.running`), the network restored under the
     same IEEE, the device controlled without pairing again; boot time of
     `auto` with each NCP.
-14. The way back: zigbee-rs `efr32mg24-nv-clear.gbl` (`norestore`; does
+14. The way back: zigbee-rs `efr32mg24-nv-clear.gbl` (`restore: held`, no
+    restore button; does
     Gecko Bootloader v2.04.02 take a GBL without an application tag? else
     Nerivec's 40 KiB NVM3 clear), the zigbee-rs NCP still answering after
     it; then SONOFF's stock GBL: EZSP with the network restored; `stock

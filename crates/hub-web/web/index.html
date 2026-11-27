@@ -666,7 +666,7 @@ function loadGw(){if(has("storage"))call("storage/status").then(g=>{gwBan(g);kv(
 let gnc={};
 function loadNcp(){if(has("ncp_update"))call("ncp/update/status").then(n=>{gnc=n;const b=n.backend||{},u=n.update||{},i=n.image,j=n.job||{};
  kv($("#gnc"),[["Backend",b.running&&b.running+" ("+b.why+")"],["NCP",b.found],["Stored image",i&&(i.kind=="zrhp"?"zigbee-rs "+i.fw:i.kind+(i.app_version?" "+i.app_version:""))+", "+i.size+" B"+(i.known?" ("+i.known+")":"")],["Flashing",j.running&&j.phase+", "+Math.round(j.sent*100/(j.total||1))+" %"],["Last update",u.message],["Network",u.restore&&u.restore!="none"&&u.restore+(u.restore_message?": "+u.restore_message:"")]]);
- $("#gnr").classList.toggle("hide",!u.backup_epid||u.restore=="done");if(j.running)setTimeout(loadNcp,2000)}).catch(()=>{})}
+ $("#gnr").classList.toggle("hide",!n.restore_offered);if(j.running)setTimeout(loadNcp,2000)}).catch(()=>{})}
 $("#gnu").onclick=e=>{const f=$("#gnf").files[0];if(f)busy(e.target,f.arrayBuffer().then(async b=>{const u=new Uint8Array(b),p=$("#gnp");await call("ncp/update/begin",{size:u.length});
  for(let at=0;at<u.length;at+=4096){await call("ncp/update/chunk",{offset:at,data:b64(u.subarray(at,at+4096))});p.textContent=Math.round(Math.min(at+4096,u.length)*100/u.length)+" %"}
  const r=await call("ncp/update/end");p.textContent="";toast(r.note);loadNcp()})).catch(x=>{$("#gnp").textContent="";toast(x.message)})};

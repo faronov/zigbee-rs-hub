@@ -387,6 +387,109 @@ pub fn after_switch(info: &J, backup: &J) -> AfterSwitch {
     AfterSwitch::Restore
 }
 
+/// What an NCP flash does first about the network on the NCP
+/// ([`before_flash`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeforeFlash {
+    /// The NCP holds a network (up, or formed and not up, or not known to
+    /// be none): back it up with its keys and keep it; a failed backup
+    /// refuses the flash when `required` (no `force`).
+    Backup {
+        /// Refuse the flash if the backup fails.
+        required: bool,
+    },
+    /// Nothing to back up: the NCP answers and holds no network; or, when
+    /// it does not answer, the operator's `force` or a network kept by an
+    /// earlier update and not restored yet.
+    Skip,
+    /// The flash is refused: why.
+    Refuse(String),
+}
+
+/// Before an NCP flash, from the hub's `network/info` (`None`: the hub
+/// does not run, a bring-up boot), whether an earlier update kept a
+/// network not restored yet (`carried`) and the operator's `force`. Any
+/// network the NCP holds is backed up first, also one that is formed but
+/// not up (EZSP: `networkInit` succeeded and the network did not come up,
+/// or failed otherwise than `NOT_JOINED`; ZRHP: formed, not started): a new
+/// firmware starts without it (the zigbee-rs NCP wipes EmberZNet's NVM3 at
+/// its first boot).
+pub fn before_flash(info: Option<&J>, carried: bool, force: bool) -> BeforeFlash {
+    let Some(i) = info else {
+        return if force || carried {
+            BeforeFlash::Skip
+        } else {
+            BeforeFlash::Refuse("the hub is not running (bring-up boot): nothing backs the network up first; send force to flash anyway".into())
+        };
+    };
+    // Without a session the state is not the NCP's now (and nothing can be
+    // backed up): only a network kept earlier, or force.
+    if i["session"] != "ready" {
+        return if force || carried {
+            BeforeFlash::Skip
+        } else {
+            BeforeFlash::Refuse(
+                "the NCP does not answer: whether it holds a network is unknown, and it cannot be backed up first; send force to flash anyway"
+                    .into(),
+            )
+        };
+    }
+    if i["state"].as_str() == Some("none") { BeforeFlash::Skip } else { BeforeFlash::Backup { required: !force } }
+}
+
+/// The outcome of [`BeforeFlash::Backup`] (`r`: the `network/backup`
+/// result, the OCB file): the kept network's extended PAN ID, or why the
+/// flash is refused.
+pub fn backed_up(required: bool, r: Result<J, String>) -> Result<Option<String>, String> {
+    match r {
+        Ok(b) => Ok(b["extended_pan_id"].as_str().map(str::to_string)),
+        Err(e) if required => {
+            Err(format!("the NCP holds a network and its backup failed ({e}); nothing was changed; send force to flash without a backup"))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// A network kept by an earlier update and not restored yet (the update
+/// record's `backup_epid` unless its `restore` is `done`): the one the next
+/// update restores when the NCP then holds no network to back up.
+pub fn carried(state: &J) -> Option<String> {
+    if state["restore"] == "done" {
+        return None;
+    }
+    state["backup_epid"].as_str().map(str::to_string)
+}
+
+/// The update record's `restore` when a flash starts: `wanted` (restored
+/// once the new firmware runs), `held` (a maintenance image, e.g. an NV
+/// clear: never restored onto the firmware that stays, which is often the
+/// one being replaced; kept for the next application image), or `none`
+/// (nothing kept, or the operator's `restore: false`).
+pub fn restore_at_start(requested: bool, kept: bool, maintenance: bool) -> &'static str {
+    match (kept, maintenance, requested) {
+        (false, _, _) => "none",
+        (true, true, _) => "held",
+        (true, false, true) => "wanted",
+        (true, false, false) => "none",
+    }
+}
+
+/// After the flash: `pending` (restored at the next start, once the NCP's
+/// session is up) for `wanted`; `held` stays; else `none`.
+pub fn restore_after_flash(at_start: &str) -> &'static str {
+    match at_start {
+        "wanted" => "pending",
+        "held" => "held",
+        _ => "none",
+    }
+}
+
+/// Whether `ncp/update/restore` is offered: a network kept, its restore
+/// not done, not pending, not held for an application image.
+pub fn restore_offered(state: &J) -> bool {
+    state["backup_epid"].is_string() && matches!(state["restore"].as_str(), Some("none" | "failed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +595,64 @@ mod tests {
         let other = json!({"state": "up", "ext_pan_id": "eeeeeeeeeeeeeeee"});
         assert!(matches!(after_switch(&other, &backup("x")), AfterSwitch::Refuse(w) if w.contains("another network")));
         assert!(matches!(after_switch(&empty, &json!({"extended_pan_id": "dd"})), AfterSwitch::Refuse(_)));
+    }
+
+    #[test]
+    fn any_network_the_ncp_holds_is_backed_up_first() {
+        let held = |state: &str, session: &str| json!({"state": state, "session": session});
+        // Up, or formed and not up (networkInit without NETWORK_UP, or
+        // failed otherwise than NOT_JOINED): backed up, required unless force.
+        for st in ["up", "formed_down"] {
+            assert_eq!(before_flash(Some(&held(st, "ready")), false, false), BeforeFlash::Backup { required: true }, "{st}");
+            assert_eq!(before_flash(Some(&held(st, "ready")), true, true), BeforeFlash::Backup { required: false }, "{st}");
+            // No session: the state is stale, nothing can be backed up.
+            assert_eq!(before_flash(Some(&held(st, "down")), true, false), BeforeFlash::Skip, "{st}");
+            assert!(matches!(before_flash(Some(&held(st, "resuming")), false, false), BeforeFlash::Refuse(_)), "{st}");
+        }
+        assert_eq!(before_flash(Some(&json!({"session": "ready"})), false, false), BeforeFlash::Backup { required: true }, "state unknown");
+        // No network on an NCP that answers: nothing to lose.
+        assert_eq!(before_flash(Some(&held("none", "ready")), false, false), BeforeFlash::Skip);
+        // An NCP that does not answer, the bring-up boot: only with a kept
+        // network or force.
+        assert!(matches!(before_flash(Some(&held("none", "down")), false, false), BeforeFlash::Refuse(w) if w.contains("force")));
+        assert_eq!(before_flash(Some(&held("none", "down")), true, false), BeforeFlash::Skip);
+        assert!(matches!(before_flash(None, false, false), BeforeFlash::Refuse(w) if w.contains("bring-up")));
+        assert_eq!(before_flash(None, false, true), BeforeFlash::Skip);
+        // A failed backup refuses unless force.
+        assert!(backed_up(true, Err("x".into())).unwrap_err().contains("nothing was changed"));
+        assert_eq!(backed_up(false, Err("x".into())), Ok(None));
+        assert_eq!(backed_up(true, Ok(json!({"extended_pan_id": "dd"}))), Ok(Some("dd".into())));
+    }
+
+    /// The way back to EmberZNet: the NV clear (a maintenance image) keeps
+    /// the network but restores nothing (not onto the zigbee-rs NCP that
+    /// stays, whose NV overlaps EmberZNet's NVM3), whatever was asked; the
+    /// stock image after it restores the kept network.
+    #[test]
+    fn the_nv_clear_holds_the_kept_network_for_the_next_application() {
+        // Step 1: the NV clear, the ZRHP network up and backed up.
+        let info = json!({"state": "up", "session": "ready"});
+        assert_eq!(before_flash(Some(&info), false, false), BeforeFlash::Backup { required: true });
+        let epid = backed_up(true, Ok(json!({"extended_pan_id": "dddddddddddddddd"}))).unwrap();
+        for requested in [true, false] {
+            assert_eq!(restore_at_start(requested, epid.is_some(), true), "held");
+        }
+        let st = json!({"backup_epid": epid, "restore": restore_after_flash("held")});
+        assert_eq!(st["restore"], "held", "not restored at the next start");
+        assert!(!restore_offered(&st), "no restore by hand onto the cleared NCP");
+        // Step 2: SONOFF's image; the zigbee-rs NCP runs no network now.
+        let carried = carried(&st);
+        assert_eq!(carried.as_deref(), Some("dddddddddddddddd"));
+        assert_eq!(before_flash(Some(&json!({"state": "none", "session": "ready"})), carried.is_some(), false), BeforeFlash::Skip);
+        let at_start = restore_at_start(true, carried.is_some(), false);
+        assert_eq!((at_start, restore_after_flash(at_start)), ("wanted", "pending"));
+        // ... restored onto EmberZNet at the next start (after_switch).
+        let done = json!({"backup_epid": carried, "restore": "done"});
+        assert_eq!(super::carried(&done), None);
+        assert!(!restore_offered(&done));
+        assert!(restore_offered(&json!({"backup_epid": "dd", "restore": "failed"})));
+        assert!(restore_offered(&json!({"backup_epid": "dd", "restore": "none"})));
+        assert!(!restore_offered(&json!({"backup_epid": "dd", "restore": "pending"})));
     }
 
     #[test]

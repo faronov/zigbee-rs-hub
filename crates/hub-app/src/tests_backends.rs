@@ -1617,3 +1617,81 @@ fn the_network_and_its_devices_move_from_the_ezsp_ncp_to_the_zrhp_ncp() {
     });
     rig.finish();
 }
+
+/// The result of a request: `Ok(result)` or `Err("code: message")`, as the
+/// NCP updater's in-process session sees it.
+fn outcome(r: &J) -> Result<J, String> {
+    if r["success"] == true { Ok(r["result"].clone()) } else { Err(format!("{}: {}", r["error"]["code"], r["error"]["message"])) }
+}
+
+/// Before an NCP flash, a network the EmberZNet NCP stores but did not
+/// bring up (`networkInit` failed otherwise than NOT_JOINED: formed, down)
+/// counts as held: it is backed up first, and as that backup fails (the
+/// export needs the network up) the flash is refused unless `force`;
+/// never flashed over silently.
+#[test]
+fn a_formed_network_that_is_down_is_backed_up_or_the_flash_refused() {
+    use crate::backend::select::{BeforeFlash, backed_up, before_flash};
+    let mut c = ezsp_sim(true, 0xDD);
+    c.network_init_fails = true;
+    let rig = Rig::ezsp(c, Store::volatile());
+    let (sid, rx) = session(&rig.app);
+    wait("session", || info(&rig.app, sid, &rx)["session"] == "ready");
+    let i = info(&rig.app, sid, &rx);
+    assert_eq!(i["state"], "formed_down", "{i}");
+    assert_eq!(before_flash(Some(&i), false, false), BeforeFlash::Backup { required: true });
+    let r = outcome(&call(&rig.app, sid, &rx, 1, json!({"type": "network/backup", "keep": true})));
+    let why = backed_up(true, r.clone()).unwrap_err();
+    assert!(why.contains("nothing was changed") && why.contains("send force"), "{why}");
+    assert_eq!(backed_up(false, r), Ok(None), "force: flashed without it");
+    rig.finish();
+}
+
+/// The way back (ZRHP → SONOFF's EmberZNet): the network kept before the
+/// NV clear goes onto the empty EmberZNet NCP (the chip's EUI-64 under
+/// both firmwares), the zigbee-rs backend's records become its, and the
+/// device works on through EZSP without pairing again.
+#[test]
+fn the_way_back_restores_the_zrhp_network_onto_emberznet() {
+    use crate::backend::select::{AfterSwitch, after_switch};
+    const CHIP_EUI64: [u8; 8] = [0x5A, 0x51, 0, 0, 0, 0, 1, 2];
+    let flash = SharedFlash::new();
+    let mut rig = Rig::zrhp_with(flash.store(), true);
+    rig.devices(vec![plug()], Arc::new(Mutex::new(Vec::new())));
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    rig.link.join(PLUG, PLUG_NWK);
+    wait("the plug interviewed", || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+    ok(&call(&rig.app, sid, &rx, 1, json!({"type": "devices/update", "device": "zb:5a52530000000001", "name": "Kettle"})));
+    let backup = ok(&call(&rig.app, sid, &rx, 2, json!({"type": "network/backup", "keep": true}))).clone();
+    let epid = backup["extended_pan_id"].as_str().unwrap().to_string();
+    rig.finish();
+
+    // SONOFF's firmware after the NV clear: EmberZNet without a network.
+    let mut c = ezsp_sim(false, 0x00);
+    c.eui64 = Eui64(CHIP_EUI64);
+    let mut rig = Rig::ezsp(c, flash.store());
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered.clone());
+    let (sid, rx) = session(&rig.app);
+    wait("the records foreign", || info(&rig.app, sid, &rx)["registry"]["state"] == "foreign");
+    let i = info(&rig.app, sid, &rx);
+    let kept = ok(&call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/replaced", "ext_pan_id": epid})))["backup"].clone();
+    assert_eq!(after_switch(&i, &kept), AfterSwitch::Restore, "{i}");
+    let r = call(&rig.app, sid, &rx, 4, json!({"type": "network/restore", "backup": kept, "confirm": true}));
+    ok(&r);
+    let sim = rig.ezsp.clone().unwrap();
+    assert!(sim.ncp(|n| n.config().custom_eui64.is_none()), "the same IEEE: no token written");
+    wait("the restored network owned", || {
+        let i = info(&rig.app, sid, &rx);
+        i["ownership"] == "owned" && i["registry"]["state"] == "owned" && i["ext_pan_id"] == epid.as_str()
+    });
+    wait("the registry loaded", || devices_list(&rig.app, sid, &rx).len() == 1);
+    let dev = ok(&call(&rig.app, sid, &rx, 5, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+    assert_eq!(dev["name"], "Kettle", "{dev}");
+    ok(&call(&rig.app, sid, &rx, 6, json!({"type": "entities/command", "uid": SWITCH, "command": "turn_on"})));
+    wait("On reached the plug through the EmberZNet NCP", || {
+        answered.lock().unwrap().iter().any(|r| r.cluster == 0x0006 && r.payload.get(2) == Some(&0x01))
+    });
+    rig.finish();
+}

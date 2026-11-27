@@ -58,8 +58,9 @@ zigbee-rs-hub gateway console:\r
                        image through the Gecko bootloader: the network is\r
                        backed up and kept first (force: without), the hub\r
                        restarts on the new firmware and restores it\r
-                       (norestore: not); foreign: an image without the\r
-                       ZRHP record (SONOFF's EmberZNet)\r
+                       (norestore: not; a maintenance image never);\r
+                       foreign: any image but a ZRHP NCP application\r
+                       (SONOFF's EmberZNet, an NV clear)\r
   ncp restore confirm  restore the network kept before the last NCP update\r
   ncp reset confirm    reset the MG24 into its application, restart the hub\r
   stock                SONOFF's application in ota_0, and how to return to it\r

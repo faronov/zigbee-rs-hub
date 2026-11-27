@@ -21,10 +21,13 @@
 //! thread:
 //!
 //! 1. the stored image read back and validated again (its SHA-256 too);
-//! 2. the running network backed up with keys and kept hub-scoped
-//!    (`network/backup` with `keep`): a new NCP firmware starts without a
-//!    network, so the backup is what carries it over. Refused without one
-//!    (an NCP that does not answer, the bring-up boot) unless `force`;
+//! 2. any network the NCP holds (up, or formed and not up) backed up with
+//!    keys and kept hub-scoped (`network/backup` with `keep`): a new NCP
+//!    firmware starts without a network, so the backup is what carries it
+//!    over. A failed backup refuses the flash, as an NCP that does not
+//!    answer or the bring-up boot (nothing known, nothing backed up) do,
+//!    unless `force` or a network kept by an earlier update
+//!    (`select::before_flash`);
 //! 3. the state `flashing` persisted (`ncp_update`), the UART taken from
 //!    the backend (parked), the MG24 reset into its bootloader (GPIO12 high
 //!    across a GPIO15 pulse), the menu it prints taken, `1`, the image over
@@ -47,7 +50,9 @@
 //! session is up, the kept network goes onto the NCP (`network/restore`
 //! with `confirm`) when the NCP has none and takes the backup's
 //! coordinator IEEE (`select::after_switch`); otherwise the reason is
-//! shown and `ncp/update/restore` retries. The devices keep working
+//! shown and `ncp/update/restore` retries. A maintenance image (an NV
+//! clear) restores nothing, automatically or by hand: the kept network
+//! waits for the next application image (`restore: held`). The devices keep working
 //! without pairing again: same network key, PAN, channel, frame counters
 //! from the backup's plus 10 000, the same Trust Center IEEE.
 
@@ -55,7 +60,7 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use hub_app::backend::select::{self, AfterSwitch, Detection, Found, Probe, ProbeTimes, Prober, Setting};
+use hub_app::backend::select::{self, AfterSwitch, BeforeFlash, Detection, Found, Probe, ProbeTimes, Prober, Setting};
 use hub_app::{App, SessionSink};
 use hub_coord::BackendKind;
 use hub_core::gecko::gbl::{GblInfo, GblParser, ImageKind, Policy};
@@ -549,39 +554,43 @@ fn job(image: &J, o: StartOpts) -> Result<String, String> {
     let size = info.gbl_len;
     JOB.lock().unwrap().total = size;
 
-    // The network carried over: a backup kept hub-scoped.
-    // A network kept by an earlier update and not restored yet stays the
-    // one to restore (a retry after a failed upload; the second image of
-    // a rollback, after which the NCP may run no network to back up).
-    let mut st = state();
-    let mut backup_epid = if st["restore"] != "done" { st["backup_epid"].as_str().map(str::to_string) } else { None };
-    match crate::hub::APP.get().map(App::status) {
-        Some(a) if a.network_up && !o.force => {
+    // The network carried over: a backup kept hub-scoped of any network
+    // the NCP holds (up, or formed and not up); a network kept by an
+    // earlier update and not restored yet stays the one to restore (a
+    // retry after a failed upload; the second image of a rollback, after
+    // which the NCP runs no network to back up).
+    let mut backup_epid = select::carried(&state());
+    let net = match crate::hub::APP.get() {
+        Some(_) => Some(Local::open()?.call("network/info", json!({}), Duration::from_secs(10))?),
+        None => None,
+    };
+    match select::before_flash(net.as_ref(), backup_epid.is_some(), o.force) {
+        BeforeFlash::Refuse(why) => return Err(why),
+        BeforeFlash::Skip => {}
+        BeforeFlash::Backup { required } => {
             phase("backing up the network");
-            let mut l = Local::open()?;
-            let b = l.call("network/backup", json!({"keys": true, "keep": true}), Duration::from_secs(120)).map_err(|e| {
-                format!("the network backup before the flash failed ({e}); nothing was changed; send force to flash without it")
-            })?;
-            backup_epid = b["extended_pan_id"].as_str().map(str::to_string);
-            info!("ncp: network {} backed up and kept", backup_epid.as_deref().unwrap_or("?"));
+            let r = Local::open()?.call("network/backup", json!({"keys": true, "keep": true}), Duration::from_secs(120));
+            if let Some(epid) = select::backed_up(required, r)? {
+                info!("ncp: network {epid} backed up and kept");
+                backup_epid = Some(epid);
+            }
         }
-        Some(a) if !a.session_up && backup_epid.is_none() && !o.force => {
-            return Err("the NCP does not answer, so its network cannot be backed up first; send force to flash anyway".into());
-        }
-        None if !o.force => {
-            return Err("the hub is not running (bring-up boot): nothing backs the network up first; send force to flash anyway".into());
-        }
-        _ => {}
     }
     let mut region = files::radio().ok_or("no radio area in the files region")?;
     let lease = uart::lease().map_err(|u| format!("the MG24 UART is in use ({u:?})"))?;
     let from = running();
-    st = json!({
+    let maintenance = info.kind() == ImageKind::Maintenance;
+    // A maintenance image (an NV clear) restores nothing: the firmware that
+    // stays is often the one being replaced, and on the way back the
+    // zigbee-rs NCP's NV overlaps EmberZNet's NVM3. The kept network waits
+    // for the next application image.
+    let restore = select::restore_at_start(o.restore, backup_epid.is_some(), maintenance);
+    let mut st = json!({
         "phase": "flashing",
         "image": image,
         "from": from.map(BackendKind::as_str),
         "backup_epid": backup_epid,
-        "restore": if o.restore && backup_epid.is_some() { "wanted" } else { "none" },
+        "restore": restore,
         "attempts": 0,
     });
     save_state(&st);
@@ -680,9 +689,7 @@ fn job(image: &J, o: StartOpts) -> Result<String, String> {
     // Whether the kept network goes onto the NCP is decided once its
     // session is up (`select::after_switch`: only onto an NCP without a
     // network; nothing when it runs that network already).
-    if st["restore"] == "wanted" {
-        st["restore"] = if detected.is_some() { "pending" } else { "none" }.into();
-    }
+    st["restore"] = select::restore_after_flash(restore).into();
     st["message"] = match (&found, verified, kind) {
         (Ok(_), true, ImageKind::Maintenance) => format!("written (no application in the image); the MG24's application runs: {said}"),
         (Err(_), _, ImageKind::Maintenance) => {
@@ -832,6 +839,7 @@ pub fn status_json() -> J {
         "job": {"running": j.running, "phase": j.phase, "attempt": j.attempt, "sent": j.sent, "total": j.total, "message": j.message},
         "update": state(),
         "restoring": *RESTORING.lock().unwrap(),
+        "restore_offered": select::restore_offered(&state()),
         "chunk": CHUNK_MAX,
     })
 }
@@ -877,8 +885,22 @@ pub fn set_backend(s: Setting) -> Result<(), String> {
 
 /// Restores the network kept before the last NCP update (on a thread).
 pub fn restore_request() -> Result<(), ApiError> {
-    if state()["backup_epid"].as_str().is_none() {
+    let st = state();
+    if st["backup_epid"].as_str().is_none() {
         return Err(api("not_found", "no network was kept before an NCP update"));
+    }
+    if !select::restore_offered(&st) {
+        return Err(api(
+            "invalid_state",
+            match st["restore"].as_str() {
+                Some("held") => {
+                    "the last image was a maintenance image (an NV clear): the kept network waits for the next application image, whose \
+                     flash restores it"
+                }
+                Some("done") => "the kept network was restored already",
+                _ => "the kept network's restore is pending (it runs once the NCP's session is up)",
+            },
+        ));
     }
     if !spawn_restore() {
         return Err(api("busy", "a restore is running"));
