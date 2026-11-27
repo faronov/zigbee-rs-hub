@@ -412,7 +412,8 @@ pub mod restore_note {
 /// Outcome of a restore.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreReport {
-    /// First NWK frame counter of the restored network.
+    /// First NWK frame counter of the restored network (EZSP: as the NCP
+    /// reports it after the restore's final reset).
     pub nwk_fc_start: u32,
     /// First APS frame counter.
     pub aps_fc_start: u32,

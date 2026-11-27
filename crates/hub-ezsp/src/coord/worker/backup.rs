@@ -51,13 +51,20 @@ pub(super) struct Live {
 /// backup without an APS counter: ~150 days of a busy coordinator's frames.
 const UNKNOWN_MARGIN: u32 = 1 << 20;
 
+/// EmberZNet keeps a frame counter set by `setValue` in its NVM at a 4096
+/// boundary: after a reset it resumes from the value rounded down (lab
+/// unit, EmberZNet 7.4.5: NWK 96058 set, 94208 after the restore's reset).
+/// A start on the boundary is where it resumes.
+const PERSIST_STEP: u32 = 0x1000;
+
 /// The first frame counters of a restore: the backup's (`nwk`, `aps`) plus
 /// the margins, from the NCP's own (`live`: `None` when it stores no
 /// network) where those are higher, whatever network they belong to (a
 /// higher counter is always safe; an older backup of the running network
 /// would otherwise go back below what its devices have seen, and they
 /// drop such frames). A counter of a stored network that the NCP does not
-/// report gets a margin of at least 2²⁰ instead.
+/// report gets a margin of at least 2²⁰ instead. Rounded up to
+/// [`PERSIST_STEP`].
 pub(super) fn start_counters(
     (nwk, aps): (u32, u32),
     live: Option<Live>,
@@ -70,12 +77,13 @@ pub(super) fn start_counters(
     };
     let (n, n_margin, n_raised, n_unknown) = pick(nwk, live.map(|l| l.nwk), o.nwk_margin);
     let (a, a_margin, a_raised, a_unknown) = pick(aps, live.map(|l| l.aps), o.aps_margin);
-    let Some(nwk_start) = n.checked_add(n_margin) else {
+    let up = |v: u32, m: u32| v.checked_add(m)?.checked_next_multiple_of(PERSIST_STEP);
+    let Some(nwk_start) = up(n, n_margin) else {
         return Err(refused(
             "the network key's frame counter plus the margin passes 2^32: the network needs a new network key first",
         ));
     };
-    let Some(aps_start) = a.checked_add(a_margin) else {
+    let Some(aps_start) = up(a, a_margin) else {
         return Err(refused("the APS frame counter plus the margin passes 2^32"));
     };
     Ok(Counters {
@@ -513,13 +521,15 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// Starts a restore (bellows' order, Gecko SDK 4.4.6 frames): leave the
     /// current network, clear the key table, the coordinator IEEE (an NCP
     /// reset applies it), the NWK and APS frame counters plus their margins
-    /// (`setValue`, without a network), the initial security state with
-    /// `NO_FRAME_COUNTER_RESET` (the backup's network key and sequence, the
-    /// hashed link key root), the key table (`importLinkKey`),
+    /// on [`PERSIST_STEP`] (`setValue`, without a network), the initial
+    /// security state with `NO_FRAME_COUNTER_RESET` (the backup's network
+    /// key and sequence, the hashed link key root), the key table
+    /// (`importLinkKey`),
     /// `formNetwork`, the NWK update ID (the network management token:
     /// `formNetwork` does not take it), the child table (`setChildData`),
-    /// and an NCP reset that must bring the restored network back. The
-    /// answer goes to `slot` once done.
+    /// and an NCP reset that must bring the restored network back, its
+    /// counters read back into the report. The answer goes to `slot` once
+    /// done.
     pub(super) fn restore_start(&mut self, plan: Box<Plan>, o: RestoreOptions, slot: Arc<Slot>) {
         let r = self.restore_begin(&plan, o);
         let (report, step) = match r {
@@ -568,9 +578,15 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                             .push((0, restore_note::UPDATE_ID_NOT_RESTORED));
                     }
                     self.left = None;
+                    self.read_back(&mut r.report);
                     info!(
-                        "ezsp: network restored (PAN 0x{:04X}, channel {}, {} link keys, {} children)",
-                        r.plan.pan_id, r.plan.channel, r.report.link_keys_on_ncp, r.report.children
+                        "ezsp: network restored (PAN 0x{:04X}, channel {}, {} link keys, {} children, NWK frame counter {}, APS {})",
+                        r.plan.pan_id,
+                        r.plan.channel,
+                        r.report.link_keys_on_ncp,
+                        r.report.children,
+                        r.report.nwk_fc_start,
+                        r.report.aps_fc_start
                     );
                     std::mem::take(&mut r.report)
                 });
@@ -955,6 +971,25 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     }
 
     /// After the reset, the NCP must run the backup's network.
+    /// The frame counters the restored network resumed from after the
+    /// restore's reset, as the NCP reports them, into the report (those
+    /// written stay where it does not report them).
+    fn read_back(&mut self, report: &mut RestoreReport) {
+        let Ok(live) = self.read_live() else { return };
+        for (now, set, what) in [
+            (live.nwk, &mut report.nwk_fc_start, "NWK"),
+            (live.aps, &mut report.aps_fc_start, "APS"),
+        ] {
+            let Some(now) = now else { continue };
+            if now < *set {
+                warn!(
+                    "ezsp: the NCP resumed the {what} frame counter at {now} after the restore's reset, below the {set} written"
+                );
+            }
+            *set = now;
+        }
+    }
+
     fn check_restored(&mut self, plan: &Plan) -> Result<(), CoordError> {
         let NetworkOwnership::Observed(n) = self.ownership else {
             return Err(refused(
