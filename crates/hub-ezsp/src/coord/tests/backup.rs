@@ -238,9 +238,12 @@ fn a_backup_restores_onto_another_ncp_in_every_verified_version() {
         let blob = blob(&items);
         b.admin.restore_check(&blob, margins(10_000)).unwrap();
         let report = b.admin.backup_restore(blob, margins(10_000)).unwrap();
+        // The backup's counters plus the margins (60 000, 10 700), on the
+        // NCP's 4096 boundaries (61 440, 12 288); the second reset resumes
+        // 4096 above.
         assert_eq!(
             (report.nwk_fc_start, report.aps_fc_start),
-            (60_000, 10_700),
+            (65_536, 16_384),
             "EZSP {version}: the margins"
         );
         assert_eq!((report.link_keys_on_ncp, report.children), (1, 1));
@@ -267,7 +270,7 @@ fn a_backup_restores_onto_another_ncp_in_every_verified_version() {
         );
         assert_eq!((n.network_key, n.network_key_sequence), (NKEY, 2));
         assert_eq!((n.tc_link_key, n.tclk_hashed), (ROOT, true));
-        assert_eq!((n.nwk_frame_counter, n.aps_frame_counter), (60_000, 10_700));
+        assert_eq!((n.nwk_frame_counter, n.aps_frame_counter), (65_536, 16_384));
         assert_eq!(
             n.key_table[0].map(|(e, k, _)| (e, k)),
             Some((Eui64::from_u64(KEYED), LINK))
@@ -319,7 +322,7 @@ fn a_backup_restores_onto_another_ncp_in_every_verified_version() {
         assert!(again.contains(&BackupItem::NetworkKey {
             key: NKEY,
             seq: 2,
-            tx_counter: 60_000,
+            tx_counter: 65_536,
             active: true
         }));
         assert!(again.contains(&BackupItem::HashedTclkSeed(ROOT)));
@@ -475,11 +478,14 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
             .admin
             .backup_restore(blob(&items), margins(10_000))
             .unwrap();
+        // What the NCP resumed from after the restore's last reset,
+        // above every counter it held before.
         let n = r.sim.ncp(|n| n.config().clone());
         assert_eq!(
             (n.nwk_frame_counter, n.aps_frame_counter),
             (report.nwk_fc_start, report.aps_fc_start)
         );
+        assert!(Some(n.nwk_frame_counter) > r.sim.ncp(|n| n.nwk_counter_high_at_reset()));
         assert_eq!(n.network_key, NKEY);
         r.finish();
         report
@@ -494,7 +500,7 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
         let r = restore(newer.clone(), leave_first);
         assert_eq!(
             (r.nwk_fc_start, r.aps_fc_start),
-            (130_000, 15_000),
+            (135_168, 20_480),
             "leave first: {leave_first}"
         );
         assert!(r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
@@ -505,7 +511,7 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
         ..source(13)
     };
     let r = restore(other, false);
-    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (910_000, 10_700));
+    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (917_504, 16_384));
     // networkInit failed: the network is stored, not up.
     let down = SimConfig {
         network_init_fails: true,
@@ -519,12 +525,54 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
         .admin
         .backup_restore(blob(&items), margins(10_000))
         .unwrap();
-    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (130_000, 15_000));
+    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (135_168, 20_480));
     d.finish();
     // Lower own counters: the backup's.
     let r = restore(source(13), false);
-    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (60_000, 10_700));
+    assert_eq!((r.nwk_fc_start, r.aps_fc_start), (65_536, 16_384));
     assert!(!r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
+}
+
+/// EmberZNet keeps the counters `setValue` wrote truncated to 4096 and
+/// resumes from there at the next initialization, storing 4096 more for
+/// the one after (lab unit, 7.4.5: 96 058 written, 94 208 after the
+/// reset). The restore writes boundaries and resets twice: the NCP resumes
+/// above every counter it held before the last reset (the restored
+/// network's first frames, after `formNetwork`, use the written ones), and
+/// the report gives where it resumed, also for an NCP with another step.
+#[test]
+fn the_restore_resumes_above_the_counters_used_before_its_last_reset() {
+    let mut a = Rig::new(SimConfig {
+        nwk_frame_counter: 86_058,
+        ..source(13)
+    });
+    a.next_up();
+    let items = export(&mut a, true);
+    a.finish();
+    for (step, nwk, aps) in [(0x1000, 102_400, 16_384), (0x10000, 131_072, 65_536)] {
+        let mut b = Rig::new(SimConfig {
+            frame_counter_persist_step: step,
+            ..target(13)
+        });
+        b.next_up();
+        let keep = RestoreOptions {
+            allow_ieee_change: false,
+            ..margins(10_000)
+        };
+        let r = b.admin.backup_restore(blob(&items), keep).unwrap();
+        let (n, high) = b
+            .sim
+            .ncp(|n| (n.config().clone(), n.nwk_counter_high_at_reset()));
+        assert_eq!(high, Some(98_304), "step {step}: 96 058 on the boundary");
+        assert!(Some(n.nwk_frame_counter) > high, "step {step}");
+        assert_eq!(
+            (n.nwk_frame_counter, n.aps_frame_counter),
+            (nwk, aps),
+            "step {step}"
+        );
+        assert_eq!((r.nwk_fc_start, r.aps_fc_start), (nwk, aps), "step {step}");
+        b.finish();
+    }
 }
 
 /// A stored network whose frame counters the NCP does not report (or
@@ -547,7 +595,11 @@ fn counters_the_ncp_does_not_report_get_a_large_margin() {
         aps_frame_counter: 0,
         ..source(13)
     };
-    for cfg in [silent, not_up] {
+    // Where the NCP does not report them, the counters written.
+    for (cfg, nwk, aps) in [
+        (silent, 1_101_824, 1_052_672),
+        (not_up, 1_105_920, 1_056_768),
+    ] {
         let mut b = Rig::new(cfg);
         b.next_up();
         b.sim.ncp(|n| n.config_mut().network_init_fails = false);
@@ -555,10 +607,9 @@ fn counters_the_ncp_does_not_report_get_a_large_margin() {
             .admin
             .backup_restore(blob(&items), margins(10_000))
             .unwrap();
-        assert_eq!(
-            (r.nwk_fc_start, r.aps_fc_start),
-            (50_000 + (1 << 20), 700 + (1 << 20))
-        );
+        // 50 000 and 700 plus 2^20, on 4096 boundaries; 4096 more after the
+        // second reset.
+        assert_eq!((r.nwk_fc_start, r.aps_fc_start), (nwk, aps));
         assert!(r.notes.contains(&(0, restore_note::COUNTERS_UNKNOWN)));
         assert!(!r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
         b.finish();
@@ -591,11 +642,11 @@ fn another_stacks_backup_gets_a_new_link_key_root_and_the_large_aps_margin() {
     let r = b.admin.backup_restore(blob(&items), o).unwrap();
     assert!(r.notes.contains(&(0, restore_note::TCLK_ROOT_GENERATED)));
     assert!(r.notes.contains(&(0, restore_note::IEEE_KEPT)));
-    assert_eq!(r.aps_fc_start, 1 << 20);
+    assert_eq!(r.aps_fc_start, (1 << 20) + 4096);
     let n = b.sim.ncp(|n| n.config().clone());
     assert_ne!(n.tc_link_key, ROOT);
     assert_ne!(n.tc_link_key, [0; 16]);
-    assert_eq!(n.aps_frame_counter, 1 << 20);
+    assert_eq!(n.aps_frame_counter, (1 << 20) + 4096);
     assert_eq!(
         n.key_table[0].map(|(_, k, _)| k),
         Some(LINK),

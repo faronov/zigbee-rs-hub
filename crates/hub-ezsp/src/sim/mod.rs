@@ -142,6 +142,13 @@ pub struct SimConfig {
     /// `getNetworkKeyInfo` and `getValue(NWK_FRAME_COUNTER)` answer with
     /// the NWK frame counter (else `NOT_FOUND` and `ERROR_INVALID_ID`).
     pub nwk_frame_counter_readable: bool,
+    /// The frame counters' NVM step: `setValue` stores the value truncated
+    /// to it (`formNetwork` does not advance it), and each `networkInit`
+    /// resumes from the stored value and stores it plus the step for the
+    /// next (EmberZNet: 0x1000, Silicon Labs' host-NCP to RCP migration
+    /// notes; the lab's Dongle Max, 7.4.5: 96 058 set, 94 208 after the
+    /// next initialization; the APS counter alike, UNVERIFIED).
+    pub frame_counter_persist_step: u32,
     /// `KEY_TABLE_SIZE` after a reset.
     pub key_table_size: u16,
     /// Key table entries: partner, key, metadata.
@@ -233,6 +240,7 @@ impl Default for SimConfig {
             aps_frame_counter: 0x0100,
             aps_frame_counter_readable: true,
             nwk_frame_counter_readable: true,
+            frame_counter_persist_step: 0x1000,
             key_table_size: 0,
             key_table: Vec::new(),
             custom_eui64: None,
@@ -266,6 +274,14 @@ pub struct SentMessage {
 #[derive(Debug)]
 pub struct SimNcp {
     cfg: SimConfig,
+    /// The NWK and APS frame counters in NVM
+    /// ([`SimConfig::frame_counter_persist_step`]); `None` until set or
+    /// initialized (the configured counter then).
+    persisted: [Option<u32>; 2],
+    /// The highest NWK frame counter the NCP held with its network up, and
+    /// that value at the last reset.
+    nwk_high: Option<u32>,
+    nwk_high_at_reset: Option<u32>,
     /// The EUI64 since the last reset ([`SimConfig::effective_eui64`]).
     eui64: Eui64,
     link: Ash,
@@ -338,6 +354,9 @@ impl SimNcp {
         let multicast = vec![MulticastTableEntry::default(); cfg.multicast_table_size];
         let mut n = SimNcp {
             eui64: cfg.effective_eui64(),
+            persisted: [None; 2],
+            nwk_high: None,
+            nwk_high_at_reset: None,
             cfg,
             link,
             version: None,
@@ -489,7 +508,31 @@ impl SimNcp {
         self.stall = frame_id;
     }
 
+    /// The highest NWK frame counter the NCP held with its network up
+    /// before its last reset: every counter its frames may have used then.
+    pub fn nwk_counter_high_at_reset(&self) -> Option<u32> {
+        self.nwk_high_at_reset
+    }
+
+    /// `networkInit` brings the network up: the frame counters resume from
+    /// NVM, which keeps them plus the step for the next initialization.
+    fn init_frame_counters(&mut self) {
+        let step = self.cfg.frame_counter_persist_step.max(1);
+        for (i, c) in [
+            &mut self.cfg.nwk_frame_counter,
+            &mut self.cfg.aps_frame_counter,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stored = self.persisted[i].unwrap_or(*c);
+            *c = stored;
+            self.persisted[i] = Some((stored - stored % step).saturating_add(step));
+        }
+    }
+
     fn reset_ezsp(&mut self) {
+        self.nwk_high_at_reset = self.nwk_high;
         self.version = None;
         self.config = default_config(self.cfg.key_table_size);
         for (id, v) in &self.cfg.config_values {
@@ -621,7 +664,13 @@ impl SimNcp {
             return;
         };
         let (resp, callbacks) = match Command::decode(h.frame_id, v, params) {
-            Ok(Some(cmd)) => self.execute(v, cmd),
+            Ok(Some(cmd)) => {
+                let r = self.execute(v, cmd);
+                if self.network_up {
+                    self.nwk_high = self.nwk_high.max(Some(self.cfg.nwk_frame_counter));
+                }
+                r
+            }
             Ok(None) => (
                 Response::InvalidCommand {
                     reason: EzspStatus::ERROR_INVALID_FRAME_ID,
@@ -802,14 +851,18 @@ impl SimNcp {
             Command::SetValue { id, value }
                 if id == ValueId::NWK_FRAME_COUNTER || id == ValueId::APS_FRAME_COUNTER =>
             {
+                let step = self.cfg.frame_counter_persist_step.max(1);
                 let status = match <[u8; 4]>::try_from(value.as_slice()) {
                     _ if self.network_up => K::InvalidCall,
-                    Ok(b) if id == ValueId::NWK_FRAME_COUNTER => {
-                        self.cfg.nwk_frame_counter = u32::from_le_bytes(b);
-                        K::Success
-                    }
                     Ok(b) => {
-                        self.cfg.aps_frame_counter = u32::from_le_bytes(b);
+                        let c = u32::from_le_bytes(b);
+                        let i = usize::from(id != ValueId::NWK_FRAME_COUNTER);
+                        self.persisted[i] = Some(c - c % step);
+                        if i == 0 {
+                            self.cfg.nwk_frame_counter = c;
+                        } else {
+                            self.cfg.aps_frame_counter = c;
+                        }
                         K::Success
                     }
                     Err(_) => K::InvalidValue,
@@ -842,6 +895,7 @@ impl SimNcp {
                     }
                 } else if self.cfg.network_formed {
                     self.network_up = true;
+                    self.init_frame_counters();
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, Ember, K::NetworkUp),
                     });
@@ -1003,6 +1057,7 @@ impl SimNcp {
                     if sec.bitmask & security_bitmask::NO_FRAME_COUNTER_RESET == 0 {
                         self.cfg.nwk_frame_counter = 0;
                         self.cfg.aps_frame_counter = 0;
+                        self.persisted = [Some(0); 2];
                     }
                     callbacks.push(Callback::StackStatus {
                         status: Self::st(v, StatusFamily::Ember, StatusKind::NetworkUp),

@@ -25,8 +25,16 @@ pub(super) enum Step {
     Ieee { note: Option<u8> },
     /// The network, without a reset before.
     Network,
-    /// The network was formed: it must come back.
-    Verify { update_id_written: bool },
+    /// The network was formed: it must come back. `used`: the NCP's NWK
+    /// frame counter before the reset.
+    Verify {
+        update_id_written: bool,
+        used: Option<u32>,
+    },
+    /// The restored network came back: one more reset, so that the NCP's
+    /// frame counters go past those it used since the restore wrote them
+    /// ([`PERSIST_STEP`]); it must come back again.
+    Advance { used: Option<u32> },
 }
 
 /// The first frame counters of a restore ([`start_counters`]).
@@ -51,13 +59,27 @@ pub(super) struct Live {
 /// backup without an APS counter: ~150 days of a busy coordinator's frames.
 const UNKNOWN_MARGIN: u32 = 1 << 20;
 
+/// EmberZNet keeps the NWK frame counter in its NVM truncated to 0x1000;
+/// each initialization (`networkInit`) resumes from the stored value and
+/// stores it plus 0x1000 for the next one (Silicon Labs, host-NCP to RCP
+/// migration notes). `setValue` stores the value truncated and
+/// `formNetwork` does not advance it, so the first initialization after a
+/// restore resumes at the start again, below the counters the network
+/// used before its reset (lab unit, EmberZNet 7.4.5: NWK 96 058 set,
+/// 94 208 after the restore's reset). A restore therefore starts on the
+/// boundary (stored as written) and resets the NCP twice: the second
+/// initialization resumes 0x1000 above it. The APS counter alike
+/// (UNVERIFIED: 7.4.5 does not report it).
+const PERSIST_STEP: u32 = 0x1000;
+
 /// The first frame counters of a restore: the backup's (`nwk`, `aps`) plus
 /// the margins, from the NCP's own (`live`: `None` when it stores no
 /// network) where those are higher, whatever network they belong to (a
 /// higher counter is always safe; an older backup of the running network
 /// would otherwise go back below what its devices have seen, and they
 /// drop such frames). A counter of a stored network that the NCP does not
-/// report gets a margin of at least 2²⁰ instead.
+/// report gets a margin of at least 2²⁰ instead. Rounded up to
+/// [`PERSIST_STEP`].
 pub(super) fn start_counters(
     (nwk, aps): (u32, u32),
     live: Option<Live>,
@@ -70,12 +92,13 @@ pub(super) fn start_counters(
     };
     let (n, n_margin, n_raised, n_unknown) = pick(nwk, live.map(|l| l.nwk), o.nwk_margin);
     let (a, a_margin, a_raised, a_unknown) = pick(aps, live.map(|l| l.aps), o.aps_margin);
-    let Some(nwk_start) = n.checked_add(n_margin) else {
+    let up = |v: u32, m: u32| v.checked_add(m)?.checked_next_multiple_of(PERSIST_STEP);
+    let Some(nwk_start) = up(n, n_margin) else {
         return Err(refused(
             "the network key's frame counter plus the margin passes 2^32: the network needs a new network key first",
         ));
     };
-    let Some(aps_start) = a.checked_add(a_margin) else {
+    let Some(aps_start) = up(a, a_margin) else {
         return Err(refused("the APS frame counter plus the margin passes 2^32"));
     };
     Ok(Counters {
@@ -513,12 +536,15 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     /// Starts a restore (bellows' order, Gecko SDK 4.4.6 frames): leave the
     /// current network, clear the key table, the coordinator IEEE (an NCP
     /// reset applies it), the NWK and APS frame counters plus their margins
-    /// (`setValue`, without a network), the initial security state with
-    /// `NO_FRAME_COUNTER_RESET` (the backup's network key and sequence, the
-    /// hashed link key root), the key table (`importLinkKey`),
+    /// on [`PERSIST_STEP`] (`setValue`, without a network), the initial
+    /// security state with `NO_FRAME_COUNTER_RESET` (the backup's network
+    /// key and sequence, the hashed link key root), the key table
+    /// (`importLinkKey`),
     /// `formNetwork`, the NWK update ID (the network management token:
     /// `formNetwork` does not take it), the child table (`setChildData`),
-    /// and an NCP reset that must bring the restored network back. The
+    /// and two NCP resets that must bring the restored network back (the
+    /// second moves the frame counters past those used before the first:
+    /// [`PERSIST_STEP`]), its counters read back into the report. The
     /// answer goes to `slot` once done.
     pub(super) fn restore_start(&mut self, plan: Box<Plan>, o: RestoreOptions, slot: Arc<Slot>) {
         let r = self.restore_begin(&plan, o);
@@ -535,7 +561,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         match step {
             Step::Network => self.restore_network(r),
             Step::Ieee { .. } => self.reset_ncp(r),
-            Step::Verify { .. } => unreachable!("set after the network"),
+            Step::Verify { .. } | Step::Advance { .. } => unreachable!("set after the network"),
         }
     }
 
@@ -556,21 +582,37 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                 }
                 self.restore_network(r);
             }
-            Step::Verify { update_id_written } => {
+            Step::Verify {
+                update_id_written,
+                used,
+            } => {
+                if let Err(e) = self.check_restored(&r.plan) {
+                    return r.slot.answer(Answer::Restore(Err(e)));
+                }
+                if !update_id_written
+                    && self
+                        .network
+                        .is_some_and(|n| n.nwk_update_id != r.plan.nwk_update_id)
+                {
+                    r.report
+                        .notes
+                        .push((0, restore_note::UPDATE_ID_NOT_RESTORED));
+                }
+                r.step = Step::Advance { used };
+                self.reset_ncp(r);
+            }
+            Step::Advance { used } => {
                 let result = self.check_restored(&r.plan).map(|()| {
-                    if !update_id_written
-                        && self
-                            .network
-                            .is_some_and(|n| n.nwk_update_id != r.plan.nwk_update_id)
-                    {
-                        r.report
-                            .notes
-                            .push((0, restore_note::UPDATE_ID_NOT_RESTORED));
-                    }
                     self.left = None;
+                    self.read_back(&mut r.report, used);
                     info!(
-                        "ezsp: network restored (PAN 0x{:04X}, channel {}, {} link keys, {} children)",
-                        r.plan.pan_id, r.plan.channel, r.report.link_keys_on_ncp, r.report.children
+                        "ezsp: network restored (PAN 0x{:04X}, channel {}, {} link keys, {} children, NWK frame counter {}, APS {})",
+                        r.plan.pan_id,
+                        r.plan.channel,
+                        r.report.link_keys_on_ncp,
+                        r.report.children,
+                        r.report.nwk_fc_start,
+                        r.report.aps_fc_start
                     );
                     std::mem::take(&mut r.report)
                 });
@@ -680,7 +722,11 @@ impl<T: Transport, C: Clock> Worker<T, C> {
         match result {
             Ok(update_id_written) => {
                 // The stack reads the child table and the tokens again.
-                r.step = Step::Verify { update_id_written };
+                let used = self.read_live().ok().and_then(|l| l.nwk);
+                r.step = Step::Verify {
+                    update_id_written,
+                    used,
+                };
                 self.reset_ncp(r);
             }
             Err(e) => r.slot.answer(Answer::Restore(Err(e))),
@@ -955,6 +1001,29 @@ impl<T: Transport, C: Clock> Worker<T, C> {
     }
 
     /// After the reset, the NCP must run the backup's network.
+    /// The frame counters the restored network resumed from after the
+    /// restore's last reset, as the NCP reports them, into the report
+    /// (those written stay where it does not report them); a warning if
+    /// the NWK counter is not above `used` (before the first reset).
+    fn read_back(&mut self, report: &mut RestoreReport, used: Option<u32>) {
+        let Ok(live) = self.read_live() else { return };
+        if let (Some(now), Some(used)) = (live.nwk, used)
+            && now <= used
+        {
+            warn!(
+                "ezsp: the NCP resumed the NWK frame counter at {now} after the restore, not above the {used} it used before: devices may drop its first frames"
+            );
+        }
+        for (now, set) in [
+            (live.nwk, &mut report.nwk_fc_start),
+            (live.aps, &mut report.aps_fc_start),
+        ] {
+            if let Some(now) = now {
+                *set = now;
+            }
+        }
+    }
+
     fn check_restored(&mut self, plan: &Plan) -> Result<(), CoordError> {
         let NetworkOwnership::Observed(n) = self.ownership else {
             return Err(refused(
