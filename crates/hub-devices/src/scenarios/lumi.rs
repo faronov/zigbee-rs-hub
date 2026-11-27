@@ -124,6 +124,36 @@ fn a_lumi_switch_that_never_answers_completes_from_its_model() {
     }
 }
 
+/// Not when the definition it would resolve to asks for binds: the
+/// interview goes on, the fingerprint as it was.
+#[test]
+fn the_lumi_quirk_is_skipped_when_the_definition_needs_binds() {
+    let mut hub = hub_with(&[]);
+    let def = load_definition(
+        "zdef: 1\nid: test/bound\nrevision: 1\nvendor: Xiaomi\nmodel: X\n\
+         match: [{model: lumi.sensor_switch}]\nconfigure:\n  - bind: {ep: 1, clusters: [0x0006]}\n",
+        crate::model::LayerSource::User,
+    )
+    .unwrap();
+    hub.upload_user_definition(def, T0).unwrap();
+    let mut sim = Sim::default();
+    let mut s = wxkg01lm();
+    s.responsive = false;
+    let model = s.report(1, 0x0000, None, &[(0x0005, text("lumi.sensor_switch"))]);
+    let a = annce(&s);
+    sim.devices.push(s);
+    hub.on_device_joined(SWITCH, 0x6001, T0);
+    hub.on_aps_indication(a, T0 + 100);
+    hub.on_aps_indication(model, T0 + 1000);
+    hub.tick(T0 + 25_000);
+    sim.run(&mut hub, T0 + 25_000);
+    let d = hub.device(SWITCH_ID).unwrap();
+    assert_eq!(d.interview, InterviewStep::NodeDesc);
+    assert!(d.fp.endpoints.iter().all(crate::hub::is_stub));
+    assert_eq!(d.fp.manufacturer_name, None);
+    assert!(hub.diagnostics(SWITCH_ID).unwrap()["interview_quirk"].is_null());
+}
+
 /// A Xiaomi button resolves to the generic tier (zigbee-herdsman-converters'
 /// definition needs the `lumi` template): its presses, reports of its On/Off
 /// client cluster (0 pressed, 1 released), fire the remote's `off` and `on`

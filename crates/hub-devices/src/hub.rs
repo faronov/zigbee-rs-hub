@@ -1911,7 +1911,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
                 // Identity strings and versions from any answer (an
                 // interview read stores them, others only fill gaps).
-                if ind.cluster == cl::BASIC && purpose != Some(Purpose::Identity) {
+                if ind.cluster == cl::BASIC && !matches!(purpose, Some(Purpose::Identity)) {
                     let solicited =
                         matches!(purpose, Some(Purpose::Interview(InterviewStep::Basic(_))));
                     structural |= self.learn_basic(id, &values, solicited, now);

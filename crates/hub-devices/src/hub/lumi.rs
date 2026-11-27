@@ -35,8 +35,9 @@ use crate::zdo::LogicalType;
 /// Manufacturer code of LUMI United Technology.
 const LUMI_MFR: u16 = 0x1037;
 
-/// Endpoint layouts by exact model: `(model, endpoint, profile, device ID,
-/// server clusters, client clusters)`, from zhaquirks' signatures
+/// Endpoint layouts by exact model (one endpoint each): `(model,
+/// endpoint, profile, device ID, server clusters, client clusters)`, from
+/// zhaquirks' signatures
 /// (`zhaquirks/xiaomi/mija/*.py`, quick-init devices).
 #[allow(clippy::type_complexity)]
 const LAYOUTS: &[(&str, u8, u16, u16, &[u16], &[u16])] = &[
@@ -101,22 +102,16 @@ fn fill(d: &mut Device) {
     if fp.mac_mains != Some(true) {
         fp.power_source.get_or_insert(0x03);
     }
-    let layout = LAYOUTS
-        .iter()
-        .filter(|l| fp.model_id.as_deref() == Some(l.0))
-        .collect::<Vec<_>>();
-    if !layout.is_empty() && fp.endpoints.iter().all(is_stub) {
-        fp.endpoints = layout
-            .iter()
-            .map(|l| EndpointFp {
-                ep: l.1,
-                profile: l.2,
-                device_id: l.3,
-                in_clusters: l.4.to_vec(),
-                out_clusters: l.5.to_vec(),
-            })
-            .collect();
-        d.active_eps = layout.iter().map(|l| l.1).collect();
+    let layout = LAYOUTS.iter().find(|l| fp.model_id.as_deref() == Some(l.0));
+    if let Some(l) = layout.filter(|_| fp.endpoints.iter().all(is_stub)) {
+        fp.endpoints = vec![EndpointFp {
+            ep: l.1,
+            profile: l.2,
+            device_id: l.3,
+            in_clusters: l.4.to_vec(),
+            out_clusters: l.5.to_vec(),
+        }];
+        d.active_eps = vec![l.1];
     }
 }
 
@@ -163,10 +158,18 @@ impl<T: ZigbeeTransport> Hub<T> {
         {
             return false;
         }
-        let mut q = d.clone();
-        fill(&mut q);
-        let res = self.resolution_of(&q);
-        if needs_configure(&q, &res) {
+        // Filled in place (a copy of the device would cost the firmware
+        // its clone code), put back when the quirk does not apply.
+        let Some(d) = self.devices.get_mut(id) else {
+            return false;
+        };
+        let saved = (d.fp.clone(), d.active_eps.clone());
+        fill(d);
+        let d = &self.devices[id];
+        let res = self.resolution_of(d);
+        if needs_configure(d, &res) {
+            let d = self.devices.get_mut(id).unwrap();
+            (d.fp, d.active_eps) = saved;
             return false;
         }
         self.pending
@@ -176,8 +179,6 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         d.queue
             .retain(|x| !matches!(x.purpose, Purpose::Interview(_)));
-        d.fp = q.fp;
-        d.active_eps = q.active_eps;
         d.interview_partial = true;
         if !self.interview_quirks.iter().any(|x| x == id) {
             self.interview_quirks.push(id.to_string());
