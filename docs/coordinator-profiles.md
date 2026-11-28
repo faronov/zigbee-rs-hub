@@ -52,8 +52,8 @@ features. Order of work: ZRHP (existing), then EZSP, then ZNP.
 | Thread BR + H2, early sample | ESP32-S3, 4 MB flash: development layout, one app slot, no hub OTA | zigbee-rs / ZRHP | as above | Released as `…-4mb-dev` (0.3.0: MQTT, no console). Octal image: Zigbee on the N4R8 lab board. Quad image (main 002658d, 2,797,888 B): ran on a bare S3 devkit with 4 MB flash and 2 MB Quad PSRAM, no radio (in-place upgrade from 0.1.3 with `hubdata`, Wi-Fi and token kept; PSRAM detected; web page and WebSocket API under 4 parallel clients; internal heap min 121,351 B; clean restart, no crash). Zigbee on a 4 MB board still ran only on the N4R8 lab board |
 | S3 + MG24 | ESP32-S3; actual board/memory to be identified | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM | **First external backend.** Not implemented; UART and reset/boot wiring unspecified |
 | S3 + CC2652P7 | ESP32-S3; actual board/memory to be identified | TI Z-Stack ZNP / ZNP-MT | TI ROM serial bootloader | After EZSP. Not implemented; updater blocked until reset and bootloader-backdoor lines are specified |
-| Dongle-M + MG24, stock NCP | Classic ESP32-D0WDR2-V3, 16 MB flash / 2 MB PSRAM | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM (from the ESP32, not yet on hardware) | Hub image `zrh-donglem` (experimental asset of the hub releases since 0.3.0): the app on `Backend::ezsp`, data on SONOFF's `files` after a claim, self-update; SONOFF's stock partition table kept (install through SONOFF's web console). Runs on one lab unit (network formed, a sleepy device joined, interviewed and reporting; network backup export and same-network restore); the rest of its HIL checklist pending (`docs/dongle-max.md`) |
-| Dongle-M + MG24, zigbee-rs NCP | Same Dongle-M host | zigbee-rs / ZRHP | Gecko bootloader / XMODEM, not H2 `FW_*` | Hub side in `zrh-donglem` (host-tested): the ZRHP backend chosen at boot (`auto` asks the MG24), the GBL flashed from the ESP32 with a kept backup and the network restored after the switch (`docs/dongle-max.md`, "Replacing the MG24 firmware"). The NCP's 38.4 MHz radio for the Dongle-M is in zigbee-rs PR #21 (in review); no hardware run yet |
+| Dongle-M + MG24, stock NCP | Classic ESP32-D0WDR2-V3, 16 MB flash / 2 MB PSRAM | EmberZNet NCP / EZSP-ASH | Gecko bootloader / XMODEM (from the ESP32, run on the lab unit) | Hub image `zrh-donglem` (experimental asset of the hub releases since 0.3.0): the app on `Backend::ezsp`, data on SONOFF's `files` after a claim, self-update; SONOFF's stock partition table kept (install through SONOFF's web console). Runs on one lab unit (network formed, a sleepy device joined, interviewed and reporting; network backup export and same-network restore); the rest of its HIL checklist pending (`docs/dongle-max.md`) |
+| Dongle-M + MG24, zigbee-rs NCP | Same Dongle-M host | zigbee-rs / ZRHP | Gecko bootloader / XMODEM, not H2 `FW_*` | Hub side in `zrh-donglem`: the ZRHP backend chosen at boot (`auto` asks the MG24), the GBL flashed from the ESP32 with a kept backup and the network restored after the switch (`docs/dongle-max.md`, "Replacing the MG24 firmware"). The NCP for the Dongle-M (38.4 MHz radio) is zigbee-rs `ncp-v0.1.3`'s `efr32mg24-ncp-sonoff-dongle-m.gbl`; run on the lab unit (0.4.2: the switch with the network kept, and back) |
 
 PSRAM: Thread BR modules seen so far are N4R8 (lab, 8 MB Octal), N4R2
 (2 MB Quad) and, at retail, N8R2/N8R8. Quad/Octal is the interface; the
@@ -239,15 +239,14 @@ about 259 KB of headroom (the hand-written API request parser saved
 and `zigbee-zrhp` (about 109 KB), so size is not on the backends' critical
 path. These are build results, not hardware results.
 
-Release 0.4.1 (CI dry run, quad / octal): 4 MB 2,933,680 / 2,934,864 B
-(97.4 % of the 2,944 KiB slot, ~78 KiB left); 8 MB 3,084,256 /
-3,085,440 B and its developer edition 3,086,272 / 3,087,456 B (98.2 % of
-the 3 MiB slot, ~57 KiB left); `zrh-donglem` about 3.2 MB (50 % of its
-6 MiB slot). The published 0.4.0 images were 13 KB smaller (4 MB 2,920,256
-/ 2,921,440 B, 8 MB developer edition 3,072,752 / 3,073,936 B, ~70 KiB
-left); the 0.4.0 figures first recorded here were about 44 KB below the
-published images. The 8 MB headroom is the tightest; the size pass
-planned after 0.4.0 is due before the next feature release.
+Release 0.4.2 (CI dry run, quad / octal): 4 MB 2,966,656 / 2,967,824 B
+(98.4 % of the 2,944 KiB slot, ~46 KiB left); 8 MB 3,117,344 /
+3,118,512 B and its developer edition 3,118,032 / 3,119,216 B (99.2 % of
+the 3 MiB slot, ~26 KiB left); `zrh-donglem` about 3.5 MB (55 % of its
+6 MiB slot). Release 0.4.1: 4 MB 2,934,864 B (~78 KiB left), 8 MB
+developer edition 3,087,456 B (~57 KiB left), so 0.4.2 added about
+32 KB to every S3 image. The 8 MB headroom is the tightest: the size pass
+must come before the next feature lands.
 
 Every image detects PSRAM at boot. Without it the application is not
 started (hardware run on the N4R8 lab board with a Quad image: ~35 KB of

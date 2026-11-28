@@ -8,7 +8,8 @@ the EZSP backend (`docs/ezsp-backend.md`), with its data on SONOFF's
 `files` partition once claimed, on SONOFF's unchanged partition table.
 The image also carries the ZRHP backend and can replace the MG24's
 firmware with the zigbee-rs NCP and back through the Gecko bootloader
-(host-tested, not yet on hardware: "Replacing the MG24 firmware").
+(run on the lab unit in both directions with zigbee-rs NCP 0.1.3:
+"Replacing the MG24 firmware").
 The board bring-up image (0.1.0) ran on one unit. Nothing here is a Zigbee
 or interoperability claim.
 
@@ -78,7 +79,7 @@ Decided 2026-11-24; `zrh-donglem` 0.2.0 (0.3.0: the version of the hub release):
 | Ethernet (also PoE-powered) and Wi-Fi | yes: Ethernet first, the Wi-Fi station after 10 s without an Ethernet address |
 | Network backup/restore (Open Coordinator Backup) | yes: `network/backup` and `network/restore` on the EZSP backend, in the format zigpy/ZHA and Zigbee2MQTT use (`docs/ezsp-backend.md`, "Backup and restore"); host-tested against the simulated NCP (EZSP 13–18); an export and a restore onto the same network ran on the lab unit (0.3.0, the joined sensor kept working) |
 | Green Power through EZSP | later |
-| MG24 firmware update through the Gecko bootloader | yes, host-tested, not yet on hardware: a GBL uploaded into the `radio` area, validated, flashed over XMODEM after a kept network backup; SONOFF's EmberZNet ⇄ the zigbee-rs ZRHP NCP ("Replacing the MG24 firmware") |
+| MG24 firmware update through the Gecko bootloader | yes, run on the lab unit in both directions (0.4.2, zigbee-rs NCP 0.1.3): a GBL uploaded into the `radio` area, validated, flashed over XMODEM after a kept network backup; SONOFF's EmberZNet ⇄ the zigbee-rs ZRHP NCP ("Replacing the MG24 firmware") |
 | Coordinator backend | EZSP (SONOFF's EmberZNet NCP) or ZRHP (the zigbee-rs NCP): both in the image, the boot picks one (`ncp_backend`: `auto` asks the MG24) |
 | Installation through SONOFF's web console | yes: **SONOFF's partition table and bootloader never change** |
 | TCP bridge to the MG24 UART (port 6638, as the stock firmware) | **no** |
@@ -529,15 +530,20 @@ for that boot.
 
 ## Replacing the MG24 firmware (zigbee-rs ZRHP)
 
-**Status: implemented and host-tested, not yet run on hardware** (HIL
-items 11–14 below). The hub can replace the MG24's application through its
+**Status: implemented, host-tested, and run on the lab unit in both
+directions** (0.4.2, 2026-11-28: SONOFF's EmberZNet → the zigbee-rs NCP
+0.1.3 with the network kept, XMODEM 3,612 blocks, none resent, about
+52 s; the way back, NV clear then SONOFF's stock GBL, with the network
+restored and a sleepy end device rejoining secured; then 0.1.3 again;
+HIL items 11–14 below). The hub can replace the MG24's application through its
 resident Gecko bootloader, from the ESP32, without USB: SONOFF's EmberZNet
 NCP by the zigbee-rs ZRHP NCP, and back. The bootloader itself is never
 written, so a failed or interrupted update can always be repeated. The
 zigbee-rs NCP for the Dongle-M needs its 38.4 MHz radio (feature
-`hfxo-38m4hz`, zigbee-rs PR #21, in review; its tables match the stock
-image byte for byte); zigbee-rs releases before it return `Unsupported`
-for the radio on the Dongle-M.
+`hfxo-38m4hz`, zigbee-rs PR #21; its tables match the stock image byte
+for byte): `efr32mg24-ncp-sonoff-dongle-m.gbl` of zigbee-rs `ncp-v0.1.3`
+and later; zigbee-rs releases before it return `Unsupported` for the
+radio on the Dongle-M.
 
 ### Before: what the MG24 has
 
@@ -939,8 +945,9 @@ stored network (the hub's backend calls it at every session start).
   token interface, a one-time custom EUI-64) and a ZHA import are
   host-tested only (`docs/ezsp-backend.md`, `docs/migration.md`).
 - **Green Power through EZSP**: GP frames are ignored.
-- **MG24 firmware updates** ("Replacing the MG24 firmware"): not yet run
-  on hardware; one image at a time (640 KiB), so the way back takes two
+- **MG24 firmware updates** ("Replacing the MG24 firmware"): run on the
+  lab unit in both directions (not yet: a power cut during an upload, item
+  12); one image at a time (640 KiB), so the way back takes two
   flashes; images are checked by their structure and write ranges, and
   named when known by their SHA-256, not checked against a per-version
   allow-list manifest (`coordinator-profiles.md`); the zigbee-rs MG24 NCP
@@ -960,7 +967,9 @@ stored network (the hub's backend calls it at every session start).
 
 Done on the lab unit: 1 (4 blocks claimed), 2 (session start 2.6 s), the
 Wi-Fi part of 3, forming and a sleepy end device's join and interview of
-5, `restart bringup` and the MG24 probes of 9. With 0.4.1 (2026-11-27):
+5, `restart bringup` and the MG24 probes of 9. With 0.4.2 (2026-11-28):
+13 (the switch to the zigbee-rs NCP 0.1.3, network kept) and 14 (the way
+back and to 0.1.3 again). With 0.4.1 (2026-11-27):
 the new `storage/status` fields and the claim refusals
 `confirm_required` and `already_claimed` (not yet the recovery of 10),
 and a restore over its own network (`docs/ezsp-backend.md`, "Not
