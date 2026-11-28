@@ -1816,7 +1816,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             d.last_seen_published = Some(now);
         }
         d.last_seen = Some(now);
+        // The first LQI since a restart replaces a kept one: published.
+        let fresh = d.link_stale && lqi.is_some();
         if lqi.is_some() {
+            d.link_stale = false;
             d.lqi = lqi;
         }
         if rssi.is_some() {
@@ -1849,7 +1852,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        if !was || minute_passed {
+        if !was || minute_passed || fresh {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
         if !was {
@@ -3345,25 +3348,19 @@ impl<T: ZigbeeTransport> Hub<T> {
     // Registry operations used by the API.
 
     /// Removes a device (`devices/remove`): a Zigbee device is asked to
-    /// leave (ZDO Mgmt_Leave_req, unless `force`), then the coordinator
-    /// purges it from its tables ([`Request::RemoveDevice`], whatever
-    /// `force`) and its IEEE goes to [`Self::take_removed`].
+    /// leave ([`Self::send_mgmt_leave`], unless `force`), then the
+    /// coordinator purges it from its tables ([`Request::RemoveDevice`],
+    /// whatever `force`) and its IEEE goes to [`Self::take_removed`].
     pub fn remove_device(&mut self, id: &str, force: bool, now: Millis) -> Result<(), ApiError> {
         let d = self
             .devices
             .get(id)
             .ok_or_else(|| ApiError::new("not_found", format!("no device {id}")))?;
+        let extended = d.sleepy() || d.node_desc.is_none();
         match d.kind.clone() {
             DeviceKind::Zigbee { ieee, nwk } => {
                 if !force {
-                    let tsn = self.next_zdo_tsn();
-                    self.send_zdo(
-                        id,
-                        zdo::cluster::MGMT_LEAVE_REQ,
-                        zdo::mgmt_leave_req(tsn, ieee),
-                        Purpose::None,
-                        now,
-                    );
+                    self.send_mgmt_leave(ieee, nwk, extended);
                 }
                 let req = Request::RemoveDevice {
                     ieee,
@@ -3380,6 +3377,41 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         self.forget_device(id);
         Ok(())
+    }
+
+    /// ZDO Mgmt_Leave_req (rejoin false, children kept) to `nwk`, sent
+    /// now, whether the engine knows the device or not, also to a sleepy
+    /// one (its parent holds the request until its next poll; a device's
+    /// own queue goes with a removed device): `extended`, the APS extended
+    /// timeout of a sleepy or unknown device.
+    pub fn send_mgmt_leave(&mut self, ieee: u64, nwk: u16, extended: bool) {
+        let tsn = self.next_zdo_tsn();
+        let req = ApsRequest {
+            dst: ApsDst::Nwk(nwk),
+            dst_ep: 0,
+            src_ep: 0,
+            profile: 0,
+            cluster: zdo::cluster::MGMT_LEAVE_REQ,
+            payload: zdo::mgmt_leave_req(tsn, ieee),
+            options: TxOptions {
+                ack: true,
+                extended_timeout: extended,
+            },
+        };
+        let _ = self.transport.submit(Request::Aps(req));
+    }
+
+    /// A device unknown to the engine (removed) is asked to leave
+    /// ([`Self::send_mgmt_leave`]) and the coordinator removes it
+    /// ([`Request::RemoveDevice`]: the Trust Center's removal through its
+    /// parent where the backend has one, and its record and key dropped).
+    pub fn ask_to_leave(&mut self, ieee: u64, nwk: u16, now: Millis) {
+        self.send_mgmt_leave(ieee, nwk, true);
+        let req = Request::RemoveDevice {
+            ieee,
+            nwk: Some(nwk),
+        };
+        self.control(req, control::Then::Nothing, None, now);
     }
 
     /// Drops a device, its entities and what waits for it, without network

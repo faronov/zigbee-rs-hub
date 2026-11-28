@@ -236,7 +236,7 @@ identity list.
 ```rust
 pub trait NetworkAdmin: Send + Sync {        // debug_assert!: never on the app thread
     fn form(&self, p: FormParams) -> Result<NetworkParams, CoordError>;
-    fn leave_reset(&self) -> Result<(), CoordError>;
+    fn leave_reset(&self, announce: bool) -> Result<(), CoordError>; // announce: NWK Leave on air (explicit leave only)
     fn energy_scan(&self, mask: u32, exp: u8) -> Result<Vec<EnergyChannel>, CoordError>;
     fn active_scan(&self, mask: u32, exp: u8) -> Result<Vec<Beacon>, CoordError>;
     fn change_channel(&self, ch: u8) -> Result<ChannelChange, CoordError>;

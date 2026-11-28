@@ -125,9 +125,12 @@ fn source(version: u8) -> SimConfig {
 }
 
 /// An NCP without a network, with its own IEEE.
+/// An NCP that never ran a network (frame counters 0).
 fn target(version: u8) -> SimConfig {
     let mut c = sim(version);
     c.network_formed = false;
+    c.nwk_frame_counter = 0;
+    c.aps_frame_counter = 0;
     c.eui64 = Eui64::from_u64(B_IEEE);
     c.key_table_size = 4;
     c
@@ -472,7 +475,7 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
         let mut r = Rig::new(cfg);
         r.next_up();
         if leave_first {
-            r.admin.leave_reset().unwrap();
+            r.admin.leave_reset(false).unwrap();
         }
         let report = r
             .admin
@@ -531,6 +534,44 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
     let r = restore(source(13), false);
     assert_eq!((r.nwk_fc_start, r.aps_fc_start), (65_536, 16_384));
     assert!(!r.notes.contains(&(0, restore_note::FLOOR_RAISED)));
+}
+
+/// The hub restarted between the leave and the restore: the worker no
+/// longer holds the left network's counters, the NCP stores no network but
+/// still reports them (its tokens): the restore starts above them, and
+/// counters it does not report are no floor (no 2^20 margin either).
+#[test]
+fn a_restore_after_a_hub_restart_since_the_leave_starts_above_the_ncps_counters() {
+    let mut a = Rig::new(source(13));
+    a.next_up();
+    // NWK 50 000, APS 700.
+    let items = export(&mut a, true);
+    a.finish();
+    let left = |aps_readable: bool| SimConfig {
+        network_formed: false,
+        nwk_frame_counter: 120_000,
+        aps_frame_counter: 5_000,
+        aps_frame_counter_readable: aps_readable,
+        ..source(13)
+    };
+    for aps_readable in [true, false] {
+        let mut r = Rig::new(left(aps_readable));
+        r.next_up();
+        assert_eq!(r.coord().status().network_state, NetState::None);
+        let report = r
+            .admin
+            .backup_restore(blob(&items), margins(10_000))
+            .unwrap();
+        let aps = if aps_readable { 20_480 } else { 12_288 };
+        assert_eq!(
+            (report.nwk_fc_start, report.aps_fc_start),
+            (135_168, aps),
+            "APS readable: {aps_readable}"
+        );
+        assert!(report.notes.contains(&(0, restore_note::FLOOR_RAISED)));
+        assert!(!report.notes.contains(&(0, restore_note::COUNTERS_UNKNOWN)));
+        r.finish();
+    }
 }
 
 /// EmberZNet keeps the counters `setValue` wrote truncated to 4096 and

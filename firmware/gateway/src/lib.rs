@@ -153,13 +153,16 @@ pub fn run(profile: &'static BoardProfile) -> ! {
         Ok(()) => info!("NCP UART{}: tx {} rx {} at {} Bd, no flow control", board.uart.port, board.uart.tx, board.uart.rx, board.uart.line.baud),
         Err(e) => error!("NCP UART: {e}"),
     }
-    // As the stock firmware: the NCP starts from a reset into its
-    // application (also leaves a bootloader entered before a host restart).
-    lines::reset_to_app();
-
     // The hub before the network: the HTTP server starts with the first
-    // address.
+    // address. As the stock firmware, the NCP starts from a reset into its
+    // application (also leaves a bootloader entered before a host
+    // restart): the hub's backend detection makes it (`ncp::boot_detect`),
+    // except for a zigbee-rs NCP that runs and answers, whose log waits
+    // for the backend's LOG credit; without the hub, here.
     let app_allowed = zrh_espapp::resources::app_allowed();
+    if bringup() || !app_allowed {
+        lines::reset_to_app();
+    }
     if bringup() {
         info!("bring-up boot: the hub does not start (`restart` boots it again)");
     } else if !app_allowed {

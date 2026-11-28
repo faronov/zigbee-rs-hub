@@ -1099,7 +1099,7 @@ fn ezsp_restore_over_another_network_needs_force() {
     assert_eq!(sim.ncp(|n| n.config().network.extended_pan_id), [0xEE; 8]);
     let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
     assert_eq!(ok(&r)["previous_network_backed_up"], true, "{r}");
-    assert_eq!(r["result"]["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the replaced network's backup");
+    assert_eq!(r["result"]["previous_backup"]["ext_pan_id"], "eeeeeeeeeeeeeeee", "the replaced network's backup, summarised");
     wait("the restored network owned", || {
         let i = info(&rig.app, sid, &rx);
         epid_of(&i) == [0xDD; 8] && i["ownership"] == "owned" && i["registry"]["state"] == "owned"
@@ -1134,8 +1134,9 @@ fn ezsp_restore_over_another_network_needs_force() {
 }
 
 /// EZSP: the network a restore replaces is backed up first; when the
-/// records are another backend's (foreign, closed) the backup cannot be
-/// kept, so it comes back in the answer, or the restore is refused.
+/// records are another backend's (foreign, closed) it is not the last
+/// backup, but it is kept as the replaced network's (hub-scoped), and the
+/// answer only summarises it: no key leaves with it.
 #[test]
 fn ezsp_restore_over_foreign_records_returns_the_replaced_networks_backup() {
     let src = Rig::ezsp(ezsp_sim(true, 0xDD), Store::volatile());
@@ -1154,14 +1155,23 @@ fn ezsp_restore_over_foreign_records_returns_the_replaced_networks_backup() {
     let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/restore", "backup": backup, "force": true, "confirm": true}));
     let rep = ok(&r);
     assert_eq!(rep["previous_network_backed_up"], true, "{rep}");
-    assert_eq!(rep["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "returned: it could not be kept");
-    assert_eq!(rep["backup"]["network_key"]["key"], "5e".repeat(16));
+    let prev = &rep["previous_backup"];
+    assert_eq!((prev["ext_pan_id"].as_str(), prev["kept"].as_str()), (Some("eeeeeeeeeeeeeeee"), Some("network/backup/replaced")), "{rep}");
+    assert_eq!((prev["pan_id"].as_u64(), prev["channel"].as_u64()), (Some(0x1A62), Some(15)), "{rep}");
+    no_keys(&r, [0x5E; 16]);
     wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
     let last = call(&rig.app, sid, &rx, 3, json!({"type": "network/backup/last"}));
     assert_ne!(ok(&last)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "the closed records kept nothing of it");
-    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
-    assert_eq!(ok(&kept)["backup"], rep["backup"], "kept, whatever the gate");
+    let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced", "ext_pan_id": prev["ext_pan_id"]}));
+    assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16), "kept, whatever the gate");
     rig.finish();
+}
+
+/// No key in an answer: not the network key `key`, nor any `"key"` field.
+fn no_keys(frame: &J, key: [u8; 16]) {
+    let t = frame.to_string();
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(!t.contains(&hex) && !t.contains("\"key\""), "keys in an answer: {t}");
 }
 
 /// The network of EE over another backend's (foreign, closed) records, and
@@ -1199,12 +1209,14 @@ fn ezsp_a_replacement_that_fails_after_the_leave_keeps_the_replaced_network() {
         };
         let r = call(&rig.app, sid, &rx, 2, req);
         assert_eq!(r["success"], false, "{what}: {r}");
-        assert_eq!(r["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "{what}: in the error frame");
-        assert_eq!(r["backup"]["network_key"]["key"], "5e".repeat(16));
+        assert_eq!(r["previous_backup"]["ext_pan_id"], "eeeeeeeeeeeeeeee", "{what}: summarised in the error frame");
+        assert_eq!(r["previous_backup"]["kept"], "network/backup/replaced", "{what}");
+        no_keys(&r, [0x5E; 16]);
         assert!(sim.ncp(|n| !n.config().network_formed), "{what}: the network was left");
         let (sid2, rx2) = session(&rig.app);
         let kept = call(&rig.app, sid2, &rx2, 3, json!({"type": "network/backup/replaced"}));
-        assert_eq!(ok(&kept)["backup"], r["backup"], "{what}: kept");
+        assert_eq!(ok(&kept)["backup"]["extended_pan_id"], "eeeeeeeeeeeeeeee", "{what}: kept");
+        assert_eq!(ok(&kept)["backup"]["network_key"]["key"], "5e".repeat(16), "{what}: kept");
         rig.finish();
     }
 }
@@ -1244,7 +1256,8 @@ fn ezsp_a_retry_over_the_restored_network_keeps_the_replaced_one() {
     assert_eq!(ok(&first)["previous_network_backed_up"], true, "{first}");
     wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
     let again = call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "force": true}));
-    assert_eq!(ok(&again)["backup"]["extended_pan_id"], "dddddddddddddddd", "{again}");
+    assert_eq!(ok(&again)["previous_backup"]["ext_pan_id"], "dddddddddddddddd", "{again}");
+    assert_eq!(ok(&again)["previous_backup"]["kept"], "network/backup/last", "{again}");
     assert_eq!(ok(&again)["previous_network_backed_up"], true, "as the last backup: {again}");
     wait("the restored network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
     let kept = call(&rig.app, sid, &rx, 4, json!({"type": "network/backup/replaced"}));
@@ -1384,10 +1397,13 @@ fn devices_list(app: &App, sid: u64, rx: &Receiver<String>) -> Vec<String> {
 /// A removed device stays removed while the NCP's tables still list it:
 /// neither a new NCP session nor a hub restart imports it again. The NCP
 /// purges what it can (ZRHP: `TBL_INVALIDATE` and the host store's device
-/// record, `NWK_REMOVE_DEVICE` answered `UNSUPPORTED_COMMAND` as by the
-/// zigbee-rs NCP; EZSP: an APS Remove-Device to the router), whether the
-/// device was reachable (Mgmt_Leave_req) or not (`force`). Once it joins
-/// again it is back as any device, and stays after a restart.
+/// record, `NWK_REMOVE_DEVICE` with flags bit2, removal through the parent,
+/// answered `UNSUPPORTED_COMMAND` as by the zigbee-rs NCP; EZSP: an APS
+/// Remove-Device to the router), whether the device was reachable
+/// (Mgmt_Leave_req) or not (`force`). It rejoins with the network key it
+/// holds while joining is closed: asked to leave again, still removed.
+/// Paired again (joining open) it is back as any device, and stays after
+/// a restart.
 #[test]
 fn a_removed_device_is_not_imported_again_until_it_joins() {
     for kind in BOTH {
@@ -1432,6 +1448,8 @@ fn removed_device_stays_removed(kind: Kind, force: bool) {
             wait(&format!("{what}: TBL_INVALIDATE"), || zsim.state().log.iter().any(|(id, _)| *id == ids::TBL_INVALIDATE));
             let invalidated = zsim.state().log.into_iter().find(|(id, _)| *id == ids::TBL_INVALIDATE).unwrap().1;
             assert_eq!(invalidated, [&[5u8, 1][..], &PLUG.to_le_bytes()].concat(), "{what}: DEVICE table, by IEEE");
+            let remove = zsim.state().trace.unwrap().into_iter().find(|(id, _)| *id == ids::NWK_REMOVE_DEVICE).unwrap().1;
+            assert_eq!(remove, [&PLUG_NWK.to_le_bytes()[..], &PLUG.to_le_bytes(), &[0x04]].concat(), "{what}: through its parent, no rejoin");
             assert!(zsim.state().table_devices.is_empty(), "{what}");
             wait(&format!("{what}: the host store's record"), || !ncp.store_state().devices.contains_key(&PLUG.to_le_bytes()));
         }
@@ -1473,9 +1491,43 @@ fn removed_device_stays_removed(kind: Kind, force: bool) {
     assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}");
     assert_eq!(rig.app.status().imported, 0, "{what}");
 
-    // It joins again: back, interviewed, and no longer remembered.
+    // It rejoins (secured, with the network key it holds) while joining is
+    // closed: asked to leave again, the coordinator removes it again, it
+    // stays removed; a network event says so.
     let answered = Arc::new(Mutex::new(Vec::new()));
-    rig.devices(vec![plug()], answered);
+    rig.devices(vec![plug()], answered.clone());
+    ok(&call(&rig.app, sid, &rx, 7, json!({"type": "subscribe", "topics": ["network"]})));
+    rig.link.join(PLUG, PLUG_NWK);
+    let leave = || answered.lock().unwrap().iter().filter(|r| r.profile == 0 && r.cluster == 0x0034).count();
+    wait(&format!("{what}: asked to leave again"), || leave() == 1);
+    let back = loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "event" && f["event"]["topic"] == "removed_device_back" {
+            break f["event"].clone();
+        }
+    };
+    assert_eq!((back["device"].as_str(), back["via"].as_str()), (Some(plug_id), Some("rejoin")), "{what}: {back}");
+    match kind {
+        Kind::Zrhp => {
+            let zsim = rig.zsim.clone().unwrap();
+            wait(&format!("{what}: purged again"), || zsim.state().log.iter().filter(|(id, _)| *id == ids::TBL_INVALIDATE).count() >= 2);
+        }
+        Kind::Ezsp => {
+            // The NCP of the restarted hub.
+            let sim = rig.ezsp.clone().unwrap();
+            wait(&format!("{what}: Remove-Device again"), || !sim.ncp(|n| n.removals().is_empty()));
+        }
+    }
+    // Its announcement too (at most one leave request a minute).
+    rig.link.indicate(&plug().ind(0, 0, 0x0013, hub_devices::zdo::device_annce(2, PLUG_NWK, PLUG, 0x8E)));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}: still removed");
+    assert_eq!(leave(), 1, "{what}");
+    assert!(stored().is_some(), "{what}: still remembered");
+
+    // Paired again (joining open): back, interviewed, and no longer
+    // remembered.
+    ok(&call(&rig.app, sid, &rx, 8, json!({"type": "network/permit_join", "duration_s": 60})));
     rig.link.join(PLUG, PLUG_NWK);
     wait(&format!("{what}: the plug back"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
     let kv = rig.kv.clone();
@@ -1802,5 +1854,65 @@ fn the_zrhp_probe_leaves_no_thread_on_the_port() {
         if let Some(z) = zsim {
             z.stop();
         }
+    }
+}
+
+/// The Dongle-M's boot (`ncp::detect_now`, then the backend): a zigbee-rs
+/// NCP that runs and answers is not reset, so the records it kept since
+/// its own reset (its first boot after a flash: the NV erased, the crystal
+/// tuning) reach the hub's log once the backend's session grants LOG
+/// credit (the probe grants none). Reset at the hub's start, as before and
+/// still for an EmberZNet NCP seen last, the records are gone.
+#[test]
+fn a_running_zrhp_ncps_boot_log_survives_the_hubs_start() {
+    use crate::backend::select::{Found, Probe, Prober, Setting, detect, probe_zrhp};
+    use hub_ncp::transport::{Line, pipe};
+
+    type Port = Line2<pipe::Rx, pipe::Tx>;
+    struct SimProber {
+        port: Port,
+        sim: hub_ncp::sim::SimNcp,
+        resets: usize,
+    }
+    impl Prober for SimProber {
+        fn probe(&mut self, p: Probe) -> Result<Found, String> {
+            match p {
+                Probe::Zrhp => probe_zrhp(self.port.clone(), self.port.clone(), vec![Line::BR_DEFAULT], 0x5EED_0020, quick()),
+                _ => Err("no answer".into()),
+            }
+        }
+        fn reset_to_app(&mut self) {
+            self.resets += 1;
+            self.sim.reboot();
+        }
+    }
+
+    for hint in [BackendKind::Zrhp, BackendKind::Ezsp] {
+        let (host, ncp_end) = pipe::pair();
+        let sim = hub_ncp::sim::SimNcp::start(ncp_end);
+        for text in ["foreign NVM3 found: NV erased", "CTUNE 0x78 from MFG_CTUNE"] {
+            sim.log_record(3, text);
+        }
+        // Queued on the NCP's LOG endpoint (its loop takes them in 2 ms).
+        thread::sleep(Duration::from_millis(100));
+        let (rx, tx) = host.split();
+        let port = Line2(Arc::new(Mutex::new(rx)), Arc::new(Mutex::new(tx)));
+        let mut prober = SimProber { port: port.clone(), sim: sim.clone(), resets: 0 };
+        let d = detect(Setting::Auto, Some(hint), false, &mut prober);
+        assert_eq!(d.backend, BackendKind::Zrhp, "{hint:?}");
+        let mut cfg = hub_ncp::lifecycle::HubConfig::default();
+        cfg.driver.lines = vec![Line::BR_DEFAULT];
+        let hub = hub_ncp::Hub::start(cfg, port.clone(), port, None, Store::volatile(), crate::tests::rng());
+        assert!(hub.wait_ready(T), "{hint:?}");
+        if hint == BackendKind::Zrhp {
+            assert_eq!(prober.resets, 0);
+            wait("the NCP's boot records in the hub's log", || hub.ncp_log().forwarded == 2);
+        } else {
+            assert_eq!(prober.resets, 1);
+            thread::sleep(Duration::from_millis(1500));
+            assert_eq!(hub.ncp_log().forwarded, 0, "lost with the reset");
+        }
+        hub.shutdown();
+        sim.stop();
     }
 }

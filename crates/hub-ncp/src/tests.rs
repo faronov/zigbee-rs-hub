@@ -510,16 +510,19 @@ fn leave_reset_then_form_a_new_network() {
     let (hub, sim) = formed(15);
     let old = hub.store_state().network.unwrap();
     assert_eq!(hub.form(FormRequest::default()).unwrap_err(), Error::Status(Status::AlreadyExists));
-    hub.leave_reset().unwrap();
+    hub.leave_reset(false).unwrap();
     assert!(hub.store_state().network.is_none());
     assert_eq!(hub.status().ownership, Ownership::NoNetwork);
     assert_eq!(sim.state().network_state, 0);
-    let flags = sim.state().log.iter().find(|(id, _)| *id == ids::NWK_LEAVE_RESET).map(|(_, p)| p.clone());
-    assert_eq!(flags, Some(vec![0x03]), "keep the IEEE override and the host endpoints");
+    let flags = || sim.state().log.iter().filter(|(id, _)| *id == ids::NWK_LEAVE_RESET).map(|(_, p)| p.clone()).collect::<Vec<_>>();
+    assert_eq!(flags(), [vec![0x03]], "keep the IEEE override and the host endpoints; a local wipe, no Leave on air");
     let new = hub.form(FormRequest { channel_mask: 1 << 25, pan_id: Some(0x1A2B), ..FormRequest::default() }).unwrap();
     assert_eq!((new.pan_id, new.channel), (0x1A2B, 25));
     assert_ne!(new.network_key, old.network_key);
     assert_eq!(hub.status().ownership, Ownership::Owned);
+    // An explicit "leave network": the Leave is broadcast first (bit2).
+    hub.leave_reset(true).unwrap();
+    assert_eq!(flags(), [vec![0x03], vec![0x07]]);
     hub.shutdown();
     sim.stop();
 }
@@ -548,7 +551,7 @@ fn ownership_tag_follows_the_owned_network() {
 
     // The NCP left its network and runs another one the hub adopts: the
     // records are not that network's.
-    hub.leave_reset().unwrap();
+    hub.leave_reset(false).unwrap();
     sim.with(|s| (s.network_state, s.pan_id, s.ext_pan_id, s.channel, s.key) = (2, 0x5555, [9; 8], 11, [7; 16]));
     let resumes = hub.status().resumes;
     reboot(&hub, &sim);
@@ -574,7 +577,7 @@ fn an_interrupted_formation_keeps_the_records_owned() {
     use hub_coord::RegistryState;
     let (hub, sim) = formed(15);
     hub.with_store(|s| s.kv_put("dev/zb:1", b"{}")).unwrap();
-    hub.leave_reset().unwrap();
+    hub.leave_reset(false).unwrap();
     // The new network is stored, then NWK_FORM fails.
     sim.with(|s| s.unsupported.push(ids::NWK_FORM));
     assert!(hub.form(FormRequest { channel_mask: 1 << 20, ..FormRequest::default() }).is_err());

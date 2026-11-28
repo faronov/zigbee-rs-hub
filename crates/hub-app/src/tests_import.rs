@@ -194,10 +194,11 @@ fn an_import_restores_the_network_and_the_devices_without_pairing() {
         );
         assert_eq!(res["previous_network_backed_up"], true);
         assert_eq!(
-            res["backup"]["extended_pan_id"].as_str().map(str::len),
+            res["previous_backup"]["ext_pan_id"].as_str().map(str::len),
             Some(16),
-            "the replaced network's backup"
+            "the replaced network's backup, summarised"
         );
+        assert!(!r.to_string().contains("\"key\""), "{kind:?}: no keys in the answer: {r}");
         assert!(
             res["network"]["nwk_fc_start"].as_u64().unwrap() >= 5000 + (1 << 20),
             "{kind:?}: {res}"
@@ -242,7 +243,7 @@ fn an_import_restores_the_network_and_the_devices_without_pairing() {
         );
         assert_eq!(
             ok(&kept)["backup"]["extended_pan_id"],
-            res["backup"]["extended_pan_id"],
+            res["previous_backup"]["ext_pan_id"],
             "{kind:?}: kept before the leave"
         );
         let g = call(&rig.app, sid, &rx, 4, json!({"type": "groups/list"}));
@@ -917,11 +918,11 @@ fn an_apply_that_timed_out_after_the_restore_resumes() {
     );
     assert_eq!(answers[&1]["error"]["code"], "timeout", "{}", answers[&1]);
     assert_eq!(
-        answers[&1]["backup"]["extended_pan_id"]
+        answers[&1]["previous_backup"]["ext_pan_id"]
             .as_str()
             .map(str::len),
         Some(16),
-        "the replaced network's backup comes with the error"
+        "the replaced network's backup is summarised in the error"
     );
     wait("the restored network owned", || {
         let i = info(&rig.app, sid, &rx);

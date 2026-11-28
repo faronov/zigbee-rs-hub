@@ -148,8 +148,8 @@ impl NetworkAdmin for ZrhpAdmin {
         })
     }
 
-    fn leave_reset(&self) -> Result<(), CoordError> {
-        self.hub.leave_reset().map_err(coord_error)
+    fn leave_reset(&self, announce: bool) -> Result<(), CoordError> {
+        self.hub.leave_reset(announce).map_err(coord_error)
     }
 
     fn energy_scan(&self, mask: u32, exp: u8) -> Result<Vec<EnergyChannel>, CoordError> {

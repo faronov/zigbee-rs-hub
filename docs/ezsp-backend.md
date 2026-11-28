@@ -445,7 +445,11 @@ checks of step 0 alone, without changing anything):
    safe; an older backup of the running network would otherwise go back
    below what its devices have seen): of the network the NCP stores, up
    or not, or of the one it left just before (hub-app leaves first; the
-   backend reads them before every leave), note `floor_raised`. A stored
+   backend reads them before every leave), note `floor_raised`. After a
+   hub restart since that leave the backend no longer holds them: those
+   the NCP still reports without a network (EmberZNet keeps them in its
+   tokens across `leaveNetwork`) are floors where not 0, and one it does
+   not report is no floor (no extra margin). A stored
    network whose counter the NCP does not report (or reports as 0 while
    it is not up: UNVERIFIED whether EmberZNet has it before
    `networkInit`) gets a margin of at least 2²⁰ over the backup's (note
