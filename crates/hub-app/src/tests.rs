@@ -19,7 +19,7 @@ use crate::{App, AppConfig};
 pub(crate) const T: Duration = Duration::from_secs(10);
 const DEV: u64 = 0x00158d0001a2b3c4;
 
-fn rng() -> Rng {
+pub(crate) fn rng() -> Rng {
     let n = Arc::new(AtomicU32::new(7));
     Arc::new(move |buf: &mut [u8]| {
         for b in buf {

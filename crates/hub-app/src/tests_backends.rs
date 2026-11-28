@@ -1817,3 +1817,63 @@ fn the_zrhp_probe_leaves_no_thread_on_the_port() {
         }
     }
 }
+
+/// The Dongle-M's boot (`ncp::detect_now`, then the backend): a zigbee-rs
+/// NCP that runs and answers is not reset, so the records it kept since
+/// its own reset (its first boot after a flash: the NV erased, the crystal
+/// tuning) reach the hub's log once the backend's session grants LOG
+/// credit (the probe grants none). Reset at the hub's start, as before and
+/// still for an EmberZNet NCP seen last, the records are gone.
+#[test]
+fn a_running_zrhp_ncps_boot_log_survives_the_hubs_start() {
+    use crate::backend::select::{Found, Probe, Prober, Setting, detect, probe_zrhp};
+    use hub_ncp::transport::{Line, pipe};
+
+    type Port = Line2<pipe::Rx, pipe::Tx>;
+    struct SimProber {
+        port: Port,
+        sim: hub_ncp::sim::SimNcp,
+        resets: usize,
+    }
+    impl Prober for SimProber {
+        fn probe(&mut self, p: Probe) -> Result<Found, String> {
+            match p {
+                Probe::Zrhp => probe_zrhp(self.port.clone(), self.port.clone(), vec![Line::BR_DEFAULT], 0x5EED_0020, quick()),
+                _ => Err("no answer".into()),
+            }
+        }
+        fn reset_to_app(&mut self) {
+            self.resets += 1;
+            self.sim.reboot();
+        }
+    }
+
+    for hint in [BackendKind::Zrhp, BackendKind::Ezsp] {
+        let (host, ncp_end) = pipe::pair();
+        let sim = hub_ncp::sim::SimNcp::start(ncp_end);
+        for text in ["foreign NVM3 found: NV erased", "CTUNE 0x78 from MFG_CTUNE"] {
+            sim.log_record(3, text);
+        }
+        // Queued on the NCP's LOG endpoint (its loop takes them in 2 ms).
+        thread::sleep(Duration::from_millis(100));
+        let (rx, tx) = host.split();
+        let port = Line2(Arc::new(Mutex::new(rx)), Arc::new(Mutex::new(tx)));
+        let mut prober = SimProber { port: port.clone(), sim: sim.clone(), resets: 0 };
+        let d = detect(Setting::Auto, Some(hint), false, &mut prober);
+        assert_eq!(d.backend, BackendKind::Zrhp, "{hint:?}");
+        let mut cfg = hub_ncp::lifecycle::HubConfig::default();
+        cfg.driver.lines = vec![Line::BR_DEFAULT];
+        let hub = hub_ncp::Hub::start(cfg, port.clone(), port, None, Store::volatile(), crate::tests::rng());
+        assert!(hub.wait_ready(T), "{hint:?}");
+        if hint == BackendKind::Zrhp {
+            assert_eq!(prober.resets, 0);
+            wait("the NCP's boot records in the hub's log", || hub.ncp_log().forwarded == 2);
+        } else {
+            assert_eq!(prober.resets, 1);
+            thread::sleep(Duration::from_millis(1500));
+            assert_eq!(hub.ncp_log().forwarded, 0, "lost with the reset");
+        }
+        hub.shutdown();
+        sim.stop();
+    }
+}
