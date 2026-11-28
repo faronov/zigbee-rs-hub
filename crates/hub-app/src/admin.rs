@@ -8,8 +8,10 @@
 //! Requests reach this module only from authenticated sessions. Everything
 //! that talks to the NCP runs on one job thread at a time (the app thread
 //! must keep serving events); its result frame and `network` events come
-//! back through the app's input channel. Keys only appear in backup files
-//! sent to the requesting session and in the host store, never in logs.
+//! back through the app's input channel. Keys only appear in the backup
+//! requests' answers (`network/backup` with keys, `network/backup/last`,
+//! `network/backup/replaced`) to the requesting session and in the host
+//! store, never in logs or other answers.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
