@@ -407,10 +407,11 @@ const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/senso
  pgId=()=>(/^#device\/(.+)/.exec(location.hash)||[])[1];
 let sy,pgOn,snap;
 // Live values: battery (s: %, b: low), linkquality, rssi and last seen (t),
-// from the device's entities (updated with every frame), else its record.
+// from the device's entities (updated with every frame), else its record;
+// no LQI or RSSI kept over a restart until a frame measures them again.
 function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen};
  for(const e of dEnts(id)){const s=states[e.uid]||{};v.t=Math.max(v.t||0,s.last_reported||0);if(s.state!=null)v[e.device_class=="battery"?e.platform[0]:e.key]=s.state}
- return v}
+ if(d.link_stale)v.linkquality=v.rssi=null;return v}
 // Battery, signal (a dot coloured by LQI as on the map: ≥ 150, ≥ 80, below),
 // last seen and power source: under the card's title, on the page under the
 // device's facts; a line that wraps between its items only.

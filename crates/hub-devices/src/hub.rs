@@ -1816,7 +1816,10 @@ impl<T: ZigbeeTransport> Hub<T> {
             d.last_seen_published = Some(now);
         }
         d.last_seen = Some(now);
+        // The first LQI since a restart replaces a kept one: published.
+        let fresh = d.link_stale && lqi.is_some();
         if lqi.is_some() {
+            d.link_stale = false;
             d.lqi = lqi;
         }
         if rssi.is_some() {
@@ -1849,7 +1852,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        if !was || minute_passed {
+        if !was || minute_passed || fresh {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
         if !was {

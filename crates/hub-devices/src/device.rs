@@ -388,6 +388,9 @@ pub struct Device {
     pub lqi: Option<u8>,
     /// RSSI.
     pub rssi: Option<i8>,
+    /// `lqi` and `rssi` are the ones kept before a restart, not measured
+    /// since (`link_stale` in the API until the next frame). Not stored.
+    pub link_stale: bool,
     /// Availability.
     pub available: bool,
     /// The coordinator reported that the device left the network: it is
@@ -489,6 +492,7 @@ impl Device {
             last_seen_published: None,
             lqi: None,
             rssi: None,
+            link_stale: false,
             available: true,
             left: false,
             check: None,
@@ -720,6 +724,9 @@ impl Device {
         // their fields.
         if self.left {
             v["unavailable_reason"] = "left".into();
+        }
+        if self.link_stale {
+            v["link_stale"] = true.into();
         }
         // Sleepy: requests wait until it is next heard from (the web UI's
         // "press a button" hint).
