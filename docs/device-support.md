@@ -427,14 +427,19 @@ Precedence rules:
   names it instead: `catalog_refused` in `devices/diagnostics`, `refused` in
   `catalog/status` `missing` and `definitions/fetch` (when it would be
   chosen over what the device resolves to), and the web UI's Find
-  definition says so rather than "no definition". (Hub 0.3.0 kept Tuya
-  TS011F plugs generic this way: their zhc definitions need the vendor
-  templates `tuya` and `tuya_metering_zero_debounce`, 17.4. The hub now
-  implements the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
-  resolves; where zhc picks a TS011F definition that needs `tuya`
-  (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays), the hub uses
-  `TS011F_plug_1`, the `zigbeeModel` match, and names the other. Such a
-  fallback is marked: the device record's `definition_approximate`
+  definition says so rather than "no definition". A family vendor
+  template (`tuya`, 17.4) adds what its helpers need beyond those this
+  firmware implements as features it lacks, `template.<family>.<helper>`
+  (an argument: `template.tuya.tuya_on_off.inchingSwitch`; an expose no
+  implemented helper gives: `template.tuya.expose.<key>`). (Hub 0.3.0 kept
+  Tuya TS011F plugs generic this way: their zhc definitions need the
+  vendor templates `tuya` and `tuya_metering_zero_debounce`, 17.4. Hub 0.4
+  implemented the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
+  resolved, and where zhc picks a TS011F definition that needs `tuya`
+  (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) it used
+  `TS011F_plug_1` and named the other; with `tuya` they run as zhc picks
+  them. Where the better definition still needs something this firmware
+  lacks, the fallback is marked: the device record's `definition_approximate`
   `{better: "<id> (<vendor> <model>)", needs: [features]}` (also in
   `devices/diagnostics`; the web UI shows an "approx." badge explaining
   that Zigbee2MQTT uses the other definition, which needs the feature,
@@ -471,6 +476,20 @@ changed, the self-description hash changed, or the user asks. Effects:
   on several endpoints (herdsman endpoint maps name every endpoint);
 - configure (binds, reporting) is redone only if the configure hash (the
   canonical CBOR of all binds, reporting configs and configure ops) changed.
+  The queue of configure ops is not stored: a device restored at boot
+  rebuilds its ops at its first frame and sends those without a result
+  (nothing done is repeated).
+  A device already configured under a definition (every op of it has a
+  result), or paired by an earlier build (its record's `paired`, the
+  templates' revision when it joined, differs; 0 for one saved before
+  this field, or imported), that gets another resolution (a new
+  definition, a firmware that now runs one) keeps the attributes a
+  setting entity controls (select, switch, number): their configure
+  writes that were never sent — a remote's operation mode — are counted
+  done, not sent, as Zigbee2MQTT writes them at pairing only. A device paired by this build whose first definition
+  comes after its interview (fetched in a shard) sends them, as do
+  `devices/reconfigure` and a new pairing (after removing the device); a
+  write that failed is retried, also when reporting settings change.
 
 ## 4. Entity model and the Home Assistant mapping
 
@@ -734,7 +753,8 @@ For battery devices the hub caps `max` at the device's check-in or 6 h,
 whichever is shorter, so availability (4.6) has a signal. A failed Configure
 Reporting (UNSUPPORTED_ATTRIBUTE, UNREPORTABLE_ATTRIBUTE) is recorded and the
 entity is polled instead only if it is a primary measurement on a mains
-device (every `max` seconds); sleepy devices are never polled.
+device (every `max` seconds); sleepy devices are never polled, nor a device
+while it is unavailable or has left (its next frame resumes the polls).
 
 **User settings.** The table is editable per attribute class (global
 defaults), and the reporting of any ZCL-bound value of an entity can be
@@ -1535,8 +1555,9 @@ without that device class or unit) and is reported in diagnostics.
   bank's string table, encoded like the shared-item references of "Packed
   CBOR" (draft-ietf-cbor-packed): simple value *n* for *n* < 16, tag 6 with
   *n* − 16 otherwise. The bank format version pins this encoding, whatever
-  the draft's final numbering. Catalog form is derived mechanically from the
-  standalone form and is never hashed.
+  the draft's final numbering. A vendor template's `params` (key 158,
+  free-form, 17.4) stay as they are. Catalog form is derived mechanically
+  from the standalone form and is never hashed.
 
 ### 8.5 Versioning
 
@@ -1553,9 +1574,9 @@ without that device class or unit) and is reported in diagnostics.
   the definition instead of matching it without the date),
   `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
   `23 template.tuya_metering_zero_debounce` (implemented by the hub after
-  0.3.0) (vendor templates, C tier 17.4:
-  `templates: [{name, params}]`, `params` free-form, key 21 at the top
-  level), `60 wasm` (reserved). The compiler computes it from what the definition
+  0.3.0; `22` after 0.4, with the helpers 17.4 lists) (vendor
+  templates, C tier 17.4: `templates: [{name, params}]`, `params`
+  free-form, key 21 at the top level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
   that uses a feature it does not list. A hub lacking any listed feature
   treats the definition as non-matching (3.3); a code it does not know at
@@ -1778,7 +1799,9 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   shard uploaded for another device that shares a key checks that shard
   only); a device with refusals is checked again under a newer catalog —
   and after a restart on a firmware that gained their features, which
-  drops those (what it can run now is fetched) — until every one of its
+  drops those (what it can run now is fetched; a family template's
+  `template.<family>.<item>` when the firmware's template code differs,
+  `templates::REVISION` saved with the refusal) — until every one of its
   shards is: `missing` lists it with `recheck: true` also while it has a
   definition (the web UI does not count those as "without definition").
   `missing` lists a device's shards not yet checked under the installed
@@ -3712,16 +3735,60 @@ After that, the coverage report's ranking decides (Ledvance light 105,
 IKEA 89 + 66 are next).
 
 Implemented: **`tuya_metering_zero_debounce`** (`hub-devices`
-`templates.rs`; zhc `tuya.fz.TS011F_electrical_measurement`, used by
+`templates/mod.rs`; zhc `tuya.fz.TS011F_electrical_measurement`, used by
 `TS011F_plug_1` — zhc's choice for any TS011F without a more specific
 fingerprint — and `TS011F_with_threshold`; no parameters). A zero power,
 current or voltage reading (Electrical Measurement 0x050B, 0x0508, 0x0505
 on the entity's endpoint) is held for twice the attribute's minimum
 reporting interval plus one second (5 s without a reporting record, so
 11 s) and published only if no other reading of that attribute came
-meanwhile; a held zero current also sets the power to 0 when it is
+meanwhile (from the hub's 1 s tick, or before the device's next frame
+when that comes first); a held zero current also sets the power to 0 when it is
 published; while the endpoint's On/Off is off, every Electrical
 Measurement report sets the power to 0 at once.
+
+Implemented: the family template **`tuya`** (`hub-devices`
+`templates/`). The generator turns a zhc helper it cannot express in v1
+into a feature of its family's template, `params: {features: {<helper>:
+<its literal arguments>}, keys: [<exposes they give>]}` (a helper used
+twice with different arguments: `{instances: [...]}`). The hub expands
+them at resolution into ordinary entities, configure ops and triggers,
+from tables (one entity builder, one expression type), so a helper costs
+the firmware a table row more often than code; the firmware keeps the
+hashes (FNV-1a) of the helper and argument names it matches, not the
+names. What a definition's template needs beyond that — a helper, an
+argument, an expose (`keys`) no implemented helper gives — is a required
+feature it lacks,
+`template.<family>.<item>` (3.3, 9.3: refused and named, the device runs
+generic or approximate). Partial definitions (no `keys`) get the helpers'
+entities.
+
+- `tuya`: `tuya_on_off` (TS011F plugs, switch modules, DIN relays: zhc's
+  settings on On/Off 0x8000 child lock, 0x8001 indicator or backlight
+  mode, 0x8002 power-on behaviour or outage memory, 0x5000 backlight
+  switch, Tuya 0xE001 0xD010 per-endpoint power-on behaviour, 0xD020 switch
+  mode, 0xD030 switch type, 0xEF00 0x4002; the generic ZCL power-on
+  behaviour 0x4003 gives way; `onOffCountdown`: `countdown` per endpoint,
+  On/Off 0x4001 in s, set with On With Timed Off 0x42; not
+  `inchingSwitch`), `operation_mode` (TS004F: On/Off 0x8004 command or
+  event; in command mode the generic remote events stay on the `action`
+  entity), `multi_action` (0xFD single, double, hold; 0xFC rotate right,
+  left), `switch_scene` (0xFD with the scene), `tuya_led_indicator`,
+  `relay_din_led_indicator` (0x8001), `electricity_measurement_poll`
+  (Electrical Measurement voltage, current, power and/or Metering
+  summation read on endpoint 1 every 60 s, less the attributes the device
+  reported within those 60 s, not while it is unavailable or has left).
+  `multi_action` and `switch_scene` keep the generic remote events (Lidl
+  FB21-001: its on/off and dimming commands).
+
+Coverage of zhc 26.130.0's generated definitions (hub-devices test
+`template_coverage`): of the 223 using `tuya`, 50 fully translated and 8
+partial run (165 refused: Tuya lights `tuya_light` 44, the legacy EF00
+helpers, covers, breakers' value converters, thermostats). App image cost
+(8 MB S3 image, CI): ~14 KiB with the template machinery. The
+catalog lists the implemented helpers in `templates_available`
+(`<family>.<helper>`), so that its banks hold the definitions the released
+hub runs. Next: `lumi` (178 definitions).
 
 ### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
 

@@ -6,7 +6,6 @@ use serde_json::json;
 use super::*;
 use crate::model::LayerSource;
 use crate::testutil::sim::{Sim, SimDevice};
-use crate::testutil::yaml::load_definition;
 use crate::zcl::{TypedValue, ZclType, ZclValue};
 use crate::zdo::LogicalType;
 
@@ -39,16 +38,16 @@ fn plug() -> SimDevice {
 fn joined() -> (Hub<MockTransport>, Sim) {
     let mut hub = hub_with(&[]);
     let mut cat = MemoryCatalog::default();
-    // Generated catalog entries for this plug; `ts011f_plug_3` needs the
-    // `tuya` vendor template, which the hub skips (generic + plug_1 win);
-    // `ts011f_plug_1` needs `tuya_metering_zero_debounce`, which it has.
+    // Generated catalog entries for this plug, loaded as the hub loads
+    // fetched ones (zdefc CBOR): zhc picks `ts011f_plug_1` for it
+    // (template `tuya_metering_zero_debounce`); `ts011f_plug_3` names it as
+    // a white label only and selects other application versions.
     for src in [
         include_str!("fixtures/ts011f_plug_1.yaml"),
         include_str!("fixtures/ts011f_plug_3.yaml"),
     ] {
-        if let Ok(d) = load_definition(src, LayerSource::Catalog) {
-            cat.insert(d);
-        }
+        let c = zdefc::compile_str(src, zdefc::Format::Yaml, &Default::default()).unwrap();
+        cat.insert(crate::zdef_adapter::load_cbor(&c.cbor, LayerSource::Catalog).unwrap());
     }
     hub.set_catalog(Box::new(cat), T0);
     let mut sim = Sim::default();
@@ -251,11 +250,12 @@ fn plug_metering_zero_readings_are_debounced() {
     let (mut hub, mut sim) = joined();
     let d = hub.device(ID).unwrap();
     assert!(d.resolution.metering_zero_debounce);
+    // TS011F_plug_3 (template `tuya`) loads too; plug_1 matches better.
     assert!(
         d.resolution
             .diagnostics
             .iter()
-            .any(|x| x.contains("ts011f_plug_3 requires template.tuya"))
+            .all(|x| !x.contains("requires"))
     );
     let uid = |k: &str| format!("{ID}:1:{k}");
     let on = sim.dev(IEEE).clone().report(
@@ -286,6 +286,15 @@ fn plug_metering_zero_readings_are_debounced() {
     hub.on_aps_indication(electrical(&mut sim, 0x050b, 60, ZclType::I16), t + 2000);
     hub.tick(t + 30_000);
     assert_eq!(state(&hub, &uid("power")), json!(60.0));
+    // A zero due before the next reading (between two ticks) stands first.
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), t + 31_000);
+    hub.drain_events();
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 70, ZclType::I16), t + 42_500);
+    let pw: Vec<J> = states(&hub.drain_events(), &uid("power"))
+        .iter()
+        .map(|s| s["state"].clone())
+        .collect();
+    assert_eq!(pw, [json!(0.0), json!(70.0)]);
     // A zero current, once due, zeroes the power as well.
     let t = t + 40_000;
     hub.on_aps_indication(electrical(&mut sim, 0x0508, 0, ZclType::U16), t);
@@ -338,15 +347,18 @@ fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::
         score,
         priority: 0,
         shard: 0,
+        templates: crate::templates::REVISION,
     }
 }
 
 /// `definition_approximate`: the plug runs TS011F_plug_1 while a catalog
-/// definition that outranks it needs a feature this firmware lacks. What a
+/// definition that outranks it needs a feature this firmware lacks (here
+/// made up: `template.hue_light`). What a
 /// shard found is replaced only by that shard's next check (a shard checked
 /// for another device does not clear the others'), kept in the snapshot;
 /// a firmware that gained the feature drops it on restore and marks the
-/// device for the catalog service to check again.
+/// device for the catalog service to check again; so does one whose family
+/// templates differ (`template.tuya.<item>`, [`crate::templates::REVISION`]).
 #[test]
 fn approximate_definition_is_recorded_kept_and_rechecked() {
     let (mut hub, _sim) = joined();
@@ -368,18 +380,26 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
         0x10,
         &both,
         true,
-        vec![refused("tuya/x", "X", "template.tuya", s)],
+        vec![refused("tuya/x", "X", "template.hue_light", s)],
     );
     assert_eq!(approx(&hub), None);
     hub.drain_events();
-    let plug_3 = || refused("tuya/ts011f_plug_3", "JR-ZPM03", "template.tuya", s + 10);
+    let plug_3 = || {
+        refused(
+            "tuya/ts011f_plug_3",
+            "JR-ZPM03",
+            "template.hue_light",
+            s + 10,
+        )
+    };
     hub.note_refused(ID, 7, 0x20, &both, true, vec![plug_3()]);
     assert!(
         hub.drain_events()
             .iter()
             .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == ID))
     );
-    let want = json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.tuya"]});
+    let want =
+        json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.hue_light"]});
     assert_eq!(approx(&hub), Some(want.clone()));
     assert_eq!(hub.diagnostics(ID).unwrap()["definition_approximate"], want);
     // A newer catalog: shard 0x10 checked (e.g. for another device sharing
@@ -433,23 +453,41 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
         ids(hub.device(ID).unwrap()),
         [("tuya/ts011f_plug_3".to_string(), 0x20)]
     );
-    // Saved by a build that named code 22 `feature 22`.
+    // Saved by a build that named code 20 `feature 20`.
     let p3 = snap
         .refused
         .iter()
         .position(|r| r.id == "tuya/ts011f_plug_3")
         .unwrap();
-    snap.refused[p3].requires = vec!["feature 22".into()];
-    // Restored by a firmware without template.tuya: unchanged.
+    snap.refused[p3].requires = vec!["feature 20".into()];
+    // Restored by a firmware without template.hue_light: unchanged.
     let mut same = hub_with(&[]);
     same.restore_device(snap.clone(), None, T0).unwrap();
     let d = same.device(ID).unwrap();
     assert_eq!((d.refused.len(), d.refused_version), (2, 8));
-    assert_eq!(d.refused[p3].requires, ["template.tuya"]);
+    assert_eq!(d.refused[p3].requires, ["template.hue_light"]);
+    // A family template's sub-name (what the `tuya` code lacked): kept by
+    // a build with the same template code, checked again by another (one
+    // that may implement it now).
+    let mut sub = snap.clone();
+    sub.refused[p3].requires = vec!["template.tuya.tuya_light".into()];
+    let mut same = hub_with(&[]);
+    same.restore_device(sub.clone(), None, T0).unwrap();
+    let d = same.device(ID).unwrap();
+    assert_eq!(d.refused[p3].requires, ["template.tuya.tuya_light"]);
+    assert!(!d.refused_recheck);
+    sub.refused[p3].templates ^= 1;
+    let mut other = hub_with(&[]);
+    other.restore_device(sub, None, T0).unwrap();
+    let d = other.device(ID).unwrap();
+    assert_eq!(
+        (d.refused.len(), d.refused_version, d.refused_recheck),
+        (1, 0, true)
+    );
     // By one that has it: plug_3 is dropped (to be fetched now), every
     // shard is checked again.
     let mut newer = hub_with(&[]);
-    newer.features.push("template.tuya");
+    newer.features.push("template.hue_light");
     newer.restore_device(snap, None, T0).unwrap();
     let d = newer.device(ID).unwrap();
     assert_eq!(

@@ -478,6 +478,37 @@ pub fn build_ops(
     ops
 }
 
+/// Whether a configure write sets an attribute a setting entity of `d`
+/// writes (select, switch, number).
+fn sets_setting(d: &Device, k: &OpKind) -> bool {
+    let OpKind::Write {
+        ep, cluster, attr, ..
+    } = k
+    else {
+        return false;
+    };
+    d.entities.iter().any(|e| {
+        !e.orphaned
+            && e.r.ep == *ep
+            && matches!(&e.r.def.value.binding, Binding::Zcl(z)
+                if z.cluster == *cluster && z.attr == *attr && z.write != ZclWrite::ReadOnly)
+    })
+}
+
+/// Configured under a definition: every op has a result (none queued or
+/// in flight), so a later definition keeps the settings (`paired` 0).
+fn configured(d: &mut Device) {
+    if d.configure.queue.is_empty()
+        && !d.configure.in_flight
+        && d.resolution
+            .layers
+            .iter()
+            .any(|l| l.source != crate::model::LayerSource::Generic)
+    {
+        d.configure.paired = 0;
+    }
+}
+
 /// Configure hash (3.4): SHA-256 over the op keys, first 16 bytes.
 pub fn configure_hash(ops: &[OpRun]) -> String {
     let mut h = Sha256::new();
@@ -549,7 +580,18 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         let ops = build_ops(d, coord, hub_ep, &crate::hub::DevEnv { dev: d, now, tz });
-        d.configure.hash = Some(configure_hash(&ops));
+        let hash = configure_hash(&ops);
+        // A device configured under a definition, or paired by a build with
+        // other templates, that gets another resolution (a new definition,
+        // a firmware that now runs one): an attribute a setting entity
+        // writes (a remote's operation mode) stays as the device has it;
+        // zhc writes such attributes at pairing or on an explicit
+        // reconfigure. One paired by this build whose first definition
+        // comes after its interview (a fetched one) still writes them.
+        let redefined = d.interview == InterviewStep::Done
+            && d.configure.hash.as_ref().is_some_and(|h| *h != hash)
+            && d.configure.paired != crate::templates::REVISION;
+        d.configure.hash = Some(hash);
         // A superseded op whose key is current again: its result counts.
         d.configure
             .stale
@@ -612,8 +654,14 @@ impl<T: ZigbeeTransport> Hub<T> {
             if d.configure.done.get(&op.key) == Some(&true) || queued.contains(&op.key) {
                 continue;
             }
+            // Never sent (a failed one is retried).
+            if redefined && sets_setting(d, &op.kind) && !d.configure.done.contains_key(&op.key) {
+                d.configure.done.insert(op.key, true);
+                continue;
+            }
             d.configure.queue.push_back(op);
         }
+        configured(d);
         if let Some(t) = &d.resolution.tuya {
             if let Some(iv) = t.query_interval_s {
                 d.tuya_query_at.get_or_insert(now + u64::from(iv) * 1000);
@@ -768,6 +816,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         d.configure.done.insert(key.to_string(), ok);
+        configured(d);
         d.diag.configure.insert(key.to_string(), status);
         if ok {
             d.configure.backoff_s = 0;

@@ -111,6 +111,21 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         let raw = values::encode(vd, is_bool, v, &env).map_err(|x| bad(x.0))?;
         match &vd.binding {
+            // Tuya countdown: On With Timed Off, on time = off wait time.
+            Binding::Zcl(z) if z.write == ZclWrite::OnWithTimedOff => {
+                let t = raw
+                    .as_i64()
+                    .and_then(|t| u16::try_from(t).ok())
+                    .ok_or_else(|| bad(format!("{}: 0..65535 expected", e.key)))?
+                    .to_le_bytes();
+                Ok(Action::Cmd {
+                    ep,
+                    cluster: z.cluster,
+                    mfr: None,
+                    id: 0x42,
+                    payload: vec![0x00, t[0], t[1], t[0], t[1]],
+                })
+            }
             Binding::Zcl(z) if z.write != ZclWrite::ReadOnly => {
                 let zv = values::to_zcl(z.ty, &raw).map_err(bad)?;
                 Ok(Action::Write {

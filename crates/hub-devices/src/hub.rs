@@ -1182,6 +1182,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         let mut d = Device::new(id.clone(), DeviceKind::Zigbee { ieee, nwk }, now);
         d.awake_until = now + AWAKE_AFTER_JOIN_MS;
+        d.configure.paired = crate::templates::REVISION;
         self.devices.insert(id.clone(), d);
         self.nwk_index.insert(nwk, id.clone());
         self.emit(HubEvent::DeviceAdded(id.clone()));
@@ -1891,6 +1892,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.available = true;
         d.left = false;
         d.check = None;
+        let restored = std::mem::take(&mut d.configure.restored);
         if !was && let Some(n) = self.notes.get_mut_by(id) {
             n.unavailable = None;
         }
@@ -1924,12 +1926,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         if !was || minute_passed || fresh {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
+        // Its first frame since boot: the ops queued before the restart
+        // (results missing) go again; nothing done is repeated.
+        if restored {
+            self.redo_configure(id, now);
+        }
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         if !was {
-            let uids: Vec<String> = self.devices[id]
-                .entities
-                .iter()
-                .map(|e| e.uid.clone())
-                .collect();
+            let uids: Vec<String> = d.entities.iter().map(|e| e.uid.clone()).collect();
             for u in uids {
                 self.publish_state(&u);
             }
@@ -1949,6 +1955,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         #[cfg(feature = "advanced")]
         self.console_answer(id, &frame);
+        // What fell due since the last tick goes before this frame.
+        self.fire_due(id, now);
         let h = frame.header;
         let ep = ind.src_ep;
         self.stub_endpoint(id, ep, ind.profile, ind.cluster);
@@ -2009,9 +2017,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                 let mfr = lumi::report_mfr(ind.cluster, h.mfr, &recs);
                 let mut structural = false;
                 if let Some(d) = self.devices.get_mut(id) {
+                    // What it reports, the template's poll leaves out.
+                    let polled = d.resolution.electrical_poll != 0
+                        && ep == 1
+                        && matches!(ind.cluster, cl::ELECTRICAL | cl::METERING);
                     for (a, v) in &recs {
                         let (sc, vc) = d.attrs.set(ep, ind.cluster, *a, mfr, Some(v.value.clone()));
                         structural |= sc || (vc && is_structural(ind.cluster, *a));
+                        if polled {
+                            d.configure.poll_at.insert((1, ind.cluster, *a), now);
+                        }
                     }
                 }
                 if ind.cluster == cl::BASIC {
@@ -3129,6 +3144,23 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
+    /// Held zero readings (template tuya_metering_zero_debounce) that are
+    /// due: from the tick, and before a frame of the device (the tick is
+    /// 1 s apart).
+    fn fire_due(&mut self, id: &str, now: Millis) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let mut touched = Vec::new();
+        for (i, v) in crate::templates::due(d, now) {
+            set_value(d, i, None, v, now);
+            touched.push(d.entities[i].uid.clone());
+        }
+        for u in touched {
+            self.publish_state(&u);
+        }
+    }
+
     fn tick_device(&mut self, id: &str, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
@@ -3142,14 +3174,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 touched.push(d.entities[i].uid.clone());
             }
         }
-        // Held zero readings (template tuya_metering_zero_debounce).
-        for (i, v) in crate::templates::due(d, now) {
-            set_value(d, i, None, v, now);
-            touched.push(d.entities[i].uid.clone());
-        }
         for u in touched {
             self.publish_state(&u);
         }
+        self.fire_due(id, now);
         // Availability.
         self.availability_tick(id, now);
         // Configure retries (mains).
@@ -3165,7 +3193,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.redo_configure(id, now);
         }
         // Unreportable primary measurements on mains devices are polled
-        // every `max` seconds (5.2); sleepy devices never are.
+        // every `max` seconds (5.2), template `tuya`'s polled metering
+        // every 60 s; sleepy, unavailable and departed devices are not.
         self.poll_unreportable(id, now);
         // Periodic Tuya query.
         let q = self
@@ -3191,14 +3220,33 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
-        if d.sleepy()
-            || d.power() != PowerKind::Mains
-            || d.gp.is_some()
-            || d.configure.unreportable.is_empty()
-        {
+        // Nor while it is unavailable or has left: its next frame
+        // (`seen`) resumes them.
+        if d.sleepy() || d.power() != PowerKind::Mains || d.gp.is_some() || !d.available || d.left {
             return;
         }
         let mut due = Vec::new();
+        // Template `tuya` electricityMeasurementPoll: endpoint 1 every 60 s,
+        // the attributes not reported meanwhile.
+        let mut polls: Vec<(u16, Vec<u16>)> = Vec::new();
+        for (bit, c, attrs) in [
+            (1, cl::ELECTRICAL, &[0x0505, 0x0508, 0x050B][..]),
+            (2, cl::METERING, &[0x0000][..]),
+        ] {
+            if d.resolution.electrical_poll & bit == 0 {
+                continue;
+            }
+            let last = *d.configure.poll_at.entry((1, c, 0xFFFF)).or_insert(now);
+            if now >= last + 60_000 {
+                d.configure.poll_at.insert((1, c, 0xFFFF), now);
+                let pa = &d.configure.poll_at;
+                let stale = |a: &&u16| pa.get(&(1, c, **a)).is_none_or(|t| now >= t + 60_000);
+                let attrs: Vec<u16> = attrs.iter().filter(stale).copied().collect();
+                if !attrs.is_empty() {
+                    polls.push((c, attrs));
+                }
+            }
+        }
         for &(ep, c, a) in &d.configure.unreportable.clone() {
             let primary = d
                 .entities
@@ -3226,6 +3274,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         for (ep, c, a, mfr) in due {
             self.read_attrs(id, ep, c, mfr, &[a], Purpose::Refresh, now);
+        }
+        for (c, attrs) in polls {
+            self.read_attrs(id, 1, c, None, &attrs, Purpose::Refresh, now);
         }
     }
 

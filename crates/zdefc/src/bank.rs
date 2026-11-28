@@ -115,7 +115,12 @@ fn ce(x: zdef::cbor::CborError) -> String {
     format!("{x:?}")
 }
 
-/// Visits text strings (not map keys) in an encoded item.
+/// A vendor template's `params` (key 158): free-form data the hub reads as
+/// they are, so the catalog form leaves them inline (spec 8.4).
+const TEMPLATE_PARAMS: [u8; 2] = [0x18, 158];
+
+/// Visits text strings (not map keys, not template params) in an encoded
+/// item.
 fn walk_texts(r: &mut Reader<'_>, f: &mut dyn FnMut(&str)) -> Result<(), String> {
     match r.peek().map_err(ce)? {
         Head::Text(_) => f(r.text().map_err(ce)?),
@@ -126,7 +131,10 @@ fn walk_texts(r: &mut Reader<'_>, f: &mut dyn FnMut(&str)) -> Result<(), String>
         }
         Head::Map(_) => {
             for _ in 0..r.map().map_err(ce)? {
-                r.skip().map_err(ce)?;
+                if r.skip().map_err(ce)? == TEMPLATE_PARAMS {
+                    r.skip().map_err(ce)?;
+                    continue;
+                }
                 walk_texts(r, f)?;
             }
         }
@@ -197,7 +205,12 @@ fn to_catalog_form(
             let n = r.map().map_err(ce)?;
             w.map(n);
             for _ in 0..n {
-                w.raw(r.skip().map_err(ce)?);
+                let k = r.skip().map_err(ce)?;
+                w.raw(k);
+                if k == TEMPLATE_PARAMS {
+                    w.raw(r.skip().map_err(ce)?);
+                    continue;
+                }
                 to_catalog_form(r, w, table)?;
             }
         }

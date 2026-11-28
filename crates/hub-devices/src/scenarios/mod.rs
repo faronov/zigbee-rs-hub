@@ -14,6 +14,7 @@ mod plain;
 mod props;
 mod remotes;
 mod reporting;
+mod templates;
 mod tuya_plug;
 mod tuya_trv;
 mod vendors;

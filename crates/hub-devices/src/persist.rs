@@ -137,6 +137,10 @@ pub struct DeviceSnapshot {
     pub configure_hash: Option<String>,
     /// Configure results by op key.
     pub configure_done: BTreeMap<String, bool>,
+    /// [`crate::device::ConfigureState::paired`]; absent (0) from builds
+    /// before.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub paired: u32,
     /// Failed reporting configs.
     pub unreportable: Vec<(u8, u16, u16)>,
     /// Warnings.
@@ -181,6 +185,10 @@ fn is_zero(v: &u8) -> bool {
 }
 
 fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
@@ -264,6 +272,7 @@ impl DeviceSnapshot {
                 d.options.iter().map(|(k, v)| (k.clone(), v.to_json())),
             ),
             configure_hash: d.configure.hash.clone(),
+            paired: d.configure.paired,
             configure_done: d.configure.done.clone(),
             unreportable: d.configure.unreportable.clone(),
             warnings: d.warnings.clone(),
@@ -373,13 +382,19 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.refused_version = s.refused_version;
         d.refused_checked = s.refused_checked;
         d.refused_recheck = s.refused_recheck;
+        // Refused by other template code: what its templates lacked may
+        // be implemented now.
         let features = &self.features;
         for r in &mut d.refused {
+            let other = r.templates != crate::templates::REVISION;
             r.requires = r
                 .requires
                 .iter()
                 .map(|f| crate::zdef_adapter::canonical_feature(f))
-                .filter(|f| !features.iter().any(|x| x == f))
+                .filter(|f| {
+                    let gained = features.iter().any(|x| x == f);
+                    !(gained || other && crate::templates::implements(f))
+                })
                 .collect();
         }
         if d.refused.iter().any(|r| r.requires.is_empty()) {
@@ -413,6 +428,9 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .map(|(k, v)| (k.clone(), Value::from_json(v))),
         );
         d.configure.hash = s.configure_hash;
+        d.configure.paired = s.paired;
+        // An imported one is verified or configured by the import.
+        d.configure.restored = s.interviewed && s.imported == 0;
         d.configure.done = s.configure_done;
         d.configure.unreportable = s.unreportable;
         d.warnings = s.warnings;

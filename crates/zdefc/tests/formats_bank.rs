@@ -522,3 +522,39 @@ fn catalog_plan_sign_verify() {
     assert!(zdefc::catalog::verify(&dir, key.public()).is_err());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A vendor template's `params` are free-form: the catalog form leaves
+/// them inline (their strings shared by two definitions would otherwise
+/// become string-table references the hub never resolves, and the bank's
+/// self-check fails).
+#[test]
+fn template_params_stay_inline_in_a_bank() {
+    let def = |m: &str| {
+        let src = format!(
+            "zdef: 1\nid: test/{m}\nrevision: 1\nvendor: Tuya\nmodel: {m}\n\
+             match: [{{model: TS011F, manufacturer: _TZ3000_{m}}}]\n\
+             templates: [{{name: tuya, params: {{features: {{tuya_on_off: {{childLock: true}}}}, \
+             keys: [child_lock, power_on_behavior, switch]}}}}]\n"
+        );
+        let c = compile_str(&src, Format::Yaml, &Options::default()).unwrap();
+        (
+            c.def.templates[0].params.clone(),
+            zdefc::bank::Item::new(m, c.cbor).unwrap(),
+        )
+    };
+    let (params, a) = def("aaaaaaaa");
+    let (_, b) = def("bbbbbbbb");
+    let built = zdefc::bank::build_bank(&[&a, &b], &zdefc::bank::BankParams::default()).unwrap();
+    let bank = zdef::bank::Bank::parse(&built.bytes).unwrap();
+    let mut inf = zdef::bank::MinizInflate::new();
+    let strings = bank.strings(&mut inf).unwrap();
+    let mut buf = [0u8; zdef::bank::BLOCK_MAX];
+    let e = zdef::bank::IndexEntry {
+        key_hash: 0,
+        block: 0,
+        slot: 0,
+        flags: 0,
+    };
+    let back = bank.load(&mut inf, &strings, &e, &mut buf).unwrap();
+    assert_eq!(back.templates[0].params, params);
+}

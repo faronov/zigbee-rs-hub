@@ -152,6 +152,7 @@ fn sml001_snapshot() -> DeviceSnapshot {
         refused_version: 0,
         refused_checked: vec![],
         refused_recheck: false,
+        paired: 0,
     }
 }
 
@@ -374,13 +375,8 @@ fn tuya_device(ieee: u64, manufacturer: &str, model: &str, app: u32, gangs: u8) 
     }
 }
 
-/// A release of the TS011F fixtures whose file name contains one of
-/// `names`: signed manifest and shards (no bank: shard-only definitions).
-fn ts011f_release(names: &[&str], serial: u16) -> BTreeMap<String, Vec<u8>> {
-    ts011f_release_edited(names, serial, |s| s.to_string())
-}
-
-/// [`ts011f_release`] with each source passed through `edit`.
+/// A release of the TS011F fixtures `names`, each source passed through
+/// `edit`: signed manifest and shards (no bank: shard-only definitions).
 fn ts011f_release_edited(names: &[&str], serial: u16, edit: fn(&str) -> String) -> BTreeMap<String, Vec<u8>> {
     let items = names.iter().map(|n| Item::new(n, ts011f_fixture(n, edit)).unwrap()).collect();
     release_of(items, serial)
@@ -403,6 +399,15 @@ fn without_templates(s: &str) -> String {
     s.lines().filter(keep).collect::<Vec<_>>().join("\n")
 }
 
+/// A fixture whose `tuya_on_off` asks for the Tuya inching switch as well,
+/// which this firmware does not implement: a definition it refuses.
+fn with_inching(s: &str) -> String {
+    s.replace("tuya_on_off: {", "tuya_on_off: {inchingSwitch: true, ")
+}
+
+/// What [`with_inching`] makes a definition need.
+const INCHING: &str = "template.tuya.tuya_on_off.inchingSwitch";
+
 /// A signed manifest and the shards of `items` (no bank).
 fn release_of(items: Vec<Item>, serial: u16) -> BTreeMap<String, Vec<u8>> {
     let (shards, digest) = zdefc::bank::build_shards(&items.iter().collect::<Vec<_>>()).unwrap();
@@ -420,17 +425,24 @@ fn release_of(items: Vec<Item>, serial: u16) -> BTreeMap<String, Vec<u8>> {
 /// vendor templates and were dropped without a word (`skipped: ["invalid:
 /// requires feature 23 ..."]`). Replayed against the published
 /// catalog-2026.11.24 (signed manifest and the shards the plug asks for,
-/// unchanged): with template `tuya_metering_zero_debounce` the plug gets
-/// zhc's `TS011F_plug_1` (white label NEO NAS-WR01B); where zhc picks
-/// `TS011F_plug_3` (application version 69), which needs template `tuya`,
-/// the hub names that one (in the shard's commit, `definitions/fetch` and
-/// the device's diagnostics, until a new manifest) and uses plug_1.
+/// unchanged): the plug gets zhc's choice, `TS011F_plug_1` (template
+/// `tuya_metering_zero_debounce`, white label NEO NAS-WR01B), or with
+/// application version 69 `TS011F_plug_3` (template `tuya`; 0.4 refused it
+/// and ran plug_1, marked approximate), and nothing is refused.
 #[test]
 fn published_catalog_resolves_a_ts011f_plug() {
     let dir = format!("{}/../hub-devices/tests/fixtures/catalog-2026.11.24", env!("CARGO_MANIFEST_DIR"));
     let file = |n: &str| std::fs::read(format!("{dir}/{n}")).unwrap();
-    let plug_3 = "tuya/ts011f_plug_3 (Tuya TS011F_plug_3) requires template.tuya";
-    for (app, want) in [(77, json!([])), (69, json!([plug_3]))] {
+    let cases = [
+        (77, "tuya/ts011f_plug_1", ("NEO", "NAS-WR01B", "TS011F_plug_1"), &["tuya/ts011f_plug_1"][..]),
+        (
+            69,
+            "tuya/ts011f_plug_3",
+            ("Tuya", "TS011F_plug_3", "TS011F_plug_3"),
+            &["tuya/ts011f_plug_1", "tuya/ts011f_plug_3"][..],
+        ),
+    ];
+    for (app, top_id, named_want, stored_want) in cases {
         let store = Store::open(Box::new(MemFlash::new(32, 4096)) as Box<dyn hub_ncp::store::Flash>).unwrap();
         let r = rig(store);
         let snap = ts011f_snapshot("_TZ3000_gjnozsaz", app);
@@ -454,48 +466,22 @@ fn published_catalog_resolves_a_ts011f_plug() {
                 said = w.clone();
             }
         }
-        assert_eq!(stored, [json!("tuya/ts011f_plug_1")], "app {app}");
-        assert_eq!(said, want, "app {app}");
+        assert_eq!(stored, stored_want, "app {app}");
+        assert_eq!(said, json!([]), "app {app}");
         let d = call(&app_, sid, &rx, 901, json!({"type": "devices/get", "device": PLUG}))["result"].clone();
         let top = d["resolution"]["layers"].as_array().unwrap().last().unwrap().clone();
-        assert_eq!((top["id"].as_str(), top["source"].as_str()), (Some("tuya/ts011f_plug_1"), Some("fetched")), "{d}");
+        assert_eq!((top["id"].as_str(), top["source"].as_str()), (Some(top_id), Some("fetched")), "{d}");
         // The white label and the definition's model: the web UI's device
         // pictures (Zigbee2MQTT's NAS-WR01B.png, then TS011F_plug_1.png).
         let named = (d["manufacturer"].as_str(), d["model"].as_str(), d["definition_model"].as_str());
-        assert_eq!(named, (Some("NEO"), Some("NAS-WR01B"), Some("TS011F_plug_1")), "{d}");
+        assert_eq!(named, (Some(named_want.0), Some(named_want.1), Some(named_want.2)), "{d}");
+        assert_eq!(d.get("definition_approximate"), None, "{d}");
         let st = call(&app_, sid, &rx, 902, json!({"type": "catalog/status"}));
         assert_eq!(st["result"]["missing"], json!([]), "{st}");
         let f = call(&app_, sid, &rx, 903, json!({"type": "definitions/fetch", "device": PLUG}));
-        assert_eq!(f["result"].get("refused").cloned().unwrap_or(json!([])), want, "{f}");
+        assert_eq!(f["result"].get("refused").cloned().unwrap_or(json!([])), json!([]), "{f}");
         let g = call(&app_, sid, &rx, 904, json!({"type": "devices/diagnostics", "device": PLUG}));
-        assert_eq!(g["result"]["catalog_refused"], want, "{g}");
-        // Approximate where zhc's choice was refused (version 69), not for
-        // the reported plug (77): zhc's choice there is TS011F_plug_1.
-        let approx = (app == 69)
-            .then(|| json!({"better": "tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", "needs": ["template.tuya"]}));
-        assert_eq!(d.get("definition_approximate"), approx.as_ref(), "{d}");
-        assert_eq!(g["result"]["definition_approximate"], approx.clone().unwrap_or(J::Null), "{g}");
-        // A newer release: a device with refused definitions is to be
-        // checked again (`missing`, `recheck`), and stays approximate
-        // until its shards say otherwise.
-        let newer = ts011f_release(&["ts011f_plug_2", "ts011f_plug_3"], 2);
-        let m = upload(&app_, sid, &rx, &mut id, "manifest", &newer["manifest.cose"], 0, json!({}));
-        assert_eq!(m["result"]["catalog_serial"], 2, "{m}");
-        let st = call(&app_, sid, &rx, 905, json!({"type": "catalog/status"}));
-        let miss = st["result"]["missing"].as_array().unwrap().clone();
-        assert_eq!(miss.len(), usize::from(app == 69), "{st}");
-        for e in &miss {
-            assert_eq!((e["recheck"].clone(), e["refused"].clone()), (json!(true), want.clone()), "{st}");
-            for n in e["shards"].as_array().unwrap() {
-                let n = n.as_u64().unwrap();
-                let c = upload(&app_, sid, &rx, &mut id, "shard", &newer[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
-                assert_eq!(c["success"], true, "{c}");
-            }
-        }
-        let st = call(&app_, sid, &rx, 906, json!({"type": "catalog/status"}));
-        assert_eq!(st["result"]["missing"], json!([]), "{st}");
-        let d = call(&app_, sid, &rx, 907, json!({"type": "devices/get", "device": PLUG}))["result"].clone();
-        assert_eq!(d.get("definition_approximate"), approx.as_ref(), "{d}");
+        assert_eq!(g["result"]["catalog_refused"], json!([]), "{g}");
         app_.shutdown();
         r.ncp.shutdown();
         r.sim.stop();
@@ -503,13 +489,14 @@ fn published_catalog_resolves_a_ts011f_plug() {
 }
 
 /// The fallback to TS011F_plug_1 is marked approximate where zhc picks a
-/// definition this firmware cannot run yet (template `tuya`): a
-/// TS011F_plug_3-class plug (application version 69) and a 3-gang strip
-/// (TS011F_3_gang), not the reported `_TZ3000_gjnozsaz` (77), whose zhc
-/// choice is TS011F_plug_1. The mark survives a restart (device records).
+/// definition this firmware cannot run (here: template `tuya` with the
+/// inching switch): a TS011F_plug_3-class plug (application version 69)
+/// and a 3-gang strip (TS011F_3_gang), not the reported `_TZ3000_gjnozsaz`
+/// (77), whose zhc choice is TS011F_plug_1. The mark survives a restart
+/// (device records).
 #[test]
 fn fallbacks_to_ts011f_plug_1_are_marked_approximate() {
-    let files = ts011f_release(&["ts011f_plug_1", "ts011f_plug_3", "ts011f_3_gang"], 1);
+    let files = ts011f_release_edited(&["ts011f_plug_1", "ts011f_plug_3", "ts011f_3_gang"], 1, with_inching);
     let devices = [
         (ts011f_device(0xa4c1380000000011, "_TZ3000_zzzzzzzz", 69, 1), Some(("tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", 1))),
         (ts011f_device(0xa4c1380000000012, "_TZ3000_dlug3kbc", 77, 3), Some(("tuya/ts011f_3_gang (Tuya TS011F_3_gang)", 3))),
@@ -525,7 +512,7 @@ fn fallbacks_to_ts011f_plug_1_are_marked_approximate() {
         for (i, (s, want)) in devices.iter().enumerate() {
             let d = call(app, sid, rx, 950 + i as u64, json!({"type": "devices/get", "device": s.id}))["result"].clone();
             assert_eq!(d["definition_model"], "TS011F_plug_1", "{d}");
-            let approx = want.map(|(better, _)| json!({"better": better, "needs": ["template.tuya"]}));
+            let approx = want.map(|(better, _)| json!({"better": better, "needs": [INCHING]}));
             assert_eq!(d.get("definition_approximate"), approx.as_ref(), "{d}");
             if let Some((_, gangs)) = want {
                 assert_eq!(d["endpoints"].as_array().map(Vec::len), Some(*gangs as usize), "{d}");
@@ -565,17 +552,15 @@ fn fallbacks_to_ts011f_plug_1_are_marked_approximate() {
 
 /// A shard uploaded for another device checks only that shard for a
 /// device to be checked again: P (TS011F, version 69: TS011F_plug_1, plug_3
-/// refused) and A (same manufacturer, another model) share the shard of the
+/// refused, [`with_inching`]) and A (same manufacturer, another model) share the shard of the
 /// manufacturer key. Under a newer catalog, uploading A's shard alone left
 /// P without its refusals and out of `missing` (never checked again); now P
 /// stays approximate and listed, with the shards not checked yet only.
 #[test]
 fn a_shard_of_another_device_does_not_end_a_recheck() {
-    let v1 = ts011f_release(&["ts011f_plug_1", "ts011f_plug_3"], 1);
-    let mut items: Vec<Item> = ["ts011f_plug_1", "ts011f_plug_3"]
-        .iter()
-        .map(|n| Item::new(n, ts011f_fixture(n, |s| s.to_string())).unwrap())
-        .collect();
+    let v1 = ts011f_release_edited(&["ts011f_plug_1", "ts011f_plug_3"], 1, with_inching);
+    let mut items: Vec<Item> =
+        ["ts011f_plug_1", "ts011f_plug_3"].iter().map(|n| Item::new(n, ts011f_fixture(n, with_inching)).unwrap()).collect();
     let any = "zdef: 1\nid: test/zzzzzzzz_switch\nrevision: 1\nvendor: Tuya\nmodel: TS0001_test\nmatch: [{manufacturer: _TZ3000_zzzzzzzz}]\n";
     items.push(Item::new("any", zdefc::compile_str(any, zdefc::Format::Yaml, &Default::default()).unwrap().cbor).unwrap());
     let v2 = release_of(items, 2);
@@ -598,7 +583,7 @@ fn a_shard_of_another_device_does_not_end_a_recheck() {
     let approx = |id: u64| {
         call(&app, sid, &rx, id, json!({"type": "devices/get", "device": p.id}))["result"]["definition_approximate"].clone()
     };
-    let plug_3 = json!({"better": "tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", "needs": ["template.tuya"]});
+    let plug_3 = json!({"better": "tuya/ts011f_plug_3 (Tuya TS011F_plug_3)", "needs": [INCHING]});
     // Catalog 1: P gets TS011F_plug_1, approximate.
     let m = upload(&app, sid, &rx, &mut id, "manifest", &v1["manifest.cose"], 0, json!({}));
     assert_eq!(m["success"], true, "{m}");
@@ -624,7 +609,7 @@ fn a_shard_of_another_device_does_not_end_a_recheck() {
     let ep = entry(&m3, &p.id).expect("P still to check");
     assert_eq!((ep["recheck"].clone(), shards(&ep)), (json!(true), sp.iter().copied().filter(|n| *n != sa[0]).collect::<Vec<_>>()));
     assert_eq!(approx(904), plug_3);
-    // The rest: checked, still approximate (plug_3 still needs the template).
+    // The rest: checked, still approximate (plug_3 still needs the inching switch).
     for n in shards(&ep) {
         upload(&app, sid, &rx, &mut id, "shard", &v2[&format!("shard-{n:02x}.cbor")], 0, json!({"shard": n}));
     }
@@ -639,7 +624,7 @@ fn a_shard_of_another_device_does_not_end_a_recheck() {
 /// the device is restored without it and to be checked again on all its
 /// shards: a shard checked for another device sharing it (A, same
 /// manufacturer) must not end that. P (TS011F, version 69) runs
-/// TS011F_plug_1 with TS011F_plug_3 refused (d9); the saved refusal is
+/// TS011F_plug_1 with TS011F_plug_3 refused (d9, [`with_inching`]); the saved refusal is
 /// made to need a feature this build has (the update), and the newer
 /// catalog's plug_3 runs. After A's shared shard alone P stays listed with
 /// its own shard, and after that one it resolves to TS011F_plug_3.
@@ -652,7 +637,7 @@ fn an_update_recheck_survives_a_shared_shard() {
         items.push(Item::new("any", zdefc::compile_str(any, zdefc::Format::Yaml, &Default::default()).unwrap().cbor).unwrap());
         release_of(items, serial)
     };
-    let (v1, v2) = (release(1, |s| s.to_string()), release(2, without_templates));
+    let (v1, v2) = (release(1, with_inching), release(2, without_templates));
     let (p, a) = (
         tuya_device(0xa4c1380000000031, "_TZ3000_zzzzzzzz", "TS011F", 69, 1),
         tuya_device(0xa4c1380000000032, "_TZ3000_zzzzzzzz", "TS0001", 69, 1),

@@ -536,7 +536,15 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
     if let Some(Y::Sequence(t)) = get(&v, "templates") {
         d.templates = t
             .iter()
-            .map(|x| opt_s(x, "name")?.ok_or_else(|| "templates: name".to_string()))
+            .map(|x| {
+                Ok(crate::model::Template {
+                    name: opt_s(x, "name")?.ok_or_else(|| "templates: name".to_string())?,
+                    params: get(x, "params")
+                        .map(|p| serde_json::to_value(p).map_err(|e| e.to_string()))
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
             .collect::<R<_>>()?;
     }
     if let Some(dev) = get(&v, "device") {
@@ -655,6 +663,8 @@ pub fn load_definition(src: &str, source: LayerSource) -> R<Definition> {
                 .collect(),
         });
     }
+    let lacks = crate::templates::unsupported(&d);
+    d.requires.extend(lacks);
     Ok(d)
 }
 
