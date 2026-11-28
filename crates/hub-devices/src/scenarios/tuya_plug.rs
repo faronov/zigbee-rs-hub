@@ -251,11 +251,12 @@ fn plug_metering_zero_readings_are_debounced() {
     let (mut hub, mut sim) = joined();
     let d = hub.device(ID).unwrap();
     assert!(d.resolution.metering_zero_debounce);
+    // TS011F_plug_3 (template `tuya`) loads too; plug_1 matches better.
     assert!(
         d.resolution
             .diagnostics
             .iter()
-            .any(|x| x.contains("ts011f_plug_3 requires template.tuya"))
+            .all(|x| !x.contains("requires"))
     );
     let uid = |k: &str| format!("{ID}:1:{k}");
     let on = sim.dev(IEEE).clone().report(
@@ -342,7 +343,8 @@ fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::
 }
 
 /// `definition_approximate`: the plug runs TS011F_plug_1 while a catalog
-/// definition that outranks it needs a feature this firmware lacks. What a
+/// definition that outranks it needs a feature this firmware lacks (here
+/// made up: `template.hue_light`). What a
 /// shard found is replaced only by that shard's next check (a shard checked
 /// for another device does not clear the others'), kept in the snapshot;
 /// a firmware that gained the feature drops it on restore and marks the
@@ -368,18 +370,26 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
         0x10,
         &both,
         true,
-        vec![refused("tuya/x", "X", "template.tuya", s)],
+        vec![refused("tuya/x", "X", "template.hue_light", s)],
     );
     assert_eq!(approx(&hub), None);
     hub.drain_events();
-    let plug_3 = || refused("tuya/ts011f_plug_3", "JR-ZPM03", "template.tuya", s + 10);
+    let plug_3 = || {
+        refused(
+            "tuya/ts011f_plug_3",
+            "JR-ZPM03",
+            "template.hue_light",
+            s + 10,
+        )
+    };
     hub.note_refused(ID, 7, 0x20, &both, true, vec![plug_3()]);
     assert!(
         hub.drain_events()
             .iter()
             .any(|e| matches!(e, HubEvent::DeviceUpdated(i) if i == ID))
     );
-    let want = json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.tuya"]});
+    let want =
+        json!({"better": "tuya/ts011f_plug_3 (Tuya JR-ZPM03)", "needs": ["template.hue_light"]});
     assert_eq!(approx(&hub), Some(want.clone()));
     assert_eq!(hub.diagnostics(ID).unwrap()["definition_approximate"], want);
     // A newer catalog: shard 0x10 checked (e.g. for another device sharing
@@ -433,23 +443,23 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
         ids(hub.device(ID).unwrap()),
         [("tuya/ts011f_plug_3".to_string(), 0x20)]
     );
-    // Saved by a build that named code 22 `feature 22`.
+    // Saved by a build that named code 20 `feature 20`.
     let p3 = snap
         .refused
         .iter()
         .position(|r| r.id == "tuya/ts011f_plug_3")
         .unwrap();
-    snap.refused[p3].requires = vec!["feature 22".into()];
-    // Restored by a firmware without template.tuya: unchanged.
+    snap.refused[p3].requires = vec!["feature 20".into()];
+    // Restored by a firmware without template.hue_light: unchanged.
     let mut same = hub_with(&[]);
     same.restore_device(snap.clone(), None, T0).unwrap();
     let d = same.device(ID).unwrap();
     assert_eq!((d.refused.len(), d.refused_version), (2, 8));
-    assert_eq!(d.refused[p3].requires, ["template.tuya"]);
+    assert_eq!(d.refused[p3].requires, ["template.hue_light"]);
     // By one that has it: plug_3 is dropped (to be fetched now), every
     // shard is checked again.
     let mut newer = hub_with(&[]);
-    newer.features.push("template.tuya");
+    newer.features.push("template.hue_light");
     newer.restore_device(snap, None, T0).unwrap();
     let d = newer.device(ID).unwrap();
     assert_eq!(

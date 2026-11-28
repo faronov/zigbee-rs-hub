@@ -246,6 +246,9 @@ pub enum ZclWrite {
     CoverTilt,
     /// Door Lock 0x00 Lock / 0x01 Unlock.
     LockCommands,
+    /// On/Off On With Timed Off (0x42), on time = off wait time = the
+    /// value in s (Tuya countdown).
+    OnWithTimedOff,
     /// Not writable.
     ReadOnly,
 }
@@ -1137,6 +1140,16 @@ pub enum LayerSource {
     User,
 }
 
+/// A vendor template a definition turns on (17.4, [`crate::templates`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Template {
+    /// Name (`tuya`, `lumi`, `tuya_metering_zero_debounce`).
+    pub name: String,
+    /// `params`; the family templates' `features` (zhc helper → its
+    /// arguments) and `keys` (the exposes they provide).
+    pub params: serde_json::Value,
+}
+
 /// A definition or a self-description fragment.
 #[derive(Debug, Clone)]
 pub struct Definition {
@@ -1174,8 +1187,8 @@ pub struct Definition {
     pub tuya: Option<TuyaFlags>,
     /// GP flags.
     pub gp: Option<GpFlags>,
-    /// Vendor templates by name (17.4).
-    pub templates: Vec<String>,
+    /// Vendor templates (17.4).
+    pub templates: Vec<Template>,
     /// `mfr` of a fragment.
     pub mfr: Option<u16>,
     /// Source.
@@ -1241,7 +1254,7 @@ impl Definition {
             add("gp");
         }
         for t in &self.templates {
-            add(&format!("template.{t}"));
+            add(&format!("template.{}", t.name));
         }
         for e in &self.entities {
             for (_, v) in e.values() {

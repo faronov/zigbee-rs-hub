@@ -647,8 +647,18 @@ pub fn adapt(
     d.templates = zd
         .templates
         .iter()
-        .map(|t| t.name.as_str().to_string())
+        .map(|t| crate::model::Template {
+            name: t.name.as_str().to_string(),
+            params: t
+                .params
+                .as_deref()
+                .map_or(serde_json::Value::Null, crate::templates::params_from_cbor),
+        })
         .collect();
+    // What the family templates need that this firmware lacks is required
+    // (refused and named like a missing feature, 8.5).
+    let lacks = crate::templates::unsupported(&d);
+    d.requires.extend(lacks);
     d.mfr = zd.mfr;
     d.content_hash = content_hash;
     d.zdef = Some(def.clone());
@@ -677,10 +687,14 @@ pub fn canonical_feature(name: &str) -> String {
 }
 
 /// The `zdef` features this engine implements: all of v1 (not `wasm`) and
-/// of the vendor templates (17.4) only `tuya_metering_zero_debounce`
-/// ([`crate::templates`]).
+/// the vendor templates (17.4) `tuya_metering_zero_debounce` and `tuya`
+/// ([`crate::templates`]; what a family template needs beyond the helpers
+/// implemented is a required `template.<family>.<item>`).
 pub fn hub_features() -> zdef::HubFeatures {
-    zdef::HubFeatures::v1().with(zdef::enums::TemplateName::TuyaMeteringZeroDebounce.feature())
+    use zdef::enums::TemplateName as T;
+    zdef::HubFeatures::v1()
+        .with(T::TuyaMeteringZeroDebounce.feature())
+        .with(T::Tuya.feature())
 }
 
 /// The hub's load path for CBOR (catalog, uploads, fetched definitions,
@@ -865,18 +879,33 @@ entities:
         );
     }
 
-    /// Vendor templates are C-tier features the hub does not implement:
-    /// such catalog definitions are skipped, not half-loaded.
+    /// A family template's helper the hub does not implement is a required
+    /// feature it lacks (`template.<family>.<helper>`): such a catalog
+    /// definition is skipped, not half-loaded; a template it does not know
+    /// at all is refused by `zdef::load`.
     #[test]
     fn templates_are_required_features() {
-        let src = TRV.replace(
-            "x-partial: true\n",
-            "x-partial: true\ntemplates: [{name: tuya, params: {features: {tuya_light: {color: true}}}}]\n",
-        );
-        let c = zdefc::compile_str(&src, zdefc::Format::Yaml, &zdefc::Options::default()).unwrap();
+        let with = |t: &str| {
+            let src = TRV.replace(
+                "x-partial: true\n",
+                &format!("x-partial: true\ntemplates: [{t}]\n"),
+            );
+            zdefc::compile_str(&src, zdefc::Format::Yaml, &zdefc::Options::default()).unwrap()
+        };
+        let c =
+            with("{name: tuya, params: {features: {tuya_light: {color: true}}, keys: [light]}}");
         assert_eq!(c.def.templates[0].name, zdef::enums::TemplateName::Tuya);
-        let e = load_cbor(&c.cbor, LayerSource::Catalog).unwrap_err();
-        assert!(e.0.contains("template.tuya"), "{}", e.0);
+        let d = load_cbor(&c.cbor, LayerSource::Catalog).unwrap();
+        assert_eq!(
+            crate::resolve::missing_features(&d, crate::resolve::HUB_FEATURES),
+            ["template.tuya.expose.light", "template.tuya.tuya_light"]
+        );
+        let c =
+            with("{name: tuya, params: {features: {operation_mode: {}}, keys: [operation_mode]}}");
+        let d = load_cbor(&c.cbor, LayerSource::Catalog).unwrap();
+        assert!(crate::resolve::missing_features(&d, crate::resolve::HUB_FEATURES).is_empty());
+        let e = load_cbor(&with("{name: hue_light}").cbor, LayerSource::Catalog).unwrap_err();
+        assert!(e.0.contains("template.hue_light"), "{}", e.0);
     }
 
     /// A feature code this build does not know is kept (`feature N`), so

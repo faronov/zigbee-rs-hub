@@ -75,6 +75,18 @@ repository. An update keeps all data.
 
 ### New
 
+- **Tuya devices run zigbee-herdsman-converters' definitions that need the
+  `tuya` vendor template**, which the hub refused before ("requires
+  template.tuya": the device stayed generic or ran TS011F_plug_1): TS011F
+  plugs (`TS011F_plug_2`, `_3`), multi-gang strips, switch modules and DIN
+  relays with child lock, indicator mode, power-on behaviour or outage
+  memory, switch type and a countdown per switch (On With Timed Off);
+  TS004F remotes and knobs such as HOBEIAN ZG-101ZD and Moes
+  ERS-10TZBVB-AA (operation mode command/event; single, double, hold and
+  rotation actions, and in command mode the Level Control steps); plugs
+  whose metering is polled every 60 s. 58 of the 223 generated definitions
+  that use `tuya` run; the others name what they lack (e.g.
+  `template.tuya.tuya_light`) and fall back as before.
 - **Dongle Max: the MG24's firmware can be replaced from the hub**
   (experimental, run on the lab Dongle Max in both directions). Settings › Zigbee radio
   firmware (MG24) uploads a GBL file and flashes it through the MG24's

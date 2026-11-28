@@ -3165,7 +3165,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.redo_configure(id, now);
         }
         // Unreportable primary measurements on mains devices are polled
-        // every `max` seconds (5.2); sleepy devices never are.
+        // every `max` seconds (5.2), template `tuya`'s polled metering
+        // every 60 s; sleepy devices never are.
         self.poll_unreportable(id, now);
         // Periodic Tuya query.
         let q = self
@@ -3191,14 +3192,25 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
-        if d.sleepy()
-            || d.power() != PowerKind::Mains
-            || d.gp.is_some()
-            || d.configure.unreportable.is_empty()
-        {
+        if d.sleepy() || d.power() != PowerKind::Mains || d.gp.is_some() {
             return;
         }
         let mut due = Vec::new();
+        // Template `tuya` electricityMeasurementPoll: endpoint 1 every 60 s.
+        let mut polls: Vec<(u16, &[u16])> = Vec::new();
+        for (bit, c, attrs) in [
+            (1, cl::ELECTRICAL, &[0x0505, 0x0508, 0x050B][..]),
+            (2, cl::METERING, &[0x0000][..]),
+        ] {
+            if d.resolution.electrical_poll & bit == 0 {
+                continue;
+            }
+            let last = *d.configure.poll_at.entry((1, c, 0xFFFF)).or_insert(now);
+            if now >= last + 60_000 {
+                d.configure.poll_at.insert((1, c, 0xFFFF), now);
+                polls.push((c, attrs));
+            }
+        }
         for &(ep, c, a) in &d.configure.unreportable.clone() {
             let primary = d
                 .entities
@@ -3226,6 +3238,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         for (ep, c, a, mfr) in due {
             self.read_attrs(id, ep, c, mfr, &[a], Purpose::Refresh, now);
+        }
+        for (c, attrs) in polls {
+            self.read_attrs(id, 1, c, None, attrs, Purpose::Refresh, now);
         }
     }
 
