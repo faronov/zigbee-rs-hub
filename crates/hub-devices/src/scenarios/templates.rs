@@ -761,13 +761,7 @@ fn wxkg11lm_multistate_and_on_off_clicks() {
 const OPPLE: u64 = 0x0415_8d00_00cc_0003;
 const OPPLE_ID: &str = "zb:04158d0000cc0003";
 
-/// Aqara Opple WXCJKG13LM (6 buttons): event mode written at configure
-/// (0xFCC0 0x0009 = 1, manufacturer 0x115F); presentValue clicks per
-/// button endpoint, a hold released 5 s later unless the button reports.
-#[test]
-fn opple_switch_event_mode_buttons_and_commands() {
-    let mut hub = hub_of(&[include_str!("fixtures/aqara-wxcjkg13lm.yaml")]);
-    let mut sim = Sim::default();
+fn opple() -> SimDevice {
     let mut dev = SimDevice::new(OPPLE, 0x6103, LogicalType::EndDevice, false, 0x115F).endpoint(
         1,
         0x0104,
@@ -778,8 +772,61 @@ fn opple_switch_event_mode_buttons_and_commands() {
     for ep in 2..=6 {
         dev = dev.endpoint(ep, 0x0104, 0x0105, &[0x0003, 0x0012], &[0x0006]);
     }
-    sim.devices
-        .push(dev.basic("LUMI", "lumi.remote.b686opcn01", 0x03));
+    dev.basic("LUMI", "lumi.remote.b686opcn01", 0x03)
+}
+
+/// The Opple's event mode write follows the TS004F's: sent for a device
+/// paired by this build whose definition is fetched after the interview,
+/// not for one paired by 0.4.2 (it ran generic) that this build redefines.
+#[test]
+fn opple_event_mode_written_for_a_pairing_not_after_an_upgrade() {
+    let src = include_str!("fixtures/aqara-wxcjkg13lm.yaml");
+    let mode = |sim: &mut Sim| {
+        sim.dev(OPPLE)
+            .writes
+            .iter()
+            .filter(|w| (w.1, w.2) == (0xFCC0, 0x0009))
+            .count()
+    };
+    let mut hub = hub_of(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(opple());
+    sim.join(&mut hub, OPPLE, T0);
+    assert_eq!(layer(&hub, OPPLE_ID), "generic");
+    let mut snap = hub.snapshot_device(OPPLE_ID).unwrap();
+    let mut cat = MemoryCatalog::default();
+    cat.insert(def(src));
+    let t = T0 + 5000;
+    hub.set_catalog(Box::new(cat), t);
+    assert_eq!(layer(&hub, OPPLE_ID), "aqara/wxcjkg13lm");
+    let press = |n: u8| {
+        let pv = TypedValue::uint(ZclType::U16, 1);
+        report(&opple(), 1, 0x0012, None, n, &[(0x0055, pv)])
+    };
+    hub.on_aps_indication(press(1), t);
+    sim.run(&mut hub, t);
+    assert_eq!(mode(&mut sim), 1);
+    // Saved by 0.4.2 (no `paired`), restored by this build.
+    snap.paired = 0;
+    let mut hub = hub_of(&[src]);
+    hub.features.retain(|f| *f != "template.lumi");
+    hub.restore_device(snap, None, t + 1000).unwrap();
+    hub.features.push("template.lumi");
+    hub.reresolve(None, t + 2000);
+    assert_eq!(layer(&hub, OPPLE_ID), "aqara/wxcjkg13lm");
+    hub.on_aps_indication(press(2), t + 2000);
+    sim.run(&mut hub, t + 2000);
+    assert_eq!(mode(&mut sim), 1);
+}
+
+/// Aqara Opple WXCJKG13LM (6 buttons): event mode written at configure
+/// (0xFCC0 0x0009 = 1, manufacturer 0x115F); presentValue clicks per
+/// button endpoint, a hold released 5 s later unless the button reports.
+#[test]
+fn opple_switch_event_mode_buttons_and_commands() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-wxcjkg13lm.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(opple());
     sim.join(&mut hub, OPPLE, T0);
     assert_eq!(layer(&hub, OPPLE_ID), "aqara/wxcjkg13lm");
     let s = sim.dev(OPPLE).clone();
@@ -1112,19 +1159,9 @@ fn wxkg04lm_battery_from_0x00f7_and_buttons() {
 fn opple_buttons_without_their_descriptors() {
     let mut hub = hub_of(&[include_str!("fixtures/aqara-wxcjkg13lm.yaml")]);
     let mut sim = Sim::default();
-    let mut dev = SimDevice::new(OPPLE, 0x6103, LogicalType::EndDevice, false, 0x115F).endpoint(
-        1,
-        0x0104,
-        0x0105,
-        &[0x0000, 0x0001, 0x0003, 0x0012, 0xFCC0],
-        &[0x0003, 0x0006, 0x0008, 0x0300],
-    );
-    for ep in 2..=6 {
-        dev = dev.endpoint(ep, 0x0104, 0x0105, &[0x0003, 0x0012], &[0x0006]);
-    }
+    let mut dev = opple();
     dev.simple_desc_failing.extend(2..=6);
-    sim.devices
-        .push(dev.basic("LUMI", "lumi.remote.b686opcn01", 0x03));
+    sim.devices.push(dev);
     sim.join(&mut hub, OPPLE, T0);
     for t in 1..=6 {
         hub.tick(T0 + t * 30_000);

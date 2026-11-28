@@ -45,6 +45,9 @@ install instructions and the list of merged pull requests. A pre-release
   sensitivity; a switch's reset or leave announcement is answered as by
   Zigbee2MQTT. 99 of the 178 generated definitions that use `lumi` run;
   the others name what they lack (e.g. `template.lumi.lumi_light`).
+  Upgrading: an Opple remote paired before keeps its mode (command or
+  event); change it with its `operation_mode` select or Reconfigure, or
+  remove the device and pair it again.
 
 ### Fixes
 
