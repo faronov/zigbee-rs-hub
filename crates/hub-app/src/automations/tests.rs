@@ -170,6 +170,73 @@ fn unknown_values_do_not_count_as_changes() {
     assert_eq!(r.w.commands.len(), 1);
 }
 
+/// A state message as the engine publishes it after a report at `at` s.
+fn reported(uid: &str, v: J, at: f64, attrs: J) -> HubEvent {
+    HubEvent::EntityState(json!({"uid": uid, "state": v, "attributes": attrs, "available": true, "last_reported": at}))
+}
+
+#[test]
+fn reported_fires_on_every_report_of_the_value() {
+    let mut r = Rig::new();
+    let sos = "zb:1:1:alarm";
+    r.create(json!({"id": "sos", "triggers": [state_trig(sos, "reported", json!("emergency"))], "actions": [cmd("plug", "toggle")]}));
+    r.create(json!({"id": "any", "triggers": [{"type": "state", "uid": sos, "op": "reported"}], "actions": [cmd("lamp", "toggle")]}));
+    r.create(json!({"id": "chg", "triggers": [{"type": "state", "uid": sos, "op": "changed"}], "actions": [cmd("bell", "toggle")]}));
+    assert_eq!(r.a.rule("sos").unwrap().json()["v"], 2, "format 1 firmware refuses it");
+    assert_eq!(r.a.rule("chg").unwrap().json()["v"], 1);
+    // The first press ever, then the same value at every press.
+    for at in [10.0, 11.0, 12.0] {
+        r.feed(vec![reported(sos, json!("emergency"), at, json!({}))]);
+    }
+    let n = |r: &Rig, u: &str| r.cmds().iter().filter(|c| c.0 == u).count();
+    assert_eq!((n(&r, "plug"), n(&r, "lamp"), n(&r, "bell")), (3, 3, 0));
+    // Published again without a report (availability, a command pending)
+    // or restored: no press.
+    r.feed(vec![reported(sos, json!("emergency"), 12.0, json!({})), reported(sos, json!("emergency"), 13.0, json!({"restored": true}))]);
+    assert_eq!(n(&r, "plug"), 3);
+    // Another value: only the rule without one.
+    r.feed(vec![reported(sos, json!("clear"), 14.0, json!({}))]);
+    assert_eq!((n(&r, "plug"), n(&r, "lamp"), n(&r, "bell")), (3, 4, 1));
+    let t = &r.traces("sos")[0];
+    assert_eq!((t["trigger"]["to"].clone(), t["result"].clone()), (json!("emergency"), json!("done")));
+    // Enabled again, a report from while it was disabled, published
+    // again, is no press.
+    r.req("automations/disable", json!({"automation": "sos"})).unwrap();
+    r.feed(vec![reported(sos, json!("emergency"), 15.0, json!({}))]);
+    r.req("automations/enable", json!({"automation": "sos"})).unwrap();
+    r.feed(vec![reported(sos, json!("emergency"), 15.0, json!({}))]);
+    assert_eq!(n(&r, "plug"), 3);
+    r.feed(vec![reported(sos, json!("emergency"), 16.0, json!({}))]);
+    assert_eq!(n(&r, "plug"), 4);
+    // Event entities: their event type is an attribute of every report.
+    r.create(json!({"id": "ev", "triggers": [{"type": "state", "uid": "b", "attribute": "event_type", "op": "reported", "value": "single"}], "actions": [cmd("fan", "toggle")]}));
+    for (at, ty) in [(20.0, "single"), (21.0, "single"), (22.0, "double")] {
+        r.feed(vec![reported("b", json!(at), at, json!({"event_type": ty}))]);
+    }
+    assert_eq!(n(&r, "fan"), 2);
+    // Not a condition.
+    let e = r.req("automations/validate", json!({"rule": {"conditions": [state_trig(sos, "reported", J::Null)], "actions": [cmd("a", "b")]}}));
+    assert_eq!(e.unwrap()["ok"], false);
+}
+
+#[test]
+fn changed_to_a_value_and_format_1_rules() {
+    let mut r = Rig::new();
+    r.w.states.insert("s".into(), json!("off"));
+    r.create(json!({"id": "on", "triggers": [state_trig("s", "changed", json!("on"))], "actions": [cmd("x", "turn_on")]}));
+    // Stored by format 1 firmware, whose `changed` ignored the value.
+    let old = br#"{"v":1,"id":"old","triggers":[{"type":"state","uid":"s","op":"changed","value":"on"}],"actions":[{"type":"command","uid":"y","command":"toggle"}]}"#;
+    assert_eq!(r.a.load(vec![("auto/old".into(), old.to_vec())]), 2);
+    r.a.prime(&r.w);
+    assert_eq!(r.a.rule("old").unwrap().json()["v"], 1);
+    assert_eq!(r.a.rule("on").unwrap().json()["v"], 2);
+    for v in ["on", "on", "dim", "off", "on"] {
+        r.state("s", json!(v));
+    }
+    let n = |u: &str| r.cmds().iter().filter(|c| c.0 == u).count();
+    assert_eq!((n("x"), n("y")), (2, 4), "to `on` twice; the format 1 rule at every change");
+}
+
 #[test]
 fn events_and_availability() {
     let mut r = Rig::new();
@@ -571,7 +638,7 @@ fn validation_and_limits() {
         json!({"actions": [{"type": "request", "request": {"type": "automations/delete", "automation": "x"}}]}),
         json!({"actions": [{"type": "request", "request": {"type": "network/reset"}}]}),
         json!({"actions": [{"type": "jump"}]}),
-        json!({"v": 2, "actions": [cmd("a", "b")]}),
+        json!({"v": 3, "actions": [cmd("a", "b")]}),
     ];
     for b in bad {
         let e = r.req("automations/create", json!({"rule": b})).unwrap_err();

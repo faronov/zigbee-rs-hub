@@ -2848,7 +2848,11 @@ and never blocks (a `delay` suspends the run until a monotonic deadline;
 the thread wakes for it). Rules are evaluated in ID order, deterministically.
 
 **Rule** (the JSON of `automations/create` and of every result; unknown
-top-level fields are dropped, `v` is the format version, 1):
+top-level fields are dropped, `v` is the format version: 2 for a rule that
+uses what format 1 lacks (a `reported` trigger, `changed` with a `value`),
+else 1, so firmware that reads format 1 only refuses just those rules
+(`unsupported`; the stored record stays). A rule without `v` is read as
+the newest format; a stored format 1 rule keeps its meaning):
 
 ```json
 {"v": 1, "id": "stairs", "name": "Stairs light", "enabled": true,
@@ -2871,14 +2875,21 @@ Triggers (any of them starts a run):
 
 | `type` | Fields | Fires |
 |---|---|---|
-| `state` | `uid`, `attribute` (optional: an attribute of the state message instead of `state`), `op` (`equals`, `not_equals`, `above`, `below`, `changed`), `value` | `changed`: on a change between two known values (unknown → value is not a change; a repeated report is not either); the comparisons when they start to hold (from not holding or unknown). A reported unknown (an invalid or unmapped value) is the previous value like any other, so a comparison can start to hold again after it; the state of an entity never reported (restored or made again, its value not known yet) is not: the previous value stays the last known one. A rule loaded with the network records compares with the devices' restored last values. Numbers compare by value (`"21.5"` = 21.5), `true` = `"on"`, `false` = `"off"` |
-| `event` | `uid`, `event_type` (optional) | an `entity_event` (buttons, remotes, GP commands, 4.7) |
+| `state` | `uid`, `attribute` (optional: an attribute of the state message instead of `state`), `op` (`equals`, `not_equals`, `above`, `below`, `changed`, `reported`), `value` (optional for `changed` and `reported`) | `changed`: on a change between two known values (unknown → value is not a change; a repeated report is not either), to `value` when one is given (a format 1 rule ignores it); `reported`: on every report of the entity, the same value again too, of `value` when one is given (a state published again without a report, for its availability or a pending command, and a restored value are not reports); the comparisons when they start to hold (from not holding or unknown). A reported unknown (an invalid or unmapped value) is the previous value like any other, so a comparison can start to hold again after it; the state of an entity never reported (restored or made again, its value not known yet) is not: the previous value stays the last known one. A rule loaded with the network records compares with the devices' restored last values. Numbers compare by value (`"21.5"` = 21.5), `true` = `"on"`, `false` = `"off"` |
+| `event` | `uid`, `event_type` (optional) | an `entity_event` (buttons, remotes, GP commands, 4.7), each one |
 | `availability` | `device`, `to` (`available`/`unavailable`, optional) | the device's availability changed |
 | `time` | `cron`: `minute hour day month weekday` (numbers, `*`, `a-b`, lists, `/step`; weekday 0–7 or `sun`…`sat`, months `jan`…`dec`; day and weekday both restricted = either) | once per local minute (the hub's fixed UTC offset); nothing is caught up after a clock step |
 | `start` | — | once, when the hub's NCP session is first up |
 
+**Momentary states.** Some buttons are states, not `event` entities: an
+`action` sensor that reads `emergency` or `single` at every press, an SOS
+button's IAS Zone `alarm` that reads on at every press. The value repeats,
+so `changed` fires once at most: use `reported` (with the value to react
+to). The web UI's trigger editor offers it as “received” and picks it for
+entities whose key starts with `action`, `alarm` or `sos`.
+
 Conditions (all must hold; evaluated in order up to the first that
-fails): `state` (`uid`, `attribute`, `op` without `changed`, `value`),
+fails): `state` (`uid`, `attribute`, `op` without `changed` and `reported`, `value`),
 `time` (`after`/`before` `HH:MM`, local; wraps midnight when
 `after` > `before`), `weekday` (`days`: `mon`…`sun` or 1–7), `and`, `or`,
 `not` (`conditions`: a list; `not` = none holds), nested at most 3 deep.
@@ -2916,7 +2927,10 @@ wait for it: until the hub's clock is synchronised (SNTP; before that the
 clock counts from power-on), `time` triggers do not fire, the conditions
 do not hold (trace note `time not synchronised`), and `automations/list`
 reports `time_synced: false` with a `suspended` reason on every scheduled
-rule.
+rule. Run times (trace `time`, `last_run`, the events' `time`) are API
+times like `last_seen`: Unix time once the clock is set, before that on the
+time base of `network/info` `time`; the hub keeps them on its monotonic
+clock, so a run from before the clock was set reads as Unix time after it.
 
 **Storage.** Each rule is a host store journal record `auto/<id>` (16.1)
 holding its compact JSON, written when it changes (create, update,

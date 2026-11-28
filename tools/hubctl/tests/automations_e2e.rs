@@ -150,7 +150,7 @@ fn end_to_end(backend: &str) {
         s.as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|x| x["state"] == false))
     });
     let info = c.call(json!({"type": "hub/info"})).unwrap();
-    assert_eq!(info["automations"]["format"], 1);
+    assert_eq!(info["automations"]["format"], 2);
     c.call(json!({"type": "subscribe", "topics": ["automations"]})).unwrap();
 
     // Plug 2 follows plug 1.

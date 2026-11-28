@@ -21,7 +21,7 @@ pub mod rule;
 
 use std::collections::VecDeque;
 
-use hub_devices::device::Millis;
+use hub_devices::device::{Millis, ts};
 use hub_devices::hub::{ApiError, HubEvent};
 use log::warn;
 use serde_json::{Map, Value as J, json};
@@ -59,7 +59,8 @@ const MAX_TICKETS: usize = 64;
 pub struct Clock {
     /// Monotonic ms since the app started (delays, rate limits).
     pub mono_ms: u64,
-    /// The API's clock, ms (trace times, as `last_seen`).
+    /// The engine's clock, ms (trace times, as `last_seen`: shown through
+    /// [`ts`], Unix time once the hub knows it, for earlier traces too).
     pub now_ms: Millis,
     /// Unix time, s, once the wall clock is synchronised.
     pub wall_s: Option<i64>,
@@ -71,10 +72,6 @@ impl Clock {
     /// Local calendar time, when synchronised.
     pub fn local(&self) -> Option<Local> {
         self.wall_s.map(|s| Local::at(s, self.tz_offset_s))
-    }
-
-    fn t(&self) -> f64 {
-        self.now_ms as f64 / 1000.0
     }
 }
 
@@ -100,7 +97,7 @@ struct Runtime {
     window: u64,
     in_window: u32,
     runs: u32,
-    last: Option<(f64, &'static str)>,
+    last: Option<(Millis, &'static str)>,
 }
 
 #[derive(Debug)]
@@ -123,7 +120,8 @@ struct Run {
 struct Trace {
     run: u32,
     rule: String,
-    time: f64,
+    /// Engine time, ms.
+    time: Millis,
     trigger: String,
     chain: Vec<String>,
     conditions: String,
@@ -140,7 +138,7 @@ fn parse(text: &str) -> J {
 impl Trace {
     fn json(&self) -> J {
         json!({
-            "run": self.run, "automation": self.rule, "time": self.time, "trigger": parse(&self.trigger),
+            "run": self.run, "automation": self.rule, "time": ts(self.time), "trigger": parse(&self.trigger),
             "chain": self.chain, "conditions": parse(&self.conditions),
             "actions": self.actions.iter().map(|(_, a)| parse(a)).collect::<Vec<_>>(),
             "result": self.result, "count": self.count,
@@ -172,7 +170,8 @@ pub struct Automations {
     next_run: u32,
     tickets: VecMap<u64, (u32, usize)>,
     causes: VecMap<String, (Vec<String>, u64)>,
-    /// Watched state values (`uid` or `uid\x1fattribute`).
+    /// Watched state values (`uid` or `uid\x1fattribute`), and the last
+    /// report of entities that `reported` triggers watch (`uid\x1e`).
     last: VecMap<String, J>,
     /// Watched devices' availability.
     avail: VecMap<String, bool>,
@@ -201,6 +200,20 @@ fn key(s: &StateRef) -> String {
     match &s.attribute {
         Some(a) => format!("{}\x1f{a}", s.uid),
         None => s.uid.clone(),
+    }
+}
+
+fn report_key(uid: &str) -> String {
+    format!("{uid}\x1e")
+}
+
+/// The report a state message tells: its `last_reported` in engine time
+/// (the same across a step of the wall clock), null for none or a
+/// restored value.
+fn report(msg: &J) -> J {
+    match msg["last_reported"].as_f64() {
+        Some(t) if msg["attributes"]["restored"] != true => ((t * 1000.0).round() as i64 - hub_devices::device::wall_ms(0)).into(),
+        _ => J::Null,
     }
 }
 
@@ -259,16 +272,19 @@ fn holds(op: Op, v: &J, x: &J) -> bool {
         Op::NotEquals => !loose_eq(v, x),
         Op::Above => num(v).zip(num(x)).is_some_and(|(v, x)| v > x),
         Op::Below => num(v).zip(num(x)).is_some_and(|(v, x)| v < x),
-        Op::Changed => false,
+        Op::Changed | Op::Reported => false,
     }
 }
 
 /// Whether a state trigger fires for `prev` → `new`: `changed` on any
-/// change between known values; the comparisons when they start to hold
-/// (an unknown previous value does not hold).
-pub fn fires(s: &StateRef, prev: &J, new: &J) -> bool {
+/// change between known values (to `value`, when given); `reported` on
+/// any new report (`fresh`) of `value`, when given; the comparisons when
+/// they start to hold (an unknown previous value does not hold).
+pub fn fires(s: &StateRef, prev: &J, new: &J, fresh: bool) -> bool {
+    let to = s.value.is_null() || loose_eq(new, &s.value);
     match s.op {
-        Op::Changed => !prev.is_null() && !new.is_null() && !loose_eq(prev, new),
+        Op::Changed => !prev.is_null() && !new.is_null() && !loose_eq(prev, new) && to,
+        Op::Reported => fresh && to,
         op => holds(op, new, &s.value) && !holds(op, prev, &s.value),
     }
 }
@@ -314,12 +330,19 @@ impl Automations {
             for t in &r.triggers {
                 match t {
                     Trigger::State(s) => {
+                        let msg = w.state(&s.uid).unwrap_or(J::Null);
                         let k = key(s);
                         if self.last.get(&k).is_none_or(J::is_null) {
-                            let v = w.state(&s.uid).map(|m| value_of(&m, &s.attribute)).unwrap_or(J::Null);
-                            self.last.insert(k.clone(), v);
+                            self.last.insert(k.clone(), value_of(&msg, &s.attribute));
                         }
                         keys.push(k);
+                        if s.op == Op::Reported {
+                            let k = report_key(&s.uid);
+                            if self.last.get(&k).is_none_or(J::is_null) {
+                                self.last.insert(k.clone(), report(&msg));
+                            }
+                            keys.push(k);
+                        }
                     }
                     Trigger::Availability { device, .. } => {
                         if !self.avail.contains_key(device)
@@ -367,6 +390,10 @@ impl Automations {
         let Some(uid) = msg.get("uid").and_then(J::as_str) else { return };
         let mut fire = Vec::new();
         let mut seen: Vec<(String, J)> = Vec::new();
+        // A new report: not one already seen (a state published again, for
+        // its availability or a command), not a restored value.
+        let (rk, at) = (report_key(uid), report(msg));
+        let fresh = !at.is_null() && self.last.get(&rk).is_some_and(|p| *p != at);
         for r in self.rules.values().filter(|r| r.enabled) {
             let mut hit = None;
             for t in &r.triggers {
@@ -377,7 +404,7 @@ impl Automations {
                 let new = value_of(msg, &s.attribute);
                 let k = key(s);
                 let prev = self.last.get(&k).cloned().unwrap_or(J::Null);
-                if hit.is_none() && fires(s, &prev, &new) {
+                if hit.is_none() && fires(s, &prev, &new, fresh) {
                     let mut h = json!({"type": "state", "uid": uid, "from": prev, "to": new});
                     if let Some(a) = &s.attribute {
                         h["attribute"] = a.clone().into();
@@ -397,6 +424,9 @@ impl Automations {
         }
         for (k, v) in seen {
             self.last.insert(k, v);
+        }
+        if fresh {
+            self.last.insert(rk, at);
         }
         let chain = self.chain_of(uid, clk);
         for (id, t) in fire {
@@ -532,13 +562,13 @@ impl Automations {
         let (trigger, conditions) = (trigger.to_string(), J::Array(conditions).to_string());
         if let Some(t) = self.traces.back_mut().filter(|t| t.rule == id && t.result == result) {
             t.count += 1;
-            t.time = clk.t();
+            t.time = clk.now_ms;
             t.trigger = trigger;
             t.conditions = conditions;
             return;
         }
         let run = self.new_run();
-        self.push_trace(Trace { run, rule: id.into(), time: clk.t(), trigger, chain, conditions, actions: Vec::new(), result, count: 1 });
+        self.push_trace(Trace { run, rule: id.into(), time: clk.now_ms, trigger, chain, conditions, actions: Vec::new(), result, count: 1 });
         self.finished(run);
     }
 
@@ -551,7 +581,7 @@ impl Automations {
 
     fn finished(&mut self, run: u32) {
         let Some(t) = self.traces.iter().find(|t| t.run == run) else { return };
-        let ev = json!({"topic": "automation_run", "run": run, "automation": t.rule, "result": t.result, "trigger": parse(&t.trigger), "time": t.time});
+        let ev = json!({"topic": "automation_run", "run": run, "automation": t.rule, "result": t.result, "trigger": parse(&t.trigger), "time": ts(t.time)});
         if t.result != "running" {
             self.rt.or_default(&t.rule).last = Some((t.time, t.result));
         }
@@ -698,7 +728,7 @@ impl Automations {
         self.push_trace(Trace {
             run,
             rule: id.into(),
-            time: clk.t(),
+            time: clk.now_ms,
             trigger: trigger.to_string(),
             chain: chain.clone(),
             conditions: J::Array(conds).to_string(),
@@ -791,7 +821,7 @@ impl Automations {
                     if webhook.is_some() {
                         out["note"] = "webhooks are not sent yet".into();
                     }
-                    self.events.push(json!({"topic": "automation_notify", "automation": rid, "run": run, "message": message, "data": parse(data), "time": clk.t()}));
+                    self.events.push(json!({"topic": "automation_notify", "automation": rid, "run": run, "message": message, "data": parse(data), "time": ts(clk.now_ms)}));
                 }
                 Action::Enable { rule, enabled } => {
                     out["type"] = if *enabled { "enable" } else { "disable" }.into();
@@ -922,7 +952,7 @@ impl Automations {
         let rt = self.rt.get(id);
         v["running"] = self.runs.iter().any(|x| x.rule == id).into();
         v["runs"] = rt.map_or(0, |x| x.runs).into();
-        v["last_run"] = rt.and_then(|x| x.last).map_or(J::Null, |(t, _)| t.into());
+        v["last_run"] = rt.and_then(|x| x.last).map_or(J::Null, |(t, _)| ts(t).into());
         v["last_result"] = rt.and_then(|x| x.last).map_or(J::Null, |(_, r)| r.into());
         if r.scheduled() && clk.wall_s.is_none() {
             v["suspended"] = "time not synchronised: schedules wait for the clock".into();

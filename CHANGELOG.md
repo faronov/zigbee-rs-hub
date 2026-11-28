@@ -48,6 +48,15 @@ install instructions and the list of merged pull requests. A pre-release
 - zigbee-rs crates at master `0607d31` (zigbee-rs PR #22: restored
   EmberZNet devices are admitted by the zigbee-rs NCP's Trust Center;
   late LOG credit is delivered at once).
+- **Automations: a trigger at every press of a button that reports a
+  state.** An SOS button's `alarm`, or an `action` sensor that reads
+  `emergency` at every press, reports the same value each time, and a
+  `changed` trigger never fired for it. The new state trigger `reported`
+  ("received" in the editor, picked for `action`, `alarm` and `sos`
+  entities) fires at every report, of the value given; a state published
+  again without a report (availability, a pending command) or restored is
+  not one. `changed` takes a value too ("changed to"). Rules that use either
+  are format 2 (`v`): older firmware refuses them, other rules stay format 1.
 
 ### Home Assistant
 
@@ -63,6 +72,11 @@ install instructions and the list of merged pull requests. A pre-release
 
 ### Fixes
 
+- **Automations' run times were "20784 d ago"** when the hub started before
+  its clock was set (SNTP): runs were timed on the clock from power-on,
+  the page measured them against Unix time. They are now API times like
+  `last_seen` (trace `time`, `last_run`), Unix time once the clock is set,
+  runs from before it too.
 - **Old Xiaomi buttons and sensors finish their interview.** A WXKG01LM
   (`lumi.sensor_switch`) stayed at "interviewing: basic_0" or
   "active_endpoints" for ever: it answers the interview's requests poorly,
