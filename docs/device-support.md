@@ -3733,7 +3733,8 @@ current or voltage reading (Electrical Measurement 0x050B, 0x0508, 0x0505
 on the entity's endpoint) is held for twice the attribute's minimum
 reporting interval plus one second (5 s without a reporting record, so
 11 s) and published only if no other reading of that attribute came
-meanwhile; a held zero current also sets the power to 0 when it is
+meanwhile (from the hub's 1 s tick, or before the device's next frame
+when that comes first); a held zero current also sets the power to 0 when it is
 published; while the endpoint's On/Off is off, every Electrical
 Measurement report sets the power to 0 at once.
 

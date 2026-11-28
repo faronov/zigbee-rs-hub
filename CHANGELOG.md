@@ -226,6 +226,10 @@ repository. An update keeps all data.
 
 ### Fixes
 
+- **A TS011F plug's zero power, current or voltage could be lost** (template
+  `tuya_metering_zero_debounce`): a zero held back the 11 s was dropped
+  when the next reading came after those 11 s but before the hub's next
+  1 s tick. It is published first now.
 - **Automations' run times were "20784 d ago"** when the hub started before
   its clock was set (SNTP): runs were timed on the clock from power-on,
   the page measured them against Unix time. They are now API times like

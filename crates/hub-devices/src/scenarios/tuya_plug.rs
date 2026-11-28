@@ -286,6 +286,15 @@ fn plug_metering_zero_readings_are_debounced() {
     hub.on_aps_indication(electrical(&mut sim, 0x050b, 60, ZclType::I16), t + 2000);
     hub.tick(t + 30_000);
     assert_eq!(state(&hub, &uid("power")), json!(60.0));
+    // A zero due before the next reading (between two ticks) stands first.
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 0, ZclType::I16), t + 31_000);
+    hub.drain_events();
+    hub.on_aps_indication(electrical(&mut sim, 0x050b, 70, ZclType::I16), t + 42_500);
+    let pw: Vec<J> = states(&hub.drain_events(), &uid("power"))
+        .iter()
+        .map(|s| s["state"].clone())
+        .collect();
+    assert_eq!(pw, [json!(0.0), json!(70.0)]);
     // A zero current, once due, zeroes the power as well.
     let t = t + 40_000;
     hub.on_aps_indication(electrical(&mut sim, 0x0508, 0, ZclType::U16), t);

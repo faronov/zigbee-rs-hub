@@ -1949,6 +1949,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         #[cfg(feature = "advanced")]
         self.console_answer(id, &frame);
+        // What fell due since the last tick goes before this frame.
+        self.fire_due(id, now);
         let h = frame.header;
         let ep = ind.src_ep;
         self.stub_endpoint(id, ep, ind.profile, ind.cluster);
@@ -3129,6 +3131,23 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
+    /// Held zero readings (template tuya_metering_zero_debounce) that are
+    /// due: from the tick, and before a frame of the device (the tick is
+    /// 1 s apart).
+    fn fire_due(&mut self, id: &str, now: Millis) {
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        let mut touched = Vec::new();
+        for (i, v) in crate::templates::due(d, now) {
+            set_value(d, i, None, v, now);
+            touched.push(d.entities[i].uid.clone());
+        }
+        for u in touched {
+            self.publish_state(&u);
+        }
+    }
+
     fn tick_device(&mut self, id: &str, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
@@ -3142,14 +3161,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 touched.push(d.entities[i].uid.clone());
             }
         }
-        // Held zero readings (template tuya_metering_zero_debounce).
-        for (i, v) in crate::templates::due(d, now) {
-            set_value(d, i, None, v, now);
-            touched.push(d.entities[i].uid.clone());
-        }
         for u in touched {
             self.publish_state(&u);
         }
+        self.fire_due(id, now);
         // Availability.
         self.availability_tick(id, now);
         // Configure retries (mains).
