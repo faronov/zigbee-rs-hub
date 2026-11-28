@@ -193,7 +193,8 @@ is kept in a per-device **pending queue** and sent when the device next talks
 to the hub, like herdsman's `sendPolicy: "queue"`: any frame from it counts
 (a report, a command it sends to a group or broadcasts, a ZDO answer, its
 Device_annce, a Poll Control Check-in, 5.3), and so does its rejoin (the
-coordinator's join event). Settings writes from the UI to sleepy devices
+coordinator's join event) and, on a zigbee-rs NCP that reports them, its
+data polls (below). Settings writes from the UI to sleepy devices
 use the same queue; the entity shows the requested value as `pending`
 until the write response arrives, and a binding or group request shows
 `queued` until it is sent (the web UI says "press a button on the device
@@ -208,11 +209,27 @@ configure records the failure, the binding table read ends with its
 error). A device that rejoined under a new short address (its join, its
 Device_annce, or a frame with its IEEE from the new address) gets what
 waited for it there, the ZDO descriptor requests with the new address of
-interest. The hub hears only frames: a device whose uplinks the NCP does
-not pass on (data polls; groupcasts to a group the coordinator is not a
+interest. Otherwise the hub hears only frames: a device whose uplinks the
+NCP does not pass on (groupcasts to a group the coordinator is not a
 member of, e.g. an IKEA E1524/E1810 remote with firmware before 2.3.075,
-which sends its presses to a group) is never seen awake: neither coordinator
-backend reports a child's data poll to the hub yet.
+which sends its presses to a group; data polls, below) is never seen awake.
+
+**Data polls (ZRHP, zigbee-rs NCP images after 0.1.3).** A sleepy device
+is reachable right after it polls its parent (MAC Data Request). An NCP
+that offers `EVT_CHILD_POLL` (capability bit 25) reports the polls of its
+own children once the hub asks for them (`host_caps` bit 4, set in a
+second `SYS_NEGOTIATE` of the session when the first answer shows the
+capability: an NCP without it, 0.1.3 and EmberZNet, never gets the bit).
+The hub takes a report as a frame from the device: seen
+(`last_seen`, available), awake for 5 s, and its queue goes out at once (to
+the short address it polled from); the NCP holds each frame for the
+device's next poll. A device that polls but rarely sends (a SONOFF SNZB-01
+button) gets its configure and reads without a press. Reports are hints:
+the NCP sends at most one per child every 2 s (or when its ACK's Frame
+Pending changes) and 10 per second in all, tracks 32 children, and does
+not see the polls of children of other routers; frames still go out at any
+frame from the device, and the End Device Timeout (`EVT_DEVICE_LEFT`)
+stays the liveness authority.
 
 Basic attributes are learnt from any Read Attributes Response or Report
 Attributes of the device, not only the interview's reads: an interview
@@ -2557,8 +2574,9 @@ code feels familiar:
   for the NCP session's `hub/info` fields and `ncp_log` in `maintenance`;
   `boot_id` and `crash` in `hub/system`; the events `definition_missing`
   (14.4), `topology_updated` (14.6), `mqtt_status` (14.10); `queued` in
-  binding records (14.9); ZRHP leaves and refused joins reach the hub
-  (`CoordEvent::DeviceLeft`, `JoinDenied`).
+  binding records (14.9); `tx_power_min` and `tx_power_max` in
+  `network/info` (the NCP's range); ZRHP leaves and refused joins reach
+  the hub (`CoordEvent::DeviceLeft`, `JoinDenied`).
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2586,7 +2604,7 @@ code feels familiar:
 | Type | Parameters | Result |
 |---|---|---|
 | `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`, `edition` (`standard`, or `devtools`: the developer edition, 14.6 `hub/developer/set`); once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) and `maintenance` (14.6). API 1.4: when these change (the first session, an NCP restart with other capabilities, a restore with another coordinator IEEE) the changed ones come as `hub_updated` (topic `network`) |
-| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced`, `registry` (whose the hub's network records are, below: {`state`: `owned`, `untagged` (nothing stored yet), `unverified` (an NCP-held network not compared yet), `foreign` with `backend` and `why`}) (fields the host core does not know are absent; `unsupported` without a host core) |
+| `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power` (applied), `tx_power_requested` (set with `network/set_tx_power`; absent: the NCP's default), `tx_power_min` and `tx_power_max` (API 1.4: the range the NCP reports, zigbee-rs NCP images after 0.1.3; absent otherwise), `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced`, `registry` (whose the hub's network records are, below: {`state`: `owned`, `untagged` (nothing stored yet), `unverified` (an NCP-held network not compared yet), `foreign` with `backend` and `why`}) (fields the host core does not know are absent; `unsupported` without a host core) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
 | `network/events` | — | API 1.4: the network log, oldest first: the last 32 `device_network` event bodies (below), this run |
 | `devices/list` | — | device records (4.1) |
@@ -2778,7 +2796,7 @@ written as text with fallible allocation, never as a JSON tree).
 | `network/energy_scan` | `channels` (list, default 11–26), `duration_exp` (0–8, default 3: ≈ 0.14 s per channel), `passes` (1–10, default 1; `count` is the old name) | **background job** (below). Result: `passes` (done), `passes_requested`, `cancelled`, `channels`: [{`channel`, `energy` (average over the passes, 0–255), `energy_max` (peak), `max_rssi_dbm` (peak), `wifi_overlap`, `score`}], `current`, `wifi_channel` (the hub's own Wi-Fi channel, when known), `recommended`, `duration_ms`; a partial result after every pass but the last. `score` (lower is better) = 4 × energy, +1000 under the hub's 20 MHz Wi-Fi channel (Wi-Fi 1 → 11–14, 6 → 16–19, 11 → 21–24), +120 next to it, +160 for 26, +30 off the Light Link primaries 11/15/20/25 |
 | `network/active_scan` | `channels` (list, default 11–26), `duration_exp` (0–6, default 3) | **background job**. Result: `networks`: [{`channel`, `pan_id`, `ext_pan_id` (big-endian hex), `src` (the beacon's sender), `lqi`, `rssi`, `permit_join`, `stack_profile`, `update_id`, `beacons` (how many were heard), `own` (this hub's network)}] — one entry per network and channel, from its best beacon (every router beacons; ZRHP `NWK_ACTIVE_SCAN` 0x010A); `duration_ms`. `unsupported` on NCP images without it |
 | `network/change_channel` | `channel` (11–26) | `channel`, `nwk_update_id` once the NCP tuned (ZRHP `NWK_CHANGE_CHANNEL`: `Mgmt_NWK_Update_req` broadcast, switch ≈ 9 s later); the store follows. Sleepy devices find the network by their rejoin scan |
-| `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps and rounds down to its radio's steps: ESP32-H2 −24…+20, ESP32-C6 −15…+20 dBm, 3 dB); persisted in the host store and re-applied after every NCP restart. `network/info` reports `tx_power` (applied, absent while the NCP reports 0x7F, unknown) and `tx_power_requested` |
+| `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps and rounds down to its radio's steps: ESP32-H2 −24…+20, ESP32-C6 −15…+20 dBm, 3 dB; EFR32MG24 −24…+20 dBm with the 20 dBm PA, −30…+10 dBm with the 10 dBm PA); persisted in the host store and re-applied after every NCP restart. When the NCP reports its range (`tx_power_min`, `tx_power_max`) the hub clamps `dbm` to it first and keeps the clamped value. `network/info` reports `tx_power` (applied, absent while the NCP reports 0x7F, unknown) and `tx_power_requested`. Until it is set a ZRHP NCP keeps its own default (the hub forms with `NWK_FORM.tx_power` 0, "keep"); the Dongle Max's zigbee-rs NCP starts at +8 dBm (images after NCP 0.1.3) |
 | `network/diagnostics` | `reset` (bool), `groups` (`DIAG` group mask, default all) | `ncp` (`SYS_GET_STATUS`: `uptime_s`, `free_aps_slots`, `pta_coex`, `key_export_locked`, `permit_join`, …), `counters` [{`id`, `group`, `name`, `value`}] (`DIAG_GET_COUNTERS`), `frame_counters`, `host_link` (the hub's link counters), `pta` {`capable`, `enabled`}, `tx_power_set`, `ezsp_hashed_tclk` (ZRHP: the NCP keeps an EZSP backup's hashed link key root and derives the devices' keys from it, capability bit 14), `ncp_log` (as `network/ncp_log`, ZRHP), `unsupported` (commands the NCP lacks), `errors` |
 | `network/ncp_log` | `level` (0 off, 1 error … 5 trace; absent: read) | `level`, `forwarded`, `suppressed` (over the rate limit: 16 at once, then 2 a second), `dropped` (by the NCP, its log full). ZRHP only: the hub grants the NCP's LOG endpoint credit, and its log records (first the ones it kept since its reset: crystal tuning, IEEE source, NV state) go into the hub's log under the target `ncp` up to `level` (default 3, info, the NCP's own default); a level set is kept in the host store and sent to the NCP in every session (`SYS_SET_CONFIG` `log_level`). Console (Dongle Max): `ncp log [on|off|level <n>]` |
 | `network/topology` | `refresh` (default true: a **background job**; false answers at once with the last map the hub kept, null before the first scan: maps up to 96 KiB with PSRAM, 8 KiB without (`Resources::kept_map_bytes`); a larger one goes only to the session that scanned, in its `job_result`, and the previous map stays), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); cancelling stops before the next router |

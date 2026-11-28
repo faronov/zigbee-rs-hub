@@ -198,12 +198,20 @@ impl Hub {
         });
     }
 
-    /// `NWK_SET_TX_POWER` (antenna-referred dBm); returns what the NCP
-    /// applied. Persisted and replayed on every resume.
+    /// `NWK_SET_TX_POWER` (antenna-referred dBm), within the range the NCP
+    /// reports (capacities 20/21); returns what the NCP applied. The value
+    /// sent is persisted and replayed on every resume.
     pub fn set_tx_power(&self, dbm: i8) -> Result<i8, Error> {
+        let dbm = self.tx_power_range().map_or(dbm, |(min, max)| dbm.clamp(min, max));
         let applied = self.apply_tx_power(dbm, false)?;
         self.with_store(|s| s.kv_put(TX_POWER_KEY, &[dbm as u8])).map_err(|e| Error::Other(e.to_string()))?;
         Ok(applied)
+    }
+
+    /// The NCP's `NWK_SET_TX_POWER` range `(min, max)` in dBm, when it
+    /// reports one.
+    fn tx_power_range(&self) -> Option<(i8, i8)> {
+        self.inner.client.session().and_then(|s| s.negotiated.tx_power_range)
     }
 
     /// The TX power the operator set (`None`: the NCP's default).

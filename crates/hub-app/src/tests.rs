@@ -1017,6 +1017,35 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     app.shutdown();
 }
 
+/// The TX power range the NCP reports (ZRHP capacities 20/21, e.g. the
+/// MG24's 10 dBm PA) is in `network/info`, and `network/set_tx_power` keeps
+/// to it: the clamped value is what is sent, stored and replayed. An NCP
+/// that reports none (0.1.3, the sim's default) has no range fields.
+#[test]
+fn the_ncps_tx_power_range_bounds_the_setting() {
+    let r = rig_with(Store::volatile(), |sim| sim.with(|s| s.tx_power_range = Some((-30, 10))));
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    form(&app, sid, &rx, 15);
+    let net = call(&app, sid, &rx, 1, json!({"type": "network/info"}));
+    assert_eq!((ok(&net)["tx_power_min"].as_i64(), ok(&net)["tx_power_max"].as_i64()), (Some(-30), Some(10)));
+    let tx = call(&app, sid, &rx, 2, json!({"type": "network/set_tx_power", "dbm": 20}));
+    assert_eq!((ok(&tx)["requested_dbm"].as_i64(), ok(&tx)["applied_dbm"].as_i64()), (Some(20), Some(10)));
+    assert_eq!(r.ncp.stored_tx_power(), Some(10));
+    let sent: Vec<_> = r.sim.state().log.into_iter().filter(|(id, _)| *id == ids::NWK_SET_TX_POWER).map(|(_, p)| p).collect();
+    assert_eq!(sent, [vec![10]]);
+    let net = call(&app, sid, &rx, 3, json!({"type": "network/info"}));
+    assert_eq!((ok(&net)["tx_power"].as_i64(), ok(&net)["tx_power_requested"].as_i64()), (Some(10), Some(10)));
+    app.shutdown();
+
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    let net = call(&app, sid, &rx, 1, json!({"type": "network/info"}));
+    assert!(ok(&net).get("tx_power_min").is_none() && ok(&net).get("tx_power_max").is_none(), "{net}");
+    app.shutdown();
+}
+
 #[test]
 fn network_map_from_coordinator_tables_and_router_answers() {
     use hub_ncp::sim::SimRemote;

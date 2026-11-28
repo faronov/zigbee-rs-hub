@@ -111,10 +111,31 @@ repository. An update keeps all data.
   on the Dongle Max console) sets the level, kept across restarts;
   `network/diagnostics` shows it with its counters, and whether the NCP
   keeps an EmberZNet backup's hashed link key root (`ezsp_hashed_tclk`).
-- zigbee-rs crates at master `cb9b5c0e` (zigbee-rs NCP 0.1.3, PRs #22 to
+- **Sleepy devices get their requests when they poll** (ZRHP, zigbee-rs
+  NCP images after 0.1.3). The hub asks an NCP that offers them for its
+  reports of its children's data polls (`EVT_CHILD_POLL`) and takes one
+  as a frame from the device: seen, awake, and what waits for it
+  (configure, reads, binds, settings) goes out at once, the NCP holding it
+  for the next poll. A button that polls but rarely sends, like a SONOFF
+  SNZB-01, is configured without a press. The reports are hints (at most
+  one per child every 2 s, 10 per second in all, only the NCP's own
+  children): any frame still sends the queue, as before. NCP 0.1.3 and
+  EmberZNet are unaffected (`docs/device-support.md` 3.1).
+- **TX power: the NCP's range.** `network/info` has `tx_power_min` and
+  `tx_power_max` when the NCP reports them (zigbee-rs NCP images after
+  0.1.3: ESP32-H2/C6, and the MG24 with −24…+20 dBm on its 20 dBm PA);
+  `network/set_tx_power` clamps to them and keeps the clamped value, and
+  Settings shows the range. The hub sets no TX power of its own: until
+  one is set the NCP keeps its default (+8 dBm on the Dongle Max's
+  zigbee-rs NCP).
+- zigbee-rs crates at master `2c841178` (zigbee-rs NCP 0.1.3, PRs #22 to
   #26: restored EmberZNet devices are admitted by the zigbee-rs NCP's
   Trust Center; late LOG credit is delivered at once; `NWK_LEAVE_RESET`
-  flags bit2, the Leave on air only when asked; `SEC_DERIVE_EZSP_KEY`).
+  flags bit2, the Leave on air only when asked; `SEC_DERIVE_EZSP_KEY`;
+  then PRs #27 to #35: the MG24's `NWK_SET_TX_POWER` and the TX power
+  range, ZRHP ACK-first transmission with a line-rate RTO floor, the child
+  poll reports, faster polling of sleepy sensors while the network talks
+  to them).
 - `network/reset` takes `leave` (Network › New network: "announce the
   leave on air"): the coordinator broadcasts a NWK Leave before the wipe,
   for an explicit "leave network". Without it (the default, and always
@@ -208,6 +229,16 @@ repository. An update keeps all data.
 
 ### Fixes
 
+- **ZRHP over a UART: no spurious retransmissions at 115 200 Bd.** The
+  link now knows the UART's rate (S3 hub to the H2, Dongle Max to the
+  MG24, also after a line change): it sends ACKs first and holds data
+  while the UART is still busy, and its retransmission timeout no longer
+  runs out before the peer could answer (about 0.1 s at 115 200 Bd).
+  USB links keep the fixed timeout.
+- **No more `BUSY` refusals from a ZRHP NCP under load.** The hub sends at
+  most the NCP's `max_aps_inflight` unconfirmed APS requests at once (16
+  on the zigbee-rs NCP); the others wait in the hub, in order, instead of
+  being refused (the `busy` APS counter of `hub/system`).
 - **Automations' run times were "20784 d ago"** when the hub started before
   its clock was set (SNTP): runs were timed on the clock from power-on,
   the page measured them against Unix time. They are now API times like

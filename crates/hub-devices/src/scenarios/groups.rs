@@ -823,6 +823,48 @@ fn a_sleepy_remote_s_queue_goes_out_on_any_uplink() {
     assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], false);
 }
 
+/// A poll the NCP reports (ZRHP `EVT_CHILD_POLL`) wakes a sleepy remote
+/// as an uplink does: what waits for it goes out at once, to the short
+/// address it polled from. A poll of an unknown device changes nothing,
+/// and polls publish no link quality (they have none).
+#[test]
+fn a_sleepy_remote_s_poll_sends_its_queue() {
+    let (mut hub, mut sim) = setup();
+    let t = T0 + 120_000;
+    let nwk = sim.dev(REMOTE).nwk;
+    hub.on_child_poll(Some(REMOTE), nwk, t - 20_000);
+    hub.drain_events();
+    hub.on_child_poll(Some(REMOTE), nwk, t - 19_000);
+    assert!(hub.drain_events().is_empty());
+    bind_to_l1(&mut hub, t);
+    hub.drain_events();
+    hub.on_child_poll(Some(0x0017880100aa00ff), 0x7777, t + 500);
+    assert!(hub.transport.aps().is_empty());
+    assert!(pending_states(&hub.drain_events()).is_empty());
+
+    sim.dev(REMOTE).nwk = 0x4444;
+    hub.on_child_poll(Some(REMOTE), 0x4444, t + 1000);
+    assert_eq!(pending_states(&hub.drain_events()), ["pending"]);
+    assert_eq!(hub.device(IDR).unwrap().nwk(), Some(0x4444));
+    sim.run(&mut hub, t + 1000);
+    assert!(
+        sim.dev(REMOTE)
+            .bind_table
+            .contains(&(1, 6, BindDst::Ieee(L1, 11)))
+    );
+
+    // Asleep again: a binding table read waits; a poll known only by its
+    // short address sends it.
+    sim.dev(REMOTE).bind_table.clear();
+    let t = t + 60_000;
+    hub.bindings_read(IDR, t).unwrap();
+    sim.run(&mut hub, t);
+    assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], true);
+    hub.on_child_poll(None, 0x4444, t + 1000);
+    sim.run(&mut hub, t + 1000);
+    assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], false);
+}
+
 /// A remote that rejoined under another short address gets what waited
 /// for it there: after the trust center's join, and after a frame that
 /// shows the new address with its IEEE (also inside the ZDO requests

@@ -671,3 +671,36 @@ fn echo_on(c: &crate::Client, data: &[u8]) -> Result<Vec<u8>, Error> {
     let rsp = c.call(&SysEcho { data: Rest(data) }, CallOpts::default())?;
     Ok(rsp.payload[1..].to_vec())
 }
+
+/// `host_caps` bit 4 (`CHILD_POLL_EVENTS`) goes only to an NCP that
+/// advertises capability bit 25: one without it (NCP 0.1.3) negotiates
+/// once, without the bit, as before; with it a second `SYS_NEGOTIATE`
+/// opts in, and the next session opts in at once.
+#[test]
+fn child_poll_events_are_asked_only_of_an_ncp_that_has_them() {
+    use zigbee_zrhp::msg::system::host_caps::CHILD_POLL_EVENTS;
+    let base = HubConfig::default().driver.host_caps & !CHILD_POLL_EVENTS;
+    for child_polls in [false, true] {
+        let (host, ncp) = pipe::pair();
+        let sim = SimNcp::start(ncp);
+        sim.with(|s| s.child_polls = child_polls);
+        let (rx, tx) = host.split();
+        let mut cfg = HubConfig::default();
+        cfg.driver.lines = vec![Line::BR_DEFAULT];
+        let hub = Hub::start(cfg, rx, tx, None, Store::volatile(), rng());
+        assert!(hub.wait_ready(T));
+        let negotiated = hub.client().session().unwrap().negotiated.host_caps;
+        if child_polls {
+            assert_eq!(sim.state().negotiations, [base, base | CHILD_POLL_EVENTS]);
+            assert_eq!(negotiated, base | CHILD_POLL_EVENTS);
+            reboot(&hub, &sim);
+            assert!(hub.wait_ready(T));
+            assert_eq!(sim.state().negotiations[2..], [base | CHILD_POLL_EVENTS]);
+        } else {
+            assert_eq!(sim.state().negotiations, [base]);
+            assert_eq!(negotiated, base);
+        }
+        hub.shutdown();
+        sim.stop();
+    }
+}

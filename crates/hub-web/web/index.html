@@ -547,8 +547,8 @@ $("#chb").onclick=e=>{const c=+$("#ch").value;if(c==net.channel)return toast("Al
  busy(e.target,act("network/change_channel",{channel:c}).then(r=>toast("Network on channel "+r.channel))).catch(()=>{})};
 // TX power: antenna-referred; the NCP clamps and rounds down to its steps.
 const TXR={1:[-24,20,"ESP32-H2"],2:[-15,20,"ESP32-C6"]};
-function txHint(){const n=net,r=TXR[(n.ncp||{}).chip],i=$("#txp");if(r){i.min=r[0];i.max=r[1]}
- $("#txh").textContent=(r?r[2]+": "+r[0]+"…+"+r[1]+" dBm in 3 dB steps (the NCP rounds down). ":"")+"Antenna-referred; re-applied after every NCP restart. Rules differ by country: in the EU, ETSI EN 300 328 caps the power density at 10 dBm/MHz EIRP, so more than about +10 dBm with a gain antenna may exceed it. More power helps the hub send, not hear."}
+function txHint(){const n=net,m=n.tx_power_max!=null,r=m?[n.tx_power_min,n.tx_power_max,"This NCP"]:TXR[(n.ncp||{}).chip],i=$("#txp");if(r){i.min=r[0];i.max=r[1]}
+ $("#txh").textContent=(r?r[2]+": "+r[0]+"…+"+r[1]+(m?" dBm (the NCP rounds down to a step of its radio). ":" dBm in 3 dB steps (the NCP rounds down). "):"")+"Antenna-referred; re-applied after every NCP restart. Rules differ by country: in the EU, ETSI EN 300 328 caps the power density at 10 dBm/MHz EIRP, so more than about +10 dBm with a gain antenna may exceed it. More power helps the hub send, not hear."}
 $("#txb").onclick=e=>{const d=+$("#txp").value;busy(e.target,act("network/set_tx_power",{dbm:d}).then(r=>{$("#txi").textContent="requested "+r.requested_dbm+" dBm → applied "+r.applied_dbm+" dBm";net.tx_power=r.applied_dbm;net.tx_power_requested=d;renderSNet()})).catch(()=>{})};
 // Energy scan: the hub averages the passes and keeps the peak; the
 // recommendation mirrors its scoring (4 × energy, +1000 under Wi-Fi, +120

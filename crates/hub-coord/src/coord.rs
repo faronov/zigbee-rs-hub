@@ -60,6 +60,14 @@ pub enum CoordEvent {
         /// left the network.
         aged_out: bool,
     },
+    /// A child of the NCP polled it (ZRHP `EVT_CHILD_POLL`): it is awake
+    /// now. A hint only: the NCP rate-limits the reports and drops some.
+    ChildPoll {
+        /// IEEE, when the NCP knows it.
+        ieee: Option<u64>,
+        /// Short address.
+        nwk: u16,
+    },
     /// Green Power event.
     Gp(Box<GpEvent>),
     /// [`Progress`] of a request.

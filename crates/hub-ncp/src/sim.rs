@@ -26,7 +26,7 @@ use zigbee_zrhp::msg::network::{
     NwkEnergyScan, NwkForm, NwkGetInfoRsp, NwkInit, NwkInitRsp, NwkPermitJoin, NwkSetTxPower, NwkSetTxPowerRsp, ScanResult,
 };
 use zigbee_zrhp::msg::security::{EvtFcCheckpoint, SecGetFrameCountersRsp, SecGetNetworkKeyRsp};
-use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysGetStatusRsp, SysNegotiateRsp, caps};
+use zigbee_zrhp::msg::system::{Capacity, EvtNcpReady, SysGetInfoRsp, SysGetStatusRsp, SysNegotiateReq, SysNegotiateRsp, capacity, caps};
 use zigbee_zrhp::msg::tables::{TableKey, TblInvalidate, TblRead, TblReadEntry, TblReadRsp, TblSyncRsp};
 use zigbee_zrhp::msg::{Batch, Kind, RawMessage, ids};
 use zigbee_zrhp::queue::EndpointQueues;
@@ -147,6 +147,19 @@ pub struct SimState {
     pub log_level: Option<u8>,
     /// Sequence of the next `EVT_LOG_RECORD`.
     pub log_seq: u16,
+    /// Advertise `CHILD_POLL_EVENTS` (capability bit 25), as zigbee-rs NCP
+    /// images after 0.1.3.
+    pub child_polls: bool,
+    /// `NWK_SET_TX_POWER` range reported as capacities 20/21 (`None`: not
+    /// reported, as NCP 0.1.3); `NWK_SET_TX_POWER` clamps to it.
+    pub tx_power_range: Option<(i8, i8)>,
+    /// `host_caps` of every `SYS_NEGOTIATE`.
+    pub negotiations: Vec<u64>,
+    /// `APS_DATA_REQUEST`s accepted and not yet confirmed; more than
+    /// [`SIM_MAX_APS_INFLIGHT`] are refused with `BUSY`, as the NCP does.
+    pub aps_inflight: usize,
+    /// Delay of `EVT_APS_DATA_CONFIRM` after the request.
+    pub aps_confirm_delay: Duration,
 }
 
 /// A network the simulated NCP hears in an active scan.
@@ -174,6 +187,9 @@ type Injected = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 /// Largest unfragmented ASDU of the simulated NCP (`max_asdu`, as the
 /// zigbee-rs NCP); longer ones are refused with `TOO_LARGE`.
 pub const SIM_MAX_ASDU: usize = 82;
+
+/// `max_aps_inflight` of the simulated NCP.
+pub const SIM_MAX_APS_INFLIGHT: usize = 4;
 
 /// One `APS_DATA_REQUEST` as a [`SimApsHook`] sees it.
 #[derive(Debug, Clone, Copy)]
@@ -280,6 +296,11 @@ impl SimNcp {
             scan_progress: true,
             log_level: None,
             log_seq: 0,
+            child_polls: false,
+            tx_power_range: None,
+            negotiations: Vec::new(),
+            aps_inflight: 0,
+            aps_confirm_delay: Duration::from_millis(10),
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
         let sim = Self {
@@ -357,6 +378,7 @@ impl SimNcp {
             s.trial = false;
         }
         s.endpoints.clear();
+        s.aps_inflight = 0;
         s.staging = None;
         s.nwk_limit += STRIDE;
         s.aps_limit += STRIDE;
@@ -398,6 +420,9 @@ impl SimNcp {
                 match a {
                     Action::Reboot => self.reboot(),
                     Action::Event(id, payload) => {
+                        if id == ids::EVT_APS_DATA_CONFIRM {
+                            self.with(|s| s.aps_inflight = s.aps_inflight.saturating_sub(1));
+                        }
                         seq = seq.wrapping_add(1);
                         let ep = zigbee_zrhp::msg::home_endpoint(id).unwrap_or(Endpoint::Zigbee);
                         let _ = q.queue(ep).raw(Kind::Event, id, seq, &payload);
@@ -520,8 +545,17 @@ impl SimNcp {
         }
         let rsp = match m.header.msg_id {
             ids::SYS_NEGOTIATE => {
-                let capacities =
-                    [Capacity { id: 1, value: 4 }, Capacity { id: 6, value: SIM_MAX_ASDU as u32 }, Capacity { id: 7, value: STRIDE }];
+                let r: SysNegotiateReq = m.decode().unwrap();
+                s.negotiations.push(r.host_caps);
+                let mut capacities = vec![
+                    Capacity { id: capacity::MAX_APS_INFLIGHT, value: SIM_MAX_APS_INFLIGHT as u32 },
+                    Capacity { id: capacity::MAX_ASDU, value: SIM_MAX_ASDU as u32 },
+                    Capacity { id: capacity::FC_STRIDE, value: STRIDE },
+                ];
+                if let Some((min, max)) = s.tx_power_range {
+                    capacities.push(Capacity { id: capacity::TX_POWER_MIN_DBM, value: i32::from(min) as u32 });
+                    capacities.push(Capacity { id: capacity::TX_POWER_MAX_DBM, value: i32::from(max) as u32 });
+                }
                 ok(encode!(SysNegotiateRsp {
                     major: 1,
                     minor: 0,
@@ -530,7 +564,8 @@ impl SimNcp {
                         | caps::UART_FLOW_CONTROL
                         | caps::BACKUP_RESTORE
                         | if s.unsupported.contains(&ids::NWK_ENERGY_SCAN) { 0 } else { caps::ENERGY_SCAN }
-                        | if s.unsupported.contains(&ids::NWK_SET_TX_POWER) { 0 } else { caps::TX_POWER },
+                        | if s.unsupported.contains(&ids::NWK_SET_TX_POWER) { 0 } else { caps::TX_POWER }
+                        | if s.child_polls { caps::CHILD_POLL_EVENTS } else { 0 },
                     capacities: List::new(&capacities),
                     fw: Bytes8(b"sim-ncp 0.1.0"),
                     build_id: [0x51; 8],
@@ -673,7 +708,8 @@ impl SimNcp {
             }
             ids::NWK_SET_TX_POWER => {
                 let r: NwkSetTxPower = m.decode().unwrap();
-                s.tx_power = r.dbm.clamp(-24, 20);
+                let (min, max) = s.tx_power_range.unwrap_or((-24, 20));
+                s.tx_power = r.dbm.clamp(min, max);
                 s.log.push((m.header.msg_id, m.payload.to_vec()));
                 ok(encode!(NwkSetTxPowerRsp { applied_dbm: s.tx_power }))
             }
@@ -864,6 +900,10 @@ impl SimNcp {
                     zigbee_zrhp::msg::data::ApsDst::Nwk(n) => n,
                     _ => 0xFFFF,
                 };
+                if s.aps_inflight >= SIM_MAX_APS_INFLIGHT {
+                    return (status(Status::Busy), actions);
+                }
+                s.aps_inflight += 1;
                 let zb_status = s.undeliverable.iter().find(|u| u.0 == dst).map_or(0, |u| u.1);
                 let (st, flags) = if zb_status == 0 { (0, 1) } else { (1, 0) };
                 if let Some(hook) = self.aps_hook.lock().unwrap().as_mut() {
@@ -873,7 +913,7 @@ impl SimNcp {
                     }
                 }
                 actions.push((
-                    Duration::from_millis(10),
+                    s.aps_confirm_delay,
                     event(&EvtApsDataConfirm { req_tid: tid, status: st, zb_status, aps_counter: 7, dst_nwk: dst, flags, elapsed_ms: 10 }),
                 ));
                 if req.profile == 0

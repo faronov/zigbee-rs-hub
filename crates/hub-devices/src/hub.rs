@@ -1864,7 +1864,36 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.pump_configure(&id, now);
     }
 
-    /// Any frame from a device: last_seen, link quality, availability.
+    /// A child of the NCP polled it (ZRHP `EVT_CHILD_POLL`): as an uplink,
+    /// heard from, awake, and what waits for it goes out now (the NCP holds
+    /// it for the child's next poll). A hint, rate-limited by the NCP: the
+    /// queue still waits for frames when no report comes.
+    pub fn on_child_poll(&mut self, ieee: Option<u64>, nwk: u16, now: Millis) {
+        let by_ieee = ieee.map(zigbee_id).filter(|i| self.devices.contains_key(i));
+        let Some(id) = by_ieee
+            .clone()
+            .or_else(|| self.nwk_index.get(&nwk).cloned())
+        else {
+            return;
+        };
+        if by_ieee.is_some()
+            && self
+                .devices
+                .get(&id)
+                .and_then(Device::nwk)
+                .is_some_and(|n| n != nwk)
+        {
+            self.renumber(&id, nwk);
+        }
+        self.seen(&id, None, None, now);
+        if let Some(d) = self.devices.get_mut(&id) {
+            d.awake_until = d.awake_until.max(now + AWAKE_AFTER_RX_MS);
+        }
+        self.flush_queue(&id, now);
+    }
+
+    /// Any frame from a device: last_seen, link quality, availability; a
+    /// data poll (no LQI, no RSSI): last_seen and availability.
     pub(crate) fn seen(&mut self, id: &str, lqi: Option<u8>, rssi: Option<i8>, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
@@ -1897,16 +1926,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
-        let mut fields = vec![
-            (
-                DeviceField::Linkquality,
-                d.lqi.map_or(Value::Null, |v| Value::Int(i64::from(v))),
-            ),
-            (
-                DeviceField::Rssi,
-                d.rssi.map_or(Value::Null, |v| Value::Int(i64::from(v))),
-            ),
-        ];
+        let mut fields = Vec::new();
+        // A data poll (no LQI, no RSSI) leaves the link's entities as they are.
+        if lqi.is_some() || !was {
+            let v = d.lqi.map_or(Value::Null, |v| Value::Int(i64::from(v)));
+            fields.push((DeviceField::Linkquality, v));
+        }
+        if rssi.is_some() || !was {
+            let v = d.rssi.map_or(Value::Null, |v| Value::Int(i64::from(v)));
+            fields.push((DeviceField::Rssi, v));
+        }
         if minute_passed || !was {
             fields.push((DeviceField::LastSeen, Value::Float(ts(now))));
         }

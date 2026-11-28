@@ -8,7 +8,7 @@
 //! | Module | Contents | Spec |
 //! |---|---|---|
 //! | [`transport`] | byte-stream halves, line settings, EN/BOOT control, in-memory pipe | 4, 11.5 |
-//! | [`driver`] | link thread: `zigbee-zrhp` [`Link`](zigbee_zrhp::link::Link) (embedded profile), credits, sessions, negotiation, request gate, `RETRY` after a resync, line hunting | 5, 6 |
+//! | [`driver`] | link thread: `zigbee-zrhp` [`Link`](zigbee_zrhp::link::Link) (embedded profile), credits, sessions, negotiation (opt-in `host_caps`), request gate, `RETRY` after a resync, line hunting and line rate | 5, 6 |
 //! | [`lifecycle`] | [`Hub`]: seamless resume, network ownership, `NWK_INIT` floors, replay, events → store, form, permit join, APS data, NCP update/confirm, reset, ROM-loader hand-off; maintenance (`netops`): energy scan, channel change, TX power, diagnostics, coordinator tables, backup export/restore, leave/reset | 7, 8.4, 8.7, 9, 12.1, 12.4 |
 //! | [`fw`] | `FW_*` streaming into the NCP's inactive slot | 7.9 |
 //! | [`inventory`] | devices the NCP knows (`TBL_READ`, `DIAG_GET_CHILDREN`/`NEIGHBORS`) for import | 8.5, 10 |

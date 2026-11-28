@@ -969,6 +969,7 @@ impl Runner {
                 let removed = self.removed.contains(ieee);
                 self.engine.on_leave(ieee, nwk, rejoin, removed, aged_out, now);
             }
+            CoordEvent::ChildPoll { ieee, nwk } => self.engine.on_child_poll(ieee, nwk, now),
             CoordEvent::Gp(e) => self.engine.on_gp_event(*e, now),
             CoordEvent::NetworkState(c) => {
                 let state = match c {
