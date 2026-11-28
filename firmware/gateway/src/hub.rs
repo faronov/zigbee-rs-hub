@@ -113,6 +113,7 @@ pub fn start(board: &BoardProfile) -> Option<App> {
         // The example definitions take ~90 KB decoded (PSRAM).
         builtin_catalog: r.builtin_catalog,
         ota_streams: r.ota_streams,
+        kept_map_bytes: r.kept_map_bytes,
         platform: Some(Arc::new(platform::Gateway)),
         admin_stack: ADMIN_STACK,
         ..Default::default()

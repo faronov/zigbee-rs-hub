@@ -20,9 +20,13 @@ use serde_json::Value as J;
 use crate::admin::{JobOut, Out};
 use crate::jw::{Jw, oom};
 
-/// Results kept for `network/job/result`, all kinds together (the oldest
-/// go first; larger ones only go to the session that started the job).
+/// Results kept for `network/job/result`, all kinds but the network map
+/// together (the oldest go first; larger ones only go to the session that
+/// started the job). The map has a limit of its own ([`Board::set_map_limit`]).
 pub const MAX_KEPT_RESULT: usize = 8 * 1024;
+
+/// The network map's job kind.
+pub const TOPOLOGY: &str = "topology";
 
 /// A lane: one job at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,12 +93,19 @@ fn jv(text: &str) -> J {
 }
 
 /// The board.
-#[derive(Default)]
 pub struct Board {
     next: u64,
     running: Vec<Running>,
     /// `(job, kind, result text)`, the last one of each kind.
     results: Vec<(u64, &'static str, String)>,
+    /// The largest network map kept.
+    map_limit: usize,
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Self { next: 0, running: Vec::new(), results: Vec::new(), map_limit: MAX_KEPT_RESULT }
+    }
 }
 
 /// Shared between the app thread and the job threads.
@@ -188,7 +199,9 @@ impl Board {
     /// The `network/job/result` frame: `{job, kind, partial, result}`.
     #[inline(never)]
     pub fn result_reply(&self, id: u64, job: Option<u64>, kind: Option<&str>) -> Result<String, ApiError> {
-        let (j, k, t) = self.result(job, kind).ok_or_else(|| ApiError::new("not_found", "no such result (kept: the last of each kind, up to 16 KB)"))?;
+        let (j, k, t) = self.result(job, kind).ok_or_else(|| {
+            ApiError::new("not_found", format!("no such result (kept: the last one of each kind, 8 KB together, the network map up to {} KB)", self.map_limit / 1024))
+        })?;
         let mut w = Jw::result(id, t.len() + 120)?;
         w.obj().key("job").num(j).key("kind").str(k).key("partial").num(false).key("result").raw(t).end_obj();
         w.finish()
@@ -199,15 +212,27 @@ impl Board {
         self.results.iter().find(|(j, k, _)| job.is_none_or(|x| x == *j) && kind.is_none_or(|x| x == *k)).map(|(j, k, t)| (*j, *k, t.as_str()))
     }
 
-    fn keep(&mut self, job: u64, kind: &'static str, text: String) {
-        self.results.retain(|(_, k, _)| *k != kind);
-        if text.len() > MAX_KEPT_RESULT {
-            return;
+    /// The largest network map kept (`Resources::kept_map_bytes`).
+    pub fn set_map_limit(&mut self, bytes: usize) {
+        self.map_limit = bytes;
+    }
+
+    /// Keeps `text` (moved, not copied) as the last result of `kind`: the
+    /// network map on its own up to the map limit, the others together up
+    /// to [`MAX_KEPT_RESULT`] (the oldest go first). A larger one is not
+    /// kept (false) and the kind's previous result stays.
+    fn keep(&mut self, job: u64, kind: &'static str, text: String) -> bool {
+        let map = kind == TOPOLOGY;
+        if text.len() > if map { self.map_limit } else { MAX_KEPT_RESULT } {
+            return false;
         }
-        while self.results.iter().map(|r| r.2.len()).sum::<usize>() + text.len() > MAX_KEPT_RESULT {
-            self.results.remove(0);
+        self.results.retain(|(_, k, _)| *k != kind);
+        while !map && self.results.iter().filter(|r| r.1 != TOPOLOGY).map(|r| r.2.len()).sum::<usize>() + text.len() > MAX_KEPT_RESULT {
+            let Some(i) = self.results.iter().position(|r| r.1 != TOPOLOGY) else { break };
+            self.results.remove(i);
         }
         self.results.push((job, kind, text));
+        true
     }
 }
 
@@ -419,15 +444,22 @@ pub fn run(
             out(JobOut::Reply(sid, f));
         }
         let ev = end_text(if r.is_ok() { "job_done" } else { "job_failed" }, job, kind, r.as_ref().err(), cancelled);
-        let mapped = r.is_ok() && kind == "topology";
-        if let Ok(text) = r {
-            board.lock().unwrap().keep(job, kind, text);
-        }
-        // A new network map, kept for `network/job/result` (API 1.4; not
-        // in the event: a map of tens of KB to every subscriber, besides
-        // the requester's `job_result`, would overrun a session's send
-        // budget).
-        if mapped {
+        let kept = match r {
+            Ok(text) => {
+                let len = text.len();
+                let kept = board.lock().unwrap().keep(job, kind, text);
+                if !kept {
+                    log::info!("admin: {kind} result of {len} B not kept (too large), the previous one stays");
+                }
+                kept
+            }
+            Err(_) => false,
+        };
+        // A new network map the other clients can fetch (API 1.4; not in
+        // the event: a map of tens of KB to every subscriber, besides the
+        // requester's `job_result`, would overrun a session's send budget).
+        // One too large to keep went to the requester alone.
+        if kept && kind == TOPOLOGY {
             out(JobOut::Event(serde_json::json!({"topic": "topology_updated", "job": job})));
         }
         drop(done);
@@ -471,5 +503,22 @@ mod tests {
         assert_eq!(b.progress_events()[0]["cancelling"], true);
         b.finish(job);
         assert!(b.progress_events().is_empty(), "non-background jobs have no events");
+    }
+
+    /// The network map has a limit of its own: the other results do not
+    /// push it out, and a result too large to keep leaves the previous one.
+    #[test]
+    fn the_map_is_kept_beside_the_other_results() {
+        let mut b = Board::default();
+        b.set_map_limit(32 * 1024);
+        let text = |n: usize| "x".repeat(n);
+        let job = |b: &Board, kind| b.result(None, Some(kind)).map(|r| r.0);
+        assert!(b.keep(1, TOPOLOGY, text(20 * 1024)));
+        assert!(b.keep(2, "energy_scan", text(5 * 1024)));
+        assert!(b.keep(3, "active_scan", text(5 * 1024)));
+        assert_eq!((job(&b, TOPOLOGY), job(&b, "energy_scan"), job(&b, "active_scan")), (Some(1), None, Some(3)));
+        assert!(!b.keep(4, TOPOLOGY, text(40 * 1024)));
+        assert!(!b.keep(5, "active_scan", text(MAX_KEPT_RESULT + 1)));
+        assert_eq!((job(&b, TOPOLOGY), job(&b, "active_scan")), (Some(1), Some(3)));
     }
 }

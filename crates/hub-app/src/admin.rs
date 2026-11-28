@@ -782,6 +782,12 @@ impl Admin {
         }
     }
 
+    /// The largest network map kept for every client
+    /// (`Resources::kept_map_bytes`).
+    pub fn keep_maps_up_to(&mut self, bytes: usize) {
+        self.board.lock().unwrap().set_map_limit(bytes);
+    }
+
     /// Start the long-lived job thread (with `job_stack`); call once,
     /// early, while the heap is in one piece.
     pub fn start_worker(&mut self) {
@@ -837,7 +843,7 @@ impl Admin {
             "network/topology" => match TopologyReq::from(v) {
                 Ok(q) if !q.refresh => {
                     let b = self.board.lock().unwrap();
-                    let r = raw_frame(id, b.result(None, Some("topology")).map_or("null", |(_, _, t)| t));
+                    let r = raw_frame(id, b.result(None, Some(jobs::TOPOLOGY)).map_or("null", |(_, _, t)| t));
                     return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
                 }
                 Ok(q) => return self.job_topology(ctx, sid, id, q),
@@ -1338,7 +1344,7 @@ impl Admin {
         let known = (ctx.known)();
         let now_s = ctx.now_s;
         self.start_bg(
-            "topology",
+            jobs::TOPOLOGY,
             1,
             Duration::from_secs(10),
             ctx.out.clone(),

@@ -118,7 +118,9 @@ install instructions and the list of merged pull requests. A pre-release
   ESP-IDF panic record, crash streak). New events: `hub_updated` for the
   NCP session's `hub/info` fields (and `ncp_log` in `maintenance`),
   `definition_missing` (no catalog definition, or only refused ones),
-  `topology_updated` (a new network map to fetch), `mqtt_status`; binding
+  `topology_updated` (a new network map to fetch: maps up to 96 KiB are
+  kept for every client, no longer 8 KB with every other result),
+  `mqtt_status`; binding
   records say `queued` while a read waits for a sleeping device.
   `hubctl --sim --sim-devices serve` takes `sim/join`, `sim/announce`
   and `sim/leave` requests and `--sim-crash`, for the integration's tests.

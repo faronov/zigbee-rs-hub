@@ -1079,6 +1079,63 @@ fn network_map_from_coordinator_tables_and_router_answers() {
     app.shutdown();
 }
 
+/// A network map over the 8 KiB the other results share: with PSRAM it is
+/// kept for every client (`topology_updated`, `network/job/result`,
+/// `network/topology` without a scan); without, only the requester gets
+/// it, no `topology_updated` says otherwise and the previous map stays.
+#[test]
+fn a_large_network_map_is_kept_for_every_client_with_psram() {
+    use hub_core::resources::Resources;
+    for psram in [2 * 1024 * 1024, 0] {
+        let r = rig(Store::volatile());
+        let app = App::start(r.ncp.clone(), AppConfig { kept_map_bytes: Resources::for_psram(psram).kept_map_bytes, ..cfg() });
+        assert!(app.wait(T, |s| s.endpoint_registered));
+        let (sid, rx) = session(&app);
+        form(&app, sid, &rx, 15);
+        ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]})));
+        // A scan: its job, the requester's map, whether `topology_updated` came.
+        let scan = |id: u64| {
+            let job = ok(&call(&app, sid, &rx, id, json!({"type": "network/topology"})))["job"].as_u64().unwrap();
+            let (mut map, mut updated) = (J::Null, false);
+            loop {
+                let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+                let e = &f["event"];
+                if f["type"] == "job_result" && f["job"] == job && f["partial"] == false {
+                    map = f["result"].clone();
+                } else if e["job"] == job && e["topic"] == "topology_updated" {
+                    updated = true;
+                } else if e["job"] == job && e["topic"] == "job_done" {
+                    return (job, map, updated);
+                }
+            }
+        };
+        let (small_job, small, updated) = scan(2);
+        assert!(updated && small["nodes"].is_array(), "{small}");
+        r.sim.with(|s| {
+            s.neighbors = Some((0..60u8).map(|i| ([0xA0, i, 0, 0, 0, 0, 0, 0], 0x4000 + u16::from(i), 2, 1)).collect());
+            s.children = Some((0..60u8).map(|i| ([0xB0, i, 0, 0, 0, 0, 0, 0], 0x5000 + u16::from(i), 0x80)).collect());
+        });
+        let (job, map, updated) = scan(3);
+        let len = map.to_string().len();
+        assert_eq!(map["nodes"].as_array().map(Vec::len), Some(121));
+        assert!(len > 8 * 1024 && len <= Resources::for_psram(1).kept_map_bytes, "{len} B");
+        let cached = call(&app, sid, &rx, 4, json!({"type": "network/topology", "refresh": false}));
+        let by_job = call(&app, sid, &rx, 5, json!({"type": "network/job/result", "job": job}));
+        if psram > 0 {
+            assert!(updated);
+            assert_eq!(ok(&cached), &map);
+            assert_eq!(ok(&by_job)["result"], map);
+        } else {
+            assert!(!updated, "a map the other clients cannot fetch");
+            assert_eq!(ok(&cached), &small, "the previous map stays");
+            assert_eq!(err_code(&by_job), "not_found");
+            let prev = call(&app, sid, &rx, 6, json!({"type": "network/job/result", "job": small_job}));
+            assert_eq!(ok(&prev)["result"], small);
+        }
+        app.shutdown();
+    }
+}
+
 #[test]
 fn backup_then_restore_onto_a_fresh_ncp_in_batches() {
     let r = rig(Store::volatile());

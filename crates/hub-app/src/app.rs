@@ -207,6 +207,9 @@ pub struct AppConfig {
     /// OTA images streamed at once (`Resources::ota_streams` on the hub).
     #[cfg(feature = "ota")]
     pub ota_streams: usize,
+    /// The largest network map kept for every client, not only the one
+    /// that asked for it (`Resources::kept_map_bytes` on the hub).
+    pub kept_map_bytes: usize,
 }
 
 impl Default for AppConfig {
@@ -225,6 +228,8 @@ impl Default for AppConfig {
             ota_flash: Default::default(),
             #[cfg(feature = "ota")]
             ota_streams: hub_ota::stream::MAX_STREAMS,
+            // As with PSRAM.
+            kept_map_bytes: hub_core::resources::Resources::for_psram(1).kept_map_bytes,
         }
     }
 }
@@ -751,6 +756,7 @@ impl Runner {
         api.set_info("ota", ota.info());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
+        admin.keep_maps_up_to(cfg.kept_map_bytes);
         admin.developer = developer;
         admin.start_worker();
         admin.load_clock(&*records);
