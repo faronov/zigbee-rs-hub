@@ -306,7 +306,7 @@ pub fn entry(d: &J) -> Entry {
             out_clusters: clusters(e.get("out")),
         });
     }
-    endpoints.sort_by_key(|e| e.ep);
+    hub_vecmap::sort::sort_by_key(&mut endpoints, |e| e.ep);
     let attrs = d
         .get("attributes")
         .and_then(J::as_array)

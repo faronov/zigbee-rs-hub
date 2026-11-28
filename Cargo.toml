@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core", "crates/hub-store", "crates/hub-coord", "crates/hub-ncp", "crates/hub-devices", "crates/hub-ota", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/hub-ezsp", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/espapp", "firmware/hub", "firmware/gateway", "firmware/donglem"]
+members = ["crates/hub-core", "crates/hub-vecmap", "crates/hub-store", "crates/hub-coord", "crates/hub-ncp", "crates/hub-devices", "crates/hub-ota", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/hub-ezsp", "crates/zdef", "crates/zdefc", "crates/zdefc-wasm", "tools/hubctl", "firmware/bridge", "firmware/espapp", "firmware/hub", "firmware/gateway", "firmware/donglem"]
 # Host-side `cargo test` at the root only builds the portable crates and the
 # desktop tool; the firmware is built from `firmware/bridge`,
 # `firmware/hub` and `firmware/donglem` (Xtensa toolchain, see README;
 # `firmware/espapp` and `firmware/gateway` are their shared libraries).
-default-members = ["crates/hub-core", "crates/hub-store", "crates/hub-coord", "crates/hub-ncp", "crates/hub-devices", "crates/hub-ota", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/hub-ezsp", "crates/zdef", "crates/zdefc", "tools/hubctl"]
+default-members = ["crates/hub-core", "crates/hub-vecmap", "crates/hub-store", "crates/hub-coord", "crates/hub-ncp", "crates/hub-devices", "crates/hub-ota", "crates/hub-app", "crates/hub-web", "crates/hub-mqtt", "crates/hub-ezsp", "crates/zdef", "crates/zdefc", "tools/hubctl"]
 
 [workspace.package]
 edition = "2024"
@@ -15,6 +15,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 hub-core = { path = "crates/hub-core" }
+hub-vecmap = { path = "crates/hub-vecmap" }
 hub-store = { path = "crates/hub-store" }
 hub-coord = { path = "crates/hub-coord" }
 hub-ncp = { path = "crates/hub-ncp" }

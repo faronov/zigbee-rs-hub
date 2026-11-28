@@ -1188,6 +1188,7 @@ dependencies = [
  "hub-ncp",
  "hub-ota",
  "hub-store",
+ "hub-vecmap",
  "log",
  "miniz_oxide 0.8.9",
  "serde_json",
@@ -1219,6 +1220,7 @@ dependencies = [
  "base64 0.22.1",
  "heapless",
  "hub-coord",
+ "hub-vecmap",
  "miniz_oxide 0.8.9",
  "proptest",
  "serde",
@@ -1246,6 +1248,7 @@ dependencies = [
  "hub-app",
  "hub-devices",
  "hub-ncp",
+ "hub-vecmap",
  "log",
  "serde_json",
  "zigbee-zrhp",
@@ -1257,6 +1260,7 @@ version = "0.1.0"
 dependencies = [
  "hub-coord",
  "hub-store",
+ "hub-vecmap",
  "log",
  "sha2",
  "zigbee-zrhp",
@@ -1267,6 +1271,7 @@ name = "hub-ota"
 version = "0.1.0"
 dependencies = [
  "hub-store",
+ "hub-vecmap",
  "log",
  "serde_json",
  "sha2",
@@ -1277,8 +1282,17 @@ name = "hub-store"
 version = "0.1.0"
 dependencies = [
  "hub-core",
+ "hub-vecmap",
  "littlefs2-sys",
  "zigbee-zrhp",
+]
+
+[[package]]
+name = "hub-vecmap"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3363,6 +3377,7 @@ dependencies = [
  "hub-core",
  "hub-mqtt",
  "hub-store",
+ "hub-vecmap",
  "hub-web",
  "log",
  "serde_json",

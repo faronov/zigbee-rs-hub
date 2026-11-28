@@ -14,7 +14,6 @@
 //! [`App::start`] and [`App::start_with`] (feature `zrhp`) start the app on
 //! a running ZRHP host core.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -33,6 +32,7 @@ use hub_devices::resolve::{Catalog, MemoryCatalog};
 use hub_devices::transport::Outcome;
 use hub_devices::zdef_adapter::ZdefSchemaDecoder;
 use hub_store::{EndpointRecord, KvStore, kv};
+use hub_vecmap::{VecMap, VecSet};
 use log::{info, warn};
 
 use crate::admin::{self, Admin, JobOut};
@@ -512,9 +512,9 @@ struct Runner {
     /// The coordinator's events.
     events: Arc<EventQueue>,
     api: ApiServer,
-    sinks: BTreeMap<SessionId, Box<dyn SessionSink>>,
+    sinks: VecMap<SessionId, Box<dyn SessionSink>>,
     /// Sessions whose snapshot is being sent piece by piece.
-    outboxes: BTreeMap<SessionId, Outbox>,
+    outboxes: VecMap<SessionId, Outbox>,
     registry: Registry,
     last: crate::laststate::LastValues,
     status: Arc<Mutex<AppStatus>>,
@@ -534,7 +534,7 @@ struct Runner {
     /// The devices the operator removed (not imported again).
     removed: Removed,
     /// Devices the NCP device import added in this process.
-    ncp_imported: BTreeSet<u64>,
+    ncp_imported: VecSet<u64>,
     /// Unknown states of restored mains devices have been read.
     refreshed: bool,
     /// Permit-join seconds left at the last look.
@@ -767,8 +767,8 @@ impl Runner {
             engine,
             events,
             api,
-            sinks: BTreeMap::new(),
-            outboxes: BTreeMap::new(),
+            sinks: VecMap::new(),
+            outboxes: VecMap::new(),
             registry: Registry::default(),
             last: Default::default(),
             status,
@@ -782,7 +782,7 @@ impl Runner {
             imported: 0,
             removed_skipped: 0,
             removed: Removed::default(),
-            ncp_imported: BTreeSet::new(),
+            ncp_imported: VecSet::new(),
             refreshed: false,
             permit_left: 0,
             admin,

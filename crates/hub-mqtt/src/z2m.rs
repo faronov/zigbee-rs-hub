@@ -14,11 +14,8 @@
 //! endpoints) gets the endpoint name as a suffix (`state_l1`), like
 //! Zigbee2MQTT's multi-endpoint devices.
 
-use std::collections::BTreeMap;
-
+use hub_vecmap::VecMap;
 use serde_json::{Map, Value as J};
-
-use hub_devices::vecmap::btree_map;
 
 use crate::model::{Device, Entity, Model, Platform, State};
 use crate::obj::{Obj, put};
@@ -88,8 +85,8 @@ pub fn check_name(name: &str) -> Result<(), String> {
 /// with the same name gets `_<last 4 hex of the IEEE>`.
 #[derive(Debug, Default, Clone)]
 pub struct Names {
-    by_id: BTreeMap<String, String>,
-    by_name: BTreeMap<String, String>,
+    by_id: VecMap<String, String>,
+    by_name: VecMap<String, String>,
 }
 
 /// A friendly-name change: `(device id, old, new)`.
@@ -108,12 +105,12 @@ impl Names {
 
     /// Re-derives the names; returns the changes (new devices: old `None`;
     /// gone ones: new `None`).
-    pub fn assign(&mut self, devices: &BTreeMap<String, Box<Device>>) -> Vec<Rename> {
+    pub fn assign(&mut self, devices: &VecMap<String, Box<Device>>) -> Vec<Rename> {
         let want = |d: &Device| {
             let s = sanitize(&d.name);
             if s.is_empty() { d.ieee_address() } else { s }
         };
-        let mut next: BTreeMap<String, String> = BTreeMap::new();
+        let mut next: VecMap<String, String> = VecMap::new();
         // IEEE addresses resolve to their device, never to another name.
         let mut taken: Vec<String> = devices.values().map(|d| d.ieee_address()).collect();
         let mut take = |n: &String| {
@@ -167,7 +164,7 @@ impl Names {
                 changes.push((id.clone(), Some(old.clone()), None));
             }
         }
-        self.by_name = btree_map(next.iter().map(|(id, n)| (n.clone(), id.clone())));
+        self.by_name = next.iter().map(|(id, n)| (n.clone(), id.clone())).collect();
         for (id, d) in devices {
             self.by_name
                 .entry(d.ieee_address())
@@ -1540,7 +1537,7 @@ mod tests {
             check_name("lamp/1").is_err() && check_name("a+b").is_err() && check_name(" ").is_err()
         );
 
-        let mut devs = BTreeMap::new();
+        let mut devs = VecMap::new();
         devs.insert(
             "zb:00158d0000000002".to_string(),
             Box::new(dev("zb:00158d0000000002", "TS0201")),

@@ -8,8 +8,6 @@
 pub mod messages;
 mod snapshot;
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use base64::Engine as _;
 use serde_json::{Value as J, json};
 
@@ -19,6 +17,7 @@ use crate::hub::{ApiError, Hub, HubEvent};
 use crate::model::{Binding, Definition, LayerSource};
 use crate::resolve::{Catalog, MemoryCatalog, ResolveInput, resolve};
 use crate::transport::ZigbeeTransport;
+use crate::vecmap::{VecMap, VecSet};
 pub use messages::*;
 pub use snapshot::SnapshotStream;
 
@@ -53,16 +52,16 @@ pub type SessionId = u64;
 struct Session {
     authed: bool,
     /// Subscription ID → topics.
-    subs: BTreeMap<u64, BTreeSet<String>>,
+    subs: VecMap<u64, VecSet<String>>,
     /// Command ticket → request ID.
-    tickets: BTreeMap<u64, u64>,
+    tickets: VecMap<u64, u64>,
 }
 
 /// The API state of the hub.
 pub struct ApiServer {
     hub_name: String,
     token: String,
-    sessions: BTreeMap<SessionId, Session>,
+    sessions: VecMap<SessionId, Session>,
     next_session: SessionId,
     seq: u64,
     /// Fields the application adds to `hub/info` (coordinator IEEE, NCP).
@@ -148,7 +147,7 @@ impl ApiServer {
         Self {
             hub_name: hub_name.into(),
             token: token.into(),
-            sessions: BTreeMap::new(),
+            sessions: VecMap::new(),
             next_session: 1,
             seq: 0,
             info: serde_json::Map::new(),
@@ -389,8 +388,7 @@ impl ApiServer {
             ));
         }
         if let Some(sess) = self.sessions.get_mut(&s) {
-            sess.subs
-                .insert(id, crate::vecmap::btree_set(topics.iter().cloned()));
+            sess.subs.insert(id, topics.iter().cloned().collect());
         }
         Ok((
             ServerMessage::ok(id, json!({"seq": self.seq})),
@@ -690,9 +688,10 @@ impl ApiServer {
                 if let Some(r) = replace.filter(|r| *r != d.id) {
                     hub.delete_user_definition(&r, now)?;
                 }
-                let before: BTreeMap<String, Vec<String>> = crate::vecmap::btree_map(
-                    hub.devices().map(|x| (x.id.clone(), uids_of(hub, &x.id))),
-                );
+                let before: VecMap<String, Vec<String>> = hub
+                    .devices()
+                    .map(|x| (x.id.clone(), uids_of(hub, &x.id)))
+                    .collect();
                 let id = d.id.clone();
                 let matched = hub.upload_user_definition(d, now)?;
                 match source {
@@ -872,7 +871,7 @@ impl ApiServer {
                                 && *c == crate::gp::generic::SEEN_COMMANDS)
                                 .then_some(*a as u8)
                         }));
-                        cmds.sort_unstable();
+                        hub_vecmap::sort::sort(&mut cmds);
                         cmds.dedup();
                         r["device_id"] = g.device_id.into();
                         r["commands"] = cmds.into();

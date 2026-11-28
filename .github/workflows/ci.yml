@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo test -p hub-core -p hub-store -p hub-coord -p hub-ncp -p hub-ota -p hub-app -p hub-web -p hub-mqtt -p hubctl -p hub-ezsp
+      - run: cargo test -p hub-core -p hub-vecmap -p hub-store -p hub-coord -p hub-ncp -p hub-ota -p hub-app -p hub-web -p hub-mqtt -p hubctl -p hub-ezsp
       - name: hub-store links no ZRHP code
         run: "! cargo tree -p hub-store -e normal | grep -q zigbee-zrhp"
       - name: hub-coord stays backend-neutral (no hub-store, hub-ncp or zigbee-zrhp)
@@ -71,8 +71,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo fmt -p hub-coord -p hub-devices -- --check
+      - run: cargo fmt -p hub-coord -p hub-devices -p hub-vecmap -- --check
       - run: cargo clippy -p hub-coord -p hub-devices --all-targets -- -D warnings
+      - run: cargo clippy -p hub-vecmap --all-targets --all-features -- -D warnings
+      - run: cargo test -p hub-vecmap --all-features
       - run: cargo test -p hub-devices
       - run: cargo test -p hub-devices --features advanced
       # The 4 MB images: no Zigbee device OTA (the ZRHP backend).

@@ -22,8 +22,6 @@
 //! They are written, and the sweep deletes stored ones the engine lacks,
 //! only once they were loaded and while they are this hub's.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use hub_devices::device::Millis;
 use hub_devices::hub::zgroups::{BIND_KEY, GROUP_KEY};
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
@@ -31,9 +29,9 @@ use hub_devices::model::LayerSource;
 use hub_devices::persist::DeviceSnapshot;
 use hub_devices::reporting::DEFAULTS_KEY;
 use hub_devices::transport::ZigbeeTransport;
-use hub_devices::vecmap::{btree_map, btree_set};
 use hub_devices::zdef_adapter::{ZdefSchemaDecoder, load_cbor};
 use hub_store::{Gate, KvStore, Scope, kv};
+use hub_vecmap::{VecMap, VecSet};
 use log::{info, warn};
 
 /// Device key prefix.
@@ -67,8 +65,8 @@ type Records = Vec<(String, Vec<u8>)>;
 /// Registry bookkeeping.
 #[derive(Debug, Default)]
 pub struct Registry {
-    dirty: BTreeSet<String>,
-    removed: BTreeSet<String>,
+    dirty: VecSet<String>,
+    removed: VecSet<String>,
     dirty_since: Option<Millis>,
     /// Groups or bindings changed.
     zg_dirty: bool,
@@ -242,14 +240,13 @@ impl Registry {
         if sweep {
             self.dirty.clear();
             self.last_sweep = now;
-            let defs: BTreeMap<String, Vec<u8>> = btree_map(
-                engine
-                    .user_definitions()
-                    .defs
-                    .iter()
-                    .filter_map(|d| Some((format!("{UDEF}{}", d.id), d.zdef.as_ref()?.encode().ok()?))),
-            );
-            let live: BTreeSet<String> = btree_set(engine.devices().map(|d| format!("{DEV}{}", d.id)));
+            let defs: VecMap<String, Vec<u8>> = engine
+                .user_definitions()
+                .defs
+                .iter()
+                .filter_map(|d| Some((format!("{UDEF}{}", d.id), d.zdef.as_ref()?.encode().ok()?)))
+                .collect();
+            let live: VecSet<String> = engine.devices().map(|d| format!("{DEV}{}", d.id)).collect();
             // Sources of the user definitions still stored, `<format>\n<text>`
             // (ascending ids, as the map iterates).
             let srcs: Records = engine

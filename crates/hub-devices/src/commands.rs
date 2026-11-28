@@ -1,8 +1,6 @@
 //! Entity commands (spec 4.5, 14.3): HA service names and parameters →
 //! ZCL commands, attribute writes, Tuya DP writes or hub options.
 
-use std::collections::BTreeMap;
-
 use serde_json::{Value as J, json};
 
 use crate::device::{Device, InterviewStep, Millis};
@@ -12,6 +10,7 @@ use crate::model::*;
 use crate::transport::ZigbeeTransport;
 use crate::tuya::{self, DpRecord};
 use crate::values;
+use crate::vecmap::VecMap;
 use crate::zcl::frame::{self as zf, global};
 use crate::zcl::{FrameType, TypedValue, ZclFrame, ZclValue, cluster as cl};
 
@@ -748,7 +747,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let tuya_optimistic = d.resolution.tuya.as_ref().is_some_and(|t| t.optimistic);
         let ticket = self.new_ticket();
         // Group attribute writes per (ep, cluster, mfr); Tuya DPs into one frame.
-        let mut writes: BTreeMap<(u8, u16, Option<u16>), Vec<(u16, TypedValue)>> = BTreeMap::new();
+        let mut writes: VecMap<(u8, u16, Option<u16>), Vec<(u16, TypedValue)>> = VecMap::new();
         let mut dps: Vec<DpRecord> = Vec::new();
         let mut cmds = Vec::new();
         let mut hub_vals = Vec::new();
@@ -880,7 +879,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .get(&did)
             .and_then(|d| d.entities.iter().find(|e| e.uid == uid))
             .ok_or_else(|| ApiError::new("not_found", uid.to_string()))?;
-        let mut reads: BTreeMap<(u8, u16, Option<u16>), Vec<u16>> = BTreeMap::new();
+        let mut reads: VecMap<(u8, u16, Option<u16>), Vec<u16>> = VecMap::new();
         let mut tuya = false;
         for (_, v) in e.r.def.values() {
             match &v.binding {

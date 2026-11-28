@@ -70,7 +70,7 @@ pub struct AttrEntry {
 #[derive(Debug, Clone, Default)]
 pub struct AttrCache {
     /// Entries.
-    pub map: BTreeMap<(u8, u16, u16, Option<u16>), AttrEntry>,
+    pub map: VecMap<(u8, u16, u16, Option<u16>), AttrEntry>,
 }
 
 impl AttrCache {
@@ -165,7 +165,7 @@ pub struct EntityState {
     /// Own value (simple platforms).
     pub value: Value,
     /// Part values (composites).
-    pub parts: BTreeMap<String, Value>,
+    pub parts: VecMap<String, Value>,
     /// Extra attributes (events, pending).
     pub attributes: Map<String, J>,
     /// `last_changed`, ms.
@@ -210,15 +210,15 @@ pub struct Diagnostics {
     /// Last 50 frames: (ms, cluster, hex).
     pub frames: VecDeque<(Millis, u16, String)>,
     /// Attributes seen without an entity.
-    pub unknown_attrs: BTreeMap<(u8, u16, u16), String>,
+    pub unknown_attrs: VecMap<(u8, u16, u16), String>,
     /// Tuya DPs seen without an entity: dp → (type, hex, ms).
-    pub tuya_dps: BTreeMap<u8, (u8, String, Millis)>,
+    pub tuya_dps: VecMap<u8, (u8, String, Millis)>,
     /// GP data without an entity (manufacturer reports, 0xB0–0xBF).
     pub gp_data: BTreeMap<u8, String>,
     /// Configure results by op key.
-    pub configure: BTreeMap<String, String>,
+    pub configure: VecMap<String, String>,
     /// Dropped / counted events.
-    pub counters: BTreeMap<String, u64>,
+    pub counters: VecMap<String, u64>,
 }
 
 /// A catalog definition a device matches that this hub cannot run: it
@@ -316,7 +316,7 @@ pub struct ConfigureState {
     /// Hash of the current op list.
     pub hash: Option<String>,
     /// Results by op key: `true` done.
-    pub done: BTreeMap<String, bool>,
+    pub done: VecMap<String, bool>,
     /// Next retry of failed ops (mains).
     pub retry_at: Option<Millis>,
     /// Current backoff, s.
@@ -328,7 +328,7 @@ pub struct ConfigureState {
     /// Failed reporting configs (polled if primary on mains).
     pub unreportable: Vec<(u8, u16, u16)>,
     /// Last poll (or failure) of an unreportable primary measurement.
-    pub poll_at: BTreeMap<(u8, u16, u16), Millis>,
+    pub poll_at: VecMap<(u8, u16, u16), Millis>,
     /// The user changed reporting settings: the next op rebuild forgets
     /// superseded Configure Reporting results.
     pub reports_changed: bool,
@@ -355,7 +355,7 @@ pub struct SchemaState {
     /// Chunk size.
     pub chunk_size: Option<u8>,
     /// Collected chunks.
-    pub chunks: BTreeMap<u16, Vec<u8>>,
+    pub chunks: VecMap<u16, Vec<u8>>,
     /// Retries per chunk.
     pub retries: u8,
     /// Decoded fragment.
@@ -426,7 +426,7 @@ pub struct Device {
     /// Pinned definition.
     pub pinned: Option<String>,
     /// Hub-binding option values (`opt.<key>`).
-    pub options: BTreeMap<String, Value>,
+    pub options: VecMap<String, Value>,
     /// Warnings (`gp_unsecured`, configure failures).
     pub warnings: Vec<String>,
     /// Diagnostics.
@@ -520,7 +520,7 @@ impl Device {
             user_name: None,
             disabled: false,
             pinned: None,
-            options: BTreeMap::new(),
+            options: VecMap::new(),
             warnings: Vec::new(),
             diag: Diagnostics::default(),
             refused: Vec::new(),
@@ -591,7 +591,7 @@ impl Device {
             .iter()
             .filter(|r| bar.is_none_or(|b| (r.score, r.priority) > b))
             .collect();
-        v.sort_by_key(|r| std::cmp::Reverse((r.score, r.priority)));
+        hub_vecmap::sort::sort_by_key(&mut v, |r| std::cmp::Reverse((r.score, r.priority)));
         // Once per definition (found in several shards).
         let mut seen: Vec<&str> = Vec::new();
         v.retain(|r| {

@@ -6,7 +6,7 @@
 //! the [`ZigbeeTransport`] and to the event outbox ([`HubEvent`]), which
 //! the WebSocket layer ([`crate::api`]) turns into messages.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{Map, Value as J, json};
@@ -483,20 +483,20 @@ pub struct Hub<T: ZigbeeTransport> {
     pub(crate) user: MemoryCatalog,
     /// Source texts of user definitions by id: `(format, text)`; the hub
     /// never parses them (D15), it keeps them for the editor.
-    pub user_sources: BTreeMap<String, (String, String)>,
+    pub user_sources: crate::vecmap::VecMap<String, (String, String)>,
     pub(crate) devices: BTreeMap<String, Device>,
-    pub(crate) dispatch: BTreeMap<String, BTreeMap<DKey, Vec<(usize, Option<usize>)>>>,
-    nwk_index: BTreeMap<u16, String>,
+    pub(crate) dispatch: crate::vecmap::VecMap<String, Dispatch>,
+    nwk_index: crate::vecmap::VecMap<u16, String>,
     zcl_tsn: u8,
     zdo_tsn: u8,
-    pub(crate) pending: BTreeMap<(bool, u8), Pending>,
+    pub(crate) pending: crate::vecmap::VecMap<(bool, u8), Pending>,
     pub(crate) tickets: BTreeMap<u64, Ticket>,
     /// APS indications handled (wrapping): tells a request sent while one
     /// is handled (a sleepy device's queue, flushed by its uplink) from
     /// the frame that released it.
     pub(crate) rx_n: u32,
     /// Control requests in flight.
-    pub(crate) controls: BTreeMap<RequestId, control::Control>,
+    pub(crate) controls: crate::vecmap::VecMap<RequestId, control::Control>,
     /// Answer tickets issued.
     answers: u64,
     /// Times the events were drained.
@@ -537,7 +537,7 @@ pub struct Hub<T: ZigbeeTransport> {
     app_outcomes: Vec<AppOutcome>,
     /// Snapshots of the topics of services outside the engine, sent on
     /// `subscribe` (kept current by the application).
-    pub app_snapshots: BTreeMap<&'static str, String>,
+    pub app_snapshots: crate::vecmap::VecMap<&'static str, String>,
     /// Imported devices, heard from, waiting to be configured again
     /// ([`import`]).
     pub(crate) import_queue: std::collections::VecDeque<String>,
@@ -661,16 +661,16 @@ impl<T: ZigbeeTransport> Hub<T> {
             cfg,
             catalog,
             user: MemoryCatalog::default(),
-            user_sources: BTreeMap::new(),
+            user_sources: crate::vecmap::VecMap::new(),
             devices: BTreeMap::new(),
-            dispatch: BTreeMap::new(),
-            nwk_index: BTreeMap::new(),
+            dispatch: crate::vecmap::VecMap::new(),
+            nwk_index: crate::vecmap::VecMap::new(),
             zcl_tsn: 0,
             zdo_tsn: 0,
-            pending: BTreeMap::new(),
+            pending: crate::vecmap::VecMap::new(),
             tickets: BTreeMap::new(),
             rx_n: 0,
-            controls: BTreeMap::new(),
+            controls: crate::vecmap::VecMap::new(),
             answers: 0,
             drains: 0,
             deferred: None,
@@ -691,7 +691,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             app_frames: Vec::new(),
             app_sent: Vec::new(),
             app_outcomes: Vec::new(),
-            app_snapshots: BTreeMap::new(),
+            app_snapshots: crate::vecmap::VecMap::new(),
             import_queue: std::collections::VecDeque::new(),
             import_probe_last: None,
             removed: Vec::new(),
@@ -1657,8 +1657,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         };
         let old_layers = d.resolution.layers.clone();
-        let mut old: BTreeMap<String, Entity> =
-            crate::vecmap::btree_map(d.entities.drain(..).map(|e| (e.uid.clone(), e)));
+        let mut old: crate::vecmap::VecMap<String, Entity> =
+            d.entities.drain(..).map(|e| (e.uid.clone(), e)).collect();
         let mut added = Vec::new();
         let mut revived = Vec::new();
         let mut updated = Vec::new();
@@ -1780,7 +1780,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        let seeded: BTreeSet<usize> = crate::vecmap::btree_set(work.iter().map(|w| w.0));
+        let seeded: crate::vecmap::VecSet<usize> = work.iter().map(|w| w.0).collect();
         let unseeded: Vec<String> = d
             .entities
             .iter()
@@ -1892,7 +1892,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.available = true;
         d.left = false;
         d.check = None;
-        if !was && let Some(n) = self.notes.get_mut_by(id) {
+        if !was && let Some(n) = self.notes.get_mut(id) {
             n.unavailable = None;
         }
         let Some(d) = self.devices.get_mut(id) else {
@@ -2752,7 +2752,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         // low…) is pushed only when set, and either just set or no other
         // bit changed: a repeated alarm is a new press, a battery-low or
         // tamper change is not one, nor is the alarm clearing.
-        let mut pushed = BTreeSet::new();
+        let mut pushed = crate::vecmap::VecSet::new();
         if push {
             let zone: Vec<Option<bool>> = decoded
                 .iter()
@@ -2781,7 +2781,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        let mut touched = BTreeSet::new();
+        let mut touched = crate::vecmap::VecSet::new();
         for (i, p, v, flags) in decoded {
             if flags.map_miss || flags.expr_error {
                 d.entities[i].state.errors += 1;
@@ -3462,8 +3462,8 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     fn clear_pending_state(&mut self, tk: &Ticket) {
-        let uids: BTreeSet<String> =
-            crate::vecmap::btree_set(tk.optimistic.iter().map(|o| o.0.clone()));
+        let uids: crate::vecmap::VecSet<String> =
+            tk.optimistic.iter().map(|o| o.0.clone()).collect();
         for uid in uids {
             if let Some(d) = self.devices.get_mut(device_of_uid(&uid)) {
                 if let Some(i) = d.entity_index(&uid) {
@@ -3477,7 +3477,7 @@ impl<T: ZigbeeTransport> Hub<T> {
     fn finish_ticket(&mut self, t: u64, tk: Ticket, now: Millis) {
         match tk.error.clone() {
             None => {
-                let mut uids = BTreeSet::new();
+                let mut uids = crate::vecmap::VecSet::new();
                 for (uid, part, v) in &tk.optimistic {
                     if let Some(d) = self.devices.get_mut(device_of_uid(uid)) {
                         if let Some(i) = d.entity_index(uid) {
@@ -3903,9 +3903,12 @@ pub(crate) fn eval_trigger(
     Some((et, attrs))
 }
 
+/// A device's dispatch table: the entities (index, part) of each key.
+pub(crate) type Dispatch = crate::vecmap::VecMap<DKey, Vec<(usize, Option<usize>)>>;
+
 /// Builds the dispatch table of a device.
-pub(crate) fn build_dispatch(d: &Device) -> BTreeMap<DKey, Vec<(usize, Option<usize>)>> {
-    let mut t: BTreeMap<DKey, Vec<(usize, Option<usize>)>> = BTreeMap::new();
+pub(crate) fn build_dispatch(d: &Device) -> Dispatch {
+    let mut t = Dispatch::new();
     for (i, e) in d.entities.iter().enumerate() {
         if e.orphaned {
             continue;

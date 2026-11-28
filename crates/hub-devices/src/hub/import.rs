@@ -23,8 +23,6 @@
 //! that answers none of [`IMPORT_PROBE_TRIES`] probes waits until it is
 //! heard from.
 
-use std::collections::BTreeMap;
-
 use crate::configure::{build_ops, configure_hash};
 use crate::device::{Device, DeviceKind, InterviewStep, Millis};
 use crate::fingerprint::Fingerprint;
@@ -183,9 +181,9 @@ fn snapshot(d: &ImportedDevice, mode: u8) -> DeviceSnapshot {
         user_name: d.name.clone(),
         disabled: false,
         pinned: None,
-        options: BTreeMap::new(),
+        options: Default::default(),
         configure_hash: None,
-        configure_done: BTreeMap::new(),
+        configure_done: Default::default(),
         unreportable: Vec::new(),
         warnings: Vec::new(),
         gp: None,

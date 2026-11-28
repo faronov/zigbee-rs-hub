@@ -18,7 +18,6 @@
 //! entities, diagnostics. A restored device starts available with
 //! `last_seen` = restore time; its availability timers run from there.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +32,7 @@ use crate::hub::{Hub, HubEvent, Purpose, SchemaDecoder};
 use crate::model::LayerSource;
 use crate::reporting::ReportSetting;
 use crate::transport::ZigbeeTransport;
+use crate::vecmap::VecMap;
 use crate::zcl::ZclValue;
 use crate::zdo::NodeDescriptor;
 
@@ -132,11 +132,11 @@ pub struct DeviceSnapshot {
     /// Pinned definition.
     pub pinned: Option<String>,
     /// Hub option values (JSON).
-    pub options: BTreeMap<String, J>,
+    pub options: VecMap<String, J>,
     /// Configure hash.
     pub configure_hash: Option<String>,
     /// Configure results by op key.
-    pub configure_done: BTreeMap<String, bool>,
+    pub configure_done: VecMap<String, bool>,
     /// [`crate::device::ConfigureState::paired`]; absent (0) from builds
     /// before.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -268,9 +268,11 @@ impl DeviceSnapshot {
             user_name: d.user_name.clone(),
             disabled: d.disabled,
             pinned: d.pinned.clone(),
-            options: crate::vecmap::btree_map(
-                d.options.iter().map(|(k, v)| (k.clone(), v.to_json())),
-            ),
+            options: d
+                .options
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_json()))
+                .collect(),
             configure_hash: d.configure.hash.clone(),
             paired: d.configure.paired,
             configure_done: d.configure.done.clone(),
@@ -294,7 +296,7 @@ impl DeviceSnapshot {
             reporting: d
                 .report_overrides
                 .iter()
-                .map(|&((ep, cluster, attr, mfr), report)| ReportSnap {
+                .map(|(&(ep, cluster, attr, mfr), &report)| ReportSnap {
                     ep,
                     cluster,
                     attr,
@@ -422,11 +424,11 @@ impl<T: ZigbeeTransport> Hub<T> {
             .map(|r| ((r.ep, r.cluster, r.attr, r.mfr), r.report))
             .collect();
         d.pinned = s.pinned;
-        d.options = crate::vecmap::btree_map(
-            s.options
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::from_json(v))),
-        );
+        d.options = s
+            .options
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::from_json(v)))
+            .collect();
         d.configure.hash = s.configure_hash;
         d.configure.paired = s.paired;
         d.configure.done = s.configure_done;

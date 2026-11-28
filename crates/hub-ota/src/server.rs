@@ -27,8 +27,7 @@
 //! other devices. At most `max_concurrent` devices download at once; others
 //! are told NO_IMAGE_AVAILABLE and notified when a slot frees.
 
-use std::collections::BTreeMap;
-
+use hub_vecmap::VecMap;
 use serde_json::{Value as J, json};
 
 use crate::images::{Fetch, Images, Offer};
@@ -641,7 +640,7 @@ pub struct Server {
     /// Settings.
     pub settings: Settings,
     /// Per device.
-    pub devices: BTreeMap<String, DevState>,
+    pub devices: VecMap<String, DevState>,
     /// The NCP's largest unfragmented ASDU.
     pub asdu_max: usize,
     /// The devices' own policies are unknown (their stored states are not
@@ -650,7 +649,7 @@ pub struct Server {
     /// Paced actions.
     due: Vec<(Millis, Action)>,
     /// Image Page Requests being answered, per device.
-    pages: BTreeMap<String, Page>,
+    pages: VecMap<String, Page>,
     /// When the last block response leaves (global pacing).
     next_slot: Millis,
     last_tick: Millis,

@@ -27,7 +27,7 @@
 //!   [`DriverConfig::lines`] (921 600 with RTS/CTS, then the 460 800
 //!   fallback).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
@@ -841,7 +841,7 @@ struct Driver<T: PortTx> {
     tx: T,
     out: OutQueues,
     buf: Box<[u8; TX_BUFFER_LEN]>,
-    pending: BTreeMap<u16, Pending>,
+    pending: hub_vecmap::VecMap<u16, Pending>,
     held: Vec<u16>,
     tids: TidAllocator,
     seq: u64,
@@ -876,7 +876,7 @@ impl<T: PortTx> Driver<T> {
             tx,
             out: OutQueues::default(),
             buf: Box::new([0; TX_BUFFER_LEN]),
-            pending: BTreeMap::new(),
+            pending: hub_vecmap::VecMap::new(),
             held: Vec::new(),
             tids: TidAllocator::new(),
             seq: 0,
@@ -1155,7 +1155,7 @@ impl<T: PortTx> Driver<T> {
             .filter(|(_, p)| matches!(p.state, PState::Held))
             .map(|(t, p)| (p.seq, *t))
             .collect();
-        held.sort_unstable();
+        hub_vecmap::sort::sort(&mut held);
         self.held = held.into_iter().map(|(_, t)| t).collect();
     }
 

@@ -3,9 +3,9 @@
 //! plus the host store's device records. The hub imports them when it
 //! adopted a network whose devices joined before it (no join event).
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
+use hub_vecmap::VecMap;
 use zigbee_zrhp::types::Status;
 use zigbee_zrhp::msg::diag::{DiagGetChildren, DiagGetChildrenRsp, DiagGetNeighbors, DiagGetNeighborsRsp};
 use zigbee_zrhp::msg::ids;
@@ -59,7 +59,7 @@ pub struct Inventory {
     pub unsupported: Vec<u16>,
 }
 
-fn add(map: &mut BTreeMap<[u8; 8], NcpDevice>, ieee: [u8; 8], nwk: u16, src: u8) -> &mut NcpDevice {
+fn add(map: &mut VecMap<[u8; 8], NcpDevice>, ieee: [u8; 8], nwk: u16, src: u8) -> &mut NcpDevice {
     let d = map.entry(ieee).or_insert(NcpDevice { ieee, nwk: NO_NWK, capability: None, device_type: None, sources: 0 });
     // Children and neighbors are live; they win over a table's address.
     if nwk < 0xFFF8 && (d.nwk == NO_NWK || src & (source::CHILD | source::NEIGHBOR) != 0) {
@@ -84,7 +84,7 @@ fn supported<T>(r: Result<T, Error>, id: u16, out: &mut Inventory) -> Result<Opt
 /// Reads the three NCP sources.
 pub fn read(client: &Client, opts: CallOpts) -> Result<Inventory, Error> {
     let mut out = Inventory::default();
-    let mut map = BTreeMap::new();
+    let mut map = VecMap::new();
 
     let mut cursor = 0u16;
     for _ in 0..MAX_PAGES {
@@ -148,7 +148,7 @@ impl Hub {
         let opts = CallOpts::timeout(Duration::from_secs(5));
         let mut inv = read(self.client(), opts)?;
         // Inserted, not collected: collecting sorts with code of its own.
-        let mut map: BTreeMap<[u8; 8], NcpDevice> = BTreeMap::new();
+        let mut map: VecMap<[u8; 8], NcpDevice> = VecMap::new();
         for d in inv.devices.drain(..) {
             map.insert(d.ieee, d);
         }

@@ -10,13 +10,12 @@
 //! the writes over the `hubdata` sectors. A write is one journal record, so
 //! a crash leaves the previous one.
 
-use std::collections::BTreeSet;
-
 use hub_devices::device::Millis;
 use hub_devices::hub::{Hub as Engine, HubEvent, device_of_uid};
 use hub_devices::model::Category;
 use hub_devices::transport::ZigbeeTransport;
 use hub_store::{Gate, KvStore, kv};
+use hub_vecmap::VecSet;
 use log::{info, warn};
 
 /// Key prefix.
@@ -29,9 +28,9 @@ pub const SLOW_MS: Millis = 6 * 3_600_000;
 /// Bookkeeping of the kept values.
 #[derive(Debug, Default)]
 pub struct LastValues {
-    dirty: BTreeSet<String>,
-    slow: BTreeSet<String>,
-    removed: BTreeSet<String>,
+    dirty: VecSet<String>,
+    slow: VecSet<String>,
+    removed: VecSet<String>,
     last_save: Millis,
     last_slow: Millis,
     /// States restored at start.

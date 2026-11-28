@@ -27,6 +27,8 @@ doctest = false
 esp-idf-svc = "=0.53.0"
 hub-core = { workspace = true }
 hub-store = { workspace = true }
+# Sorted-vector maps (less firmware code than B-tree instantiations).
+hub-vecmap = { workspace = true }
 # Debug and trace lines compiled out of the images (the logger passes up
 # to CONFIG_LOG_MAXIMUM_LEVEL, Info, so none of them was ever written).
 log = { version = "0.4", features = ["release_max_level_info"] }

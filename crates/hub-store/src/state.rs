@@ -1,6 +1,6 @@
 //! Host state kept in the store, and its journal records.
 
-use std::collections::BTreeMap;
+use hub_vecmap::VecMap;
 
 /// Store identity and table bookkeeping (spec 8.8, 12.1 `meta`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -114,13 +114,13 @@ pub struct HostState {
     /// Last logged checkpoint per domain (`[NWK, APS]`).
     pub fc: [Option<FcRecord>; 2],
     /// Device registry.
-    pub devices: BTreeMap<[u8; 8], DeviceRecord>,
+    pub devices: VecMap<[u8; 8], DeviceRecord>,
     /// Pending NCP update.
     pub fw_pending: Option<FwPending>,
     /// Host endpoints.
-    pub endpoints: BTreeMap<u8, EndpointRecord>,
+    pub endpoints: VecMap<u8, EndpointRecord>,
     /// Application key/value records (device registry, user definitions).
-    pub kv: BTreeMap<String, Vec<u8>>,
+    pub kv: VecMap<String, Vec<u8>>,
     /// A multi-part value being received: `(key, parts, data so far, next part)`.
     pub kv_pending: Option<(String, u16, Vec<u8>, u16)>,
 }

@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 # Coordinator boundary: the APS and GP types exchanged with the backend.
 hub-coord = { workspace = true }
+# Sorted-vector maps and sets (less firmware code than B-tree instantiations).
+hub-vecmap = { workspace = true, features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

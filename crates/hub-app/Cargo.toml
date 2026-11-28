@@ -12,6 +12,8 @@ publish = false
 hub-coord = { workspace = true }
 hub-devices = { workspace = true }
 hub-store = { workspace = true }
+# Sorted-vector maps (less firmware code than B-tree instantiations).
+hub-vecmap = { workspace = true }
 hub-ota = { workspace = true, optional = true }
 # Coordinator backends (features `zrhp`, `ezsp`; at least one for a hub).
 hub-ncp = { workspace = true, optional = true }

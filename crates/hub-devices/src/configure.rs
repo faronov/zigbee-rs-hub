@@ -4,8 +4,6 @@
 //! retried without repeating what worked, and nothing is redone unless the
 //! configure hash changed.
 
-use std::collections::BTreeMap;
-
 use sha2::{Digest, Sha256};
 
 use crate::device::{Device, InterviewStep, Millis};
@@ -16,6 +14,7 @@ use crate::model::*;
 use crate::reporting::ReportSetting;
 use crate::transport::{Request, ZigbeeTransport};
 use crate::values;
+use crate::vecmap::VecMap;
 use crate::zcl::frame::{self as zf, ReportingConfig, global};
 use crate::zcl::{FrameType, PROFILE_GP, TypedValue, ZclFrame, ZclType, ZclValue, cluster as cl};
 use crate::zdo::{self, BindDst};
@@ -76,8 +75,8 @@ pub fn build_ops(
     }
     // Reporting configs by (ep, cluster, mfr).
     let sleepy_cap = crate::reporting::max_cap(d);
-    let mut reports: BTreeMap<(u8, u16, Option<u16>), Vec<ReportingConfig>> = BTreeMap::new();
-    let mut reads: BTreeMap<(u8, u16, Option<u16>), Vec<u16>> = BTreeMap::new();
+    let mut reports: VecMap<(u8, u16, Option<u16>), Vec<ReportingConfig>> = VecMap::new();
+    let mut reads: VecMap<(u8, u16, Option<u16>), Vec<u16>> = VecMap::new();
     let mut binds: Vec<(u8, u16)> = Vec::new();
     // Xiaomi devices report on their own and refuse most binds: they get
     // binds and reporting only where a definition asks (hub::lumi).
@@ -596,13 +595,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             // already sent. An attribute that will be configured again
             // learns anew whether the device refuses it.
             let live = |k: &str| !k.starts_with("report:") || ops.iter().any(|o| o.key == k);
-            // Rebuilt, not `retain`ed: no BTreeMap removal code for this
-            // map in the firmware.
-            for (k, ok) in std::mem::take(&mut d.configure.done) {
-                if live(&k) {
-                    d.configure.done.insert(k, ok);
-                }
-            }
+            d.configure.done.retain(|k, _| live(k));
             d.configure.queue.retain(|o| live(&o.key));
             let in_flight = d
                 .queue
