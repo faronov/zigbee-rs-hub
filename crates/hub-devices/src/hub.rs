@@ -480,6 +480,10 @@ pub struct Hub<T: ZigbeeTransport> {
     zdo_tsn: u8,
     pub(crate) pending: BTreeMap<(bool, u8), Pending>,
     pub(crate) tickets: BTreeMap<u64, Ticket>,
+    /// APS indications handled (wrapping): tells a request sent while one
+    /// is handled (a sleepy device's queue, flushed by its uplink) from
+    /// the frame that released it.
+    pub(crate) rx_n: u32,
     /// Control requests in flight.
     pub(crate) controls: BTreeMap<RequestId, control::Control>,
     /// Answer tickets issued.
@@ -646,6 +650,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             zdo_tsn: 0,
             pending: BTreeMap::new(),
             tickets: BTreeMap::new(),
+            rx_n: 0,
             controls: BTreeMap::new(),
             answers: 0,
             drains: 0,
@@ -980,6 +985,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         #[cfg(feature = "advanced")]
         self.tap_tx(dev_id, &req, now);
+        self.tuya_note_sent(dev_id, &req, now);
         match purpose {
             Purpose::None => {}
             Purpose::App => self.app_sent.push(AppSent {
@@ -1770,6 +1776,7 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// `EVT_APS_DATA_INDICATION`.
     pub fn on_aps_indication(&mut self, ind: ApsIndication, now: Millis) {
+        self.rx_n = self.rx_n.wrapping_add(1);
         let id = match ind
             .src_ieee
             .map(zigbee_id)
@@ -3390,6 +3397,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                 });
             }
         }
+    }
+
+    /// The DPs of device `id` commands still wait for.
+    pub(crate) fn tuya_awaited(&self, id: &str) -> Vec<u8> {
+        self.tickets
+            .values()
+            .flat_map(|t| t.tuya_dps.iter())
+            .filter(|(d, _)| d == id)
+            .map(|(_, p)| *p)
+            .collect()
     }
 
     /// A Tuya DP arrived: completes tickets waiting for it.

@@ -54,8 +54,10 @@ install instructions and the list of merged pull requests. A pre-release
   `changed` trigger never fired for it. The new state trigger `reported`
   ("received" in the editor, picked for `action`, `alarm` and `sos`
   sensors) fires at every value the device sends on its own (a report, a
-  command, a Tuya DP report, a GP frame), of the value given; never at a
-  read (the refresh after a restart, a poll), a value the hub set (a
+  command, a Tuya data frame, a GP frame), of the value given; never at a
+  read (the refresh after a restart, a poll), the answer to the hub's Tuya
+  query or DP write (for 10 s, whatever the command: TS0601 devices send
+  their own changes as dataResponse too), a value the hub set (a
   command's completion) or a restored state. An IAS Zone alarm counts when
   its bit is set and nothing else changed (not at a battery-low or tamper
   notification, nor when it clears); a notification sent again counts

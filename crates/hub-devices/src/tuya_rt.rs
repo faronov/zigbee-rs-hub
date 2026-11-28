@@ -5,9 +5,23 @@
 use crate::device::Millis;
 use crate::hub::{DKey, DevEnv, Hub, Purpose, eval_trigger, set_value};
 use crate::model::{Binding, DeviceField, TimeSync, TriggerSource, TuyaSend, TuyaType};
-use crate::transport::ZigbeeTransport;
+use crate::transport::{ApsRequest, ZigbeeTransport};
 use crate::tuya::{self, DpRecord, cmd};
-use crate::zcl::{FrameType, PROFILE_GP, ZclFrame, ZclHeader, cluster as cl};
+use crate::zcl::{Direction, FrameType, PROFILE_GP, ZclFrame, ZclHeader, cluster as cl};
+
+/// How long after the hub's dataQuery (any DP) or DP write (those DPs)
+/// goes out the device's data frames answer it.
+const ANSWER_MS: Millis = 10_000;
+/// Outstanding requests noted per device; beyond, any DP answers for
+/// [`ANSWER_MS`].
+const ASKED_MAX: usize = 16;
+
+/// Whether a request that went out at `at` (`p`: the DP written, `None`:
+/// a query) may still be answered: for [`ANSWER_MS`], a write as long as a
+/// command waits for its DP.
+fn asking(at: Millis, p: Option<u8>, awaited: &[u8], now: Millis) -> bool {
+    now.saturating_sub(at) < ANSWER_MS || p.is_some_and(|p| awaited.contains(&p))
+}
 
 fn fnv(parts: &[&[u8]]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -92,6 +106,64 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.send_zcl(id, ep, cl::TUYA, f, Purpose::None, now);
     }
 
+    /// Notes the hub's dataQuery or DP write to `id` as it goes out (a
+    /// sleepy device's queued frame when it is sent, whoever built it).
+    pub(crate) fn tuya_note_sent(&mut self, id: &str, req: &ApsRequest, now: Millis) {
+        if req.cluster != cl::TUYA || req.profile == PROFILE_GP {
+            return;
+        }
+        let Ok(f) = ZclFrame::parse(&req.payload) else {
+            return;
+        };
+        if f.header.frame_type != FrameType::Cluster
+            || f.header.direction != Direction::ClientToServer
+        {
+            return;
+        }
+        let asked: Vec<Option<u8>> = match f.header.cmd {
+            cmd::DATA_QUERY => vec![None],
+            cmd::DATA_REQUEST | cmd::SEND_DATA => match tuya::parse_data(&f.payload) {
+                Ok((_, recs)) => recs.iter().map(|r| Some(r.dp)).collect(),
+                Err(_) => return,
+            },
+            _ => return,
+        };
+        let awaited = self.tuya_awaited(id);
+        let rx = self.rx_n;
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
+        d.tuya_asked
+            .retain(|&(at, _, p)| asking(at, p, &awaited, now) && !asked.contains(&p));
+        d.tuya_asked.extend(asked.into_iter().map(|p| (now, rx, p)));
+        if d.tuya_asked.len() > ASKED_MAX {
+            d.tuya_asked = vec![(now, rx, None)];
+        }
+    }
+
+    /// Whether the device's data frame of `dp` (the indication handled)
+    /// answers the hub: a dataQuery or a write of `dp` that went out less
+    /// than [`ANSWER_MS`] before, a write as long as a command waits for
+    /// its DP; never the uplink that released a sleepy device's queued
+    /// request. Otherwise it is the device's own, whatever the command:
+    /// many TS0601 send their state changes as dataResponse, and answer a
+    /// query or a write with dataReports (zigbee-herdsman and ZHA take
+    /// them all alike).
+    fn tuya_answers(&mut self, id: &str, dp: u8, now: Millis) -> bool {
+        let awaited = self.tuya_awaited(id);
+        let rx = self.rx_n;
+        let Some(d) = self.devices.get_mut(id) else {
+            return false;
+        };
+        let mut answers = false;
+        d.tuya_asked.retain(|&(at, n, p)| {
+            let keep = asking(at, p, &awaited, now);
+            answers |= keep && n != rx && p.is_none_or(|p| p == dp);
+            keep
+        });
+        answers
+    }
+
     pub(crate) fn handle_tuya(
         &mut self,
         id: &str,
@@ -121,11 +193,14 @@ impl<T: ZigbeeTransport> Hub<T> {
                     }
                     return;
                 };
-                // A data response answers the hub (a query, a value it set);
-                // the reports are the device's own.
-                let push = h.cmd != cmd::DATA_RESPONSE;
-                for r in recs {
-                    self.tuya_dp(id, ep, seq, &r, flags.dedup, push, now);
+                // By context, not by command: what answers the hub's query
+                // or write is not the device's own (`pushed`).
+                let push: Vec<bool> = recs
+                    .iter()
+                    .map(|r| !self.tuya_answers(id, r.dp, now))
+                    .collect();
+                for (r, push) in recs.iter().zip(push) {
+                    self.tuya_dp(id, ep, seq, r, flags.dedup, push, now);
                 }
             }
             cmd::MCU_SYNC_TIME => self.tuya_time(id, now),
