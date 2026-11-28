@@ -134,6 +134,11 @@ fn sim_events(backend: &str) {
     c.call(json!({"type": "sim/join", "device": P1, "how": "secured", "nwk": 0x5A21}));
     c.call(json!({"type": "sim/announce", "device": P1}));
     c.call(json!({"type": "sim/join", "device": "zb:5a525300000000ee", "denied": true}));
+    if backend == "zrhp" {
+        c.call(json!({"type": "sim/leave", "device": P2, "aged_out": true}));
+        c.wait("aged out", |c| c.call(json!({"type": "network/events"})).as_array().unwrap().iter().any(|e| e["event"] == "aged_out"));
+        assert_eq!(c.device(P2)["available"], true);
+    }
     c.call(json!({"type": "sim/leave", "device": P2}));
     c.wait("the leave", |c| c.device(P2)["unavailable_reason"] == "left");
     let p1 = c.device(P1);

@@ -954,13 +954,14 @@ impl Runner {
                 info!("app: {kind:?} of {ieee:016x} (0x{nwk:04X}) denied, joining {}", if self.permit_left == 0 { "closed" } else { "open" });
                 self.engine.on_join_denied(ieee, nwk, kind, self.permit_left == 0, now);
             }
-            // The device stays (unless it said it rejoins: unavailable with
-            // the reason `left` until it is heard again); removal stays the
-            // operator's (`devices/remove`).
-            CoordEvent::DeviceLeft { ieee, nwk, rejoin } => {
-                info!("app: device {ieee:016x} (0x{nwk:04X}) left, rejoin {rejoin:?}");
+            // The device stays (unavailable with the reason `left` until it
+            // is heard again, unless it said it rejoins or only aged out of
+            // the NCP's child table); removal stays the operator's
+            // (`devices/remove`).
+            CoordEvent::DeviceLeft { ieee, nwk, rejoin, aged_out } => {
+                info!("app: device {ieee:016x} (0x{nwk:04X}) {}, rejoin {rejoin:?}", if aged_out { "aged out" } else { "left" });
                 let removed = self.removed.contains(ieee);
-                self.engine.on_leave(ieee, nwk, rejoin, removed, now);
+                self.engine.on_leave(ieee, nwk, rejoin, removed, aged_out, now);
             }
             CoordEvent::Gp(e) => self.engine.on_gp_event(*e, now),
             CoordEvent::NetworkState(c) => {
@@ -1137,7 +1138,6 @@ impl Runner {
             Input::Admin(out) => match out {
                 JobOut::Reply(sid, frame) => self.send_owned(sid, frame),
                 JobOut::Event(body) => self.engine.network_event(body),
-                JobOut::EventText(text) => self.engine.app_event_text("network", text),
                 JobOut::Groups(list) => {
                     self.engine.zg_replace_groups(&list, now);
                     info!("app: {} groups from the restored backup", self.engine.zg.groups.len());

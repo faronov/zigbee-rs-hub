@@ -1045,7 +1045,8 @@ fn network_map_from_coordinator_tables_and_router_answers() {
     let mut evs = Vec::new();
     let map = job_with(&app, sid, &rx, 2, json!({"type": "network/topology"}), &mut evs);
     let map = ok(&map).clone();
-    // The map also goes to every `network` subscriber (API 1.4).
+    // Every `network` subscriber hears of the new map (API 1.4), without
+    // it: `network/job/result` has it.
     let ev = loop {
         if let Some(e) = evs.iter().find(|e| e["topic"] == "topology_updated") {
             break e.clone();
@@ -1053,7 +1054,9 @@ fn network_map_from_coordinator_tables_and_router_answers() {
         let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
         evs.push(f["event"].clone());
     };
-    assert_eq!(ev["map"], map);
+    assert_eq!((ev.get("map"), ev["job"].as_u64().is_some()), (None, true), "{ev}");
+    let kept = call(&app, sid, &rx, 4, json!({"type": "network/job/result", "job": ev["job"]}));
+    assert_eq!(ok(&kept)["result"], map);
     let nodes = map["nodes"].as_array().unwrap();
     let nwks: Vec<u64> = nodes.iter().map(|n| n["nwk"].as_u64().unwrap()).collect();
     assert_eq!(nwks, vec![0, 0x1111, 0x2222, 0x3333, 0x4444], "the previous child is left out: {map}");

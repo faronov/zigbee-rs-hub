@@ -30,6 +30,8 @@ pub enum NetEvent {
     Announced,
     /// The coordinator reported a leave.
     Left,
+    /// The NCP dropped a child that timed out (it need not have left).
+    AgedOut,
 }
 
 /// One network log entry.
@@ -64,6 +66,7 @@ impl NetEntry {
             NetEvent::Rejoined => "rejoined",
             NetEvent::Announced => "announced",
             NetEvent::Left => "left",
+            NetEvent::AgedOut => "aged_out",
         };
         let mut s = format!(
             "{{\"topic\":\"device_network\",\"event\":\"{event}\",\"device\":\"{}\",\"nwk\":{},\"time\":{}",
@@ -219,13 +222,18 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// The coordinator reported a leave (`nwk` finds the device when the
     /// IEEE is not known, 0): logged (`left`, `removed` when the hub
     /// removed it), counted, and unless it said it rejoins, the device is
-    /// unavailable ([`Hub::on_device_left`]).
+    /// unavailable ([`Hub::on_device_left`]). `aged_out`: the NCP only
+    /// dropped it from its child table after a timeout (a router child
+    /// routing through others now, a sleeping or moved end device): logged
+    /// as `aged_out`, nothing else; its availability stays the usual
+    /// rules' (4.6).
     pub fn on_leave(
         &mut self,
         ieee: u64,
         nwk: u16,
         rejoin: Option<bool>,
         removed: bool,
+        aged_out: bool,
         now: Millis,
     ) {
         let ieee = match ieee {
@@ -237,17 +245,29 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .unwrap_or(0),
             i => i,
         };
+        let aged_out = aged_out && !removed;
         self.net_log(NetEntry {
             at: now,
             ieee,
             nwk,
             prev: None,
-            event: NetEvent::Left,
+            event: if aged_out {
+                NetEvent::AgedOut
+            } else {
+                NetEvent::Left
+            },
             denied: false,
             how: "",
-            reason: if removed { "removed" } else { "self" },
-            rejoin,
+            reason: match (aged_out, removed) {
+                (true, _) => "",
+                (_, true) => "removed",
+                _ => "self",
+            },
+            rejoin: rejoin.filter(|_| !aged_out),
         });
+        if aged_out {
+            return;
+        }
         let id = zigbee_id(ieee);
         let Some(d) = self.devices.get_mut(&id) else {
             return;

@@ -853,6 +853,73 @@ mod tests {
         sim.stop();
     }
 
+    /// A child the NCP dropped after a timeout (`EVT_DEVICE_LEFT` reason
+    /// 4, flags 0) keeps its host store record and reaches the engine as
+    /// `aged_out`; a leave without the rejoin flag drops the record.
+    #[test]
+    fn an_aged_out_child_keeps_its_store_record() {
+        use zigbee_zrhp::msg::network::{EvtDeviceJoined, EvtDeviceLeft};
+        let (hub, sim, coord, q) = rig();
+        events_until(
+            &q,
+            |e| matches!(e, CoordEvent::Session(s) if matches!(**s, SessionEvent::Up { .. })),
+        );
+        let (router, gone) = (0x00158d0001a2b3c6u64, 0x00158d0001a2b3c7u64);
+        for (ieee, nwk) in [(router, 0x3456), (gone, 0x4567)] {
+            let ev = EvtDeviceJoined {
+                nwk,
+                ieee: Ieee::from_u64(ieee),
+                parent_nwk: 0,
+                join_type: 0,
+                capability: 0x8E,
+                decision: 0,
+            };
+            sim.inject_event(
+                ids::EVT_DEVICE_JOINED,
+                crate::driver::encode_body(&ev).unwrap(),
+            );
+        }
+        let t = Instant::now();
+        while hub.store_state().devices.len() < 2 {
+            assert!(t.elapsed() < T);
+            thread::sleep(Duration::from_millis(5));
+        }
+        for (ieee, nwk, reason) in [(router, 0x3456, 4), (gone, 0x4567, 1)] {
+            let ev = EvtDeviceLeft {
+                nwk,
+                ieee: Ieee::from_u64(ieee),
+                flags: 0,
+                reason,
+            };
+            sim.inject_event(
+                ids::EVT_DEVICE_LEFT,
+                crate::driver::encode_body(&ev).unwrap(),
+            );
+        }
+        let evs = events_until(
+            &q,
+            |e| matches!(e, CoordEvent::DeviceLeft { ieee, .. } if *ieee == gone),
+        );
+        let left: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                CoordEvent::DeviceLeft { ieee, aged_out, .. } => Some((*ieee, *aged_out)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(left, [(router, true), (gone, false)]);
+        let t = Instant::now();
+        while hub.store_state().devices.len() > 1 {
+            assert!(t.elapsed() < T);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let kept: Vec<_> = hub.store_state().devices.keys().copied().collect();
+        assert_eq!(kept, [router.to_le_bytes()]);
+        drop(coord);
+        hub.shutdown();
+        sim.stop();
+    }
+
     #[test]
     fn submit_never_waits_and_control_requests_are_barriers() {
         let (hub, sim, mut coord, q) = rig();

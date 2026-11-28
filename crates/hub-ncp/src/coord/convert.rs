@@ -14,6 +14,11 @@ use zigbee_zrhp::types::Ieee;
 
 use crate::driver::Message;
 
+/// `EVT_DEVICE_LEFT.reason`: a child of the NCP aged out (an end device
+/// missed its End Device Timeout, a router child its Link Status); it need
+/// not have left the network.
+pub(crate) const LEFT_CHILD_TIMEOUT: u8 = 4;
+
 fn gpd(id: &wg::GpdId) -> eg::GpdId {
     match *id {
         wg::GpdId::SrcId(s) => eg::GpdId::SrcId(s),
@@ -104,10 +109,17 @@ pub fn coord_event(m: &Message) -> Option<CoordEvent> {
             }
             CoordEvent::DeviceJoined { ieee, nwk, kind }
         }
-        // Flags bit 0: it leaves to rejoin.
+        // Flags bit 0: it leaves to rejoin; reason 4: a child of the NCP
+        // aged out (an end device missed its timeout, a router child its
+        // Link Status), which need not be a leave.
         ids::EVT_DEVICE_LEFT => {
             let e: EvtDeviceLeft = m.decode().ok()?;
-            CoordEvent::DeviceLeft { ieee: e.ieee.to_u64(), nwk: e.nwk, rejoin: Some(e.flags & 0x01 != 0) }
+            CoordEvent::DeviceLeft {
+                ieee: e.ieee.to_u64(),
+                nwk: e.nwk,
+                rejoin: Some(e.flags & 0x01 != 0),
+                aged_out: e.reason == LEFT_CHILD_TIMEOUT,
+            }
         }
         ids::EVT_GP_FRAME => {
             let e: wg::EvtGpFrame = m.decode().ok()?;
@@ -340,11 +352,12 @@ mod tests {
         };
         assert_eq!(join(2, 0), Some(CoordEvent::DeviceJoined { ieee: 7, nwk: 0x1234, kind: JoinKind::TcRejoin }));
         assert_eq!(join(0, 1), Some(CoordEvent::JoinDenied { ieee: 7, nwk: 0x1234, kind: JoinKind::Association }));
-        let left = EvtDeviceLeft { nwk: 0x1234, ieee: Ieee::from_u64(7), flags: 0x01, reason: 0 };
-        assert_eq!(
-            ev(ids::EVT_DEVICE_LEFT, crate::driver::encode_body(&left).unwrap()),
-            Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(true) })
-        );
+        let left = |flags, reason| {
+            let e = EvtDeviceLeft { nwk: 0x1234, ieee: Ieee::from_u64(7), flags, reason };
+            ev(ids::EVT_DEVICE_LEFT, crate::driver::encode_body(&e).unwrap())
+        };
+        assert_eq!(left(0x01, 1), Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(true), aged_out: false }));
+        assert_eq!(left(0, 4), Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(false), aged_out: true }));
     }
 
     #[test]

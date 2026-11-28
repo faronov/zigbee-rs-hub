@@ -1206,7 +1206,8 @@ fn joins_rejoins_leaves_and_denials_are_reported() {
         [&CoordEvent::DeviceLeft {
             ieee: 0x98,
             nwk: 0x4324,
-            rejoin: None
+            rejoin: None,
+            aged_out: false
         }]
     );
     assert!(matches!(

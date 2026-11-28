@@ -900,6 +900,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                         ieee,
                         nwk: new_node_id,
                         rejoin: None,
+                        aged_out: false,
                     });
                 } else if policy_decision == JoinDecision::DENY_JOIN {
                     info!("ezsp: join of {ieee:016X} denied");

@@ -94,7 +94,7 @@ pub enum CoordEvent {                     // large variants boxed: bounded slots
     Ownership(Box<NetworkOwnership>), NetworkState(NetState), PermitJoin { remaining_s: u32 },
     Indication(ApsIndication), DeviceJoined { ieee: u64, nwk: u16, kind: JoinKind },
     JoinDenied { ieee: u64, nwk: u16, kind: JoinKind },  // JoinKind: Association | SecuredRejoin | TcRejoin | Direct
-    DeviceLeft { ieee: u64, nwk: u16, rejoin: Option<bool> }, Gp(Box<GpEvent>),
+    DeviceLeft { ieee: u64, nwk: u16, rejoin: Option<bool>, aged_out: bool }, Gp(Box<GpEvent>),  // aged_out: ZRHP reason 4
     Progress { id: RequestId, p: Progress }, Done { id: RequestId, t: Terminal },
     ScanProgress { scan: u8, done: u8, total: u8 }, Dropped { events: u32 },
 }

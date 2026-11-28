@@ -116,7 +116,7 @@ impl SimLink for Zrhp {
 
     fn leave(&self, ieee: u64, nwk: u16) {
         use zigbee_zrhp::msg::network::EvtDeviceLeft;
-        let ev = EvtDeviceLeft { nwk, ieee: zigbee_zrhp::types::Ieee::from_u64(ieee), flags: 0, reason: 0 };
+        let ev = EvtDeviceLeft { nwk, ieee: zigbee_zrhp::types::Ieee::from_u64(ieee), flags: 0, reason: 1 };
         self.sim.inject_event(zigbee_zrhp::msg::ids::EVT_DEVICE_LEFT, hub_ncp::driver::encode_body(&ev).unwrap());
     }
 
@@ -535,6 +535,36 @@ fn joins_refusals_rejoins_announcements_and_leaves_are_logged() {
         assert_eq!(get().get("unavailable_since"), None, "{kind:?}");
         rig.finish();
     }
+}
+
+/// A child the ZRHP NCP dropped after a timeout (`EVT_DEVICE_LEFT` reason
+/// 4, flags 0: a router child not heard directly for a minute, which
+/// routes through others; an end device past its End Device Timeout) has
+/// not left: the network log says `aged_out`, the device stays available
+/// under the usual availability rules. A leave is still one.
+#[test]
+fn a_child_that_aged_out_of_the_ncp_has_not_left() {
+    use zigbee_zrhp::msg::network::EvtDeviceLeft;
+    let mut rig = Rig::zrhp(true);
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    rig.devices(vec![plug()], answered);
+    let (sid, rx) = session(&rig.app);
+    let get = || ok(&call(&rig.app, sid, &rx, 2, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+    let log = || ok(&call(&rig.app, sid, &rx, 3, json!({"type": "network/events"}))).as_array().unwrap().clone();
+    rig.link.join(PLUG, PLUG_NWK);
+    wait("the plug's state", || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+
+    let ev = EvtDeviceLeft { nwk: PLUG_NWK, ieee: zigbee_zrhp::types::Ieee::from_u64(PLUG), flags: 0, reason: 4 };
+    rig.zsim.as_ref().unwrap().inject_event(zigbee_zrhp::msg::ids::EVT_DEVICE_LEFT, hub_ncp::driver::encode_body(&ev).unwrap());
+    wait("aged out", || log().iter().any(|e| e["event"] == "aged_out"));
+    let e = log().into_iter().find(|e| e["event"] == "aged_out").unwrap();
+    assert_eq!((&e["device"], e.get("reason"), e.get("rejoin")), (&json!("zb:5a52530000000001"), None, None), "{e}");
+    let d = get();
+    assert_eq!((&d["available"], d.get("unavailable_reason"), d.get("leaves")), (&json!(true), None, None), "{d}");
+
+    rig.link.leave(PLUG, PLUG_NWK);
+    wait("the plug left", || get()["unavailable_reason"] == "left");
+    rig.finish();
 }
 
 /// A device whose interview ended partial (its Simple descriptor failed)

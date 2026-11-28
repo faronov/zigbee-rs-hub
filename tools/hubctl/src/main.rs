@@ -87,7 +87,8 @@ simulated NCP:
                             association|secured|tc, nwk, denied} or {partial:
                             true} (a new plug whose interview ends partial),
                             sim/announce {device, nwk}, sim/leave {device,
-                            rejoin} (both backends)
+                            rejoin, aged_out (ZRHP: the child timed out)}
+                            (both backends)
   --sim-z2m-devices         instead: form on channel 15 and join four simulated
                             devices (sensor, light, plug, remote) that answer
                             the interview and commands and report; the remote

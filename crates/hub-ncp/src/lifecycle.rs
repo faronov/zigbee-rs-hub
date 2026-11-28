@@ -855,8 +855,10 @@ impl Hub {
             }
             ids::EVT_DEVICE_LEFT => {
                 if let Ok(e) = m.decode::<EvtDeviceLeft>() {
-                    info!("hub: device {:02X?} 0x{:04X} left (flags 0x{:02X})", e.ieee.0, e.nwk, e.flags);
-                    if e.flags & 0x01 == 0 && e.ieee.0 != [0; 8] {
+                    info!("hub: device {:02X?} 0x{:04X} left (flags 0x{:02X}, reason {})", e.ieee.0, e.nwk, e.flags, e.reason);
+                    // A child that only aged out stays (a router child
+                    // routes through others; an end device may poll again).
+                    if e.flags & 0x01 == 0 && e.reason != crate::coord::convert::LEFT_CHILD_TIMEOUT && e.ieee.0 != [0; 8] {
                         self.commit(Change::DeviceDel(e.ieee.0));
                     }
                 }

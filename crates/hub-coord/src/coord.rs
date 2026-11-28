@@ -54,6 +54,11 @@ pub enum CoordEvent {
         /// Whether it announced a rejoin; `None` when the backend does not
         /// know (EZSP's trust center reports a leave without it).
         rejoin: Option<bool>,
+        /// The NCP only dropped it from its child table after a timeout
+        /// (ZRHP reason 4: an end device missed its End Device Timeout, a
+        /// router child stopped sending Link Status): it need not have
+        /// left the network.
+        aged_out: bool,
     },
     /// Green Power event.
     Gp(Box<GpEvent>),

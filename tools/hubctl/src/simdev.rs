@@ -310,14 +310,18 @@ impl Control {
         }
     }
 
-    fn leave(&self, ieee: u64, nwk: u16, rejoin: bool) {
+    /// A leave; `aged_out`: the NCP dropped the child after a timeout
+    /// (ZRHP reason 4; EZSP has none).
+    fn leave(&self, ieee: u64, nwk: u16, rejoin: bool, aged_out: bool) -> Result<(), ApiError> {
         match &self.ncp {
             Ncp::Zrhp(sim) => {
-                let ev = EvtDeviceLeft { nwk, ieee: Ieee::from_u64(ieee), flags: rejoin.into(), reason: 0 };
+                let reason = if aged_out { 4 } else { 1 };
+                let ev = EvtDeviceLeft { nwk, ieee: Ieee::from_u64(ieee), flags: rejoin.into(), reason };
                 if let Ok(b) = hub_ncp::driver::encode_body(&ev) {
                     sim.inject_event(ids::EVT_DEVICE_LEFT, b);
                 }
             }
+            Ncp::Ezsp(_) if aged_out => return Err(ApiError::new("unsupported", "aged_out: ZRHP only")),
             // The trust center does not say whether it rejoins.
             Ncp::Ezsp(sim) => sim.ncp(|n| {
                 n.callback(Callback::TrustCenterJoin {
@@ -329,6 +333,7 @@ impl Control {
                 })
             }),
         }
+        Ok(())
     }
 
     fn indicate(&self, i: &ApsIndication) {
@@ -423,7 +428,7 @@ impl hub_app::RequestHook for SimHook {
             }
             "sim/leave" => {
                 let (ieee, nwk) = c.find(device)?;
-                c.leave(ieee, nwk, req["rejoin"].as_bool().unwrap_or(false));
+                c.leave(ieee, nwk, req["rejoin"].as_bool().unwrap_or(false), req["aged_out"].as_bool().unwrap_or(false))?;
                 Ok(json!({"device": hub_devices::hub::zigbee_id(ieee)}))
             }
             other => Err(ApiError::new("invalid_format", format!("unknown request {other}"))),

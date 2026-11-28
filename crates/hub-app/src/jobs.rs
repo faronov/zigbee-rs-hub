@@ -226,14 +226,10 @@ pub struct Bg {
 /// `{"type": "job_result", "job": …, "kind": …, "partial": …, "result": …}`:
 /// a job's result for the session that started it.
 pub fn result_frame(job: u64, kind: &str, partial: bool, result: &str) -> Result<String, ApiError> {
-    wrap(&format!("{{\"type\":\"job_result\",\"job\":{job},\"kind\":\"{kind}\",\"partial\":{partial},\"result\":"), result)
-}
-
-/// `head` + `result` + `}`, allocated fallibly (results are large).
-fn wrap(head: &str, result: &str) -> Result<String, ApiError> {
+    let head = format!("{{\"type\":\"job_result\",\"job\":{job},\"kind\":\"{kind}\",\"partial\":{partial},\"result\":");
     let mut s = String::new();
     s.try_reserve_exact(head.len() + result.len() + 1).map_err(|_| oom())?;
-    s.push_str(head);
+    s.push_str(&head);
     s.push_str(result);
     s.push('}');
     Ok(s)
@@ -423,14 +419,16 @@ pub fn run(
             out(JobOut::Reply(sid, f));
         }
         let ev = end_text(if r.is_ok() { "job_done" } else { "job_failed" }, job, kind, r.as_ref().err(), cancelled);
-        // A new network map for every `network` subscriber (API 1.4).
-        if let (Ok(text), "topology") = (&r, kind)
-            && let Ok(map) = wrap(&format!("{{\"topic\":\"topology_updated\",\"job\":{job},\"map\":"), text)
-        {
-            out(JobOut::EventText(map));
-        }
+        let mapped = r.is_ok() && kind == "topology";
         if let Ok(text) = r {
             board.lock().unwrap().keep(job, kind, text);
+        }
+        // A new network map, kept for `network/job/result` (API 1.4; not
+        // in the event: a map of tens of KB to every subscriber, besides
+        // the requester's `job_result`, would overrun a session's send
+        // budget).
+        if mapped {
+            out(JobOut::Event(serde_json::json!({"topic": "topology_updated", "job": job})));
         }
         drop(done);
         out(JobOut::Event(ev.map_or(J::Null, |t| jv(&t))));

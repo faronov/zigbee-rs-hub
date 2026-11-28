@@ -103,8 +103,11 @@ install instructions and the list of merged pull requests. A pre-release
   or refused, and why: joining closed), rejoins, Device_annce frames and
   leaves, on both backends: `network/events` and the event
   `device_network` (the ZRHP backend now passes on refused joins and
-  leaves too; a ZRHP leave without the rejoin flag makes the device
-  unavailable, as on EZSP). The web UI lists it on the Network card
+  leaves too: a NWK leave without the rejoin flag, a parent's report or a
+  trust center removal makes the device unavailable, `left`; a child the
+  NCP dropped after a timeout, often a router that now routes through
+  others, is only logged, `aged_out`, and keeps its host store record,
+  which the import's inventory reads). The web UI lists it on the Network card
   ("Network log"): a device that "blinks then stops" shows its join
   attempts there. Device records gain `logical_type`, `rx_on_when_idle`,
   `rejoins`, `announces`, `leaves`, every `unavailable_reason` (`left`,
@@ -115,7 +118,7 @@ install instructions and the list of merged pull requests. A pre-release
   ESP-IDF panic record, crash streak). New events: `hub_updated` for the
   NCP session's `hub/info` fields (and `ncp_log` in `maintenance`),
   `definition_missing` (no catalog definition, or only refused ones),
-  `topology_updated` (the new network map), `mqtt_status`; binding
+  `topology_updated` (a new network map to fetch), `mqtt_status`; binding
   records say `queued` while a read waits for a sleeping device.
   `hubctl --sim --sim-devices serve` takes `sim/join`, `sim/announce`
   and `sim/leave` requests and `--sim-crash`, for the integration's tests.

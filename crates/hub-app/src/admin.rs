@@ -124,8 +124,6 @@ pub enum JobOut {
     Reply(SessionId, String),
     /// A `network` topic event.
     Event(J),
-    /// A `network` topic event as JSON text (a large one).
-    EventText(String),
     /// The NCP's network was replaced: import its devices again.
     Reimport,
     /// A restored backup's groups (`metadata.internal.zigbee_rs.groups`)

@@ -622,7 +622,7 @@ State message (WebSocket, 14.3):
 | GP sensor without a known interval | Unavailable after 25 h without an accepted GPDF (D19; FlowerX GP and BGT1 GP today). |
 | Any device, per definition | `device.availability.timeout_s` replaces the computed timeout; `gp.report_interval_s` sets 3 × that for GP sensors. |
 | GP switch or energy harvesting | Never unavailable. `last_seen` only. |
-| A Zigbee device the coordinator reports as left (EZSP's trust center; ZRHP `EVT_DEVICE_LEFT` since API 1.4) | Unavailable at once, device record `unavailable_reason: "left"`, no checks; kept until its next frame or rejoin, or `devices/remove`. A ZRHP leave with the rejoin flag (bit 0) keeps the device available (it comes back); the network log (14.2) has it either way. |
+| A Zigbee device the coordinator reports as left (EZSP's trust center; ZRHP `EVT_DEVICE_LEFT` since API 1.4) | Unavailable at once, device record `unavailable_reason: "left"`, no checks; kept until its next frame or rejoin, or `devices/remove`. A ZRHP leave with the rejoin flag (bit 0) keeps the device available (it comes back), and so does a ZRHP child timeout (reason 4: the NCP dropped a child that missed its End Device Timeout, or a router child it no longer hears directly, which routes through others): the rules above decide. The network log (14.2) has them either way (`left`, `aged_out`). |
 
 While a device is unavailable its record says why (`unavailable_reason`,
 API 1.4 for all but `left`): `left`, `no_response` (a mains device failed
@@ -2624,6 +2624,7 @@ device the hub does not know too) — `{"topic": "device_network", "event":
 | `rejoined` | as `joined`, `how` `secured` (with the network key) or `tc` (through the trust center); `prev_nwk` when the address changed |
 | `announced` | a Device_annce; `prev_nwk` when the address changed |
 | `left` | `reason` `self` or `removed` (after `devices/remove`); `rejoin` when the backend says (ZRHP flags bit 0; EZSP's trust center does not) |
+| `aged_out` | ZRHP only (`EVT_DEVICE_LEFT` reason 4): the NCP dropped it from its child table after a timeout; not a leave (4.6), not counted in `leaves`, the host store keeps its record |
 
 ZRHP: `EVT_DEVICE_JOINED` `join_type` (0 association, 1 secured rejoin,
 2 trust center rejoin, 3 direct) and `decision`, `EVT_DEVICE_LEFT`; EZSP:
@@ -2810,8 +2811,11 @@ Events (topic `network`, API 1.2): `network_updated` {`reason`:
 `hub_updated` {the `hub/info` fields that changed: `developer_mode`; API
 1.4 also `coordinator_ieee`, `ncp_board`, `ncp_product`, `maintenance`
 (which now has `ncp_log` when the NCP is a ZRHP one)};
-`topology_updated` {`job`, `map`: the `network/topology` result} after
-every map scan (API 1.4; until 1.3 clients fetched it after `job_done`).
+`topology_updated` {`job`} after every map scan, once the new map is kept
+(API 1.4): clients fetch it with `network/job/result` {`job`} (or
+`network/topology` with `refresh: false`); the event does not carry it, as
+a map of tens of KB to every subscriber, next to the requester's
+`job_result`, would overrun a session's send budget (14.6).
 
 **Network records and their owner.** The device registry, last values,
 groups, bindings, automations, per-device OTA state, the last backup and
