@@ -1122,6 +1122,9 @@ impl ApiServer {
                     ("entities", json!({"topic": "entity_removed", "uid": uid}))
                 }
                 HubEvent::EntityState(mut s) => {
+                    if let Some(o) = s.as_object_mut() {
+                        o.remove("pushed");
+                    }
                     s["topic"] = "entity_state".into();
                     ("entities", s)
                 }

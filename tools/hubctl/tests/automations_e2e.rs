@@ -150,7 +150,7 @@ fn end_to_end(backend: &str) {
         s.as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|x| x["state"] == false))
     });
     let info = c.call(json!({"type": "hub/info"})).unwrap();
-    assert_eq!(info["automations"]["format"], 1);
+    assert_eq!(info["automations"]["format"], 2);
     c.call(json!({"type": "subscribe", "topics": ["automations"]})).unwrap();
 
     // Plug 2 follows plug 1.
@@ -182,6 +182,8 @@ fn end_to_end(backend: &str) {
     assert_eq!(c.traces("pulse")[0]["result"], "done");
 
     c.call(rule("boot", json!([{"type": "start"}]), json!([{"type": "notify", "message": "hub started"}]))).unwrap();
+    let reported = json!([{"type": "state", "uid": P1, "op": "reported"}]);
+    c.call(rule("rep", reported, json!([{"type": "notify", "message": "plug 1 reported"}]))).unwrap();
     let err = c.call(rule("bad", json!([{"type": "time", "cron": "61 * * * *"}]), json!([cmd(P1, "toggle")]))).unwrap_err();
     assert_eq!(err["code"], "invalid_value");
 
@@ -192,15 +194,24 @@ fn end_to_end(backend: &str) {
     let mut c = Client::connect(hub.port);
     let list = c.call(json!({"type": "automations/list"})).unwrap();
     let ids: Vec<&str> = list["rules"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["boot", "echo", "follow", "pulse"]);
+    assert_eq!(ids, ["boot", "echo", "follow", "pulse", "rep"]);
     assert_eq!(list["rules"][1]["enabled"], false);
     assert_eq!(list["time_synced"], true, "a desktop clock is set");
     c.wait("the start trigger", Duration::from_secs(20), |c| c.traces("boot").first().is_some_and(|t| t["result"] == "done"));
     // The restored rule works on the restored devices.
     c.wait("the plugs' states", Duration::from_secs(30), |c| c.state(P1) != J::Null && c.state(P2) != J::Null);
+    // `reported`: the plug's own report only, not the read of its restored
+    // state after the restart, nor the command's completion.
+    c.wait("plug 1 read", Duration::from_secs(30), |c| {
+        c.call(json!({"type": "entities/states", "uids": [P1]})).unwrap()[0]["attributes"]["restored"].is_null()
+    });
+    assert_eq!(c.runs("rep"), 0, "a read");
     let p2 = c.state(P2);
     c.call(json!({"type": "entities/command", "uid": P1, "command": "toggle"})).unwrap();
     c.wait("plug 2 toggled", Duration::from_secs(10), |c| c.state(P2) != p2);
+    c.wait("plug 1's report", Duration::from_secs(10), |c| c.runs("rep") == 1);
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(c.runs("rep"), 1, "the report, not the command's completion too");
     c.call(json!({"type": "automations/delete", "automation": "pulse"})).unwrap();
     assert_eq!(c.call(json!({"type": "automations/get", "automation": "pulse"})).unwrap_err()["code"], "not_found");
     let net = c.call(json!({"type": "network/info"})).unwrap();

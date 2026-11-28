@@ -142,7 +142,7 @@ progress{width:12em}
 <section class="card"><h2>Automations</h2><p id="aut" class="mut"></p><ul class="ents" id="aul"></ul></section>
 <section class="card"><h2 id="auh">New automation</h2>
 <div class="row"><input id="anm" placeholder="name" size="24"><label>mode <select id="amd"><option>single</option><option>restart</option></select></label><span class="mut">single ignores triggers while a run is in progress (e.g. in “after N s”); restart cancels the run and starts over</span></div>
-<div class="row acts"><b>When</b><select id="att"><option value="state">state of</option><option value="event">event of</option><option value="availability">device</option><option value="time">time</option><option value="start">hub start</option></select><select id="atd"></select><select id="atu"></select><select id="ato"><option>changed</option><option>equals</option><option>above</option><option>below</option></select><input id="atv" size="10" placeholder="value"></div>
+<div class="row acts"><b>When</b><select id="att"><option value="state">state of</option><option value="event">event of</option><option value="availability">device</option><option value="time">time</option><option value="start">hub start</option></select><select id="atd"></select><select id="atu"></select><select id="ato"><option>changed</option><option value="reported">received</option><option>equals</option><option>above</option><option>below</option></select><input id="atv" size="10" placeholder="value"></div>
 <div class="row acts"><b>If</b><select id="act"><option value="">always</option><option value="state">state of</option><option value="time">time between</option></select><select id="acd"></select><select id="acu"></select><select id="aco"><option>equals</option><option>not_equals</option><option>above</option><option>below</option></select><input id="acv" size="10" placeholder="value"></div>
 <div class="row acts"><b>Then</b><select id="aat"><option value="command">command</option><option value="notify">notify</option></select><select id="aaD"></select><select id="aau"></select><select id="aac"></select><input id="aav" size="10" placeholder="value"><label>after <input id="aad" class="num" placeholder="s"> s</label><select id="aa2"></select></div>
 <details id="ajd"><summary class="mut">JSON (all triggers, conditions and actions; device-support 14.8)</summary><textarea id="auj" rows="14" spellcheck="false"></textarea></details>
@@ -932,7 +932,7 @@ function auForm(){
 function auBuild(){
  const t=V("att"),tv=V("atv").trim(),r={name:V("anm")||undefined,mode:V("amd"),triggers:[],conditions:[],actions:[]};
  if(auId)r.id=auId;
- if(t=="state")r.triggers.push({type:t,uid:V("atu"),op:V("ato"),value:V("ato")=="changed"?undefined:num(tv)});
+ if(t=="state")r.triggers.push({type:t,uid:V("atu"),op:V("ato"),value:tv?num(tv):undefined});
  else if(t=="event")r.triggers.push({type:t,uid:V("atu"),event_type:tv||undefined});
  else if(t=="availability")r.triggers.push({type:t,device:V("atu"),to:tv||undefined});
  else if(t=="time"){const m=/^(\d\d?):(\d\d)$/.exec(tv);r.triggers.push({type:t,cron:m?+m[2]+" "+ +m[1]+" * * *":tv})}
@@ -965,6 +965,8 @@ onTab.auto=()=>{if(!authed||!hub.automations)return auRender();call("automations
 function auEv(e){const r=e.automation;if(e.topic=="automation_removed")delete au.rules[r];else if(r&&r.id)au.rules[r.id]=r;else if(e.topic=="automation_run"&&au.rules[r])Object.assign(au.rules[r],{last_result:e.result,last_run:e.time});if($("#aul").offsetParent){auRender();if(e.topic=="automation_run")auTr()}}
 for(const i of["att","atd","act","acd","aat","aaD","aau","aac"])$("#"+i).onchange=()=>{auForm();auBuild()};
 for(const i of["anm","amd","atu","ato","atv","acu","aco","acv","aav","aad","aa2"])$("#"+i).onchange=auBuild;
+// The entity's value as a hint; buttons and alarms (an `action` or `alarm` sensor) report the same value at every press: “received” fires each time.
+for(const i of["att","atd","atu"])$("#"+i).addEventListener("change",()=>{const u=V("atu"),s=states[u]||{},e=ents[u]||{},o=V("ato");if(V("att")=="state"){$("#atv").placeholder=s.state!=null?"now "+s.state:"value";const b=/^(binary_)?sensor$/.test(e.platform)&&e.category!="config"&&/^(action|alarm|sos)(_\d+)?$/.test(e.key);if(b||o=="reported"){V("ato",b?"reported":"changed");auBuild()}}});
 const auSrc=()=>{try{return JSON.parse(V("auj"))}catch(x){toast("JSON: "+x.message);throw x}};
 $("#aus").onclick=()=>{const r=auSrc();act(auId?"automations/update":"automations/create",auId?{automation:auId,rule:r}:{rule:r}).then(x=>{au.rules[x.id]=x;auEdit(x.id);auRender();$("#aum").textContent="saved"}).catch(()=>{})};
 $("#aux").onclick=()=>{if(!auId)return toast("Save first");act("automations/run",{automation:auId}).then(x=>{$("#aum").textContent=x.trace?x.trace.result:"";auTr()}).catch(()=>{})};

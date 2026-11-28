@@ -720,7 +720,9 @@ fn last_values_changed_before_they_load_wait_for_them() {
 /// first report of off fires no `equals false` (a change from unknown
 /// would), one of on fires `changed` (from unknown it would not). A
 /// reported unknown (an invalid value) is the previous value as before:
-/// off after it fires `equals false` again, and no `changed`.
+/// off after it fires `equals false` again, and no `changed`. `reported`
+/// off fires at every report of off (twice in a row too), never at the
+/// restored value or a read response (a refresh).
 #[test]
 fn state_triggers_compare_with_the_restored_values() {
     use hub_ncp::sim::indication;
@@ -729,16 +731,16 @@ fn state_triggers_compare_with_the_restored_values() {
     let uid = format!("{RACE_PLUG}:1:switch");
     let state_rule = |id: &str, op: &str| {
         let mut t = json!({"type": "state", "uid": uid, "op": op});
-        if op == "equals" {
+        if op != "changed" {
             t["value"] = false.into();
         }
         let mut r = rule(id);
         r["triggers"] = json!([t]);
         (format!("auto/{id}"), r)
     };
-    let (off, chg) = (state_rule("off", "equals"), state_rule("chg", "changed"));
+    let (off, chg, rep) = (state_rule("off", "equals"), state_rule("chg", "changed"), state_rule("rep", "reported"));
     for (adopt, first) in [(false, false), (false, true), (true, false), (true, true)] {
-        let extra = [(off.0.as_str(), off.1.clone()), (chg.0.as_str(), chg.1.clone())];
+        let extra = [(off.0.as_str(), off.1.clone()), (chg.0.as_str(), chg.1.clone()), (rep.0.as_str(), rep.1.clone())];
         // Readable right after the devices were read, or foreign until adopted.
         let (_mem, r, racy, app) = racy_start_with("dev/", if adopt { 0 } else { 2 }, true, &extra);
         let (sid, rx) = session(&app);
@@ -751,28 +753,35 @@ fn state_triggers_compare_with_the_restored_values() {
         ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["entities"]})));
         // On/Off from the plug (0xFF: invalid), seen by the rules before
         // their subscribers.
-        let report = |v: u8, tsn: u8| {
-            let zcl = [0x18, tsn, 0x0A, 0x00, 0x00, 0x10, v];
-            r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(0x5A01, 0x5a52_5300_0000_0001, 1, 1, 0x0104, 0x0006, &zcl));
+        let frame = |zcl: &[u8]| {
+            r.sim.inject_event(ids::EVT_APS_DATA_INDICATION, indication(0x5A01, 0x5a52_5300_0000_0001, 1, 1, 0x0104, 0x0006, zcl));
             loop {
                 let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
                 if f["event"]["topic"] == "entity_state" && f["event"]["uid"] == uid.as_str() {
                     assert!(!f["event"]["last_reported"].is_null(), "{f}");
+                    assert!(f["event"].get("pushed").is_none(), "internal: {f}");
                     return f["event"]["state"].clone();
                 }
             }
         };
+        let report = |v: u8, tsn: u8| frame(&[0x18, tsn, 0x0A, 0x00, 0x00, 0x10, v]);
         let runs = |id: u64| {
             let list = ok(&call(&app, sid, &rx, id, json!({"type": "automations/list"}))).clone();
             let n = |r: &str| list["rules"].as_array().unwrap().iter().find(|x| x["id"] == r).map(|x| x["runs"].clone());
-            (n("off"), n("chg"))
+            (n("off"), n("chg"), n("rep"))
         };
-        let want = |off: u64, chg: u64| (Some(J::from(off)), Some(J::from(chg)));
+        let want = |off: u64, chg: u64, rep: u64| (Some(J::from(off)), Some(J::from(chg)), Some(J::from(rep)));
+        // `reported` off: at every report of off, not at the restored value.
+        let rep = u64::from(!first);
         assert_eq!(report(u8::from(first), 1), J::Bool(first));
-        assert_eq!(runs(2), want(0, u64::from(first)), "adopt {adopt}, first report {first}");
+        assert_eq!(runs(2), want(0, u64::from(first), rep), "adopt {adopt}, first report {first}");
         assert_eq!(report(0xFF, 2), J::Null);
         assert_eq!(report(0, 3), J::Bool(false));
-        assert_eq!(runs(4), want(1, u64::from(first)), "adopt {adopt}, first {first}: unknown, then off");
+        assert_eq!(runs(4), want(1, u64::from(first), rep + 1), "adopt {adopt}, first {first}: unknown, then off");
+        assert_eq!(report(0, 4), J::Bool(false));
+        assert_eq!(runs(5), want(1, u64::from(first), rep + 2), "off again: a report, not a change");
+        assert_eq!(frame(&[0x18, 5, 0x01, 0x00, 0x00, 0x00, 0x10, 0]), J::Bool(false));
+        assert_eq!(runs(6), want(1, u64::from(first), rep + 2), "a read response is not the device's own report");
         app.shutdown();
         r.ncp.shutdown();
         r.sim.stop();

@@ -752,6 +752,8 @@ impl Hub {
             return Ok(());
         };
         let pending = self.inner.store.lock().unwrap().state().fw_pending;
+        // The store is cleared before the outcome is published: a waiter on
+        // the status finds no pending update left.
         match pending {
             Some(p) if p.activated => {
                 // By slot, not by SHA-256: the NCP reports the digest of the
@@ -762,8 +764,8 @@ impl Hub {
                         "NCP update 0x{:08X} rolled back: running 0x{:08X} in slot {}",
                         p.version, run.version, run.slot
                     ));
-                    self.update(|s| s.fw = FwState::RolledBack { expected: p.version, running: run.version });
                     self.commit(Change::FwClear);
+                    self.update(|s| s.fw = FwState::RolledBack { expected: p.version, running: run.version });
                 } else if run.state == slot_state::RUNNING_TRIAL {
                     if self.inner.policy.hold_trial {
                         info!("hub: trial image 0x{:08X} (slot {}) running, held unconfirmed", run.version, run.slot);
@@ -775,14 +777,14 @@ impl Hub {
                     }
                     c.call_empty(ids::FW_CONFIRM, self.opts(Duration::from_secs(10)))?;
                     info!("hub: FW_CONFIRM 0x{:08X} (slot {})", run.version, run.slot);
-                    self.update(|s| s.fw = FwState::Confirmed { version: run.version });
                     self.commit(Change::FwClear);
+                    self.update(|s| s.fw = FwState::Confirmed { version: run.version });
                     if let Ok(slots) = fw::slots(c, self.opts(Duration::from_secs(5))) {
                         self.update(|s| s.slots = slots);
                     }
                 } else {
-                    self.update(|s| s.fw = FwState::Confirmed { version: run.version });
                     self.commit(Change::FwClear);
+                    self.update(|s| s.fw = FwState::Confirmed { version: run.version });
                 }
             }
             _ if run.state == slot_state::RUNNING_TRIAL => {
