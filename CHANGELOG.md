@@ -76,7 +76,7 @@ repository. An update keeps all data.
 ### New
 
 - **Dongle Max: the MG24's firmware can be replaced from the hub**
-  (experimental, not yet fully run on hardware). Settings › Zigbee radio
+  (experimental, run on the lab Dongle Max in both directions). Settings › Zigbee radio
   firmware (MG24) uploads a GBL file and flashes it through the MG24's
   Gecko bootloader, from the ESP32, without USB: SONOFF's EmberZNet NCP by
   the zigbee-rs ZRHP NCP, and back. The image is checked first (never one
@@ -304,8 +304,33 @@ repository. An update keeps all data.
   alone; the counters the EmberZNet NCP still reports are now floors, as
   without the restart.
 
+### Tested on hardware
+
+HIL on main 227471ad (2026-11-28):
+
+- Thread BR board (lab S3, 4 MB octal image; the H2 updated to zigbee-rs
+  NCP 0.1.3 with the web flasher, as above): the network resumed with the
+  same PAN ID and extended PAN ID; rejoins and announcements in
+  `network/events`; the API 1.4 fields, `topology_updated`, the crash
+  record, no keys in a restore's answers; `min_free` about 120 KB, as
+  with 0.4.1; stable across reboots.
+- SONOFF Dongle Max: the hub image installed; the MG24 updated to the
+  zigbee-rs NCP 0.1.3 GBL through the hub (`ncp/update`: XMODEM, 3,612
+  blocks, none resent, about 52 s, the network kept); no NCP reset at the
+  hub's start; the NCP's log in the hub's log; a `reported` trigger fired
+  on a real report; the way back (NV clear, SONOFF's stock EmberZNet, the
+  network restored, the sleepy C6 rejoining secured) and to 0.1.3 again.
+
 ### Known limitations
 
+- Not run on hardware: binding an IKEA remote with old firmware to group
+  901 (no such remote in the lab) and the leave requests of
+  `devices/remove` and to a removed device that comes back.
+- After the H2 was flashed, a session left in its ROM loader (e.g. an
+  interrupted web-flasher session) makes the hub find no NCP: the hub
+  does not reset the H2 at its start. Run `hub ncp reset hard` on the
+  console or power-cycle the board (a fix is planned for the next
+  release).
 - The 8 MB images (and the OTA image store) have not run on an 8 MB board
   yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
   quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio, so Zigbee
@@ -337,10 +362,9 @@ repository. An update keeps all data.
 - SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
   joining and interviews, reports, a network backup export and restore
   onto the same network, the hub name and version, a Zigbee2MQTT-format
-  import of its own network, the 0.4.1 claim refusals and restore. The
-  MG24 firmware update and the ZRHP backend are host-tested; their
-  hardware run is not complete (it found the probe crash fixed above).
-  Not yet run: Ethernet, `stock confirm`, the self-update, installation
+  import of its own network, the 0.4.1 claim refusals and restore, the
+  MG24 firmware update in both directions with the hub on either NCP
+  (above). Not yet run: Ethernet, `stock confirm`, the self-update, installation
   through SONOFF's web console, a restore or import onto another radio,
   the recovery claim of 0.4.1. The stock EmberZNet 7.4.5 does not report
   the APS frame counter: its backups have no TCLK counter, and a restore
