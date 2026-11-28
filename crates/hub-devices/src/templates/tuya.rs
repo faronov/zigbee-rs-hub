@@ -18,7 +18,7 @@
 //! - `electricity_measurement_poll`: Electrical Measurement (and Metering)
 //!   read every 60 s.
 
-use super::{Cx, K, Row, TExpr, build, label, tx};
+use super::{Cx, K, Row, TExpr, build, h, label, tx};
 use crate::model::EventSel;
 use crate::zcl::ZclType;
 
@@ -27,9 +27,9 @@ const POB: &[(i64, &str)] = &[(0, "off"), (1, "on"), (2, "previous")];
 const BACKLIGHT: &[(i64, &str)] = &[(0, "off"), (1, "normal"), (2, "inverted")];
 
 /// Entities by `tuyaOnOff` argument (first: one per endpoint) or helper.
-const ROWS: &[(&str, Row)] = &[
+const ROWS: &[(u32, Row)] = &[
     (
-        "powerOnBehavior2",
+        h("powerOnBehavior2"),
         (
             "power_on_behavior",
             K::Select(POB),
@@ -40,7 +40,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "powerOnBehavior3",
+        h("powerOnBehavior3"),
         (
             "power_on_behavior",
             K::Select(POB),
@@ -51,7 +51,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "switchMode",
+        h("switchMode"),
         (
             "switch_mode",
             K::Select(&[(0, "switch"), (1, "scene")]),
@@ -62,7 +62,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "onOffCountdown",
+        h("onOffCountdown"),
         (
             "countdown",
             K::Number(0.0, 43200.0, "s"),
@@ -73,7 +73,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "powerOnBehavior",
+        h("powerOnBehavior"),
         (
             "power_on_behavior",
             K::Select(POB),
@@ -84,7 +84,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "powerOutageMemory",
+        h("powerOutageMemory"),
         (
             "power_outage_memory",
             K::Select(&[(0, "off"), (1, "on"), (2, "restore")]),
@@ -95,7 +95,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "switchType",
+        h("switchType"),
         (
             "switch_type",
             K::Select(&[(0, "toggle"), (1, "state"), (2, "momentary")]),
@@ -106,7 +106,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "switchTypeButton",
+        h("switchTypeButton"),
         (
             "switch_type_button",
             K::Select(&[(0, "release"), (1, "press")]),
@@ -117,7 +117,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "switchTypeCurtain",
+        h("switchTypeCurtain"),
         (
             "switch_type_curtain",
             K::Select(&[
@@ -133,7 +133,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "backlightModeLowMediumHigh",
+        h("backlightModeLowMediumHigh"),
         (
             "backlight_mode",
             K::Select(&[(0, "low"), (1, "medium"), (2, "high")]),
@@ -144,7 +144,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "backlightModeOffNormalInverted",
+        h("backlightModeOffNormalInverted"),
         (
             "backlight_mode",
             K::Select(BACKLIGHT),
@@ -155,7 +155,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "indicatorMode",
+        h("indicatorMode"),
         (
             "indicator_mode",
             K::Select(&[(0, "off"), (1, "off/on"), (2, "on/off"), (3, "on")]),
@@ -166,7 +166,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "indicatorModeNoneRelayPos",
+        h("indicatorModeNoneRelayPos"),
         (
             "indicator_mode",
             K::Select(&[(0, "none"), (1, "relay"), (2, "pos")]),
@@ -177,11 +177,11 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "backlightModeOffOn",
+        h("backlightModeOffOn"),
         ("backlight_mode", K::Switch(1), 0x0006, 0x5000, E8, false),
     ),
     (
-        "childLock",
+        h("childLock"),
         (
             "child_lock",
             K::Switch(-1),
@@ -192,7 +192,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "operation_mode",
+        h("operation_mode"),
         (
             "operation_mode",
             K::Select(&[(0, "command"), (1, "event")]),
@@ -203,7 +203,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "tuya_led_indicator",
+        h("tuya_led_indicator"),
         (
             "backlight_mode",
             K::Select(BACKLIGHT),
@@ -214,7 +214,7 @@ const ROWS: &[(&str, Row)] = &[
         ),
     ),
     (
-        "relay_din_led_indicator",
+        h("relay_din_led_indicator"),
         (
             "indicator_mode",
             K::Select(&[(0, "off"), (1, "on_off"), (2, "off_on")]),
@@ -228,46 +228,54 @@ const ROWS: &[(&str, Row)] = &[
 
 /// Arguments of `tuyaOnOff` implemented: those of the first 15 [`ROWS`]
 /// and two that add no entity of their own.
-const ON_OFF_ARGS: &[&str] = &[
-    "powerOnBehavior2",
-    "powerOnBehavior3",
-    "switchMode",
-    "onOffCountdown",
-    "powerOnBehavior",
-    "powerOutageMemory",
-    "switchType",
-    "switchTypeButton",
-    "switchTypeCurtain",
-    "backlightModeLowMediumHigh",
-    "backlightModeOffNormalInverted",
-    "indicatorMode",
-    "indicatorModeNoneRelayPos",
-    "backlightModeOffOn",
-    "childLock",
-    "endpoints",
-    "electricalMeasurements",
+const ON_OFF_ARGS: &[u32] = &[
+    h("powerOnBehavior2"),
+    h("powerOnBehavior3"),
+    h("switchMode"),
+    h("onOffCountdown"),
+    h("powerOnBehavior"),
+    h("powerOutageMemory"),
+    h("switchType"),
+    h("switchTypeButton"),
+    h("switchTypeCurtain"),
+    h("backlightModeLowMediumHigh"),
+    h("backlightModeOffNormalInverted"),
+    h("indicatorMode"),
+    h("indicatorModeNoneRelayPos"),
+    h("backlightModeOffOn"),
+    h("childLock"),
+    h("endpoints"),
+    h("electricalMeasurements"),
 ];
+
+const H_POB: u32 = h("powerOnBehavior");
+const H_POB3: u32 = h("powerOnBehavior3");
+const H_OPERATION_MODE: u32 = h("operation_mode");
 
 /// Expands helper `f` with arguments `p`; `false`: not implemented.
 pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a serde_json::Value) -> bool {
-    let on = |k: &str| {
-        p.get(k)
-            .is_some_and(|v| !matches!(v, serde_json::Value::Bool(false) | serde_json::Value::Null))
-    };
-    match f {
-        "tuya_on_off" => {
+    // The arguments given (not false or null), and those given false.
+    let (mut on, mut off) = (Vec::new(), Vec::new());
+    for (k, v) in p.as_object().into_iter().flatten() {
+        match v {
+            serde_json::Value::Null => {}
+            serde_json::Value::Bool(false) => off.push(h(k)),
+            _ => on.push(h(k)),
+        }
+    }
+    let hf = h(f);
+    match hf {
+        H_ON_OFF => {
             cx.args(f, p, ON_OFF_ARGS);
             let eps = cx.eps(p, "endpoints", f);
             // zhc: powerOutageMemory and powerOnBehavior2, else
             // powerOnBehavior3, else powerOnBehavior (by default).
-            let memory = on("powerOutageMemory") || on("powerOnBehavior2");
+            let memory = on.contains(&ROWS[5].0) || on.contains(&ROWS[0].0);
             for (i, (arg, row)) in ROWS[..15].iter().enumerate() {
                 let set = match *arg {
-                    "powerOnBehavior3" => !memory && on(arg),
-                    "powerOnBehavior" => {
-                        !memory && !on("powerOnBehavior3") && p.get(arg) != Some(&false.into())
-                    }
-                    _ => on(arg),
+                    H_POB3 => !memory && on.contains(arg),
+                    H_POB => !memory && !on.contains(&H_POB3) && !off.contains(arg),
+                    _ => on.contains(arg),
                 };
                 if set {
                     for &ep in if i < 4 { &eps[..] } else { &[None] } {
@@ -275,7 +283,7 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a serde_json::Value) ->
                     }
                 }
             }
-            if on("electricalMeasurements") {
+            if on.contains(&h("electricalMeasurements")) {
                 cx.provide(&["power", "current", "voltage", "energy"]);
             }
             // The switches are the generic tier's; Tuya's power-on
@@ -283,37 +291,46 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a serde_json::Value) ->
             cx.provide(&["switch", "state"]);
             cx.x.drop.push(("power_on_behavior", None));
         }
-        "operation_mode" | "tuya_led_indicator" | "relay_din_led_indicator" => {
-            let r = ROWS.iter().find(|r| r.0 == f).unwrap();
-            cx.add(build(&r.1, (f == "operation_mode").then_some(1)));
-            cx.x.remote |= f == "operation_mode";
-        }
-        "multi_action" => {
+        H_MULTI_ACTION => {
             for (id, map) in [
                 (0xFD, &[(0, "single"), (1, "double"), (2, "hold")][..]),
                 (0xFC, &[(0, "rotate_right"), (1, "rotate_left")]),
             ] {
                 let types: Vec<String> = map.iter().map(|m| m.1.to_string()).collect();
                 let ev = EventSel::Expr(tx(label(map, "", true, None)));
-                cx.on(None, 0x0006, id as u8, ev, &types);
+                cx.on(None, 0x0006, id, ev, &types);
             }
             cx.x.remote = true;
         }
-        "switch_scene" => {
+        H_SWITCH_SCENE => {
             let ev = EventSel::Fixed("switch_scene".into());
             let t = cx.on(None, 0x0006, 0xFD, ev, &["switch_scene".into()]);
             t.attrs.push(("scene".into(), tx(TExpr::Byte)));
         }
-        "electricity_measurement_poll" => {
-            cx.args(
-                f,
-                p,
-                &["electricalMeasurement", "metering", "optionDescription"],
-            );
-            let em = p.get("electricalMeasurement") != Some(&false.into());
-            cx.x.poll = u8::from(em) | u8::from(on("metering")) << 1;
+        H_POLL => {
+            let known = [
+                h("electricalMeasurement"),
+                h("metering"),
+                h("optionDescription"),
+            ];
+            cx.args(f, p, &known);
+            let em = !off.contains(&known[0]);
+            cx.x.poll = u8::from(em) | u8::from(on.contains(&known[1])) << 1;
         }
-        _ => return false,
+        // operation_mode, tuya_led_indicator, relay_din_led_indicator
+        _ => {
+            let Some(r) = ROWS[15..].iter().find(|r| r.0 == hf) else {
+                return false;
+            };
+            let mode = hf == H_OPERATION_MODE;
+            cx.add(build(&r.1, mode.then_some(1)));
+            cx.x.remote |= mode;
+        }
     }
     true
 }
+
+const H_ON_OFF: u32 = h("tuya_on_off");
+const H_MULTI_ACTION: u32 = h("multi_action");
+const H_SWITCH_SCENE: u32 = h("switch_scene");
+const H_POLL: u32 = h("electricity_measurement_poll");

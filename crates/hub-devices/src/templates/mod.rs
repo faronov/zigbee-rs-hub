@@ -275,9 +275,9 @@ impl<'a> Cx<'a> {
     }
     /// Arguments of `p` this firmware does not implement (any truthy one
     /// not in `known`).
-    pub fn args(&mut self, feature: &str, p: &J, known: &[&str]) {
+    pub fn args(&mut self, feature: &str, p: &J, known: &[u32]) {
         for (k, v) in p.as_object().into_iter().flatten() {
-            if !known.contains(&k.as_str()) && !matches!(v, J::Bool(false) | J::Null) {
+            if !known.contains(&h(k)) && !matches!(v, J::Bool(false) | J::Null) {
                 self.lack(&cat(feature, ".", k));
             }
         }
@@ -431,6 +431,19 @@ impl crate::expr::Expression for TExpr {
     }
 }
 
+/// FNV-1a hash of a name: the firmware keeps the hashes of the helper,
+/// argument and model names it matches, not the names.
+pub(crate) const fn h(s: &str) -> u32 {
+    let b = s.as_bytes();
+    let mut x: u32 = 0x811C_9DC5;
+    let mut i = 0;
+    while i < b.len() {
+        x = (x ^ b[i] as u32).wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    x
+}
+
 /// `a`, `b` and `c` in one string.
 #[inline(never)]
 pub(crate) fn cat(a: &str, b: &str, c: &str) -> String {
@@ -546,23 +559,29 @@ pub fn drop_generic(
     merged: &mut std::collections::BTreeMap<(u8, String), Box<crate::resolve::ResolvedEntity>>,
     x: &Expansion,
 ) -> Option<EntityDef> {
-    let mut remote = None;
-    merged.retain(|(e, k), r| {
-        if r.source != crate::model::LayerSource::Generic {
-            return true;
+    let remote = |k: &str, r: &crate::resolve::ResolvedEntity| {
+        x.remote && k == "action" && r.def.platform == Platform::Event
+    };
+    let mut gone = Vec::new();
+    for ((e, k), r) in merged.iter() {
+        if r.source == crate::model::LayerSource::Generic
+            && (remote(k, r)
+                || x.drop
+                    .iter()
+                    .any(|(dk, p)| dk == k && p.is_none_or(|p| p == *e)))
+        {
+            gone.push((*e, k.clone()));
         }
-        if x.remote && k == "action" && r.def.platform == Platform::Event {
-            remote = Some(std::mem::replace(
-                &mut r.def,
-                EntityDef::new("", Platform::Event),
-            ));
-            return false;
+    }
+    let mut out = None;
+    for k in gone {
+        if let Some(r) = merged.remove(&k) {
+            if remote(&k.1, &r) {
+                out = Some(r.def);
+            }
         }
-        !x.drop
-            .iter()
-            .any(|(dk, dep)| dk == k && dep.is_none_or(|p| p == *e))
-    });
-    remote
+    }
+    out
 }
 
 /// Adds the generic remote events (`g`, 5.4) to an `action` entity: its
@@ -575,12 +594,13 @@ pub fn with_remote(e: &mut EntityDef, g: EntityDef, types: bool) {
         TriggerSource::Cmd { cluster, id, .. } => Some((cluster, id)),
         _ => None,
     };
-    let have: Vec<_> = e.triggers.iter().filter_map(own).collect();
-    e.triggers.extend(
-        g.triggers
-            .into_iter()
-            .filter(|t| own(t).is_some_and(|k| !have.contains(&k))),
-    );
+    let n = e.triggers.len();
+    for t in g.triggers {
+        let k = own(&t);
+        if k.is_some() && !e.triggers[..n].iter().any(|o| own(o) == k) {
+            e.triggers.push(t);
+        }
+    }
     if types && !e.event_types.is_empty() {
         for ty in g.event_types {
             if !e.event_types.contains(&ty) {

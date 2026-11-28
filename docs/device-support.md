@@ -3735,9 +3735,11 @@ into a feature of its family's template, `params: {features: {<helper>:
 twice with different arguments: `{instances: [...]}`). The hub expands
 them at resolution into ordinary entities, configure ops and triggers,
 from tables (one entity builder, one expression type), so a helper costs
-the firmware a table row more often than code. What a definition's
-template needs beyond that — a helper, an argument, an expose (`keys`) no
-implemented helper gives — is a required feature it lacks,
+the firmware a table row more often than code; the firmware keeps the
+hashes (FNV-1a) of the helper and argument names it matches, not the
+names. What a definition's template needs beyond that — a helper, an
+argument, an expose (`keys`) no implemented helper gives — is a required
+feature it lacks,
 `template.<family>.<item>` (3.3, 9.3: refused and named, the device runs
 generic or approximate). Partial definitions (no `keys`) get the helpers'
 entities.
