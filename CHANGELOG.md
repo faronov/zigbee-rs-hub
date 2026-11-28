@@ -6,6 +6,36 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
+## Unreleased
+
+### New
+
+- **Tuya devices run zigbee-herdsman-converters' definitions that need the
+  `tuya` vendor template**, which the hub refused before ("requires
+  template.tuya": the device stayed generic or ran TS011F_plug_1): TS011F
+  plugs (`TS011F_plug_2`, `_3`), multi-gang strips, switch modules and DIN
+  relays with child lock, indicator mode, power-on behaviour or outage
+  memory, switch type and a countdown per switch (On With Timed Off);
+  TS004F remotes and knobs such as HOBEIAN ZG-101ZD and Moes
+  ERS-10TZBVB-AA (operation mode command/event; single, double, hold and
+  rotation actions, and in command mode the Level Control steps); scene
+  remotes such as the Lidl FB21-001 (scene buttons besides their on/off
+  and dimming events); the measurements of relays and plugs whose
+  definition asks for it (TS011F_din_smart_relay_polling; TS011F_plug_3
+  with the next catalog) read every 60 s while they are reachable. 58 of
+  the 223 generated definitions that use `tuya` run; the others name what
+  they lack (e.g. `template.tuya.tuya_light`) and fall back as before.
+  Upgrading: a TS004F paired before keeps its mode (command or event),
+  as Zigbee2MQTT does; change it with its `operation_mode` select or pair
+  it again.
+
+### Fixes
+
+- **A TS011F plug's zero power, current or voltage could be lost** (template
+  `tuya_metering_zero_debounce`): a zero held back the 11 s was dropped
+  when the next reading came after those 11 s but before the hub's next
+  1 s tick. It is published first now.
+
 ## 0.4.2 (2026-11-28)
 
 A fix release for 0.4.1, with the Dongle Max's MG24 firmware update and
@@ -75,24 +105,6 @@ repository. An update keeps all data.
 
 ### New
 
-- **Tuya devices run zigbee-herdsman-converters' definitions that need the
-  `tuya` vendor template**, which the hub refused before ("requires
-  template.tuya": the device stayed generic or ran TS011F_plug_1): TS011F
-  plugs (`TS011F_plug_2`, `_3`), multi-gang strips, switch modules and DIN
-  relays with child lock, indicator mode, power-on behaviour or outage
-  memory, switch type and a countdown per switch (On With Timed Off);
-  TS004F remotes and knobs such as HOBEIAN ZG-101ZD and Moes
-  ERS-10TZBVB-AA (operation mode command/event; single, double, hold and
-  rotation actions, and in command mode the Level Control steps); scene
-  remotes such as the Lidl FB21-001 (scene buttons besides their on/off
-  and dimming events); the measurements of relays and plugs whose
-  definition asks for it (TS011F_din_smart_relay_polling; TS011F_plug_3
-  with the next catalog) read every 60 s while they are reachable. 58 of
-  the 223 generated definitions that use `tuya` run; the others name what
-  they lack (e.g. `template.tuya.tuya_light`) and fall back as before.
-  Upgrading: a TS004F paired before keeps its mode (command or event),
-  as Zigbee2MQTT does; change it with its `operation_mode` select or pair
-  it again.
 - **Dongle Max: the MG24's firmware can be replaced from the hub**
   (experimental, run on the lab Dongle Max in both directions). Settings › Zigbee radio
   firmware (MG24) uploads a GBL file and flashes it through the MG24's
@@ -226,10 +238,6 @@ repository. An update keeps all data.
 
 ### Fixes
 
-- **A TS011F plug's zero power, current or voltage could be lost** (template
-  `tuya_metering_zero_debounce`): a zero held back the 11 s was dropped
-  when the next reading came after those 11 s but before the hub's next
-  1 s tick. It is published first now.
 - **Automations' run times were "20784 d ago"** when the hub started before
   its clock was set (SNTP): runs were timed on the clock from power-on,
   the page measured them against Unix time. They are now API times like
