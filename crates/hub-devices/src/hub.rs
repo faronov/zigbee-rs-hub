@@ -414,6 +414,13 @@ pub(crate) struct Ticket {
     deadline: Millis,
 }
 
+/// Whether a command still waits for DP `dp` of device `id`.
+pub(crate) fn tuya_awaited(tickets: &BTreeMap<u64, Ticket>, id: &str, dp: u8) -> bool {
+    tickets
+        .values()
+        .any(|t| t.tuya_dps.iter().any(|(d, p)| d == id && *p == dp))
+}
+
 /// Dispatch key (2, rule 2: table-driven frame dispatch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DKey {
@@ -3397,16 +3404,6 @@ impl<T: ZigbeeTransport> Hub<T> {
                 });
             }
         }
-    }
-
-    /// The DPs of device `id` commands still wait for.
-    pub(crate) fn tuya_awaited(&self, id: &str) -> Vec<u8> {
-        self.tickets
-            .values()
-            .flat_map(|t| t.tuya_dps.iter())
-            .filter(|(d, _)| d == id)
-            .map(|(_, p)| *p)
-            .collect()
     }
 
     /// A Tuya DP arrived: completes tickets waiting for it.

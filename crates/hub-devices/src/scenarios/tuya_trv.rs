@@ -508,4 +508,19 @@ fn tuya_data_frames_are_the_devices_own_unless_they_answer_the_hub() {
     );
     let f = t.tuya_frame(cmd::DATA_RESPONSE, 4, &[(4, 2, value(230))]);
     assert_eq!(pushed(&mut hub, f, 121_000, uid), [true], "the knob");
+    // A slow answer: past the 10 s, while the command still waits for it.
+    let ack = hub
+        .entity_command(
+            uid,
+            "set_temperature",
+            &json!({"temperature": 23}),
+            T0 + 121_500,
+        )
+        .unwrap();
+    assert_eq!(ack.status, "pending");
+    hub.transport.take();
+    let f = t.tuya_frame(cmd::DATA_RESPONSE, 5, &[(4, 2, value(230))]);
+    assert_eq!(pushed(&mut hub, f, 133_000, uid), [false], "a slow answer");
+    let f = t.tuya_frame(cmd::DATA_RESPONSE, 6, &[(4, 2, value(235))]);
+    assert_eq!(pushed(&mut hub, f, 140_000, uid), [true]);
 }
