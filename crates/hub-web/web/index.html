@@ -170,7 +170,7 @@ progress{width:12em}
 <section class="card f-restore"><h2>Migrate from Zigbee2MQTT or ZHA</h2><p class="mut">Moves their network and devices to this hub without pairing again; names and groups come along.</p><button id="mgo">Start</button><div data-mod="mig"></div></section>
 <section class="card"><h2>New network</h2>
 <p class="mut">Leaves the current network and forms a new one; every device must then be paired again. The current network is backed up and the file offered first.</p>
-<div class="row"><label>Channel <select id="nch"><option value="">quietest</option></select></label><label>PAN ID <input id="npan" placeholder="random" size="6"></label><label>Ext. PAN ID <input id="nepid" placeholder="random" size="17"></label><label>TX power <input id="ntx" type="number" class="num" placeholder="keep"></label></div>
+<div class="row"><label>Channel <select id="nch"><option value="">quietest</option></select></label><label>PAN ID <input id="npan" placeholder="random" size="6"></label><label>Ext. PAN ID <input id="nepid" placeholder="random" size="17"></label><label>TX power <input id="ntx" type="number" class="num" placeholder="keep"></label><label><input id="nlv" type="checkbox"> announce the leave on air</label></div>
 <div class="row acts"><input id="nconf" placeholder="type RESET" size="11"><button class="d" id="nrb">Back up and reset</button></div></section>
 <!-- gateway:start -->
 <section class="card f-storage"><h2>Storage</h2><dl class="kv" id="gst"></dl>
@@ -293,7 +293,7 @@ function onMsg(m,tok){
   ]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
- if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];if(m.backup)saveBackup(m.backup);if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
+ if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];kept(m.previous_backup);if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
 // ota:start
  if(m.type=="ota/block_needed"){uiDo("ota",()=>otNeed(m));return}
@@ -407,10 +407,11 @@ const eg=e=>e.category=="diagnostic"?4:e.category?3:e.platform=="event"?2:/senso
  pgId=()=>(/^#device\/(.+)/.exec(location.hash)||[])[1];
 let sy,pgOn,snap;
 // Live values: battery (s: %, b: low), linkquality, rssi and last seen (t),
-// from the device's entities (updated with every frame), else its record.
+// from the device's entities (updated with every frame), else its record;
+// no LQI or RSSI kept over a restart until a frame measures them again.
 function lv(id){const d=devs[id],v={linkquality:d.lqi,rssi:d.rssi,t:d.last_seen};
  for(const e of dEnts(id)){const s=states[e.uid]||{};v.t=Math.max(v.t||0,s.last_reported||0);if(s.state!=null)v[e.device_class=="battery"?e.platform[0]:e.key]=s.state}
- return v}
+ if(d.link_stale)v.linkquality=v.rssi=null;return v}
 // Battery, signal (a dot coloured by LQI as on the map: ≥ 150, ≥ 80, below),
 // last seen and power source: under the card's title, on the page under the
 // device's facts; a line that wraps between its items only.
@@ -525,6 +526,8 @@ const busy=(b,p)=>{b.disabled=true;return p.finally(()=>b.disabled=false)};
 const mkSvg=(w,h)=>{const d=el("div");d.innerHTML='<svg viewBox="0 0 '+w+" "+h+'"></svg>';return d.firstChild};
 function save(name,text){const a=el("a",{href:URL.createObjectURL(new Blob([text],{type:"application/json"})),download:name});document.body.append(a);a.click();a.remove()}
 function saveBackup(b){save("zigbee-rs-hub-backup-"+b.pan_id+"-"+new Date().toISOString().slice(0,10)+".json",JSON.stringify(b,null,1))}
+// The network a reset, restore or import replaced: its backup is kept on the hub, the answer only names it.
+function kept(p){p&&call(p.kept,{ext_pan_id:p.ext_pan_id}).then(r=>r.backup&&saveBackup(r.backup)).catch(()=>{})}
 for(let c=11;c<=26;c++){$("#ch").append(el("option",{value:c},c));$("#nch").append(el("option",{value:c},c))}
 function renderSNet(){
  const n=net,c=n.ncp||{};
@@ -600,14 +603,14 @@ $("#rsf").onchange=async e=>{
  if(!confirm("Restore network PAN "+b.pan_id+", channel "+b.channel+" with "+(b.devices||[]).length+" devices onto this hub's radio? Never run the old coordinator at the same time."))return;
  $("#bks").textContent="restoring…";
  try{const u=q=>upload(b,q).catch(err=>{const m=err.message,k=["force","confirm","confirm_ieee_write_once"].find(k=>!q[k]&&m.includes("set "+k+" "));if(k&&confirm(m+"\n\nGo on?"))return u({...q,[k]:!0});throw err});let r=await u({});
-  if(r&&r.backup)saveBackup(r.backup);if(r)$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}
+  if(r){kept(r.previous_backup);$("#bks").textContent="Restored PAN "+hex(r.pan_id,4)+" on channel "+r.channel+": "+r.devices+" devices, "+r.children+" children, "+r.link_keys_on_ncp+" link keys"}}
  catch(err){$("#bks").textContent="";toast("restore: "+err.message)}};
 $("#nrb").onclick=e=>{
  if($("#nconf").value!="RESET")return toast("Type RESET to confirm");
  const p={confirm:"RESET"},c=$("#nch").value,pan=$("#npan").value.trim(),ep=$("#nepid").value.trim(),tx=$("#ntx").value;
- if(c)p.channel=+c;if(pan)p.pan_id=parseInt(pan,16);if(ep)p.ext_pan_id=ep;if(tx!=="")p.tx_power=+tx;
+ if(c)p.channel=+c;if(pan)p.pan_id=parseInt(pan,16);if(ep)p.ext_pan_id=ep;if(tx!=="")p.tx_power=+tx;if($("#nlv").checked)p.leave=!0;
  if(!confirm("Leave the current network and form a new one? All devices must be paired again."))return;
- busy(e.target,act("network/reset",p).then(r=>{if(r.backup)saveBackup(r.backup);$("#nconf").value="";toast("New network: PAN "+hex(r.network.pan_id,4)+", channel "+r.network.channel)})).catch(()=>{})};
+ busy(e.target,act("network/reset",p).then(r=>{kept(r.previous_backup);$("#nconf").value="";toast("New network: PAN "+hex(r.network.pan_id,4)+", channel "+r.network.channel)})).catch(()=>{})};
 // An IANA zone as a POSIX TZ string (hub/time/set): the zone's offsets from
 // Intl hour by hour this year and next; its two changes a year become
 // Mm.w.d/time rules (the local day before a change or a day either side,

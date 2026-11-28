@@ -366,6 +366,14 @@ pub struct ExportSummary {
     pub complete: bool,
     /// [`NetworkIdentity::key_id_for`] of the exported network key.
     pub key_id: Option<[u8; 8]>,
+    /// PAN ID.
+    pub pan_id: u16,
+    /// Channel.
+    pub channel: u8,
+    /// The network key's outgoing frame counter (0 without the key).
+    pub nwk_fc: u32,
+    /// The Trust Center link key's outgoing (APS) frame counter.
+    pub aps_fc: u32,
 }
 
 /// Why [`from_export`] failed.
@@ -530,7 +538,15 @@ pub fn from_export(export: Export, info: &ExportInfo, out: &mut String) -> Resul
         Some(BackupItem::NetworkKey { key, .. }) => Some(NetworkIdentity::key_id_for(key)),
         _ => None,
     };
-    let mut summary = ExportSummary { devices: devices.len(), link_keys: 0, complete: nkey.is_some(), key_id };
+    let nwk_fc = match &nkey {
+        Some(BackupItem::NetworkKey { tx_counter, .. }) => *tx_counter,
+        _ => 0,
+    };
+    let aps_fc = match &tclk {
+        Some(BackupItem::TcLinkKey { tx_counter, .. }) => *tx_counter,
+        _ => 0,
+    };
+    let mut summary = ExportSummary { devices: devices.len(), link_keys: 0, complete: nkey.is_some(), key_id, pan_id, channel, nwk_fc, aps_fc };
     for (i, d) in devices.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -713,7 +729,8 @@ mod tests {
             ezsp_version: None,
         };
         let (summary, text) = export(&a, &info);
-        assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true, key_id: Some(r.key_id) });
+        let (pan_id, channel, nwk_fc, aps_fc) = (r.pan_id, r.channel, 112_233, 4096);
+        assert_eq!(summary, ExportSummary { devices: 4, link_keys: 1, complete: true, key_id: Some(r.key_id), pan_id, channel, nwk_fc, aps_fc });
         let v: J = serde_json::from_str(&text).unwrap();
         assert_eq!(v["metadata"]["internal"]["creation_time"], "2023-11-14T22:13:20+00:00");
         assert_eq!(v["metadata"]["internal"]["zigbee_rs"]["groups"][0]["name"], "Kitchen");

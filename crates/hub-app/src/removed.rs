@@ -5,11 +5,18 @@
 //! tables of an NCP that could not purge them (a removal while the session
 //! was down, an NCP without the purge commands).
 //!
-//! A real join (`CoordEvent::DeviceJoined`) or a device created any other
-//! way (a device announcement, a migration import, the registry) ends the
-//! entry. Forming, resetting or restoring the network drops them all (the
-//! operator replaced the network's state), as `network/registry/clear`
-//! does with the record.
+//! A removed device that still holds the network key comes back on its
+//! next secured rejoin (EmberZNet and the zigbee-rs NCP since its PR #22
+//! admit it): heard again while joining is closed (a join, a device
+//! announcement, a frame naming its IEEE) it is asked to leave again
+//! ([`Removed::ask_again`], at most every [`ASK_AGAIN_MS`]) and stays
+//! removed. A join or an announcement while joining is open is the
+//! operator pairing it again and ends the entry, as does a device created
+//! any other way (a migration import, the registry). Only a new network
+//! key keeps a device that holds the current one out for good. Forming,
+//! resetting or restoring the network drops them all (the operator
+//! replaced the network's state), as `network/registry/clear` does with
+//! the record.
 //!
 //! One network-scoped record ([`KEY`], `hub_store::kv`), written at once
 //! when it changes, while the network records are this hub's: format byte
@@ -29,6 +36,8 @@ pub const MAX: usize = 64;
 const FORMAT: u8 = 1;
 /// Delay before a failed write is tried again.
 const RETRY_MS: Millis = 30_000;
+/// Least time between two leave requests to a removed device heard again.
+pub const ASK_AGAIN_MS: Millis = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -50,6 +59,9 @@ pub struct Removed {
     retry_at: Millis,
     /// Store write failures.
     pub errors: u64,
+    /// Removed devices heard again: when each was last asked to leave (not
+    /// stored).
+    asked: Vec<(u64, Millis)>,
 }
 
 impl Removed {
@@ -78,6 +90,27 @@ impl Removed {
     /// Every entry dropped.
     pub fn clear_all(&mut self) {
         self.apply(Op::ClearAll);
+    }
+
+    /// The removed device `ieee` was heard again: whether to ask it to
+    /// leave now (not more often than every [`ASK_AGAIN_MS`]).
+    pub fn ask_again(&mut self, ieee: u64, now: Millis) -> bool {
+        let list = &self.list;
+        self.asked.retain(|(i, _)| list.contains(i));
+        if !self.contains(ieee) {
+            return false;
+        }
+        match self.asked.iter_mut().find(|(i, _)| *i == ieee) {
+            Some((_, t)) if now.saturating_sub(*t) < ASK_AGAIN_MS => false,
+            Some((_, t)) => {
+                *t = now;
+                true
+            }
+            None => {
+                self.asked.push((ieee, now));
+                true
+            }
+        }
     }
 
     fn apply(&mut self, op: Op) {
@@ -201,6 +234,20 @@ mod tests {
         again.clear_all();
         again.flush(&kv, 0);
         assert_eq!(stored(&kv), None);
+    }
+
+    #[test]
+    fn a_removed_device_heard_again_is_asked_at_most_every_minute() {
+        let mut r = Removed::default();
+        r.add(1);
+        assert!(!r.ask_again(2, 0), "not removed");
+        assert!(r.ask_again(1, 1_000));
+        assert!(!r.ask_again(1, 1_000 + ASK_AGAIN_MS - 1));
+        assert!(r.ask_again(1, 1_000 + ASK_AGAIN_MS));
+        r.clear(1);
+        assert!(!r.ask_again(1, 10 * ASK_AGAIN_MS));
+        r.add(1);
+        assert!(r.ask_again(1, 10 * ASK_AGAIN_MS), "removed again: asked at once");
     }
 
     #[test]

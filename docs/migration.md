@@ -204,12 +204,16 @@ Unique link keys per backend:
    take them in 2 minutes ends the job with `timeout`; running the import
    again finishes it.
 
-Nothing is sent to an imported device at import. When it is first heard
-from (any frame, an announce, the answer to a probe):
+Nothing is sent to an imported device at import. The hub endpoint joins
+the groups its configure needs at once (device-support 5.3: an IKEA
+remote on group-only firmware, which the previous coordinator bound to
+group 901, is heard only through it). When it is first heard from (any
+frame, an announce, the answer to a probe):
 
 - the same coordinator IEEE: the definition's configure is taken as done
-  (the previous coordinator did it), the identity (DateCode, SWBuildID)
-  and the states the hub does not know are read;
+  (the previous coordinator did it) but for the hub endpoint's group
+  joins, which run; the identity (DateCode, SWBuildID) and the states the
+  hub does not know are read;
 - another coordinator IEEE: the definition's configure runs, two awake
   devices at a time (a sleepy device that finds both turns taken tries
   again at its next wake; a sleeping one's requests wait for its wake and
@@ -291,7 +295,7 @@ batches too (the hub takes 16 KiB frames).
 | Type | Parameters | Result |
 |---|---|---|
 | `network/import/preview` | as above; options as `network/import` (they decide `needs`) | per request: `devices` (rows of its entries: `ieee`, `id`, `name`, `manufacturer`, `model`, `status` `new`/`replace`/`keep`/`skip`, `reason` of a skip: `green_power`, `coordinator`, `no_nwk`, `duplicate`, `invalid`; `definition` {`source`, `id`} or null for generic, `entities`, `endpoints`, `interview` `imported`/`on_first_contact`), `staged_devices`; the first: `network` {`ext_pan_id`, `pan_id`, `channel`, `coordinator_ieee`, `nwk_frame_counter`, `tclk_frame_counter`, `nwk_margin`, `aps_margin`, `devices`, `link_keys`, `hashed_tclk`, `stack`, `created`, `made_by`, `action` (`restore`, or `same`: the hub runs it already), `running` {`ext_pan_id`, `up`}, `coordinator` (`same`, `differs`, `unknown`: against the radio's IEEE now), `backend`, `needs` (`force`, `confirm`)}. The last also: `summary` {`new`, `replace`, `keep`, `skip`}, `groups`, `not_imported` {`count`, `devices` (the hub's devices the document does not list, at most 100), `removed`}, `restore_check` (`ok`, `not_needed`, or {`code`, `message`} of the backend's refusal, e.g. "set confirm_ieee_write_once"). Nothing changes |
-| `network/import` | the document; `force` (the radio runs another network), `confirm` (EZSP: the records are another network's), `confirm_ieee_write_once`, `allow_ieee_change` (default true), `skip_backup`, `remove_missing` (forget the hub's devices the document does not list), `reconfigure` (`auto`, `always`, `never`) | rows as the preview for every request but the last; the last starts the job and answers `network` {`action` `restored`/`same`, `pan_id`, `channel`, `ext_pan_id`, `coordinator_ieee`, `devices`, and after a restore `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` (as `network/restore`)}, `coordinator_changed`, `reconfigure`, `devices` {`new`, `replace`, `keep`, `skip`}, `failed`, `removed`, `groups`, `stored` (the registry written; `false` is reported as an error by the clients), `pending_verification`, `previous_network_backed_up`, `backup` (the replaced network's, with an API token) |
+| `network/import` | the document; `force` (the radio runs another network), `confirm` (EZSP: the records are another network's), `confirm_ieee_write_once`, `allow_ieee_change` (default true), `skip_backup`, `remove_missing` (forget the hub's devices the document does not list), `reconfigure` (`auto`, `always`, `never`) | rows as the preview for every request but the last; the last starts the job and answers `network` {`action` `restored`/`same`, `pan_id`, `channel`, `ext_pan_id`, `coordinator_ieee`, `devices`, and after a restore `nwk_fc_start`, `aps_fc_start`, `link_keys_on_ncp`, `link_keys_host_backed`, `children`, `notes` (as `network/restore`)}, `coordinator_changed`, `reconfigure`, `devices` {`new`, `replace`, `keep`, `skip`}, `failed`, `removed`, `groups`, `stored` (the registry written; `false` is reported as an error by the clients), `pending_verification`, `previous_network_backed_up`, `previous_backup` (the replaced network's automatic backup summarised, without keys, and the request that returns the kept file, as `network/reset`'s) |
 
 Errors: `unauthorized` (no API token), `network_required`,
 `invalid_value` (not the format, a bad network part, "set force"),

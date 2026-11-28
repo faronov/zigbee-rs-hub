@@ -260,8 +260,9 @@ pub fn run(url: &str, token: &str, doc: &J, o: &Options) -> Result<(), String> {
             last["groups"],
             s(&last["stored"])
         );
-        if !last["backup"].is_null() {
-            println!("the replaced network was backed up (network/backup/replaced)");
+        let prev = &last["previous_backup"];
+        if !prev.is_null() {
+            println!("the replaced network {} was backed up, kept on the hub ({})", s(&prev["ext_pan_id"]), s(&prev["kept"]));
         }
         if not_stored {
             return Err(NOT_STORED.into());

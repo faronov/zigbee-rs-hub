@@ -19,7 +19,7 @@ use crate::{App, AppConfig};
 pub(crate) const T: Duration = Duration::from_secs(10);
 const DEV: u64 = 0x00158d0001a2b3c4;
 
-fn rng() -> Rng {
+pub(crate) fn rng() -> Rng {
     let n = Arc::new(AtomicU32::new(7));
     Arc::new(move |buf: &mut [u8]| {
         for b in buf {
@@ -1140,16 +1140,28 @@ fn reset_backs_up_leaves_and_forms_a_new_network() {
     assert_eq!(res["network"]["channel"], 25);
     assert_eq!(res["network"]["pan_id"], 0x1A2B);
     assert_eq!(res["network"]["ext_pan_id"], "00112233445566ff");
-    assert_eq!(res["backup"]["pan_id"], format!("{:04x}", first["network"]["pan_id"].as_u64().unwrap()), "the old network was backed up");
-    assert!(r.sim.state().log.iter().any(|(id, _)| *id == ids::NWK_LEAVE_RESET));
+    let prev = &res["previous_backup"];
+    assert_eq!(prev["pan_id"], first["network"]["pan_id"], "the old network was backed up: {res}");
+    assert_eq!((prev["channel"].as_u64(), prev["kept"].as_str()), (Some(15), Some("network/backup/replaced")));
+    assert!(!f.to_string().contains("\"key\""), "no keys in the answer: {f}");
+    let kept = call(&app, sid, &rx, 3, json!({"type": "network/backup/replaced", "ext_pan_id": prev["ext_pan_id"]}));
+    assert_eq!(ok(&kept)["backup"]["pan_id"], format!("{:04x}", first["network"]["pan_id"].as_u64().unwrap()), "the file: {kept}");
+    assert!(ok(&kept)["backup"]["network_key"]["key"].is_string(), "keys through the backup request only");
+    // A wipe before a new formation is local (flags bit2 clear); the
+    // operator's explicit leave is announced on air.
+    let leaves = || r.sim.state().log.iter().filter(|(id, _)| *id == ids::NWK_LEAVE_RESET).map(|(_, p)| p[0]).collect::<Vec<_>>();
+    assert_eq!(leaves(), [0x03]);
+    ok(&call(&app, sid, &rx, 4, json!({"type": "network/reset", "confirm": "RESET", "channel": 20, "leave": true})));
+    assert_eq!(leaves(), [0x03, 0x07]);
     assert_eq!(r.sim.state().tx_power, 4);
-    assert_eq!(r.ncp.store_state().network.unwrap().pan_id, 0x1A2B);
+    assert_eq!(r.ncp.store_state().network.unwrap().channel, 20);
     app.shutdown();
 }
 
 /// Keys leave the hub only with an API token: without one the automatic
-/// backup of `network/reset` is kept (the network is not lost) but not
-/// answered, and `network/backup/last` refuses as `network/backup` does.
+/// backup of `network/reset` is kept (the network is not lost) and only
+/// summarised (as with a token), and `network/backup/last` refuses as
+/// `network/backup` does.
 #[test]
 fn keyed_backups_need_a_token_also_when_kept() {
     let r = rig(Store::volatile());
@@ -1164,7 +1176,8 @@ fn keyed_backups_need_a_token_also_when_kept() {
     let reset = |id: u64| call(&app, sid, &rx, id, json!({"type": "network/reset", "confirm": "RESET", "channel": 15}));
     ok(&reset(1));
     let again = reset(2);
-    assert_eq!(ok(&again)["backup"], J::Null, "no keys in the answer without a token: {again}");
+    assert_eq!(ok(&again)["previous_backup"]["kept"], "network/backup/replaced", "{again}");
+    assert!(!again.to_string().contains("\"key\""), "no keys in the answer: {again}");
     assert!(r.ncp.store_state().kv.contains_key(crate::admin::LAST_BACKUP_KEY), "kept in the host store");
     assert!(r.ncp.store_state().kv.keys().any(|k| k.starts_with(crate::admin::REPLACED_BACKUP_PREFIX)), "kept as the replaced network's");
     assert_eq!(err_code(&call(&app, sid, &rx, 3, json!({"type": "network/backup/last"}))), "unauthorized");

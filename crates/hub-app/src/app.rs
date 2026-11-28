@@ -925,14 +925,22 @@ impl Runner {
         let now = self.now();
         match ev {
             CoordEvent::Indication(i) => {
+                if self.removed_heard(&i, now) {
+                    return;
+                }
                 if let Some(ieee) = i.src_ieee {
                     self.engine.transport.nwk.insert(ieee, i.src_nwk);
                 }
                 self.engine.on_aps_indication(i, now);
             }
             CoordEvent::DeviceJoined { ieee, nwk } => {
-                if self.removed.clear(ieee) {
-                    info!("app: removed device {ieee:016x} joined again");
+                if self.removed.contains(ieee) {
+                    if self.engine.transport.permit_join_s() == 0 {
+                        self.remove_again(ieee, nwk, "rejoin", now);
+                        return;
+                    }
+                    self.removed.clear(ieee);
+                    info!("app: removed device {ieee:016x} joined again while joining was open: paired again");
                 }
                 self.engine.transport.nwk.insert(ieee, nwk);
                 self.engine.on_device_joined(ieee, nwk, now);
@@ -1573,14 +1581,49 @@ impl Runner {
     }
 
     /// The Zigbee devices `devices/remove` removed: remembered, so that the
-    /// coordinator's tables do not bring them back.
-    fn note_removed(&mut self) {
+    /// coordinator's tables do not bring them back. Asked to leave just now
+    /// (their answer is no reason to ask again).
+    fn note_removed(&mut self, now: Millis) {
         for ieee in self.engine.take_removed() {
-            info!("app: device {ieee:016x} removed: not imported from the NCP again unless it joins");
+            info!("app: device {ieee:016x} removed: not imported from the NCP again unless it is paired again");
             self.removed.add(ieee);
+            self.removed.ask_again(ieee, now);
             // Created again, it is no longer the import's.
             self.ncp_imported.remove(&ieee);
         }
+    }
+
+    /// A frame of a device the operator removed (its IEEE known: the
+    /// frame's, or a Device_annce's): asked to leave again, the frame goes
+    /// no further. A Device_annce while joining is open is the device paired
+    /// again: no longer removed (see [`Removed`]).
+    fn removed_heard(&mut self, i: &hub_devices::transport::ApsIndication, now: Millis) -> bool {
+        let annce = i.profile == 0 && i.cluster == hub_devices::zdo::cluster::DEVICE_ANNCE;
+        let announced = i.payload.get(3..11).filter(|_| annce).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+        let Some(ieee) = announced.or(i.src_ieee).filter(|x| self.removed.contains(*x)) else {
+            return false;
+        };
+        if annce && self.engine.transport.permit_join_s() > 0 {
+            self.removed.clear(ieee);
+            info!("app: removed device {ieee:016x} announced itself while joining was open: paired again");
+            return false;
+        }
+        self.remove_again(ieee, i.src_nwk, if annce { "announce" } else { "frame" }, now);
+        true
+    }
+
+    /// A removed device heard again (`via` a rejoin, an announcement, a
+    /// frame) is asked to leave again, at most once a minute, and stays
+    /// removed; a `removed_device_back` network event says so.
+    fn remove_again(&mut self, ieee: u64, nwk: u16, via: &str, now: Millis) {
+        if !self.removed.ask_again(ieee, now) {
+            return;
+        }
+        warn!("app: removed device {ieee:016x} (0x{nwk:04X}) is back ({via}): asked to leave again");
+        self.engine.transport.nwk.insert(ieee, nwk);
+        self.engine.ask_to_leave(ieee, nwk, now);
+        let device = hub_devices::hub::zigbee_id(ieee);
+        self.engine.network_event(serde_json::json!({"topic": "removed_device_back", "device": device, "nwk": nwk, "via": via}));
     }
 
     /// A device created other than by the NCP device import (a device
@@ -1709,7 +1752,7 @@ impl Runner {
             }
         }
         self.pump_automations();
-        self.note_removed();
+        self.note_removed(now);
         self.registry.flush(&*self.records, &self.engine, now, false);
         self.last.flush(&*self.records, &self.engine, now, false);
         self.removed.flush(&*self.records, now);

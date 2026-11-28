@@ -658,7 +658,7 @@ at that boot, as after a completed flash.
 `ncp_backend` (NVS, `ncp/backend/set`, console `ncp backend`): `auto`
 (default), `ezsp` or `zrhp`, from the next boot. A fixed setting starts
 that backend without asking (but for the bootloader after an update that
-did not finish). `auto` asks the MG24 (`hub_app::backend::select`): the
+did not finish, and `zrhp`'s one probe before any reset, below). `auto` asks the MG24 (`hub_app::backend::select`): the
 backend whose NCP answered last first (one probe at a normal boot; EZSP
 first without a history: the stock firmware), then the other, then the
 bootloader's menu. Nothing answering starts the last backend (it keeps
@@ -671,6 +671,19 @@ frames with bad CRCs (and the EZSP probe's reset restarts its link); the
 bootloader probe is a newline. `ncp/update/status` `backend` and `hub` on
 the console show the setting, what answered, every probe and why this
 backend.
+
+**Reset at boot.** As SONOFF's firmware, the hub resets the MG24 into its
+application before the probes (which also leaves a bootloader entered
+before a host restart), except for a zigbee-rs NCP that runs and answers:
+when the setting (else the NCP seen last) is `zrhp` and no update was
+interrupted, the ZRHP probe asks it first, without a reset, and only an NCP
+that does not answer is reset and probed again. The zigbee-rs NCP keeps its
+log until a host grants it LOG credit, its boot records included (the NV
+it erased at its first boot after a flash, where its crystal tuning and
+IEEE come from); the probe grants none, the backend's session does, so
+they reach the hub's log (`ncp`) also after the hub restarts on a freshly
+flashed NCP. A reset at the hub's start lost them. A boot without the hub
+(bring-up, no PSRAM) resets the MG24 as before.
 
 **Crash guard.** The ZRHP probe (at boot and after a flash) and the
 ZRHP backend's start (until its session is up and 10 s later, at most a

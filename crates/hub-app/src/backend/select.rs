@@ -26,6 +26,17 @@
 //! hub runs, says so, and offers to flash again; nothing is sent to the
 //! bootloader's menu.
 //!
+//! **Reset into the application** ([`Prober::reset_to_app`]) before the
+//! probes, as SONOFF's firmware does (it also leaves a bootloader entered
+//! before a host restart), except for a zigbee-rs NCP that runs and
+//! answers: when the NCP expected (the setting's, else the hint's) is ZRHP
+//! and no update was interrupted, it is asked first, without a reset; only
+//! when it does not answer is it reset and the probes made. A running
+//! zigbee-rs NCP keeps its log until a host grants LOG credit (its boot
+//! records: crystal tuning, IEEE source, the NV erased at its first boot
+//! after a flash); the probe grants none, the backend's session does and
+//! the records reach the hub's log. A reset here lost them.
+//!
 //! [`after_switch`] decides what happens once the hub runs on another
 //! backend than before an NCP update: restore the network kept before it,
 //! or why not.
@@ -173,6 +184,9 @@ pub fn be_hex(b: &[u8; 8]) -> String {
 pub trait Prober {
     /// One probe: what answered, or why nothing did.
     fn probe(&mut self, p: Probe) -> Result<Found, String>;
+    /// Resets the NCP into its application (the reset line, the loader
+    /// line released).
+    fn reset_to_app(&mut self);
 }
 
 /// The decision.
@@ -225,10 +239,26 @@ pub fn order(setting: Setting, hint: Option<BackendKind>, suspect_bootloader: bo
 }
 
 /// Decides the backend: a fixed setting without probes (but for the
-/// bootloader when an update did not finish), `auto` by [`order`].
+/// bootloader when an update did not finish), `auto` by [`order`]; the NCP
+/// reset into its application first unless it is a ZRHP NCP that answers
+/// as expected (see the module's "Reset into the application").
 pub fn detect(setting: Setting, hint: Option<BackendKind>, suspect_bootloader: bool, prober: &mut dyn Prober) -> Detection {
     let fallback = setting.fixed().or(hint).unwrap_or(BackendKind::Ezsp);
     let mut d = Detection { setting, backend: fallback, found: None, tried: Vec::new(), park: false, why: "" };
+    if !suspect_bootloader && fallback == BackendKind::Zrhp {
+        match prober.probe(Probe::Zrhp) {
+            Ok(found) if found.backend().is_some() => {
+                d.tried.push((Probe::Zrhp, None));
+                d.backend = BackendKind::Zrhp;
+                d.why = "detected";
+                d.found = Some(found);
+                return d;
+            }
+            Ok(_) => d.tried.push((Probe::Zrhp, Some("not an application".into()))),
+            Err(e) => d.tried.push((Probe::Zrhp, Some(e))),
+        }
+    }
+    prober.reset_to_app();
     for p in order(setting, hint, suspect_bootloader) {
         match prober.probe(p) {
             Ok(found) => {
@@ -489,6 +519,10 @@ pub struct GuardedProber<'a> {
 }
 
 impl Prober for GuardedProber<'_> {
+    fn reset_to_app(&mut self) {
+        self.inner.reset_to_app();
+    }
+
     fn probe(&mut self, p: Probe) -> Result<Found, String> {
         if p != Probe::Zrhp {
             return self.inner.probe(p);
@@ -696,15 +730,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Answers from a script; records the order asked.
+    /// Answers from a script; records the order asked and the resets
+    /// (the probes asked before each).
     struct Script {
         ezsp: bool,
         zrhp: bool,
         bootloader: bool,
         asked: Vec<Probe>,
+        resets: Vec<usize>,
     }
 
     impl Prober for Script {
+        fn reset_to_app(&mut self) {
+            self.resets.push(self.asked.len());
+        }
+
         fn probe(&mut self, p: Probe) -> Result<Found, String> {
             self.asked.push(p);
             let ok = match p {
@@ -724,7 +764,39 @@ mod tests {
     }
 
     fn ncp(ezsp: bool, zrhp: bool, bootloader: bool) -> Script {
-        Script { ezsp, zrhp, bootloader, asked: Vec::new() }
+        Script { ezsp, zrhp, bootloader, asked: Vec::new(), resets: Vec::new() }
+    }
+
+    /// A zigbee-rs NCP that runs and answers is not reset (its log, boot
+    /// records included, waits for the backend's LOG credit); one that
+    /// does not answer is reset, then asked again with the others; any
+    /// other case is reset first, as SONOFF's firmware does.
+    #[test]
+    fn a_running_zrhp_ncp_is_not_reset() {
+        use BackendKind::{Ezsp, Zrhp};
+        for setting in [Setting::Auto, Setting::Zrhp] {
+            let mut s = ncp(false, true, false);
+            let d = detect(setting, Some(Zrhp), false, &mut s);
+            assert_eq!((d.backend, d.why, d.found.is_some()), (Zrhp, "detected", true), "{setting:?}");
+            assert_eq!((s.asked.as_slice(), s.resets.as_slice()), (&[Probe::Zrhp][..], &[][..]), "{setting:?}");
+        }
+        let mut s = ncp(true, false, false);
+        let d = detect(Setting::Auto, Some(Zrhp), false, &mut s);
+        assert_eq!(d.backend, Ezsp);
+        assert_eq!((s.asked.as_slice(), s.resets.as_slice()), (&[Probe::Zrhp, Probe::Zrhp, Probe::Ezsp][..], &[1][..]));
+        let mut s = ncp(false, false, false);
+        assert_eq!(detect(Setting::Zrhp, None, false, &mut s).why, "setting");
+        assert_eq!((s.asked.as_slice(), s.resets.as_slice()), (&[Probe::Zrhp][..], &[1][..]));
+        for (setting, hint, suspect) in [
+            (Setting::Auto, Some(Ezsp), false),
+            (Setting::Auto, None, false),
+            (Setting::Auto, Some(Zrhp), true),
+            (Setting::Ezsp, Some(Zrhp), false),
+        ] {
+            let mut s = ncp(true, true, true);
+            detect(setting, hint, suspect, &mut s);
+            assert_eq!(s.resets, [0], "{setting:?} {hint:?} suspect {suspect}");
+        }
     }
 
     #[test]
@@ -749,7 +821,8 @@ mod tests {
         let mut s = ncp(true, false, false);
         let d = detect(Setting::Auto, Some(BackendKind::Zrhp), false, &mut s);
         assert_eq!(d.backend, BackendKind::Ezsp);
-        assert_eq!(d.to_json()["probes"].as_array().unwrap().len(), 2);
+        // The ZRHP NCP asked before and after its reset.
+        assert_eq!(d.to_json()["probes"].as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -757,7 +830,7 @@ mod tests {
         let mut s = ncp(false, false, true);
         let d = detect(Setting::Auto, Some(BackendKind::Zrhp), false, &mut s);
         assert_eq!((d.backend, d.park), (BackendKind::Zrhp, true));
-        assert_eq!(s.asked, [Probe::Zrhp, Probe::Ezsp, Probe::Bootloader]);
+        assert_eq!(s.asked, [Probe::Zrhp, Probe::Zrhp, Probe::Ezsp, Probe::Bootloader]);
         // An update that did not finish: the bootloader first, nothing
         // else is sent.
         let mut s = ncp(true, true, true);
@@ -907,6 +980,8 @@ mod tests {
     }
 
     impl Prober for Mg24<'_> {
+        fn reset_to_app(&mut self) {}
+
         fn probe(&mut self, p: Probe) -> Result<Found, String> {
             self.asked.push(p);
             match p {

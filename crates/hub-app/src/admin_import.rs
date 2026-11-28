@@ -29,8 +29,8 @@ use log::info;
 use serde_json::{Value as J, json};
 
 use super::{
-    Admin, Ctx, JobOut, Reply, bad, be_hex, failed_with_backup, field, flag, frame, keep_replaced,
-    keys_may_leave, ncp_error, network_state, replace, restore_error, take_backup,
+    Admin, Ctx, JobOut, Reply, bad, be_hex, failed_with_backup, field, flag, frame, keep_or_last,
+    keys_may_leave, ncp_error, network_state, previous_backup, replace, restore_error, take_backup,
 };
 use crate::migrate::{self, Counts, Entry, NetworkFacts, Reconfigure};
 use crate::ocb;
@@ -618,7 +618,6 @@ impl Admin {
             .caps
             .as_ref()
             .is_some_and(|c| c.ownership == OwnershipModel::NcpNv);
-        let keys_out = keys_may_leave(ctx.api);
         let known = (ctx.known)();
         let source = self.source.clone();
         let now_s = ctx.now_s;
@@ -658,24 +657,22 @@ impl Admin {
                 // A refusal (e.g. an IEEE the NCP cannot take) changes nothing.
                 net.restore_check(&blob, ropts).map_err(restore_error)?;
                 if network_state(&*net) == NetState::Up && !o.skip_backup {
-                    let b = take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
+                    let mut b = take_backup(&*net, &*records, true, &known, &source, now_s, id).map_err(|e| {
                         ApiError::new(&e.code, format!("automatic backup before the import failed ({}); set skip_backup to import anyway", e.message))
                     })?;
-                    if !(b.stored && b.ext_pan_id == ext_pan_id && b.key_id == Some(key_id)) {
-                        keep_replaced(&*records, &b)?;
-                    }
+                    b.kept = keep_or_last(&*records, &b, ext_pan_id, key_id)?;
                     previous = Some(b);
                 }
                 let replaced = replace(&*net, &*records, || {
                     if ncp_nv && network_state(&*net) != NetState::None {
-                        net.leave_reset().map_err(|e| ncp_error("leave/reset", e))?;
+                        net.leave_reset(false).map_err(|e| ncp_error("leave/reset", e))?;
                     }
                     records.forming(Some(ext_pan_id));
                     net.backup_restore(blob, ropts).map_err(restore_error)
                 });
                 match replaced {
                     Ok(r) => report = Some(r),
-                    Err(e) => return failed_with_backup(id, e, previous.as_ref(), keys_out),
+                    Err(e) => return failed_with_backup(id, e, previous.as_ref()),
                 }
                 // The devices go in once their records can be stored (the
                 // backend's report of the restored network re-tags them).
@@ -685,7 +682,7 @@ impl Admin {
                         let e = ApiError::new("registry_read_only", format!(
                             "the network was restored, but the device registry ({}) did not become writable: no device was imported; import again (the restore is not repeated)",
                             records.registry().as_str()));
-                        return failed_with_backup(id, e, previous.as_ref(), keys_out);
+                        return failed_with_backup(id, e, previous.as_ref());
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -704,13 +701,13 @@ impl Admin {
                 } else {
                     "the network was restored, but the devices were not taken in time: import again to finish (the restore is not repeated)"
                 });
-                return failed_with_backup(id, e, previous.as_ref(), keys_out);
+                return failed_with_backup(id, e, previous.as_ref());
             };
             if !same {
                 out(JobOut::Reimport);
             }
             out(JobOut::Event(json!({"topic": "network_updated", "reason": "imported"})));
-            let file = previous.as_ref().filter(|_| keys_out).map_or("null", |b| b.file());
+            let prev = previous_backup(previous.as_ref())?;
             let mut c = applied.counts;
             c.skip += skipped;
             let mut result = json!({
@@ -742,18 +739,12 @@ impl Admin {
                 n["notes"] = r.notes.iter().map(|(i, n)| json!({"index": i, "note": super::note_name(*n)})).collect();
             }
             info!("admin: import done: {}", result["devices"]);
-            // The previous network's backup holds keys: the text is put in
-            // as it is, not parsed.
             let body = result.to_string();
-            let mut t = String::new();
-            t.try_reserve(body.len() + file.len() + 64).map_err(|_| crate::jw::oom())?;
-            t.push_str(&format!("{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":"));
-            t.push_str(&body[..body.len() - 1]);
-            t.push_str(",\"backup\":");
-            t.push_str(file);
-            t.push_str("}}");
             drop(previous);
-            Ok(Reply::Frame(t))
+            Ok(Reply::Frame(format!(
+                "{{\"id\":{id},\"type\":\"result\",\"success\":true,\"result\":{},\"previous_backup\":{prev}}}}}",
+                &body[..body.len() - 1]
+            )))
         });
         // Frames now: the job did not start (busy, low memory); the hold
         // was this call's.

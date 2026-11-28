@@ -176,7 +176,9 @@ impl NetworkAdmin for EzspAdmin {
         }
     }
 
-    fn leave_reset(&self) -> Result<(), CoordError> {
+    /// `leaveNetwork`, which EmberZNet always announces (`announce` has
+    /// no local variant here).
+    fn leave_reset(&self, _announce: bool) -> Result<(), CoordError> {
         match self.run(Op::LeaveReset) {
             Some(Answer::Unit(r)) => r,
             _ => stopped(),

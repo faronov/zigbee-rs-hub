@@ -219,6 +219,13 @@ fn last_values_come_back_marked_restored_until_a_report() {
     );
     assert_eq!(msg["last_reported"], J::Null);
     assert_eq!(d.lqi, hub.device(id).unwrap().lqi);
+    // The kept LQI and RSSI, marked as not measured since the restart.
+    let dev = d.record();
+    assert_eq!(
+        (&dev["lqi"], &dev["link_stale"]),
+        (&json!(d.lqi), &json!(true)),
+        "{dev}"
+    );
     // Restored values are read again like unknown ones; a report ends the mark.
     assert!(restored.refresh_unknown(T0 + 60_000) >= 2);
     let s = sim.dev(SENSOR).clone();
@@ -232,6 +239,7 @@ fn last_values_come_back_marked_restored_until_a_report() {
         (msg["state"].clone(), msg["attributes"].get("restored")),
         (json!(22.0), None)
     );
+    assert_eq!(d.record().get("link_stale"), None, "measured again");
 }
 
 /// A leave the coordinator reports: the device stays, unavailable with the

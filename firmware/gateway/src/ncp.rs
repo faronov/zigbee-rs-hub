@@ -295,6 +295,10 @@ struct UartProber {
 }
 
 impl Prober for UartProber {
+    fn reset_to_app(&mut self) {
+        lines::reset_to_app();
+    }
+
     fn probe(&mut self, p: Probe) -> Result<Found, String> {
         let t0 = Instant::now();
         let r = match p {
@@ -323,6 +327,10 @@ impl Prober for UartProber {
 struct Busy(uart::User);
 
 impl Prober for Busy {
+    fn reset_to_app(&mut self) {
+        lines::reset_to_app();
+    }
+
     fn probe(&mut self, _: Probe) -> Result<Found, String> {
         Err(format!("the MG24 UART is in use ({:?})", self.0))
     }
@@ -342,6 +350,7 @@ pub fn boot_detect(board: &BoardProfile) -> Detection {
         Ok(Err(_)) | Err(_) => {
             // No probe ran (or it panicked): the last backend, parked.
             error!("ncp: the backend detection failed; the UART stays parked");
+            lines::reset_to_app();
             uart::park_from_boot();
             let backend = settings::get(SEEN_KEY).and_then(|s| kind_of(&s)).unwrap_or(BackendKind::Ezsp);
             let d = Detection { setting: setting(), backend, found: None, tried: Vec::new(), park: true, why: "the backend detection failed" };

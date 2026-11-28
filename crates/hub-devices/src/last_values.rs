@@ -1,7 +1,8 @@
 //! The last known values of a device (entity states, `last_seen`, LQI,
 //! RSSI) as a small JSON text, for the app to keep in the host store and
 //! hand back after a restart. Restored states are marked: the API shows
-//! them with `restored: true` until the device reports again.
+//! them with `restored: true` until the device reports again, restored
+//! LQI and RSSI with the device's `link_stale: true` until its next frame.
 //!
 //! Times are kept as Unix milliseconds, and only while the hub knows the
 //! time ([`crate::device::time_synced`]): the engine's own clock restarts
@@ -73,8 +74,8 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// Puts kept values back on a restored device: entity states not
-    /// reported since start (marked `restored`), `last_seen`, LQI, RSSI.
-    /// Returns the number of states restored.
+    /// reported since start (marked `restored`), `last_seen`, LQI, RSSI
+    /// (marked `link_stale`). Returns the number of states restored.
     pub fn restore_last_values(&mut self, id: &str, text: &str, now: Millis) -> usize {
         let Ok(J::Object(v)) = serde_json::from_str::<J>(text) else {
             return 0;
@@ -90,12 +91,14 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .get("lqi")
                 .and_then(J::as_u64)
                 .and_then(|q| u8::try_from(q).ok());
+            d.link_stale = d.lqi.is_some();
         }
         if d.rssi.is_none() {
             d.rssi = v
                 .get("rssi")
                 .and_then(J::as_i64)
                 .and_then(|r| i8::try_from(r).ok());
+            d.link_stale |= d.rssi.is_some();
         }
         let mut n = 0;
         let Some(J::Object(es)) = v.get("e") else {

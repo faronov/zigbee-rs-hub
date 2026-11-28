@@ -404,6 +404,36 @@ fn membership_read_reconciles_and_failed_add() {
     );
 }
 
+/// `devices/remove` of a sleepy device: the Mgmt_Leave_req (rejoin false)
+/// goes out at once (its parent holds it until the next poll), not into
+/// the device's queue, which goes with the device; then the coordinator's
+/// removal.
+#[test]
+fn a_removed_sleepy_device_is_asked_to_leave_at_once() {
+    let (mut hub, mut sim) = setup();
+    let t = T0 + 120_000; // the remote's awake window after joining is over
+    hub.remove_device(IDR, false, t).unwrap();
+    sim.run(&mut hub, t);
+    let leave: Vec<_> = sim
+        .aps()
+        .into_iter()
+        .filter(|a| a.profile == 0 && a.cluster == 0x0034)
+        .collect();
+    assert_eq!(leave.len(), 1, "{:?}", sim.log);
+    assert_eq!(
+        leave[0].payload[1..10],
+        [&REMOTE.to_le_bytes()[..], &[0x00]].concat()[..],
+        "rejoin false"
+    );
+    assert!(leave[0].options.extended_timeout);
+    assert!(
+        sim.log
+            .iter()
+            .any(|s| matches!(s, Sent::Remove(i) if *i == REMOTE))
+    );
+    assert!(hub.device(IDR).is_none());
+}
+
 #[test]
 fn bindings_on_a_sleepy_remote_wait_for_it() {
     let (mut hub, mut sim) = setup();
@@ -459,9 +489,11 @@ fn bindings_on_a_sleepy_remote_wait_for_it() {
     );
     let b = &hub.bindings_list(Some(IDR))[0];
     assert!(b["pending"].as_array().unwrap().is_empty());
-    assert_eq!(b["table"].as_array().unwrap().len(), 2);
+    // Its configure's binds to the hub (On/Off, Level), then these two.
+    assert_eq!(b["table"].as_array().unwrap().len(), 4);
+    assert_eq!(b["table"][0]["target"], json!({"hub": true, "endpoint": 1}));
     assert_eq!(
-        b["table"][0]["target"],
+        b["table"][2]["target"],
         json!({"device": ID1, "endpoint": 11})
     );
 

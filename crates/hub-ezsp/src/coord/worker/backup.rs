@@ -419,13 +419,23 @@ impl<T: Transport, C: Clock> Worker<T, C> {
 
     /// The first NWK and APS frame counters of a restore
     /// ([`start_counters`]), with the NCP's own: of the network it stores,
-    /// or of the one it left for the restore ([`Self::leave_reset`]).
+    /// or of the one it left for the restore ([`Self::leave_reset`]). After
+    /// a hub restart between that leave and the restore the worker has no
+    /// such counters: the ones the NCP still reports without a network
+    /// (EmberZNet keeps them in its tokens across `leaveNetwork`) are
+    /// floors where they are not 0, and an unreported one is no floor.
     fn restore_counters(&mut self, plan: &Plan, o: RestoreOptions) -> Result<Counters, CoordError> {
         let live = if self.net != NetState::None {
             let r = self.read_live();
             Some(r.map_err(|e| self.admin_error(e))?)
-        } else {
+        } else if self.left.is_some() {
             self.left
+        } else {
+            let r = self.read_live().map_err(|e| self.admin_error(e))?;
+            Some(Live {
+                nwk: Some(r.nwk.unwrap_or(0)),
+                aps: Some(r.aps.unwrap_or(0)),
+            })
         };
         let backup = (plan.nwk_counter, plan.tc_link.map_or(0, |t| t.tx_counter));
         start_counters(backup, live, o)

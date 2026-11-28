@@ -54,6 +54,6 @@ $("#mgp").onclick=e=>busy(e.target,(async()=>{mgDoc=await mgRead([...$("#mgf").f
 $("#mgx").onclick=e=>{if(!mgDoc||!confirm("Import "+(mgDoc.devices||[]).length+" devices and their network? The running network is backed up first."))return;
  const go=q=>mgSend("network/import",q).catch(err=>{const m=err.message,k=["force","confirm","confirm_ieee_write_once"].find(k=>!q[k]&&m.includes("set "+k+" "));if(k&&confirm(m+"\n\nGo on?"))return go({...q,[k]:!0});throw err});
  $("#mgi").textContent="importing…";
- busy(e.target,go({reconfigure:$("#mgc").value,remove_missing:$("#mgr").checked}).then(([r])=>{if(r.backup)saveBackup(r.backup);if(r.stored===!1)throw new Error("the devices were imported but not stored (the device registry is not writable): they are lost at the next restart; check the registry in Network and import again");const d=r.devices;
+ busy(e.target,go({reconfigure:$("#mgc").value,remove_missing:$("#mgr").checked}).then(([r])=>{kept(r.previous_backup);if(r.stored===!1)throw new Error("the devices were imported but not stored (the device registry is not writable): they are lost at the next restart; check the registry in Network and import again");const d=r.devices;
   $("#mgi").textContent="Imported: "+d.new+" new, "+d.replace+" replaced, "+d.keep+" kept, "+d.skip+" skipped; "+r.groups+" groups"+". Devices are verified when they next talk.";$("#mga").classList.add("hide")})).catch(err=>{$("#mgi").textContent="";toast("import: "+err.message)})};
 </script>

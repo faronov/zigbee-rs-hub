@@ -45,9 +45,17 @@ install instructions and the list of merged pull requests. A pre-release
   on the Dongle Max console) sets the level, kept across restarts;
   `network/diagnostics` shows it with its counters, and whether the NCP
   keeps an EmberZNet backup's hashed link key root (`ezsp_hashed_tclk`).
-- zigbee-rs crates at master `0607d31` (zigbee-rs PR #22: restored
-  EmberZNet devices are admitted by the zigbee-rs NCP's Trust Center;
-  late LOG credit is delivered at once).
+- zigbee-rs crates at master `cb9b5c0e` (zigbee-rs NCP 0.1.3, PRs #22 to
+  #26: restored EmberZNet devices are admitted by the zigbee-rs NCP's
+  Trust Center; late LOG credit is delivered at once; `NWK_LEAVE_RESET`
+  flags bit2, the Leave on air only when asked; `SEC_DERIVE_EZSP_KEY`).
+- `network/reset` takes `leave` (Network › New network: "announce the
+  leave on air"): the coordinator broadcasts a NWK Leave before the wipe,
+  for an explicit "leave network". Without it (the default, and always
+  before a restore or an import) the wipe is local on zigbee-rs NCP 0.1.3
+  and later: the old network's routers keep the coordinator, so its kept
+  backup can still be restored. Older zigbee-rs NCPs and EmberZNet always
+  broadcast it.
 - **Automations: a trigger at every press of a button that reports a
   state.** An SOS button's `alarm`, or an `action` sensor that reads
   `emergency` at every press, reports the same value each time, and a
@@ -63,6 +71,36 @@ install instructions and the list of merged pull requests. A pre-release
   notification, nor when it clears); a notification sent again counts
   once. `changed` takes a value too ("changed to"). Rules that use either
   are format 2 (`v`): older firmware refuses them, other rules stay format 1.
+
+### Security
+
+- **No keys in the answers of `network/reset`, `network/restore` and
+  `network/import`.** They carried the replaced network's automatic
+  backup, network key and link keys included, to whoever made the
+  request (with an API token), also in their error frames. They now
+  carry `previous_backup`, a summary without keys (extended PAN ID, PAN
+  ID, channel, devices, link keys, NWK and APS frame counters) and the
+  request that returns the kept file (`network/backup/replaced` or
+  `network/backup/last`): keys leave the hub only through the backup
+  requests. The web UI fetches the file from there and offers it as
+  before; `hubctl import` prints the summary. Clients that saved `backup`
+  from these answers must fetch it with the request named in `kept`.
+- **MQTT: another broker host or user name drops the stored password.**
+  `mqtt/config/set` kept the password when only the host or the user name
+  changed, so the hub sent it to whatever broker was set next. Now it goes
+  unless the same request gives one (the settings form sends it only when
+  typed: enter it again after changing the broker or user).
+- **Removed devices are asked to leave again when they come back.** A
+  device removed with `devices/remove` that still holds the network key is
+  admitted again on its next secured rejoin (by EmberZNet, and by the
+  zigbee-rs NCP since 0.1.3), and the hub took it back. Now, heard again
+  while joining is closed (a rejoin, its announcement, a frame), it is
+  asked to leave again (at most once a minute), stays removed, and a
+  `removed_device_back` event (topic `network`) says so. Pairing it again
+  while joining is open brings it back. The removal's leave request also
+  reaches sleepy devices now (it waited for a wake-up that never came, as
+  the device was gone). Only a new network key keeps a device out for
+  good: `docs/device-support.md`, `devices/remove`.
 
 ### Home Assistant
 
@@ -117,11 +155,24 @@ install instructions and the list of merged pull requests. A pre-release
   shows the new address). A binding or group request no longer shows
   "until it wakes" after it was sent. The web UI says "press a button on
   the device to wake it" while a sleepy device's interview or binding
-  table read waits. An IKEA E1524/E1810 remote with old firmware (before
-  2.3.075) sends its presses to a group the coordinator is not in: the
-  NCP does not pass them on, so the hub never sees it awake; the
-  zigbee-herdsman-converters remote configure (bind to a group the hub
-  joins) is not supported yet.
+  table read waits.
+- **IKEA remotes with old firmware reach the hub.** An E1524/E1810 TRADFRI
+  remote (also E1743, E1766, E1841) before firmware 2.3.075 can only be
+  bound to a group, and sent its presses to a group the hub was not in.
+  As zigbee-herdsman-converters does, configure now binds its On/Off to
+  group 901 and the hub endpoint joins 901 and 0x0000 (where an unbound
+  remote sends, so a press also sends a bind that waited for it); its
+  groupcasts fire its `action` events. Newer firmware is bound to the hub
+  as before. The hub endpoint's groups for devices (also a definition's
+  `configure: group`) are joined again after an NCP reset or a restore,
+  on both NCPs, and when a Zigbee2MQTT/ZHA migration imports the remote;
+  they count toward the EZSP multicast table, and a full table stops the
+  joins (`TABLE_FULL`) until a group is left.
+- **A remote's or button's bindings to the hub are listed** (Bindings in
+  the device page, `bindings/list`): configure binds its client clusters
+  (a SONOFF SNZB-01's On/Off) to the hub endpoint, and the record now
+  shows them once the device confirmed them, so a button whose presses do
+  not arrive shows whether it is bound.
 - **Basic attributes are read one per request** (identity first), as
   zigbee-herdsman does: some devices do not answer a read of several. A
   failed optional attribute (power source, versions, date code, build ID)
@@ -145,6 +196,21 @@ install instructions and the list of merged pull requests. A pre-release
 - **Dongle Max: `mg24 bootloader` shows the whole menu.** The bootloader
   prints its menu by itself on entry; the wait for the menu after the
   newline stopped at that first copy and cut the second one short.
+- **Dongle Max: the zigbee-rs NCP's boot log reaches the hub's log.** The
+  hub reset the MG24 at every start, so the records the NCP kept from its
+  own reset were lost, among them the NV it erased at its first boot after
+  a flash and where its crystal tuning and IEEE come from. A zigbee-rs
+  NCP that runs and answers is no longer reset when the hub starts; any
+  other NCP is, as before.
+- **LQI and RSSI after a hub restart are marked as old.** Devices showed
+  the LQI and RSSI kept from before the restart as if measured. The device
+  record now has `link_stale: true` until the device's next frame, and the
+  web UI shows no LQI or RSSI meanwhile.
+- **EZSP: a restore after a hub restart starts above the NCP's frame
+  counters.** When the hub restarted between leaving a network and
+  restoring a backup, the restore started from the backup's counters
+  alone; the counters the EmberZNet NCP still reports are now floors, as
+  without the restart.
 
 ## 0.4.1 (2026-11-27)
 
