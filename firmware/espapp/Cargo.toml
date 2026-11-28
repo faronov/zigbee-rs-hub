@@ -27,7 +27,9 @@ doctest = false
 esp-idf-svc = "=0.53.0"
 hub-core = { workspace = true }
 hub-store = { workspace = true }
-log = "0.4"
+# Debug and trace lines compiled out of the images (the logger passes up
+# to CONFIG_LOG_MAXIMUM_LEVEL, Info, so none of them was ever written).
+log = { version = "0.4", features = ["release_max_level_info"] }
 hub-app = { workspace = true, optional = true }
 hub-web = { workspace = true, optional = true }
 hub-mqtt = { workspace = true, optional = true }
