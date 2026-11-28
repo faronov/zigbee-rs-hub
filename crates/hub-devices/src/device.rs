@@ -242,6 +242,15 @@ pub struct Refused {
     /// The shard it was found in (a shard check replaces that shard's).
     #[serde(default)]
     pub shard: u8,
+    /// The family templates' [`crate::templates::REVISION`] that refused
+    /// it (0: a build before them): another build checks its
+    /// `template.<family>.…` names again.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub templates: u32,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 impl Refused {

@@ -431,6 +431,33 @@ impl crate::expr::Expression for TExpr {
     }
 }
 
+/// What the family templates implement, as one number: their helper and
+/// argument names (by hash) and [`CODE`]. A refusal recorded under another
+/// revision ([`crate::device::Refused::templates`]) is checked again.
+pub const REVISION: u32 = fold(CODE, &[tuya::NAMES]);
+
+/// Bumped when the templates implement more under the same names (an
+/// expose, an argument value).
+const CODE: u32 = 1;
+
+/// Whether `name`, a feature a definition requires, is an item of a family
+/// template this build implements (`template.tuya.<item>`).
+pub fn implements(name: &str) -> bool {
+    name.strip_prefix("template.")
+        .and_then(|r| r.split_once('.'))
+        .is_some_and(|(f, _)| f == "tuya")
+}
+
+/// [`h`] continued over `l`.
+pub(crate) const fn fold(mut x: u32, l: &[u32]) -> u32 {
+    let mut i = 0;
+    while i < l.len() {
+        x = (x ^ l[i]).wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    x
+}
+
 /// FNV-1a hash of a name: the firmware keeps the hashes of the helper,
 /// argument and model names it matches, not the names.
 pub(crate) const fn h(s: &str) -> u32 {

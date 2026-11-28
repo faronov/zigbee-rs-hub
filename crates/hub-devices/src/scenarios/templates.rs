@@ -77,9 +77,10 @@ const PLUG: u64 = 0xa4c1_3800_0000_0101;
 const PLUG_ID: &str = "zb:a4c1380000000101";
 
 /// TS011F_plug_3 (`tuya_on_off` with child lock, indicator mode, power
-/// outage memory, countdown and metering): Tuya's settings on On/Off as
-/// zhc maps them, the countdown set with On With Timed Off, no generic
-/// ZCL power-on behaviour.
+/// outage memory, countdown and electrical measurements;
+/// `electricity_measurement_poll`): Tuya's settings on On/Off as zhc maps
+/// them, the countdown set with On With Timed Off, no generic ZCL power-on
+/// behaviour, measurements polled every 60 s.
 #[test]
 fn ts011f_plug_3_runs_its_tuya_on_off() {
     let mut hub = hub_of(&[include_str!("fixtures/ts011f_plug_3.yaml")]);
@@ -186,10 +187,40 @@ fn ts011f_plug_3_runs_its_tuya_on_off() {
         w.contains(&(1, 0x0006, 0x8000, None, ZclValue::Bool(Some(true)))),
         "{w:?}"
     );
+    // `electricity_measurement_poll` (zhc's predicates as true, regenerated
+    // definition): voltage, current, power and the energy read every 60 s.
+    let reads = |sim: &Sim, c: u16| {
+        sim.aps()
+            .iter()
+            .filter(|a| a.cluster == c && a.payload[2] == global::READ_ATTRIBUTES)
+            .count()
+    };
+    hub.tick(t + 1000);
+    sim.run(&mut hub, t + 1000);
+    sim.log.clear();
+    hub.tick(t + 61_000);
+    sim.run(&mut hub, t + 61_000);
+    assert_eq!((reads(&sim, 0x0b04), reads(&sim, 0x0702)), (1, 1));
 }
 
 const KNOB: u64 = 0xa4c1_3800_0000_0102;
 const KNOB_ID: &str = "zb:a4c1380000000102";
+
+/// HOBEIAN ZG-101ZD `_TZ3000_402vrq2i` in command mode.
+fn knob() -> SimDevice {
+    SimDevice::new(KNOB, 0x4102, LogicalType::EndDevice, true, 0x1002)
+        .endpoint(
+            1,
+            0x0104,
+            0x0104,
+            &[0x0000, 0x0001, 0x0003, 0x0004, 0x0006, 0x1000],
+            &[
+                0x0019, 0x000a, 0x0003, 0x0004, 0x0006, 0x0008, 0x0300, 0x1000,
+            ],
+        )
+        .basic("_TZ3000_402vrq2i", "TS004F", 3)
+        .attr(1, 0x0006, 0x8004, TypedValue::uint(ZclType::ENUM8, 0))
+}
 
 /// A TS004F knob `_TZ3000_402vrq2i` (HOBEIAN ZG-101ZD, `multi_action` and
 /// `operation_mode`): event mode writes On/Off 0x8004 = 1 at configure; its
@@ -200,20 +231,7 @@ const KNOB_ID: &str = "zb:a4c1380000000102";
 fn ts004f_knob_actions_and_operation_mode() {
     let mut hub = hub_of(&[include_str!("fixtures/hobeian-zg-101zd.yaml")]);
     let mut sim = Sim::default();
-    sim.devices.push(
-        SimDevice::new(KNOB, 0x4102, LogicalType::EndDevice, true, 0x1002)
-            .endpoint(
-                1,
-                0x0104,
-                0x0104,
-                &[0x0000, 0x0001, 0x0003, 0x0004, 0x0006, 0x1000],
-                &[
-                    0x0019, 0x000a, 0x0003, 0x0004, 0x0006, 0x0008, 0x0300, 0x1000,
-                ],
-            )
-            .basic("_TZ3000_402vrq2i", "TS004F", 3)
-            .attr(1, 0x0006, 0x8004, TypedValue::uint(ZclType::ENUM8, 0)),
-    );
+    sim.devices.push(knob());
     sim.join(&mut hub, KNOB, T0);
     assert_eq!(layer(&hub, KNOB_ID), "hobeian/zg-101zd");
     let d = hub.device(KNOB_ID).unwrap();
@@ -263,4 +281,166 @@ fn ts004f_knob_actions_and_operation_mode() {
     sim.run(&mut hub, t);
     let w = sim.dev(KNOB).writes.last().cloned().unwrap();
     assert_eq!((w.1, w.2, w.4.value), (0x0006, 0x8004, ZclValue::Uint(0)));
+}
+
+/// A TS004F paired before, generic (its definition needed `template.tuya`,
+/// which that firmware lacked), keeps its operation mode once the hub runs
+/// the definition (restored by a firmware that has the template, the
+/// definition fetched, the device resolved again): the configure write of
+/// On/Off 0x8004 is not sent (zhc writes it at pairing only); the mode
+/// select is the user's, and in command mode the generic remote events
+/// stay. A fresh pairing writes it (`ts004f_knob_actions_and_operation_mode`).
+#[test]
+fn ts004f_paired_before_keeps_its_mode() {
+    let src = include_str!("fixtures/hobeian-zg-101zd.yaml");
+    let mut old = hub_of(&[src]);
+    old.features.retain(|f| *f != "template.tuya");
+    let mut sim = Sim::default();
+    sim.devices.push(knob());
+    sim.join(&mut old, KNOB, T0);
+    assert_eq!(layer(&old, KNOB_ID), "generic");
+    let mode_writes = |sim: &mut Sim| {
+        sim.dev(KNOB)
+            .writes
+            .iter()
+            .filter(|w| (w.1, w.2) == (0x0006, 0x8004))
+            .count()
+    };
+    assert_eq!(mode_writes(&mut sim), 0);
+    let snap = old.snapshot_device(KNOB_ID).unwrap();
+    let mut hub = hub_of(&[src]);
+    hub.features.retain(|f| *f != "template.tuya");
+    hub.restore_device(snap, None, T0 + 1000).unwrap();
+    hub.features.push("template.tuya");
+    let t = T0 + 2000;
+    hub.reresolve(None, t);
+    assert_eq!(layer(&hub, KNOB_ID), "hobeian/zg-101zd");
+    let s = sim.dev(KNOB).clone();
+    hub.on_aps_indication(cmd(&s, 1, 0x0008, 9, 0x02, &[0x00, 0x0D, 0x01, 0x00]), t);
+    sim.run(&mut hub, t);
+    assert_eq!(mode_writes(&mut sim), 0);
+    let uid = format!("{KNOB_ID}:1:action");
+    let ev = fired(&hub.drain_events(), &uid);
+    assert!(ev.iter().any(|e| e.0 == "brightness_step_up"), "{ev:?}");
+    // The user switches it.
+    let mode = format!("{KNOB_ID}:1:operation_mode");
+    hub.entity_command(&mode, "select_option", &json!({"option": "event"}), t)
+        .unwrap();
+    sim.run(&mut hub, t);
+    assert_eq!(mode_writes(&mut sim), 1);
+}
+
+const LIDL: u64 = 0xa4c1_3800_0000_0103;
+const LIDL_ID: &str = "zb:a4c1380000000103";
+
+/// Lidl FB21-001 (`switch_scene`): the scene buttons' On/Off 0xFD with its
+/// scene number and the remote's On/Off and Level Control commands are
+/// events of the same `action` entity.
+#[test]
+fn fb21_001_scene_and_remote_commands() {
+    let mut hub = hub_of(&[include_str!("fixtures/lidl-fb21-001.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(LIDL, 0x4103, LogicalType::EndDevice, false, 0x1002)
+            .endpoint(
+                1,
+                0x0104,
+                0x0820,
+                &[0x0000, 0x0001, 0x0003, 0x1000],
+                &[0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0300, 0x1000],
+            )
+            .basic("_TYZB01_hww2py6b", "TS1001", 1),
+    );
+    sim.join(&mut hub, LIDL, T0);
+    assert_eq!(layer(&hub, LIDL_ID), "lidl/fb21-001");
+    let s = sim.dev(LIDL).clone();
+    let uid = format!("{LIDL_ID}:1:action");
+    hub.drain_events();
+    let t = T0 + 10_000;
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 1, 0xFD, &[0x02]), t);
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 2, 0x01, &[]), t + 100);
+    hub.on_aps_indication(
+        cmd(&s, 1, 0x0008, 3, 0x02, &[0x00, 0x20, 0x0A, 0x00]),
+        t + 200,
+    );
+    let ev = fired(&hub.drain_events(), &uid);
+    let types: Vec<&str> = ev.iter().map(|e| e.0.as_str()).collect();
+    assert_eq!(types, ["switch_scene", "on", "brightness_step_up"]);
+    assert_eq!(ev[0].1["scene"], json!(2));
+}
+
+const DIN: u64 = 0xa4c1_3800_0000_0104;
+const DIN_ID: &str = "zb:a4c1380000000104";
+const DIN_SLEEPY: u64 = 0xa4c1_3800_0000_0105;
+
+/// TS011F_din_smart_relay_polling (`electricity_measurement_poll`):
+/// Electrical Measurement voltage, current and power read on endpoint 1
+/// every 60 s; never from a sleepy device, nor while the relay is
+/// unavailable or has left (its next frame resumes the polls).
+#[test]
+fn ts011f_din_smart_relay_polling() {
+    let mut hub = hub_of(&[include_str!("fixtures/ts011f_din_smart_relay_polling.yaml")]);
+    let mut sim = Sim::default();
+    for (ieee, nwk, sleepy) in [(DIN, 0x4104, false), (DIN_SLEEPY, 0x4105, true)] {
+        let ty = if sleepy {
+            LogicalType::EndDevice
+        } else {
+            LogicalType::Router
+        };
+        sim.devices.push(
+            SimDevice::new(ieee, nwk, ty, !sleepy, 0x1002)
+                .endpoint(
+                    1,
+                    0x0104,
+                    0x0051,
+                    &[
+                        0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0b04, 0xe001,
+                    ],
+                    &[0x0019, 0x000a],
+                )
+                .basic("_TZ3000_qeuvnohg", "TS011F", 1),
+        );
+        sim.join(&mut hub, ieee, T0);
+    }
+    assert_eq!(layer(&hub, DIN_ID), "tuya/ts011f_din_smart_relay_polling");
+    let polls = |sim: &Sim, nwk: u16| {
+        sim.aps()
+            .iter()
+            .filter(|a| {
+                a.dst == crate::transport::ApsDst::Nwk(nwk)
+                    && a.cluster == 0x0b04
+                    && a.payload[2] == global::READ_ATTRIBUTES
+                    && a.payload[3..] == [0x05, 0x05, 0x08, 0x05, 0x0b, 0x05]
+            })
+            .count()
+    };
+    let at = |hub: &mut Hub<MockTransport>, sim: &mut Sim, s: u64| {
+        sim.log.clear();
+        hub.tick(T0 + s * 1000);
+        sim.run(hub, T0 + s * 1000);
+        (polls(sim, 0x4104), polls(sim, 0x4105))
+    };
+    at(&mut hub, &mut sim, 1);
+    assert_eq!(at(&mut hub, &mut sim, 30), (0, 0));
+    assert_eq!(at(&mut hub, &mut sim, 61), (1, 0));
+    // Unavailable: none; a frame from it resumes them.
+    hub.device_mut(DIN_ID).unwrap().available = false;
+    assert_eq!(at(&mut hub, &mut sim, 122), (0, 0));
+    let d = sim.dev(DIN).clone();
+    let r = report(
+        &d,
+        1,
+        0x0006,
+        None,
+        0x31,
+        &[(
+            0x0000,
+            TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+        )],
+    );
+    hub.on_aps_indication(r, T0 + 123_000);
+    assert_eq!(at(&mut hub, &mut sim, 183), (1, 0));
+    // Left: none.
+    hub.device_mut(DIN_ID).unwrap().left = true;
+    assert_eq!(at(&mut hub, &mut sim, 244), (0, 0));
 }

@@ -6,7 +6,6 @@ use serde_json::json;
 use super::*;
 use crate::model::LayerSource;
 use crate::testutil::sim::{Sim, SimDevice};
-use crate::testutil::yaml::load_definition;
 use crate::zcl::{TypedValue, ZclType, ZclValue};
 use crate::zdo::LogicalType;
 
@@ -39,16 +38,16 @@ fn plug() -> SimDevice {
 fn joined() -> (Hub<MockTransport>, Sim) {
     let mut hub = hub_with(&[]);
     let mut cat = MemoryCatalog::default();
-    // Generated catalog entries for this plug; `ts011f_plug_3` needs the
-    // `tuya` vendor template, which the hub skips (generic + plug_1 win);
-    // `ts011f_plug_1` needs `tuya_metering_zero_debounce`, which it has.
+    // Generated catalog entries for this plug, loaded as the hub loads
+    // fetched ones (zdefc CBOR): zhc picks `ts011f_plug_1` for it
+    // (template `tuya_metering_zero_debounce`); `ts011f_plug_3` names it as
+    // a white label only and selects other application versions.
     for src in [
         include_str!("fixtures/ts011f_plug_1.yaml"),
         include_str!("fixtures/ts011f_plug_3.yaml"),
     ] {
-        if let Ok(d) = load_definition(src, LayerSource::Catalog) {
-            cat.insert(d);
-        }
+        let c = zdefc::compile_str(src, zdefc::Format::Yaml, &Default::default()).unwrap();
+        cat.insert(crate::zdef_adapter::load_cbor(&c.cbor, LayerSource::Catalog).unwrap());
     }
     hub.set_catalog(Box::new(cat), T0);
     let mut sim = Sim::default();
@@ -339,6 +338,7 @@ fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::
         score,
         priority: 0,
         shard: 0,
+        templates: crate::templates::REVISION,
     }
 }
 
@@ -348,7 +348,8 @@ fn refused(id: &str, model: &str, requires: &str, score: u32) -> crate::device::
 /// shard found is replaced only by that shard's next check (a shard checked
 /// for another device does not clear the others'), kept in the snapshot;
 /// a firmware that gained the feature drops it on restore and marks the
-/// device for the catalog service to check again.
+/// device for the catalog service to check again; so does one whose family
+/// templates differ (`template.tuya.<item>`, [`crate::templates::REVISION`]).
 #[test]
 fn approximate_definition_is_recorded_kept_and_rechecked() {
     let (mut hub, _sim) = joined();
@@ -456,6 +457,24 @@ fn approximate_definition_is_recorded_kept_and_rechecked() {
     let d = same.device(ID).unwrap();
     assert_eq!((d.refused.len(), d.refused_version), (2, 8));
     assert_eq!(d.refused[p3].requires, ["template.hue_light"]);
+    // A family template's sub-name (what the `tuya` code lacked): kept by
+    // a build with the same template code, checked again by another (one
+    // that may implement it now).
+    let mut sub = snap.clone();
+    sub.refused[p3].requires = vec!["template.tuya.tuya_light".into()];
+    let mut same = hub_with(&[]);
+    same.restore_device(sub.clone(), None, T0).unwrap();
+    let d = same.device(ID).unwrap();
+    assert_eq!(d.refused[p3].requires, ["template.tuya.tuya_light"]);
+    assert!(!d.refused_recheck);
+    sub.refused[p3].templates ^= 1;
+    let mut other = hub_with(&[]);
+    other.restore_device(sub, None, T0).unwrap();
+    let d = other.device(ID).unwrap();
+    assert_eq!(
+        (d.refused.len(), d.refused_version, d.refused_recheck),
+        (1, 0, true)
+    );
     // By one that has it: plug_3 is dropped (to be fetched now), every
     // shard is checked again.
     let mut newer = hub_with(&[]);

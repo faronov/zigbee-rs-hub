@@ -373,13 +373,19 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.refused_version = s.refused_version;
         d.refused_checked = s.refused_checked;
         d.refused_recheck = s.refused_recheck;
+        // Refused by other template code: what its templates lacked may
+        // be implemented now.
         let features = &self.features;
         for r in &mut d.refused {
+            let other = r.templates != crate::templates::REVISION;
             r.requires = r
                 .requires
                 .iter()
                 .map(|f| crate::zdef_adapter::canonical_feature(f))
-                .filter(|f| !features.iter().any(|x| x == f))
+                .filter(|f| {
+                    let gained = features.iter().any(|x| x == f);
+                    !(gained || other && crate::templates::implements(f))
+                })
                 .collect();
         }
         if d.refused.iter().any(|r| r.requires.is_empty()) {

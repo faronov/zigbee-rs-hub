@@ -3166,7 +3166,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         // Unreportable primary measurements on mains devices are polled
         // every `max` seconds (5.2), template `tuya`'s polled metering
-        // every 60 s; sleepy devices never are.
+        // every 60 s; sleepy, unavailable and departed devices are not.
         self.poll_unreportable(id, now);
         // Periodic Tuya query.
         let q = self
@@ -3192,7 +3192,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
-        if d.sleepy() || d.power() != PowerKind::Mains || d.gp.is_some() {
+        // Nor while it is unavailable or has left: its next frame
+        // (`seen`) resumes them.
+        if d.sleepy() || d.power() != PowerKind::Mains || d.gp.is_some() || !d.available || d.left {
             return;
         }
         let mut due = Vec::new();

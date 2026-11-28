@@ -3,7 +3,7 @@
 # Source: src/devices/tuya.ts:13450
 zdef: 1
 id: tuya/ts011f_plug_3
-revision: 1
+revision: 3
 vendor: Tuya
 model: TS011F_plug_3
 description: Smart plug (with power monitoring by polling)
@@ -23,6 +23,7 @@ match:
   - {model: TS011F, manufacturer: _TZ3000_cehuw1lw, sw_build: "1.0.5\u0000", x-priority: -1}
   - model: TS011F
     manufacturer: {any: [_TZ3000_266azbg3, _TZ3000_okaz9tjs]}
+    x-white-label: true
 white_label:
   - {vendor: VIKEFON, model: TS011F}
   - {vendor: BlitzWolf, model: BW-SHP15}
@@ -38,10 +39,20 @@ templates:
   - name: tuya
     params:
       features:
+        electricity_measurement_poll: {metering: true}
         tuya_on_off:
           childLock: true
           electricalMeasurements: true
           indicatorMode: true
           onOffCountdown: true
           powerOutageMemory: true
-x-partial: true
+      keys:
+        - child_lock
+        - countdown
+        - current
+        - energy
+        - indicator_mode
+        - power
+        - power_outage_memory
+        - switch
+        - voltage

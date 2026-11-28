@@ -13,7 +13,8 @@
 //!   generic remote events stay) or `event` (scene commands).
 //! - `multi_action` (`tuya.fz.multi_action`): On/Off 0xFD single, double,
 //!   hold; 0xFC rotate right, left (knobs). `switch_scene`: 0xFD with the
-//!   scene number.
+//!   scene number. Both keep the generic remote events (5.4) on the same
+//!   `action` entity.
 //! - `tuya_led_indicator`, `relay_din_led_indicator`: On/Off 0x8001.
 //! - `electricity_measurement_poll`: Electrical Measurement (and Metering)
 //!   read every 60 s.
@@ -306,16 +307,13 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a serde_json::Value) ->
             let ev = EventSel::Fixed("switch_scene".into());
             let t = cx.on(None, 0x0006, 0xFD, ev, &["switch_scene".into()]);
             t.attrs.push(("scene".into(), tx(TExpr::Byte)));
+            // The remote's On/Off and Level Control commands stay events.
+            cx.x.remote = true;
         }
         H_POLL => {
-            let known = [
-                h("electricalMeasurement"),
-                h("metering"),
-                h("optionDescription"),
-            ];
-            cx.args(f, p, &known);
-            let em = !off.contains(&known[0]);
-            cx.x.poll = u8::from(em) | u8::from(on.contains(&known[1])) << 1;
+            cx.args(f, p, POLL_ARGS);
+            let em = !off.contains(&POLL_ARGS[0]);
+            cx.x.poll = u8::from(em) | u8::from(on.contains(&POLL_ARGS[1])) << 1;
         }
         // operation_mode, tuya_led_indicator, relay_din_led_indicator
         _ => {
@@ -329,6 +327,26 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a serde_json::Value) ->
     }
     true
 }
+
+/// The names this template implements, as one number
+/// ([`super::REVISION`]).
+pub(crate) const NAMES: u32 = {
+    let mut x = super::fold(0, ON_OFF_ARGS);
+    let mut i = 0;
+    while i < ROWS.len() {
+        x = super::fold(x, &[ROWS[i].0]);
+        i += 1;
+    }
+    x = super::fold(x, POLL_ARGS);
+    super::fold(x, &[H_ON_OFF, H_MULTI_ACTION, H_SWITCH_SCENE, H_POLL])
+};
+
+/// Arguments of `electricity_measurement_poll`.
+const POLL_ARGS: &[u32] = &[
+    h("electricalMeasurement"),
+    h("metering"),
+    h("optionDescription"),
+];
 
 const H_ON_OFF: u32 = h("tuya_on_off");
 const H_MULTI_ACTION: u32 = h("multi_action");

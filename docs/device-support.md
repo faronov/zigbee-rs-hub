@@ -476,6 +476,11 @@ changed, the self-description hash changed, or the user asks. Effects:
   on several endpoints (herdsman endpoint maps name every endpoint);
 - configure (binds, reporting) is redone only if the configure hash (the
   canonical CBOR of all binds, reporting configs and configure ops) changed.
+  A device configured before under another resolution (a new definition, a
+  firmware that now runs one) keeps the attributes a setting entity
+  controls (select, switch, number): their configure writes — a remote's
+  operation mode — are counted done, not sent, as Zigbee2MQTT writes them
+  at pairing only; `devices/reconfigure` and a new pairing send them.
 
 ## 4. Entity model and the Home Assistant mapping
 
@@ -739,7 +744,8 @@ For battery devices the hub caps `max` at the device's check-in or 6 h,
 whichever is shorter, so availability (4.6) has a signal. A failed Configure
 Reporting (UNSUPPORTED_ATTRIBUTE, UNREPORTABLE_ATTRIBUTE) is recorded and the
 entity is polled instead only if it is a primary measurement on a mains
-device (every `max` seconds); sleepy devices are never polled.
+device (every `max` seconds); sleepy devices are never polled, nor a device
+while it is unavailable or has left (its next frame resumes the polls).
 
 **User settings.** The table is editable per attribute class (global
 defaults), and the reporting of any ZCL-bound value of an entity can be
@@ -1784,7 +1790,9 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   shard uploaded for another device that shares a key checks that shard
   only); a device with refusals is checked again under a newer catalog —
   and after a restart on a firmware that gained their features, which
-  drops those (what it can run now is fetched) — until every one of its
+  drops those (what it can run now is fetched; a family template's
+  `template.<family>.<item>` when the firmware's template code differs,
+  `templates::REVISION` saved with the refusal) — until every one of its
   shards is: `missing` lists it with `recheck: true` also while it has a
   definition (the web UI does not count those as "without definition").
   `missing` lists a device's shards not yet checked under the installed
@@ -3758,7 +3766,9 @@ entities.
   left), `switch_scene` (0xFD with the scene), `tuya_led_indicator`,
   `relay_din_led_indicator` (0x8001), `electricity_measurement_poll`
   (Electrical Measurement voltage, current, power and/or Metering
-  summation read on endpoint 1 every 60 s).
+  summation read on endpoint 1 every 60 s, not while the device is
+  unavailable or has left). `multi_action` and `switch_scene` keep the
+  generic remote events (Lidl FB21-001: its on/off and dimming commands).
 
 Coverage of zhc 26.130.0's generated definitions (hub-devices test
 `template_coverage`): of the 223 using `tuya`, 50 fully translated and 8

@@ -667,6 +667,7 @@ impl CatalogService {
                         requires: missing.clone(),
                         score,
                         priority: d.priority,
+                        templates: hub_devices::templates::REVISION,
                     };
                     refused.entry(h.clone()).or_default().push(r);
                 }

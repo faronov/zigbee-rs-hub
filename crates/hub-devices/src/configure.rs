@@ -478,6 +478,23 @@ pub fn build_ops(
     ops
 }
 
+/// Whether a configure write sets an attribute a setting entity of `d`
+/// writes (select, switch, number).
+fn sets_setting(d: &Device, k: &OpKind) -> bool {
+    let OpKind::Write {
+        ep, cluster, attr, ..
+    } = k
+    else {
+        return false;
+    };
+    d.entities.iter().any(|e| {
+        !e.orphaned
+            && e.r.ep == *ep
+            && matches!(&e.r.def.value.binding, Binding::Zcl(z)
+                if z.cluster == *cluster && z.attr == *attr && z.write != ZclWrite::ReadOnly)
+    })
+}
+
 /// Configure hash (3.4): SHA-256 over the op keys, first 16 bytes.
 pub fn configure_hash(ops: &[OpRun]) -> String {
     let mut h = Sha256::new();
@@ -549,7 +566,14 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         let ops = build_ops(d, coord, hub_ep, &crate::hub::DevEnv { dev: d, now, tz });
-        d.configure.hash = Some(configure_hash(&ops));
+        let hash = configure_hash(&ops);
+        // Configured before under another resolution (a new definition, a
+        // firmware that now runs one): an attribute a setting entity writes
+        // (a remote's operation mode) stays as the device has it; zhc
+        // writes such attributes at pairing or on an explicit reconfigure.
+        let redefined = d.interview == InterviewStep::Done
+            && d.configure.hash.as_ref().is_some_and(|h| *h != hash);
+        d.configure.hash = Some(hash);
         // A superseded op whose key is current again: its result counts.
         d.configure
             .stale
@@ -610,6 +634,10 @@ impl<T: ZigbeeTransport> Hub<T> {
         let queued: Vec<String> = d.configure.queue.iter().map(|o| o.key.clone()).collect();
         for op in ops {
             if d.configure.done.get(&op.key) == Some(&true) || queued.contains(&op.key) {
+                continue;
+            }
+            if redefined && sets_setting(d, &op.kind) {
+                d.configure.done.insert(op.key, true);
                 continue;
             }
             d.configure.queue.push_back(op);
