@@ -323,8 +323,9 @@ pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>, registry: 
     }
     // What `network/set_tx_power` can select (ZRHP capacities 20/21).
     if let Some((min, max)) = st.caps.as_ref().and_then(|c| c.radio.tx_power_range) {
-        o["tx_power_min"] = min.into();
-        o["tx_power_max"] = max.into();
+        for (k, v) in [("tx_power_min", min), ("tx_power_max", max)] {
+            o[k] = v.into();
+        }
     }
     if let Some(r) = registry {
         o["registry"] = registry_json(r);

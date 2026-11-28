@@ -738,6 +738,7 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
                 .collect();
             format!("[{}]", v.join(","))
         }),
+        tx_power_set: net.tx_power_setting(),
     };
     let mut frame = Jw::result(id, 0)?.finish()?;
     frame.pop();
@@ -1479,6 +1480,14 @@ impl Admin {
                 Ok(r) => r,
                 Err(e) => return failed_with_backup(id, e, previous.as_ref()),
             };
+            // The operator's TX power: this hub's, else the one a backup of
+            // a hub carries (this hub's from now on); neither: the NCP's own.
+            if let Some(p) = net.tx_power_setting().or(restore.tx_power_set) {
+                match net.set_tx_power(p) {
+                    Ok(_) => records.tx_power_set(p),
+                    Err(e) => warn!("admin: TX power after the restore: {e}"),
+                }
+            }
             out(JobOut::Reimport);
             if let Some(g) = groups {
                 out(JobOut::Groups(g));

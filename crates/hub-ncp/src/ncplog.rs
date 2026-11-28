@@ -4,9 +4,10 @@
 //! ([`crate::driver::LOG_CREDITS`]), so the NCP sends its log records: first the
 //! ones it kept since its reset (the zigbee-rs NCP: crystal tuning, IEEE
 //! source, NV state), then new ones. Each goes into the hub's log under the
-//! target `ncp` at its own level (ESP-IDF's log, the console, `hub/logs`),
-//! up to the hub's NCP log level: 0 off, 1 error … 5 trace, by default 3
-//! (info, the NCP's own default). A level the operator set
+//! target `ncp` (ESP-IDF's log, the console, `hub/logs`) at its own level,
+//! debug and trace records at info with `D:` or `T:` before their text
+//! (the firmware logs nothing below info), up to the hub's NCP log level:
+//! 0 off, 1 error … 5 trace, by default 3 (info, the NCP's own default). A level the operator set
 //! ([`Hub::set_ncp_log`]) is kept in the host store and sent in every
 //! session, as `SYS_SET_CONFIG` `log_level` (`LOG_CONFIG` travels on the
 //! LOG endpoint, to which an NCP grants the host no credit: spec 3.3, and
@@ -41,7 +42,7 @@ pub const PER_SEC: u32 = 2;
 pub struct NcpLogStats {
     /// 0 off, 1 error … 5 trace.
     pub level: u8,
-    /// Records in the hub's log.
+    /// Records written to the hub's log.
     pub forwarded: u32,
     /// Records over the rate limit, not shown.
     pub suppressed: u32,
@@ -112,14 +113,14 @@ impl NcpLog {
             warn!(target: "ncp", "{held} NCP log records not shown (rate limit)");
         }
         self.forwarded.fetch_add(1, Ordering::Relaxed);
-        let level = match e.level {
-            1 => Level::Error,
-            2 => Level::Warn,
-            3 => Level::Info,
-            4 => Level::Debug,
-            _ => Level::Trace,
+        let (level, tag) = match e.level {
+            1 => (Level::Error, ""),
+            2 => (Level::Warn, ""),
+            3 => (Level::Info, ""),
+            4 => (Level::Info, "D: "),
+            _ => (Level::Info, "T: "),
         };
-        log::log!(target: "ncp", level, "[{} ms] {}", e.time_ms, String::from_utf8_lossy(e.text.0));
+        log::log!(target: "ncp", level, "[{} ms] {tag}{}", e.time_ms, String::from_utf8_lossy(e.text.0));
     }
 
     /// `EVT_LOG_DROPPED`.
@@ -177,6 +178,38 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The firmware's logger: nothing below info is written.
+    struct Firmware;
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    impl log::Log for Firmware {
+        fn enabled(&self, m: &log::Metadata<'_>) -> bool {
+            m.level() <= Level::Info
+        }
+        fn log(&self, r: &log::Record<'_>) {
+            if r.target() == "ncp" && self.enabled(r.metadata()) {
+                WRITTEN.lock().unwrap().push(format!("{} {}", r.level(), r.args()));
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// At level 5 the NCP's debug and trace records are written at info,
+    /// their level in the text; every record counted is written.
+    #[test]
+    fn debug_and_trace_records_are_written_at_info() {
+        let _ = log::set_logger(&Firmware);
+        log::set_max_level(log::LevelFilter::Info);
+        let l = NcpLog::new(5);
+        for (level, text) in [(4, "ncplog debug"), (5, "ncplog trace"), (2, "ncplog warning")] {
+            let text = zigbee_zrhp::codec::Rest(text.as_bytes());
+            l.record(&EvtLogRecord { time_ms: 7, level, module: 0, seq: 1, text });
+        }
+        let written: Vec<String> = WRITTEN.lock().unwrap().iter().filter(|w| w.contains("ncplog")).cloned().collect();
+        assert_eq!(written, ["INFO [7 ms] D: ncplog debug", "INFO [7 ms] T: ncplog trace", "WARN [7 ms] ncplog warning"]);
+        assert_eq!(l.forwarded.load(Ordering::Relaxed), 3);
+    }
 
     #[test]
     fn a_burst_then_the_rate() {

@@ -696,7 +696,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 | Mode | What runs |
 |---|---|
 | **bridge** (default; no NVS key) | `tbr-bridge` (0.2.7) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
-| **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
+| **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused. An H2 that has not answered 10 s after the hub's start (left in its ROM loader by a flash cut short) gets one EN pulse with BOOT released, logged; never when it answered, after `hub rom`, or over an NCP image being activated |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
 reboot), `mode hub once` (one boot in hub mode, any later reset returns to

@@ -58,6 +58,9 @@ pub struct Restore {
     pub key_id: [u8; 8],
     /// Channel.
     pub channel: u8,
+    /// The TX power the operator had set, in a backup of this hub
+    /// (`metadata.internal.zigbee_rs.tx_power`).
+    pub tx_power_set: Option<i8>,
     /// Devices: IEEE (wire order) and NWK address.
     pub devices: Vec<([u8; 8], Option<u16>)>,
     /// Devices the hub knows to be routers (wire order): restored without a
@@ -207,7 +210,17 @@ pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>, policy: DevicePolicy)
         Some(a) => be_wire(a, "tc_address")?,
         None => ieee,
     };
-    let tx_power = path(internal, &["tx_power"]).and_then(J::as_i64).map(|p| p.clamp(-128, 127) as i8);
+    // A backup of this hub says what the operator set (`zigbee_rs.tx_power`).
+    // Its `tx_power` is the radio's power at the time, which can be a
+    // default (an EmberZNet network the hub formed without a setting runs
+    // at 0 dBm): not applied, the NCP keeps its own. Other backups'
+    // `tx_power` is their stack's configured power (bellows, zigpy-znp).
+    let dbm = |p: Option<&J>| p.and_then(J::as_i64).map(|p| p.max(-128).min(127) as i8);
+    let tx_power_set = dbm(path(internal, &["zigbee_rs", "tx_power"]));
+    let tx_power = match path(internal, &["zigbee_rs"]) {
+        Some(_) => tx_power_set,
+        None => dbm(path(internal, &["tx_power"])),
+    };
     let mask = o
         .get("channel_mask")
         .and_then(J::as_array)
@@ -220,6 +233,7 @@ pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>, policy: DevicePolicy)
         ext_pan_id: epid,
         key_id: NetworkIdentity::key_id_for(&key),
         channel,
+        tx_power_set,
         devices: Vec::new(),
         routers: policy.routers,
         pending: policy.defer.then(Vec::new),
@@ -335,6 +349,9 @@ pub struct ExportInfo {
     /// (`metadata.internal.ezspVersion`, as bellows and zigbee-herdsman
     /// write it: Z2M's ember adapter loads no backup without it).
     pub ezsp_version: Option<u8>,
+    /// The TX power the operator set (`metadata.internal.zigbee_rs.tx_power`,
+    /// the one a restore applies; `tx_power` is the radio's).
+    pub tx_power_set: Option<i8>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -468,13 +485,19 @@ pub fn from_export(export: Export, info: &ExportInfo, out: &mut String) -> Resul
     }
     let _ = write!(
         out,
-        "\"zigbee_rs\":{{\"fw\":{},\"chip\":{},\"build_id\":{}{}{}}},\"node\":{{\"ieee\":\"{coord}\",\"nwk\":\"0000\",\"type\":\"coordinator\"}}",
+        "\"zigbee_rs\":{{\"fw\":{},\"chip\":{},\"build_id\":{}{}{}",
         js(&info.ncp_fw),
         info.ncp_chip,
         js(&info.ncp_build_id),
         if info.groups.is_empty() { "" } else { ",\"groups\":" },
         info.groups
     );
+    if let Some(p) = info.tx_power_set {
+        let _ = write!(out, ",\"tx_power\":{p}");
+    }
+    *out += "},\"node\":{\"ieee\":\"";
+    *out += &coord;
+    *out += "\",\"nwk\":\"0000\",\"type\":\"coordinator\"}";
     if let Some(BackupItem::TcLinkKey { key, tc_ieee, tx_counter, .. }) = &tclk {
         let _ = write!(
             out,
@@ -727,6 +750,7 @@ mod tests {
             host_devices: vec![([9; 8], Some(0x1234)), (r.devices[0].0, Some(0x4D32))],
             groups: r#"[{"id":1,"name":"Kitchen","members":[]}]"#.into(),
             ezsp_version: None,
+            tx_power_set: None,
         };
         let (summary, text) = export(&a, &info);
         let (pan_id, channel, nwk_fc, aps_fc) = (r.pan_id, r.channel, 112_233, 4096);
@@ -741,7 +765,12 @@ mod tests {
         assert_eq!(v["devices"][3]["ieee_address"], "0909090909090909");
         let back: J = serde_json::from_str(&text).unwrap();
         let (_, b) = import(&back).unwrap();
-        // Same items apart from the host-only device.
+        // Same items apart from the host-only device and the TX power: a
+        // backup of this hub restores only the operator's, none here.
+        let mut a = a;
+        if let BackupItem::Network { tx_power, .. } = &mut a[1] {
+            assert_eq!(tx_power.take(), Some(4));
+        }
         assert_eq!(&a[..], &b[..a.len()]);
         assert_eq!(b.len(), a.len() + 1);
     }
@@ -866,11 +895,34 @@ mod tests {
         let (r, back) = import(&v).unwrap();
         assert_eq!(r.ext_pan_id, [1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(r.tclk_counter_known);
-        for item in ezsp_items().iter().filter(|i| !matches!(i, BackupItem::Node { .. } | BackupItem::TcLinkKey { .. })) {
+        for item in ezsp_items().iter().filter(|i| !matches!(i, BackupItem::Node { .. } | BackupItem::TcLinkKey { .. } | BackupItem::Network { .. })) {
             assert!(back.contains(item), "{item:?}");
         }
         assert!(back.contains(&BackupItem::HashedTclkSeed([0x22; 16])));
         assert!(back.iter().any(|i| matches!(i, BackupItem::TcLinkKey { key: ZIGBEE_ALLIANCE_09, tx_counter: 700, .. })));
+    }
+
+    /// A restore applies the TX power the operator set, which a backup of
+    /// this hub carries as `zigbee_rs.tx_power`, never the radio's power it
+    /// also has as `tx_power` (a default of the hub's: an EmberZNet network
+    /// it formed without a setting runs at 0 dBm). Other stacks' backups
+    /// keep their configured power (bellows, below).
+    #[test]
+    fn a_backup_of_the_hub_restores_only_the_operators_tx_power() {
+        let network_tx_power = |items: &[BackupItem]| {
+            items.iter().find_map(|i| match i {
+                BackupItem::Network { tx_power, .. } => Some(*tx_power),
+                _ => None,
+            })
+        };
+        for set in [None, Some(-3)] {
+            let (_, text) = export(&ezsp_items(), &ExportInfo { tx_power_set: set, ..ExportInfo::default() });
+            let v: J = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["metadata"]["internal"]["tx_power"], 8, "the radio's, as bellows writes it");
+            assert_eq!(v["metadata"]["internal"]["zigbee_rs"].get("tx_power").and_then(J::as_i64), set.map(i64::from));
+            let (r, back) = import(&v).unwrap();
+            assert_eq!((r.tx_power_set, network_tx_power(&back)), (set, Some(set)));
+        }
     }
 
     /// bellows (zigpy 0.7x) on EZSP 13 and zigbee-herdsman's ember adapter

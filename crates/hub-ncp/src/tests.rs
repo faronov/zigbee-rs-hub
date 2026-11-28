@@ -704,3 +704,55 @@ fn child_poll_events_are_asked_only_of_an_ncp_that_has_them() {
         sim.stop();
     }
 }
+
+/// An NCP that never answers after the hub's start (an H2 left in its ROM
+/// loader) is reset once through its EN line, and then comes up; one that
+/// answers, or a stopped hub, is not reset.
+#[test]
+fn a_silent_ncp_is_reset_once_at_the_start() {
+    use std::sync::Mutex;
+    #[derive(Clone, Default)]
+    struct Lines {
+        resets: Arc<AtomicU32>,
+        ncp: Arc<Mutex<Option<pipe::End>>>,
+        sim: Arc<Mutex<Option<SimNcp>>>,
+    }
+    impl crate::transport::NcpControl for Lines {
+        fn reset(&mut self) -> std::io::Result<()> {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            // Out of the ROM loader: the NCP's application answers.
+            if let Some(end) = self.ncp.lock().unwrap().take() {
+                *self.sim.lock().unwrap() = Some(SimNcp::start(end));
+            }
+            Ok(())
+        }
+        fn enter_rom_loader(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (host, ncp) = pipe::pair();
+    let lines = Lines::default();
+    *lines.ncp.lock().unwrap() = Some(ncp);
+    let (rx, tx) = host.split();
+    let mut cfg = HubConfig::default();
+    cfg.driver.lines = vec![Line::BR_DEFAULT];
+    let hub = Hub::start(cfg, rx, tx, Some(Box::new(lines.clone())), Store::volatile(), rng());
+    assert!(hub.reset_if_silent(Duration::from_millis(300)));
+    assert!(hub.wait_ready(T));
+    assert!(!hub.reset_if_silent(Duration::ZERO), "it answers");
+    assert_eq!(lines.resets.load(Ordering::SeqCst), 1);
+    hub.shutdown();
+    lines.sim.lock().unwrap().take().unwrap().stop();
+
+    // `hub rom` stops the hub first: a stopped hub resets nothing.
+    let (host, _ncp) = pipe::pair();
+    let lines = Lines::default();
+    let (rx, tx) = host.split();
+    let mut cfg = HubConfig::default();
+    cfg.driver.lines = vec![Line::BR_DEFAULT];
+    let hub = Hub::start(cfg, rx, tx, Some(Box::new(lines.clone())), Store::volatile(), rng());
+    hub.shutdown();
+    assert!(hub.client().wait_state(T, |s| s == crate::SessionState::Stopped).is_some());
+    assert!(!hub.reset_if_silent(Duration::ZERO));
+    assert_eq!(lines.resets.load(Ordering::SeqCst), 0);
+}

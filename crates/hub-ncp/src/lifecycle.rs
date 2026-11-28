@@ -1260,6 +1260,29 @@ impl Hub {
         self.inner.client.call(&SysReset { mode: 0, confirm: 0 }, CallOpts::default()).map(|_| ())
     }
 
+    /// Boot recovery, called once: when nothing answered on the link within
+    /// `wait` of the start (no link session at all; an NCP left in its ROM
+    /// loader by an interrupted flash never answers), reset the NCP once
+    /// through its EN line ([`NcpControl::reset`]: a normal boot) and let
+    /// the driver keep trying. An NCP that answered (even with another
+    /// protocol version), a stopped driver, an activated NCP image waiting
+    /// for its first session, or no EN line: nothing. `true` when it reset
+    /// the NCP.
+    pub fn reset_if_silent(&self, wait: Duration) -> bool {
+        let c = &self.inner.client;
+        while c.state() == SessionState::Down && self.inner.started.elapsed() < wait {
+            thread::sleep(Duration::from_millis(100));
+        }
+        let activating = !matches!(self.inner.status.lock().unwrap().fw, FwState::Idle);
+        if c.state() != SessionState::Down || c.counters().sessions_established > 0 || activating {
+            return false;
+        }
+        let mut control = self.inner.control.lock().unwrap();
+        let Some(control) = control.as_mut() else { return false };
+        warn!("hub: no answer from the NCP within {} s of the start (left in its ROM loader?): resetting it", wait.as_secs());
+        control.reset().is_ok()
+    }
+
     /// Manual recovery path (spec 11.5): stop ZRHP and reset the NCP into
     /// its ROM serial loader. The byte stream then belongs to the
     /// operator's flasher (the phase-0 bridge on the Thread BR board); the

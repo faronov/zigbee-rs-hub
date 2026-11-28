@@ -202,7 +202,7 @@ impl Hub {
     /// reports (capacities 20/21); returns what the NCP applied. The value
     /// sent is persisted and replayed on every resume.
     pub fn set_tx_power(&self, dbm: i8) -> Result<i8, Error> {
-        let dbm = self.tx_power_range().map_or(dbm, |(min, max)| dbm.clamp(min, max));
+        let dbm = self.tx_power_range().map_or(dbm, |(min, max)| dbm.max(min).min(max));
         let applied = self.apply_tx_power(dbm, false)?;
         self.with_store(|s| s.kv_put(TX_POWER_KEY, &[dbm as u8])).map_err(|e| Error::Other(e.to_string()))?;
         Ok(applied)
