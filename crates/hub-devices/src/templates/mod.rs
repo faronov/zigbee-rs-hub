@@ -116,24 +116,25 @@ pub(crate) fn zero_debounce(d: &mut Device, decoded: &mut Decoded, now: Millis) 
     *decoded = out;
 }
 
-/// The held zeros that are due, as `(entity, value)`: a zero current also
-/// zeroes the power of its endpoint.
-pub(crate) fn due(d: &mut Device, now: Millis) -> Vec<(usize, Value)> {
-    let mut out = Vec::new();
+/// The held values that are due, as `(entity, value, due time)`: zeros (a
+/// zero current also zeroes the power of its endpoint) and timed events
+/// of the family templates.
+pub(crate) fn due(d: &mut Device, now: Millis) -> Vec<(usize, Value, Millis)> {
+    let mut out: Vec<(usize, Value, Millis)> = Vec::new();
     for i in 0..d.entities.len() {
-        let Some((_, v)) = d.entities[i].state.held.take_if(|h| now >= h.0) else {
+        let Some((at, v)) = d.entities[i].state.held.take_if(|h| now >= h.0) else {
             continue;
         };
         if let Some((ep, RMS_CURRENT)) = zcl_of(d, i, ELECTRICAL) {
             if let Some(pw) = find(d, ep, ELECTRICAL, ACTIVE_POWER) {
                 d.entities[pw].state.held = None;
-                out.retain(|(j, _)| *j != pw);
+                out.retain(|(j, ..)| *j != pw);
                 let z = zero_like(&d.entities[pw].state.value);
-                out.push((pw, z));
+                out.push((pw, z, at));
             }
         }
-        out.retain(|(j, _)| *j != i);
-        out.push((i, v));
+        out.retain(|(j, ..)| *j != i);
+        out.push((i, v, at));
     }
     out
 }
@@ -147,7 +148,6 @@ pub mod tuya;
 use serde_json::Value as J;
 
 use crate::expr::{Expr, ExprCtx};
-use crate::fingerprint::Fingerprint;
 use crate::model::{
     Category, ConfigureOp, Definition, EntityDef, EventSel, Platform, Template, Trigger,
     TriggerSource, ZclBinding, ZclWrite,
@@ -207,9 +207,11 @@ pub struct Expansion {
     /// The generic remote events (5.4) stay on the `action` event
     /// entity: the device sends ZCL commands in one of its modes.
     pub remote: bool,
-    /// zhc `lumiPreventReset` (bit 0, [`lumi::PREVENT_RESET`]) and
-    /// `lumiPreventLeave` (bit 1: a 0xFCC0 0x00FC false is written true).
-    pub lumi_guard: u8,
+    /// Template `lumi`: zhc `lumiPreventReset` (bit 0,
+    /// [`lumi::PREVENT_RESET`]), `lumiPreventLeave` (bit 1: a 0xFCC0 0x00FC
+    /// false is written true), a 0xFCC0 0x00F7 struct read as Basic
+    /// 0xFF01 (bit 2: with both `lumi_basic` and `lumi_specific`).
+    pub lumi: u8,
     /// zhc `tuya.modernExtend.electricityMeasurementPoll`: bit 0 Electrical
     /// Measurement voltage, current and power, bit 1 Metering summation,
     /// read every 60 s.
@@ -219,7 +221,6 @@ pub struct Expansion {
 /// One family template's expansion in progress.
 pub(crate) struct Cx<'a> {
     pub d: &'a Definition,
-    pub fp: &'a Fingerprint,
     fam: &'static str,
     pub x: Expansion,
     /// The `action` event entity the features build together.
@@ -488,18 +489,19 @@ impl crate::expr::Expression for TExpr {
 /// What the family templates implement, as one number: their helper and
 /// argument names (by hash) and [`CODE`]. A refusal recorded under another
 /// revision ([`crate::device::Refused::templates`]) is checked again.
-pub const REVISION: u32 = fold(CODE, &[tuya::NAMES]);
+pub const REVISION: u32 = fold(CODE, &[tuya::NAMES, lumi::NAMES]);
 
 /// Bumped when the templates implement more under the same names (an
 /// expose, an argument value).
 const CODE: u32 = 1;
 
 /// Whether `name`, a feature a definition requires, is an item of a family
-/// template this build implements (`template.tuya.<item>`).
+/// template this build implements (`template.tuya.<item>`,
+/// `template.lumi.<item>`).
 pub fn implements(name: &str) -> bool {
     name.strip_prefix("template.")
         .and_then(|r| r.split_once('.'))
-        .is_some_and(|(f, _)| f == "tuya")
+        .is_some_and(|(f, _)| matches!(f, "tuya" | "lumi"))
 }
 
 /// [`h`] continued over `l`.
@@ -546,7 +548,7 @@ pub(crate) fn lab(map: &[(i64, &str)]) -> Vec<(i64, String)> {
 }
 
 /// Expands one family template (`None`: not a family template).
-fn run<'a>(d: &'a Definition, t: &'a Template, fp: &'a Fingerprint) -> Option<Cx<'a>> {
+fn run<'a>(d: &'a Definition, t: &'a Template) -> Option<Cx<'a>> {
     let fam = match t.name.as_str() {
         "tuya" => "tuya",
         "lumi" => "lumi",
@@ -554,7 +556,6 @@ fn run<'a>(d: &'a Definition, t: &'a Template, fp: &'a Fingerprint) -> Option<Cx
     };
     let mut cx = Cx {
         d,
-        fp,
         fam,
         x: Expansion::default(),
         action: None,
@@ -600,10 +601,9 @@ fn run<'a>(d: &'a Definition, t: &'a Template, fp: &'a Fingerprint) -> Option<Cx
 /// for an expose no implemented helper gives).
 #[inline(never)]
 pub fn unsupported(d: &Definition) -> Vec<String> {
-    let fp = Fingerprint::default();
     let mut out = Vec::new();
     for t in &d.templates {
-        let Some(cx) = run(d, t, &fp) else { continue };
+        let Some(cx) = run(d, t) else { continue };
         for k in cx.keys.iter().flatten() {
             let given = cx.provided.iter().any(|b| {
                 k == b
@@ -620,17 +620,17 @@ pub fn unsupported(d: &Definition) -> Vec<String> {
     out
 }
 
-/// What the family templates of `d` add to the resolution of `fp`.
+/// What the family templates of `d` add to its resolution.
 #[inline(never)]
-pub fn expand(d: &Definition, fp: &Fingerprint) -> Expansion {
+pub fn expand(d: &Definition) -> Expansion {
     let mut x = Expansion::default();
     for t in &d.templates {
-        if let Some(cx) = run(d, t, fp) {
+        if let Some(cx) = run(d, t) {
             x.entities.extend(cx.x.entities);
             x.configure.extend(cx.x.configure);
             x.drop.extend(cx.x.drop);
             x.remote |= cx.x.remote;
-            x.lumi_guard |= cx.x.lumi_guard;
+            x.lumi |= cx.x.lumi;
             x.poll |= cx.x.poll;
         }
     }

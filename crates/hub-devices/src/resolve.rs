@@ -477,9 +477,8 @@ pub struct Resolution {
     pub diagnostics: Vec<String>,
     /// Template `tuya_metering_zero_debounce` ([`crate::templates`]).
     pub metering_zero_debounce: bool,
-    /// zhc `lumiPreventReset` (bit 0) and `lumiPreventLeave` (bit 1),
-    /// template `lumi` ([`crate::templates::lumi`]).
-    pub lumi_guard: u8,
+    /// Template `lumi` ([`crate::templates::Expansion::lumi`]).
+    pub lumi: u8,
     /// zhc `electricityMeasurementPoll` (template `tuya`,
     /// [`crate::templates::Expansion::poll`]).
     pub electrical_poll: u8,
@@ -786,7 +785,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         });
         // Family templates (17.4): their entities first, so that the
         // definition's own replace them; generic entities they stand for go.
-        let x = crate::templates::expand(d, fp);
+        let x = crate::templates::expand(d);
         let mut remote = crate::templates::drop_generic(&mut merged, &x);
         let n = x.entities.len();
         for (i, e) in x.entities.iter().chain(&d.entities).enumerate() {
@@ -817,7 +816,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         }
         res.configure.extend(d.configure.iter().cloned());
         res.configure.extend(x.configure.iter().cloned());
-        res.lumi_guard |= x.lumi_guard;
+        res.lumi |= x.lumi;
         res.electrical_poll |= x.poll;
         res.ignore.extend(d.ignore.iter().copied());
         if d.tuya.is_some() {

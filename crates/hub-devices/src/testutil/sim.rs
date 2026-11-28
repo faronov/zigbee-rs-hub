@@ -46,6 +46,8 @@ pub struct SimDevice {
     /// ZDO requests (by cluster) it never answers: an interview step that
     /// times out.
     pub zdo_silent: BTreeSet<u16>,
+    /// Endpoints whose Simple_Desc_req it answers with status NOT_ACTIVE.
+    pub simple_desc_failing: BTreeSet<u8>,
     /// Read Attributes asking any of these `(cluster, attr)` get no
     /// answer.
     pub silent_attrs: BTreeSet<(u16, u16)>,
@@ -95,6 +97,7 @@ impl SimDevice {
             responsive: true,
             zdo_failing: BTreeSet::new(),
             zdo_silent: BTreeSet::new(),
+            simple_desc_failing: BTreeSet::new(),
             silent_attrs: BTreeSet::new(),
             cmd_status: Status::SUCCESS,
             groups: BTreeSet::new(),
@@ -263,6 +266,13 @@ impl SimDevice {
                         zdo::cluster::ACTIVE_EP_RSP,
                         zdo::active_ep_rsp(tsn, self.nwk, &eps),
                     ))
+                }
+                zdo::cluster::SIMPLE_DESC_REQ
+                    if self.simple_desc_failing.contains(&req.payload[3]) =>
+                {
+                    let mut p = vec![tsn, 0x83];
+                    p.extend_from_slice(&self.nwk.to_le_bytes());
+                    Some((zdo::cluster::SIMPLE_DESC_RSP, p))
                 }
                 zdo::cluster::SIMPLE_DESC_REQ => {
                     let ep = req.payload[3];

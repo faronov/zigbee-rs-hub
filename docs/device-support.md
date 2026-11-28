@@ -3786,7 +3786,9 @@ count.
 - `lumi`: struct values of `lumi_basic` (Basic 0xFF01; the old 0xFF02
   structure is read as the 0xFF01 it stands for: element 1 voltage,
   element 4 outage count) and `lumi_specific`/`lumi_electricity_meter`/
-  modern `lumi_on_off` (0xFCC0 0x00F7, manufacturer 0x115F): zhc's
+  modern `lumi_on_off` (0xFCC0 0x00F7, manufacturer 0x115F; with both
+  `lumi_basic` and one of these, as in zhc, both structs give the values):
+  zhc's
   `numericAttributes2Payload` tags for the listed exposes — voltage (tag 1
   mV with a battery curve, else tag 150 V), battery (`battery_percent` of
   tag 1), device temperature 3, power outage count 5 (less one), trigger
@@ -3804,8 +3806,10 @@ count.
   and illuminance; power (Analog Input), contact (On/Off), illuminance
   (lx); actions: Multistate Input presentValue clicks by model
   (`lumi_action_multistate`: buttons by endpoint as zhc's lookups; Opple
-  remotes `button_<n>_<click>`, released 5 s after a hold without a
-  report), On/Off reports (`lumi_action`; with arguments zhc's modern
+  remotes `button_<n>_<click>` by the frame's endpoint, 1 to the model's
+  button count — WXKG04LM 3, WXCJKG11LM 2, WXCJKG12LM 4, WXCJKG13LM 6 —
+  whatever endpoints the interview got, released 5 s after a hold without
+  a report), On/Off reports (`lumi_action`; with arguments zhc's modern
   `lumiAction`: presentValue lookups, `<click>_<button>` by endpoint
   name), the WXKG01LM (press 0, release 1:
   `single`, or `hold` after 1 s and `release` with its `duration` within
@@ -3823,7 +3827,10 @@ Event triggers of these templates may listen to an attribute of Report
 Attributes frames (not in v1 definitions): they are matched with the
 command triggers, so such an event fires once per frame (a repeated TSN
 within 2 s is dropped), and a timed one (the WXKG01LM hold, the Opple
-release) is kept with the entity and fires from the hub's tick. Struct
+release) is kept with the entity and fires from the hub's tick, stamped
+with its due time, or before the device's next frame if that comes
+first (a WXKG01LM released 1.5 s after its press between two ticks gives
+`hold` and `release`, not `single`). Struct
 values are scaled by exact divisors (tag 150 voltage /10, 151 current
 /1000, 100–102 /100).
 
@@ -3836,7 +3843,9 @@ sensors, locks, alarms, cubes). App image cost (8 MB S3 image):
 `tuya` with the template machinery ~14 KiB, `lumi` ~16 KiB more. The
 catalog lists the implemented helpers in `templates_available`
 (`<family>.<helper>`), so that its banks hold the definitions the released
-hub runs.
+hub runs. A refusal of `template.tuya.<item>` or `template.lumi.<item>`
+saved by a hub whose templates had another revision (helper, argument and
+model names, by hash) is checked again on restore (9.3).
 
 ### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
 

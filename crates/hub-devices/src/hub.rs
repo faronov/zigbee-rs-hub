@@ -2059,7 +2059,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if ind.cluster == cl::ON_OFF {
                     self.client_on_off(id, ep, h.tsn, &recs, now);
                 }
-                self.lumi_guard(id, ind.cluster, &recs, now);
+                self.lumi_report(id, ep, ind.cluster, &recs, now);
                 if structural {
                     self.maybe_reresolve(id, now);
                 }
@@ -3245,10 +3245,10 @@ impl<T: ZigbeeTransport> Hub<T> {
         };
         let mut touched = Vec::new();
         let mut events = Vec::new();
-        for (i, v) in crate::templates::due(d, now) {
+        for (i, v, at) in crate::templates::due(d, now) {
             match v {
                 Value::Str(et) if d.entities[i].r.def.platform == Platform::Event => {
-                    events.push((i, et));
+                    events.push((i, et, at));
                 }
                 v => {
                     set_value(d, i, None, v, now);
@@ -3259,8 +3259,9 @@ impl<T: ZigbeeTransport> Hub<T> {
         for u in touched {
             self.publish_state(&u);
         }
-        for (i, et) in events {
-            self.fire_event(id, i, et, Map::new(), now);
+        // At their time: a release's duration counts from its hold.
+        for (i, et, at) in events {
+            self.fire_event(id, i, et, Map::new(), at);
         }
     }
 

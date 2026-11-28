@@ -225,17 +225,26 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
-    /// zhc `lumiPreventReset` (a Basic 0xFFF0 report announcing a reset
-    /// gets its answer) and `lumiPreventLeave` (0xFCC0 0x00FC reported
-    /// false is written true), template `lumi`.
-    pub(crate) fn lumi_guard(
+    /// Template `lumi` on a report: zhc `lumiPreventReset` (a Basic 0xFFF0
+    /// report announcing a reset gets its answer), `lumiPreventLeave`
+    /// (0xFCC0 0x00FC reported false is written true), and a 0xFCC0 0x00F7
+    /// struct dispatched as Basic 0xFF01 where the struct values are
+    /// bound to that ([`crate::templates::Expansion::lumi`]).
+    pub(crate) fn lumi_report(
         &mut self,
         id: &str,
+        ep: u8,
         cluster: u16,
         recs: &[(u16, TypedValue)],
         now: Millis,
     ) {
-        let guard = self.devices.get(id).map_or(0, |d| d.resolution.lumi_guard);
+        let guard = self.devices.get(id).map_or(0, |d| d.resolution.lumi);
+        if guard & 4 != 0 && cluster == 0xFCC0 {
+            if let Some((_, v)) = recs.iter().find(|r| r.0 == 0x00F7) {
+                let r = [(0xFF01, v.clone())];
+                self.dispatch_attrs(id, ep, cl::BASIC, None, &r, true, now);
+            }
+        }
         let (ask, answer) = crate::templates::lumi::PREVENT_RESET;
         let write = recs
             .iter()

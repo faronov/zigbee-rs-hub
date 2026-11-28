@@ -678,6 +678,19 @@ fn wxkg01lm_clicks_hold_and_battery() {
     assert_eq!(state(&hub, &u("voltage")), json!(2955));
     assert_eq!(state(&hub, &u("battery")), json!(70.0));
     assert_eq!(state(&hub, &u("power_outage_count")), json!(107.0));
+    // Released 1.5 s after the press, before the hub's next tick: the hold
+    // (at its time), then the release, timed from the hold as by zhc.
+    let t = t + 20_000;
+    hub.on_aps_indication(onoff(&s, 10, 0, b(false)), t);
+    hub.on_aps_indication(onoff(&s, 11, 0, b(true)), t + 1500);
+    let ev = fired(&hub.drain_events(), &uid);
+    let got: Vec<_> = ev
+        .iter()
+        .map(|e| (e.0.as_str(), e.1.get("duration").cloned()))
+        .collect();
+    assert_eq!(got, [("hold", None), ("release", Some(json!(500)))]);
+    hub.tick(t + 2000);
+    assert!(events(&mut hub, &uid).is_empty());
 }
 
 const MINI: u64 = 0x0015_8d00_00cc_0002;
@@ -1038,4 +1051,106 @@ fn aqara_z1_switch_modern_actions_and_settings() {
         (w.0, w.1, w.2, w.3, w.4.value),
         (2, 0xFCC0, 0x0200, Some(0x115F), ZclValue::Uint(0))
     );
+}
+
+const T1: u64 = 0x0415_8d00_00cc_0006;
+const T1_ID: &str = "zb:04158d0000cc0006";
+
+/// Aqara T1 double rocker WXKG04LM (`lumi_basic` and `lumi_specific`):
+/// its 0xFCC0 0x00F7 struct gives the battery and voltage as Basic 0xFF01
+/// does (zhc reads both); its buttons are `button_<n>_<click>`.
+#[test]
+fn wxkg04lm_battery_from_0x00f7_and_buttons() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-wxkg04lm.yaml")]);
+    let mut sim = Sim::default();
+    let mut dev = SimDevice::new(T1, 0x6106, LogicalType::EndDevice, false, 0x115F).endpoint(
+        1,
+        0x0104,
+        0x0103,
+        &[0x0000, 0x0001, 0x0003, 0x0012, 0xFCC0],
+        &[0x0003, 0x0006],
+    );
+    for ep in 2..=3 {
+        dev = dev.endpoint(ep, 0x0104, 0x0103, &[0x0012], &[]);
+    }
+    sim.devices
+        .push(dev.basic("LUMI", "lumi.remote.b286acn03", 0x03));
+    sim.join(&mut hub, T1, T0);
+    assert_eq!(layer(&hub, T1_ID), "aqara/wxkg04lm");
+    let s = sim.dev(T1).clone();
+    // 0x00F7: tag 1 voltage 2955 mV, tag 3 device temperature.
+    let mut f7 = vec![0x01, 0x21];
+    f7.extend_from_slice(&2955u16.to_le_bytes());
+    f7.extend_from_slice(&[0x03, 0x28, 25]);
+    let v = TypedValue::new(ZclType::OCTET_STR, ZclValue::Octets(f7));
+    hub.on_aps_indication(
+        report(&s, 1, 0xFCC0, Some(0x115F), 1, &[(0x00F7, v)]),
+        T0 + 1000,
+    );
+    let u = |k: &str| format!("{T1_ID}:1:{k}");
+    assert_eq!(state(&hub, &u("voltage")), json!(2955));
+    assert_eq!(state(&hub, &u("battery")), json!(70.0));
+    let uid = u("action");
+    hub.drain_events();
+    let pv = report(
+        &s,
+        2,
+        0x0012,
+        None,
+        2,
+        &[(0x0055, TypedValue::uint(ZclType::U16, 2))],
+    );
+    hub.on_aps_indication(pv, T0 + 2000);
+    assert_eq!(events(&mut hub, &uid), ["button_2_double"]);
+}
+
+/// An Opple remote whose interview got only its first endpoint (the
+/// Simple_Desc of the others failed; the lumi quirk completes it): every
+/// button of the model still clicks (zhc names the button by the frame's
+/// endpoint).
+#[test]
+fn opple_buttons_without_their_descriptors() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-wxcjkg13lm.yaml")]);
+    let mut sim = Sim::default();
+    let mut dev = SimDevice::new(OPPLE, 0x6103, LogicalType::EndDevice, false, 0x115F).endpoint(
+        1,
+        0x0104,
+        0x0105,
+        &[0x0000, 0x0001, 0x0003, 0x0012, 0xFCC0],
+        &[0x0003, 0x0006, 0x0008, 0x0300],
+    );
+    for ep in 2..=6 {
+        dev = dev.endpoint(ep, 0x0104, 0x0105, &[0x0003, 0x0012], &[0x0006]);
+    }
+    dev.simple_desc_failing.extend(2..=6);
+    sim.devices
+        .push(dev.basic("LUMI", "lumi.remote.b686opcn01", 0x03));
+    sim.join(&mut hub, OPPLE, T0);
+    for t in 1..=6 {
+        hub.tick(T0 + t * 30_000);
+        sim.run(&mut hub, T0 + t * 30_000);
+    }
+    assert_eq!(layer(&hub, OPPLE_ID), "aqara/wxcjkg13lm");
+    let d = hub.device(OPPLE_ID).unwrap();
+    assert!(
+        !d.fp
+            .endpoints
+            .iter()
+            .any(|e| e.ep == 3 && e.in_clusters.contains(&0x0012)),
+        "{:?}",
+        d.fp.endpoints
+    );
+    let s = sim.dev(OPPLE).clone();
+    let uid = format!("{OPPLE_ID}:1:action");
+    hub.drain_events();
+    let pv = report(
+        &s,
+        3,
+        0x0012,
+        None,
+        7,
+        &[(0x0055, TypedValue::uint(ZclType::U16, 1))],
+    );
+    hub.on_aps_indication(pv, T0 + 300_000);
+    assert_eq!(events(&mut hub, &uid), ["button_3_single"]);
 }

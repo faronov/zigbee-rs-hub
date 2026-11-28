@@ -33,10 +33,13 @@ install instructions and the list of merged pull requests. A pre-release
   need the `lumi` vendor template**, which the hub refused before
   ("requires template.lumi": they ran on the generic tier): battery,
   voltage, device temperature, power outage count and the other values of
-  the Basic 0xFF01/0xFF02 and 0xFCC0 0x00F7 structs; WXKG01LM single,
-  double (and more) clicks, hold and release; mini switches', wall
-  switches' and Opple remotes' clicks (Opple: event mode written at
-  pairing, release after a long hold); the 0xFCC0 settings (operation
+  the Basic 0xFF01/0xFF02 and 0xFCC0 0x00F7 structs (both read for
+  definitions with both, e.g. WXKG04LM); WXKG01LM single,
+  double (and more) clicks, hold and release (a hold released between two
+  ticks of the hub is still a hold); mini switches', wall switches' and
+  Opple remotes' clicks (Opple: event mode written at pairing, release
+  after a long hold, every button of the model even when the interview
+  got only some endpoints); the 0xFCC0 settings (operation
   mode, power outage memory, LED, flip indicator, click mode, …); motion
   sensors' occupancy timeout, illuminance, detection interval and
   sensitivity; a switch's reset or leave announcement is answered as by

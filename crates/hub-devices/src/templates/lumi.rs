@@ -442,8 +442,8 @@ const VOLTAGE_10MV: u16 = 1024;
 const ENERGY_WH: u16 = 2048;
 
 /// What a helper does differently by model (zhc's lists): flags, the
-/// [`BUTTONS`] of its Multistate clicks (low nibble, index + 1) and of
-/// its On/Off clicks (high nibble).
+/// [`BUTTONS`] of its Multistate clicks (low nibble, index + 1; an Opple
+/// remote's button count) and of its On/Off clicks (high nibble).
 const MODELS: &[(u32, u16, u8)] = &[
     (h("WXKG02LM_rev1"), 0, 0x10),
     (h("WXKG02LM_rev2"), 0, 0x11),
@@ -475,10 +475,10 @@ const MODELS: &[(u32, u16, u8)] = &[
     (h("ZNQBKG41LM"), 0, 7),
     (h("WS-USC02"), 0, 8),
     (h("WS-USC04"), 0, 8),
-    (h("WXKG04LM"), OPPLE | MANY, 0),
-    (h("WXCJKG11LM"), OPPLE | MANY, 0),
-    (h("WXCJKG12LM"), OPPLE | MANY, 0),
-    (h("WXCJKG13LM"), OPPLE | MANY, 0),
+    (h("WXKG04LM"), OPPLE | MANY, 3),
+    (h("WXCJKG11LM"), OPPLE | MANY, 2),
+    (h("WXCJKG12LM"), OPPLE | MANY, 4),
+    (h("WXCJKG13LM"), OPPLE | MANY, 6),
     (h("WXKG13LM"), MANY, 0),
     (h("WXKG12LM"), SHAKE, 0),
     (h("MFKZQ01LM"), CUBE, 0),
@@ -568,6 +568,44 @@ const PV: (u16, u16, bool) = (0x0012, 0x0055, false);
 const ON_OFF: (u16, u16, bool) = (0x0006, 0x0000, false);
 const COUNT_8000: (u16, u16, bool) = (0x0006, 0x8000, false);
 
+/// The names this template implements, as one number
+/// ([`super::REVISION`]).
+pub(crate) const NAMES: u32 = {
+    let mut x = super::fold(0, HELPERS);
+    let mut i = 0;
+    while i < ROWS.len() {
+        x = super::fold(x, &[ROWS[i].0]);
+        i += 1;
+    }
+    i = 0;
+    while i < MODELS.len() {
+        x = super::fold(x, &[MODELS[i].0]);
+        i += 1;
+    }
+    x = super::fold(x, METER_ARGS);
+    x = super::fold(x, ON_OFF_ARGS);
+    super::fold(x, ACTION_ARGS)
+};
+
+/// Arguments of `lumi_electricity_meter`.
+const METER_ARGS: &[u32] = &[h("energy"), h("voltage"), h("current")];
+/// Arguments of `lumi_on_off`.
+const ON_OFF_ARGS: &[u32] = &[
+    h("endpointNames"),
+    h("deviceTemperature"),
+    h("powerOutageCount"),
+    h("powerOutageMemory"),
+    H_OPERATION,
+    H_LOCK,
+];
+/// Arguments of `lumi_action`.
+const ACTION_ARGS: &[u32] = &[
+    h("actionLookup"),
+    h("buttonLookup"),
+    h("endpointNames"),
+    h("extraActions"),
+];
+
 const H_POM: u32 = h("lumi_switch_power_outage_memory");
 const H_CLICK: u32 = h("lumi_switch_click_mode");
 const H_OPERATION: u32 = h("operationMode");
@@ -596,11 +634,11 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a J) -> bool {
         0 => cx.flags |= BASIC,
         1 => cx.flags |= SPECIFIC,
         2 => {
-            cx.args(f, p, &[h("energy"), h("voltage"), h("current")]);
+            cx.args(f, p, METER_ARGS);
             cx.flags |= SPECIFIC;
         }
-        3 => cx.x.lumi_guard |= 1,
-        4 => cx.x.lumi_guard |= 2,
+        3 => cx.x.lumi |= 1,
+        4 => cx.x.lumi |= 2,
         5 => cx.x.configure.push(ConfigureOp::Write {
             ep: Some(1),
             cluster: LUMI,
@@ -673,11 +711,11 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a J) -> bool {
                 acts.extend(lab(&[(5, "quintuple"), (6, "many")]));
             }
             if fl & OPPLE != 0 {
+                // One per button endpoint 1..n of the model (zhc's
+                // `msg.endpoint.ID`; not the endpoints the interview got).
                 let mut btns = Vec::new();
-                for e in &cx.fp.endpoints {
-                    if e.in_clusters.contains(&0x0012) || e.out_clusters.contains(&0x0012) {
-                        btns.push((Some(e.ep), cat("button_", &e.ep.to_string(), "_")));
-                    }
+                for ep in 1..=b & 15 {
+                    btns.push((Some(ep), cat("button_", &ep.to_string(), "_")));
                 }
                 let pre = (PV.0, PV.1, true);
                 clicks(cx, btns, pre, AttrTiming::HoldRelease, &acts, None);
@@ -706,15 +744,7 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a J) -> bool {
 
 /// zhc `lumi.modernExtend.lumiOnOff`.
 fn on_off<'a>(cx: &mut Cx<'a>, f: &str, p: &'a J) {
-    let args = [
-        h("endpointNames"),
-        h("deviceTemperature"),
-        h("powerOutageCount"),
-        h("powerOutageMemory"),
-        H_OPERATION,
-        H_LOCK,
-    ];
-    cx.args(f, p, &args);
+    cx.args(f, p, ON_OFF_ARGS);
     let eps = cx.eps(p, "endpointNames", f);
     for (k, v) in p.as_object().into_iter().flatten() {
         // With arguments: with lumi_specific.
@@ -760,13 +790,7 @@ fn action<'a>(cx: &mut Cx<'a>, fl: u16, b: u8, p: &'a J) -> bool {
         clicks(cx, buttons(b), ON_OFF, AttrTiming::Now, &acts, None);
         return true;
     }
-    let args = [
-        h("actionLookup"),
-        h("buttonLookup"),
-        h("endpointNames"),
-        h("extraActions"),
-    ];
-    cx.args("lumi_action", p, &args);
+    cx.args("lumi_action", p, ACTION_ARGS);
     let mut acts = pairs(p.get("actionLookup"));
     let mut btns = Vec::new();
     for (e, n) in pairs(p.get("buttonLookup")) {
@@ -805,6 +829,11 @@ fn pairs(v: Option<&J>) -> Vec<(i64, String)> {
 /// After the helpers: the struct values of the exposes.
 pub(crate) fn finish(cx: &mut Cx<'_>) {
     let (cluster, attr, mfr) = if cx.flags & BASIC != 0 {
+        // Both sources (zhc registers both): the 0x00F7 struct is read as
+        // the 0xFF01 one (the same tags).
+        if cx.flags & SPECIFIC != 0 {
+            cx.x.lumi |= 4;
+        }
         (0x0000, 0xFF01, None)
     } else if cx.flags & SPECIFIC != 0 {
         (LUMI, 0x00F7, Some(0x115F))
