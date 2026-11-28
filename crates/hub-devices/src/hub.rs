@@ -1892,6 +1892,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.available = true;
         d.left = false;
         d.check = None;
+        let restored = std::mem::take(&mut d.configure.restored);
         if !was && let Some(n) = self.notes.get_mut_by(id) {
             n.unavailable = None;
         }
@@ -1925,12 +1926,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         if !was || minute_passed || fresh {
             self.emit(HubEvent::DeviceUpdated(id.to_string()));
         }
+        // Its first frame since boot: the ops queued before the restart
+        // (results missing) go again; nothing done is repeated.
+        if restored {
+            self.redo_configure(id, now);
+        }
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         if !was {
-            let uids: Vec<String> = self.devices[id]
-                .entities
-                .iter()
-                .map(|e| e.uid.clone())
-                .collect();
+            let uids: Vec<String> = d.entities.iter().map(|e| e.uid.clone()).collect();
             for u in uids {
                 self.publish_state(&u);
             }

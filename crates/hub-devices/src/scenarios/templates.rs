@@ -209,7 +209,12 @@ const KNOB_ID: &str = "zb:a4c1380000000102";
 
 /// HOBEIAN ZG-101ZD `_TZ3000_402vrq2i` in command mode.
 fn knob() -> SimDevice {
-    SimDevice::new(KNOB, 0x4102, LogicalType::EndDevice, true, 0x1002)
+    knob_rx(true)
+}
+
+/// [`knob`], sleepy (`rx_on` false) or not.
+fn knob_rx(rx_on: bool) -> SimDevice {
+    SimDevice::new(KNOB, 0x4102, LogicalType::EndDevice, rx_on, 0x1002)
         .endpoint(
             1,
             0x0104,
@@ -362,6 +367,83 @@ fn ts004f_definition_after_the_interview_writes_its_mode() {
     hub.reresolve(None, t + 1000);
     hub.on_aps_indication(cmd(&s, 1, 0x0006, 2, 0xFD, &[0x00]), t + 1000);
     sim.run(&mut hub, t + 1000);
+    assert_eq!(mode_writes(&mut sim), 1);
+}
+
+/// The knob paired generic, its definition fetched while it sleeps: the
+/// mode write waits for it, and the hub restarts (its queue is not stored;
+/// at boot the definition is installed before the registry loads).
+fn knob_restarted_before_its_mode_write(sim: &mut Sim) -> (Hub<MockTransport>, u64) {
+    let src = include_str!("fixtures/hobeian-zg-101zd.yaml");
+    let mut first = hub_of(&[]);
+    sim.devices.push(knob_rx(false));
+    sim.join(&mut first, KNOB, T0);
+    let t = T0 + 600_000;
+    let mut cat = MemoryCatalog::default();
+    cat.insert(def(src));
+    first.set_catalog(Box::new(cat), t);
+    assert_eq!(layer(&first, KNOB_ID), "hobeian/zg-101zd");
+    sim.run(&mut first, t);
+    assert_eq!(mode_writes(sim), 0, "it waits for the knob");
+    let snap = first.snapshot_device(KNOB_ID).unwrap();
+    let mut hub = hub_of(&[src]);
+    hub.restore_device(snap, None, t + 1000).unwrap();
+    assert_eq!(layer(&hub, KNOB_ID), "hobeian/zg-101zd");
+    (hub, t + 1000)
+}
+
+/// After that restart its first frame sends the mode write, once; a
+/// reporting change later neither repeats nor drops it.
+#[test]
+fn ts004f_mode_write_queued_before_a_restart_is_sent_after_it() {
+    let mut sim = Sim::default();
+    let (mut hub, t) = knob_restarted_before_its_mode_write(&mut sim);
+    let s = sim.dev(KNOB).clone();
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 1, 0xFD, &[0x00]), t + 1000);
+    sim.run(&mut hub, t + 1000);
+    assert_eq!(mode_writes(&mut sim), 1);
+    let mode = format!("{KNOB_ID}:1:operation_mode");
+    hub.set_entity_report(&mode, None, &json!([60, 3600]), t + 2000)
+        .unwrap();
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 2, 0xFD, &[0x00]), t + 2000);
+    sim.run(&mut hub, t + 2000);
+    assert_eq!(mode_writes(&mut sim), 1);
+    let d = hub.device(KNOB_ID).unwrap();
+    let done = |k: &String| k.starts_with("write:1:0006:-:8004");
+    assert!(d.configure.done.iter().any(|(k, ok)| done(k) && *ok));
+    assert_eq!(d.configure.paired, 0, "configured under its definition");
+    let configure = |a: &&&crate::transport::ApsRequest| {
+        let global = |c: u8| {
+            zf::ZclFrame::parse(&a.payload)
+                .is_ok_and(|f| f.header.frame_type == FrameType::Global && f.header.cmd == c)
+        };
+        (a.profile == 0 && a.cluster == 0x0021)
+            || (a.profile != 0
+                && (global(global::WRITE_ATTRIBUTES) || global(global::CONFIGURE_REPORTING)))
+    };
+    assert!(sim.aps().iter().filter(configure).count() > 0);
+    // Another restart: its first frame sends nothing done again.
+    let snap = hub.snapshot_device(KNOB_ID).unwrap();
+    let mut hub = hub_of(&[include_str!("fixtures/hobeian-zg-101zd.yaml")]);
+    hub.restore_device(snap, None, t + 3000).unwrap();
+    sim.log.clear();
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 3, 0xFD, &[0x00]), t + 4000);
+    sim.run(&mut hub, t + 4000);
+    assert_eq!(sim.aps().iter().filter(configure).count(), 0);
+}
+
+/// A configure change before its first frame after that restart (a
+/// reporting setting) does not take the unsent mode write as done.
+#[test]
+fn ts004f_mode_write_survives_a_change_before_its_first_frame() {
+    let mut sim = Sim::default();
+    let (mut hub, t) = knob_restarted_before_its_mode_write(&mut sim);
+    let mode = format!("{KNOB_ID}:1:operation_mode");
+    hub.set_entity_report(&mode, None, &json!([60, 3600]), t + 1000)
+        .unwrap();
+    let s = sim.dev(KNOB).clone();
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 1, 0xFD, &[0x00]), t + 2000);
+    sim.run(&mut hub, t + 2000);
     assert_eq!(mode_writes(&mut sim), 1);
 }
 

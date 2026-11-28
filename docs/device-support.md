@@ -476,14 +476,17 @@ changed, the self-description hash changed, or the user asks. Effects:
   on several endpoints (herdsman endpoint maps name every endpoint);
 - configure (binds, reporting) is redone only if the configure hash (the
   canonical CBOR of all binds, reporting configs and configure ops) changed.
-  A device already configured under a definition, or paired by an
-  earlier build (its record's `paired`, the templates' revision when it
-  joined, differs; 0 for one saved before this field, or imported), that
-  gets another resolution (a new definition, a firmware that now runs
-  one) keeps the attributes a setting entity controls (select, switch,
-  number): their configure writes that were never sent — a remote's
-  operation mode — are counted done, not sent, as Zigbee2MQTT writes them
-  at pairing only. A device paired by this build whose first definition
+  The queue of configure ops is not stored: a device restored at boot
+  rebuilds its ops at its first frame and sends those without a result
+  (nothing done is repeated).
+  A device already configured under a definition (every op of it has a
+  result), or paired by an earlier build (its record's `paired`, the
+  templates' revision when it joined, differs; 0 for one saved before
+  this field, or imported), that gets another resolution (a new
+  definition, a firmware that now runs one) keeps the attributes a
+  setting entity controls (select, switch, number): their configure
+  writes that were never sent — a remote's operation mode — are counted
+  done, not sent, as Zigbee2MQTT writes them at pairing only. A device paired by this build whose first definition
   comes after its interview (fetched in a shard) sends them, as do
   `devices/reconfigure` and a new pairing (after removing the device); a
   write that failed is retried, also when reporting settings change.

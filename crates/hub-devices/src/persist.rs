@@ -429,6 +429,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         );
         d.configure.hash = s.configure_hash;
         d.configure.paired = s.paired;
+        // An imported one is verified or configured by the import.
+        d.configure.restored = s.interviewed && s.imported == 0;
         d.configure.done = s.configure_done;
         d.configure.unreportable = s.unreportable;
         d.warnings = s.warnings;

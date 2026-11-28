@@ -337,10 +337,14 @@ pub struct ConfigureState {
     /// recorded.
     pub stale: Vec<String>,
     /// [`crate::templates::REVISION`] when it joined, until configured
-    /// under a definition (then 0; also 0 when paired by a build before):
-    /// a definition that comes later than that keeps the device's settings
-    /// (3.4).
+    /// under a definition — every op of it has a result — (then 0; also 0
+    /// when paired by a build before): a definition that comes later than
+    /// that keeps the device's settings (3.4).
     pub paired: u32,
+    /// Restored at boot, not heard from since: its first frame rebuilds
+    /// the ops and queues those without a result (queued before the
+    /// restart: the queue is not stored).
+    pub restored: bool,
 }
 
 /// Self-description progress (12.3).

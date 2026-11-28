@@ -495,6 +495,20 @@ fn sets_setting(d: &Device, k: &OpKind) -> bool {
     })
 }
 
+/// Configured under a definition: every op has a result (none queued or
+/// in flight), so a later definition keeps the settings (`paired` 0).
+fn configured(d: &mut Device) {
+    if d.configure.queue.is_empty()
+        && !d.configure.in_flight
+        && d.resolution
+            .layers
+            .iter()
+            .any(|l| l.source != crate::model::LayerSource::Generic)
+    {
+        d.configure.paired = 0;
+    }
+}
+
 /// Configure hash (3.4): SHA-256 over the op keys, first 16 bytes.
 pub fn configure_hash(ops: &[OpRun]) -> String {
     let mut h = Sha256::new();
@@ -577,13 +591,6 @@ impl<T: ZigbeeTransport> Hub<T> {
         let redefined = d.interview == InterviewStep::Done
             && d.configure.hash.as_ref().is_some_and(|h| *h != hash)
             && d.configure.paired != crate::templates::REVISION;
-        if d.resolution
-            .layers
-            .iter()
-            .any(|l| l.source != crate::model::LayerSource::Generic)
-        {
-            d.configure.paired = 0;
-        }
         d.configure.hash = Some(hash);
         // A superseded op whose key is current again: its result counts.
         d.configure
@@ -654,6 +661,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             }
             d.configure.queue.push_back(op);
         }
+        configured(d);
         if let Some(t) = &d.resolution.tuya {
             if let Some(iv) = t.query_interval_s {
                 d.tuya_query_at.get_or_insert(now + u64::from(iv) * 1000);
@@ -808,6 +816,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         d.configure.done.insert(key.to_string(), ok);
+        configured(d);
         d.diag.configure.insert(key.to_string(), status);
         if ok {
             d.configure.backoff_s = 0;
