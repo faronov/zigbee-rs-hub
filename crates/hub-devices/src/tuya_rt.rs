@@ -315,9 +315,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
                 for t in &e.r.def.triggers {
                     if t.source == (TriggerSource::Tuya { dp: r.dp }) {
-                        if let Some(ev) =
-                            eval_trigger(t, &r.data, e.state.last_event.as_deref(), &env)
-                        {
+                        if let Some(ev) = eval_trigger(
+                            t,
+                            crate::expr::Value::Null,
+                            &r.data,
+                            e.state.last_event.as_deref(),
+                            &env,
+                        ) {
                             fired.push((i, ev.0, ev.1));
                             break;
                         }

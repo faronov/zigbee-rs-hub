@@ -2,13 +2,13 @@
 //! definition turns on by name (`templates: [{name: …, params: …}]`,
 //! feature `template.<name>`).
 //!
-//! The family template `tuya` ([`tuya`]) stands for
+//! The family templates `tuya` and `lumi` ([`tuya`], [`lumi`]) stand for
 //! zigbee-herdsman-converters helpers the definition generator could not
 //! express in the v1 format: `params.features` names each helper (zhc's
 //! name in snake case, e.g. `tuya_on_off` for `tuya.modernExtend.tuyaOnOff`)
 //! with its literal arguments, `params.keys` the exposes the helpers give.
 //! The hub expands them at resolution into ordinary entities, configure
-//! ops and triggers ([`expand`]); what this firmware does not
+//! ops and attribute triggers ([`expand`]); what this firmware does not
 //! implement (a helper, an argument, a key) is a required feature it lacks
 //! (`template.<family>.<item>`, [`unsupported`]), so such a definition is
 //! refused and named as before.
@@ -139,13 +139,15 @@ pub(crate) fn due(d: &mut Device, now: Millis) -> Vec<(usize, Value)> {
 }
 
 // ---------------------------------------------------------------------------
-// Family templates (`tuya`).
+// Family templates `tuya` and `lumi`.
 
+pub mod lumi;
 pub mod tuya;
 
 use serde_json::Value as J;
 
 use crate::expr::{Expr, ExprCtx};
+use crate::fingerprint::Fingerprint;
 use crate::model::{
     Category, ConfigureOp, Definition, EntityDef, EventSel, Platform, Template, Trigger,
     TriggerSource, ZclBinding, ZclWrite,
@@ -205,6 +207,9 @@ pub struct Expansion {
     /// The generic remote events (5.4) stay on the `action` event
     /// entity: the device sends ZCL commands in one of its modes.
     pub remote: bool,
+    /// zhc `lumiPreventReset` (bit 0, [`lumi::PREVENT_RESET`]) and
+    /// `lumiPreventLeave` (bit 1: a 0xFCC0 0x00FC false is written true).
+    pub lumi_guard: u8,
     /// zhc `tuya.modernExtend.electricityMeasurementPoll`: bit 0 Electrical
     /// Measurement voltage, current and power, bit 1 Metering summation,
     /// read every 60 s.
@@ -214,6 +219,7 @@ pub struct Expansion {
 /// One family template's expansion in progress.
 pub(crate) struct Cx<'a> {
     pub d: &'a Definition,
+    pub fp: &'a Fingerprint,
     fam: &'static str,
     pub x: Expansion,
     /// The `action` event entity the features build together.
@@ -226,6 +232,8 @@ pub(crate) struct Cx<'a> {
     ep_names: Vec<&'a str>,
     /// What this firmware lacks: `template.<family>.<item>`.
     missing: Vec<String>,
+    /// The family's own notes.
+    pub flags: u8,
 }
 
 impl<'a> Cx<'a> {
@@ -237,6 +245,18 @@ impl<'a> Cx<'a> {
     /// Notes exposes given (by these entities or the generic tier).
     pub fn provide(&mut self, keys: &[&str]) {
         self.provided.extend(keys.iter().map(|k| k.to_string()));
+    }
+    /// Whether `params.keys` lists `key` (with any endpoint suffix); a
+    /// definition without the list (partial) takes `dflt`.
+    pub fn wants(&self, key: &str, dflt: bool) -> bool {
+        self.keys.as_ref().map_or(dflt, |k| {
+            k.iter().any(|x| {
+                *x == key
+                    || x.strip_prefix(key)
+                        .and_then(|r| r.strip_prefix('_'))
+                        .is_some_and(|s| self.is_ep_name(s))
+            })
+        })
     }
     /// An endpoint name of the definition, its helpers' arguments, or a
     /// conventional one (zhc's `endpoint` functions the definition could
@@ -287,38 +307,39 @@ impl<'a> Cx<'a> {
         self.provided.push(e.key.clone());
         self.x.entities.push(e);
     }
-    /// Adds a command trigger to the `action` event entity with its event
-    /// types.
+    /// Adds a trigger to the `action` event entity whose event type is
+    /// `<pre><label><post>` of a raw value ([`TExpr::Label`]: `other` for
+    /// a value not in `map`), with its event types.
     #[inline(never)]
-    pub fn on(
+    pub fn on_label(
         &mut self,
-        ep: Option<u8>,
-        cluster: u16,
-        id: u8,
-        ev: EventSel,
-        types: &[String],
+        source: TriggerSource,
+        map: Vec<(i64, String)>,
+        (pre, post): (&str, &str),
+        other: Option<&str>,
     ) -> &mut Trigger {
-        let source = TriggerSource::Cmd {
-            ep,
-            cluster,
-            id,
-            mfr: None,
-            global: false,
-        };
         let a = self.action.get_or_insert_with(|| {
             let mut e = EntityDef::new("action", Platform::Event);
             e.device_class = Some("button".into());
             e
         });
-        for ty in types {
-            if !a.event_types.contains(ty) {
-                a.event_types.push(ty.clone());
+        for l in map.iter().map(|m| m.1.as_str()).chain(other) {
+            let ty = cat(pre, l, post);
+            if !a.event_types.contains(&ty) {
+                a.event_types.push(ty);
             }
         }
+        let e = TExpr::Label {
+            cmd: matches!(source, TriggerSource::Cmd { .. }),
+            map,
+            pre: pre.into(),
+            post: post.into(),
+            other: other.map(String::from),
+        };
         a.triggers.push(Trigger {
             source,
             when: None,
-            event: ev,
+            event: EventSel::Expr(tx(e)),
             attrs: Vec::new(),
         });
         a.triggers.last_mut().unwrap()
@@ -336,6 +357,10 @@ pub(crate) enum K {
     /// A number: minimum, maximum, unit. On/Off 0x4001 is the Tuya
     /// countdown, set with On With Timed Off.
     Number(f32, f32, &'static str),
+    /// A sensor: device class, unit (empty: none).
+    Sensor(&'static str, &'static str),
+    /// A binary sensor: device class.
+    Binary(&'static str),
 }
 
 /// A template entity on one attribute: expose key, kind, cluster,
@@ -350,11 +375,13 @@ pub(crate) fn build(r: &Row, ep: Option<u8>) -> EntityDef {
         K::Select(_) => Platform::Select,
         K::Switch(_) => Platform::Switch,
         K::Number(..) => Platform::Number,
+        K::Sensor(..) => Platform::Sensor,
+        K::Binary(_) => Platform::BinarySensor,
     };
     let mut e = EntityDef::new(key, p);
     e.ep = ep;
     let countdown = (cluster, attr) == (0x0006, 0x4001);
-    if !countdown {
+    if !countdown && matches!(k, K::Select(_) | K::Switch(_) | K::Number(..)) {
         e.category = Some(Category::Config);
     }
     let s = |x: &str| (!x.is_empty()).then(|| x.to_string());
@@ -370,6 +397,11 @@ pub(crate) fn build(r: &Row, ep: Option<u8>) -> EntityDef {
             let l = &mut e.value.limits;
             (l.min, l.max, l.step) = (Some(f64::from(min)), Some(f64::from(max)), Some(1.0));
         }
+        K::Sensor(dc, unit) => {
+            (e.device_class, e.unit) = (s(dc), s(unit));
+            e.state_class = Some(crate::model::StateClass::Measurement);
+        }
+        K::Binary(dc) => e.device_class = s(dc),
         K::Switch(_) => {}
     }
     e.value.binding = crate::model::Binding::Zcl(ZclBinding {
@@ -387,7 +419,7 @@ pub(crate) fn build(r: &Row, ep: Option<u8>) -> EntityDef {
 }
 
 /// The family templates' expressions: one type (one copy of the code in
-/// the firmware).
+/// the firmware) for event types and value transforms.
 pub(crate) enum TExpr {
     /// `<pre><label><post>` of the raw value (`x`; `payload[0]` for a
     /// command); `other` for a value not in `map`.
@@ -400,6 +432,18 @@ pub(crate) enum TExpr {
     },
     /// `payload[0]`.
     Byte,
+    /// `battery_percent(x)`.
+    Battery,
+    /// `x - 1`.
+    Less1,
+    /// `(x & 0xFFFF) - 1`.
+    Count16,
+    /// `true`.
+    True,
+    /// Lumi illuminance: `x - 65536` (0 above 130536).
+    Lux,
+    /// `state.detection_interval` (else this) + 2.
+    Interval(u8),
 }
 
 impl std::fmt::Debug for TExpr {
@@ -412,6 +456,7 @@ impl crate::expr::Expression for TExpr {
     fn eval(&self, c: &ExprCtx<'_>) -> Value {
         let first = c.payload.and_then(|p| p.first()).map(|b| f64::from(*b));
         let x = c.x.as_f64();
+        let num = |f: fn(f64) -> f64| x.map_or(Value::Null, |x| Value::Float(f(x)));
         match self {
             Self::Label {
                 map,
@@ -427,6 +472,15 @@ impl crate::expr::Expression for TExpr {
                     .map_or(Value::Null, |l| Value::Str(cat(pre, l, post)))
             }
             Self::Byte => first.map_or(Value::Null, |b| Value::Int(b as i64)),
+            Self::Battery => x.map_or(Value::Null, |x| c.env.battery_percent(x)),
+            Self::Less1 => num(|x| x - 1.0),
+            Self::Count16 => num(|x| f64::from((x as u32 & 0xFFFF) as u16) - 1.0),
+            Self::True => Value::Bool(true),
+            Self::Lux => num(|x| if x > 130_536.0 { 0.0 } else { x - 65_536.0 }),
+            Self::Interval(d) => {
+                let i = c.env.state("detection_interval").as_f64();
+                Value::Float(i.unwrap_or(f64::from(*d)) + 2.0)
+            }
         }
     }
 }
@@ -486,26 +540,21 @@ pub(crate) fn tx(e: TExpr) -> Expr {
     std::sync::Arc::new(e)
 }
 
-/// [`TExpr::Label`] (`cmd`: of `payload[0]`).
-#[inline(never)]
-pub(crate) fn label(map: &[(i64, &str)], post: &str, cmd: bool, other: Option<&str>) -> TExpr {
-    TExpr::Label {
-        map: map.iter().map(|(r, l)| (*r, l.to_string())).collect(),
-        pre: String::new(),
-        post: post.into(),
-        cmd,
-        other: other.map(String::from),
-    }
+/// Labels of raw values, owned.
+pub(crate) fn lab(map: &[(i64, &str)]) -> Vec<(i64, String)> {
+    map.iter().map(|(r, l)| (*r, l.to_string())).collect()
 }
 
 /// Expands one family template (`None`: not a family template).
-fn run<'a>(d: &'a Definition, t: &'a Template) -> Option<Cx<'a>> {
-    if t.name != "tuya" {
-        return None;
-    }
-    let fam = "tuya";
+fn run<'a>(d: &'a Definition, t: &'a Template, fp: &'a Fingerprint) -> Option<Cx<'a>> {
+    let fam = match t.name.as_str() {
+        "tuya" => "tuya",
+        "lumi" => "lumi",
+        _ => return None,
+    };
     let mut cx = Cx {
         d,
+        fp,
         fam,
         x: Expansion::default(),
         action: None,
@@ -517,6 +566,7 @@ fn run<'a>(d: &'a Definition, t: &'a Template) -> Option<Cx<'a>> {
         provided: Vec::new(),
         ep_names: Vec::new(),
         missing: Vec::new(),
+        flags: 0,
     };
     let feats = t.params.get("features").and_then(J::as_object);
     for (f, p) in feats.into_iter().flatten() {
@@ -527,10 +577,17 @@ fn run<'a>(d: &'a Definition, t: &'a Template) -> Option<Cx<'a>> {
             _ => one,
         };
         for p in inst {
-            if !tuya::feature(&mut cx, f, p) {
+            let known = match fam {
+                "tuya" => tuya::feature(&mut cx, f, p),
+                _ => lumi::feature(&mut cx, f, p),
+            };
+            if !known {
                 cx.lack(f);
             }
         }
+    }
+    if fam == "lumi" {
+        lumi::finish(&mut cx);
     }
     if let Some(a) = cx.action.take() {
         cx.add(a);
@@ -543,9 +600,10 @@ fn run<'a>(d: &'a Definition, t: &'a Template) -> Option<Cx<'a>> {
 /// for an expose no implemented helper gives).
 #[inline(never)]
 pub fn unsupported(d: &Definition) -> Vec<String> {
+    let fp = Fingerprint::default();
     let mut out = Vec::new();
     for t in &d.templates {
-        let Some(cx) = run(d, t) else { continue };
+        let Some(cx) = run(d, t, &fp) else { continue };
         for k in cx.keys.iter().flatten() {
             let given = cx.provided.iter().any(|b| {
                 k == b
@@ -562,16 +620,17 @@ pub fn unsupported(d: &Definition) -> Vec<String> {
     out
 }
 
-/// What the family templates of `d` add to its resolution.
+/// What the family templates of `d` add to the resolution of `fp`.
 #[inline(never)]
-pub fn expand(d: &Definition) -> Expansion {
+pub fn expand(d: &Definition, fp: &Fingerprint) -> Expansion {
     let mut x = Expansion::default();
     for t in &d.templates {
-        if let Some(cx) = run(d, t) {
+        if let Some(cx) = run(d, t, fp) {
             x.entities.extend(cx.x.entities);
             x.configure.extend(cx.x.configure);
             x.drop.extend(cx.x.drop);
             x.remote |= cx.x.remote;
+            x.lumi_guard |= cx.x.lumi_guard;
             x.poll |= cx.x.poll;
         }
     }

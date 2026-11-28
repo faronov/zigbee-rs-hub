@@ -538,6 +538,34 @@ pub enum TriggerSource {
         /// DP.
         dp: u8,
     },
+    /// An attribute in a Report Attributes frame (vendor templates, not in
+    /// definitions): `x` is its value.
+    Attr {
+        /// Endpoint filter.
+        ep: Option<u8>,
+        /// Cluster.
+        cluster: u16,
+        /// Attribute.
+        attr: u16,
+        /// What the event starts.
+        timing: AttrTiming,
+    },
+}
+
+/// Timed behaviour of an attribute trigger ([`TriggerSource::Attr`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrTiming {
+    /// The event fires at once.
+    Now,
+    /// Press and release of a button that reports nothing else (zhc
+    /// `lumi_action_WXKG01LM`; the expression gives `hold` for a press,
+    /// `single` for a release): `hold` after 1 s pressed, then `release`
+    /// (within 4 s of the hold), else `single` at the release.
+    PressRelease,
+    /// The event fires at once and cancels a pending one; a `…_hold`
+    /// event is followed by its `…_release` after 5 s unless another
+    /// report came (Aqara Opple: no release after a long hold).
+    HoldRelease,
 }
 
 /// How a trigger chooses its event type.

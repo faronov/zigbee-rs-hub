@@ -1,5 +1,5 @@
-//! Vendor template `tuya` (spec 17.4): the generated catalog definitions
-//! that need it run, with frames as the devices send them.
+//! Vendor templates `tuya` and `lumi` (spec 17.4): the generated catalog
+//! definitions that need them run, with frames as the devices send them.
 
 use serde_json::json;
 
@@ -598,4 +598,444 @@ fn ts011f_din_smart_relay_polling() {
     // Left: none.
     hub.device_mut(DIN_ID).unwrap().left = true;
     assert_eq!(at(&mut hub, &mut sim, 245), (0, 0));
+}
+
+const BUTTON: u64 = 0x0015_8d00_00cc_0001;
+const BUTTON_ID: &str = "zb:00158d0000cc0001";
+
+fn onoff(d: &SimDevice, tsn: u8, attr: u16, v: TypedValue) -> ApsIndication {
+    report(d, 1, 0x0006, None, tsn, &[(attr, v)])
+}
+
+/// WXKG01LM (`lumi_action_wxkg01_lm`, `lumi_basic`): press and release
+/// are a single click; pressed for 1 s a hold, then a release with its
+/// duration; the click count 0x8000 double and more; battery and voltage
+/// from Basic 0xFF02 (CR2032 curve 2850–3000 mV), power outage count.
+#[test]
+fn wxkg01lm_clicks_hold_and_battery() {
+    let mut hub = hub_of(&[include_str!("fixtures/xiaomi-wxkg01lm.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(BUTTON, 0x6101, LogicalType::EndDevice, false, 0x1037)
+            .endpoint(
+                1,
+                0x0104,
+                0x0104,
+                &[0x0000, 0x0003, 0x0019, 0xFFFF],
+                &[0x0000, 0x0004, 0x0003, 0x0006, 0x0008, 0x0005, 0x0019],
+            )
+            .basic("LUMI", "lumi.sensor_switch", 0x03),
+    );
+    sim.join(&mut hub, BUTTON, T0);
+    assert_eq!(layer(&hub, BUTTON_ID), "xiaomi/wxkg01lm");
+    let s = sim.dev(BUTTON).clone();
+    let uid = format!("{BUTTON_ID}:1:action");
+    let b = |v: bool| TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(v)));
+    hub.drain_events();
+    let t = T0 + 10_000;
+    hub.on_aps_indication(onoff(&s, 1, 0, b(false)), t);
+    hub.on_aps_indication(onoff(&s, 2, 0, b(true)), t + 300);
+    hub.tick(t + 2000);
+    assert_eq!(events(&mut hub, &uid), ["single"]);
+    // Held: hold after 1 s, release with the time since the hold.
+    let t = t + 10_000;
+    hub.on_aps_indication(onoff(&s, 3, 0, b(false)), t);
+    hub.tick(t + 999);
+    assert!(events(&mut hub, &uid).is_empty());
+    hub.tick(t + 1000);
+    assert_eq!(events(&mut hub, &uid), ["hold"]);
+    hub.on_aps_indication(onoff(&s, 4, 0, b(true)), t + 2500);
+    let ev = fired(&hub.drain_events(), &uid);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(
+        (ev[0].0.as_str(), &ev[0].1["duration"]),
+        ("release", &json!(1500))
+    );
+    // Multiple clicks: 0x8000 (the button does not send 0x0000 for them).
+    let n = |v: u64| TypedValue::uint(ZclType::U8, v);
+    hub.on_aps_indication(onoff(&s, 5, 0x8000, n(2)), t + 5000);
+    hub.on_aps_indication(onoff(&s, 6, 0x8000, n(4)), t + 6000);
+    hub.on_aps_indication(onoff(&s, 7, 0x8000, n(7)), t + 7000);
+    assert_eq!(events(&mut hub, &uid), ["double", "quadruple", "many"]);
+    // Basic 0xFF02 (bogus manufacturer code): 2955 mV → 70 %, element 4
+    // the power outage count + 1.
+    let mut p = vec![0x02, 0xFF, 0x4C, 0x06, 0x00, 0x10, 0x01, 0x21];
+    p.extend_from_slice(&2955u16.to_le_bytes());
+    p.extend_from_slice(&[
+        0x21, 0xA8, 0x13, 0x24, 1, 0, 0, 0, 0, 0x21, 0x6C, 0x00, 0x20, 0x00,
+    ]);
+    let ind = s.zcl(
+        1,
+        0x0000,
+        FrameType::Global,
+        Some(0x1234),
+        0x33,
+        global::REPORT_ATTRIBUTES,
+        p,
+    );
+    hub.on_aps_indication(ind, t + 8000);
+    let u = |k: &str| format!("{BUTTON_ID}:1:{k}");
+    assert_eq!(state(&hub, &u("voltage")), json!(2955));
+    assert_eq!(state(&hub, &u("battery")), json!(70.0));
+    assert_eq!(state(&hub, &u("power_outage_count")), json!(107.0));
+}
+
+const MINI: u64 = 0x0015_8d00_00cc_0002;
+const MINI_ID: &str = "zb:00158d0000cc0002";
+
+/// WXKG11LM (`lumi_action_multistate`, `lumi_action`, `lumi_basic`):
+/// Multistate Input presentValue clicks (newer firmware) and On/Off
+/// reports (older); device temperature from Basic 0xFF01.
+#[test]
+fn wxkg11lm_multistate_and_on_off_clicks() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-wxkg11lm.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(MINI, 0x6102, LogicalType::EndDevice, false, 0x115F)
+            .endpoint(
+                1,
+                0x0104,
+                0x5F01,
+                &[0x0000, 0x0001, 0x0003, 0x0012],
+                &[0x0000, 0x0006],
+            )
+            .basic("LUMI", "lumi.remote.b1acn01", 0x03),
+    );
+    sim.join(&mut hub, MINI, T0);
+    assert_eq!(layer(&hub, MINI_ID), "aqara/wxkg11lm");
+    let s = sim.dev(MINI).clone();
+    let uid = format!("{MINI_ID}:1:action");
+    hub.drain_events();
+    let pv = |tsn, v| {
+        report(
+            &s,
+            1,
+            0x0012,
+            None,
+            tsn,
+            &[(0x0055, TypedValue::uint(ZclType::U16, v))],
+        )
+    };
+    let t = T0 + 10_000;
+    hub.on_aps_indication(pv(1, 1), t);
+    hub.on_aps_indication(pv(2, 2), t + 100);
+    hub.on_aps_indication(pv(3, 0), t + 200);
+    hub.on_aps_indication(pv(4, 255), t + 300);
+    let b = TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true)));
+    hub.on_aps_indication(onoff(&s, 5, 0, b), t + 400);
+    hub.on_aps_indication(
+        onoff(&s, 6, 0x8000, TypedValue::uint(ZclType::U8, 3)),
+        t + 500,
+    );
+    assert_eq!(
+        events(&mut hub, &uid),
+        ["single", "double", "hold", "release", "single", "triple"]
+    );
+    // Basic 0xFF01: tag 3 device temperature (int8 °C), tag 1 voltage.
+    let ff01 = TypedValue::new(
+        ZclType::OCTET_STR,
+        ZclValue::Octets(vec![0x01, 0x21, 0xB8, 0x0B, 0x03, 0x28, 0x17]),
+    );
+    hub.on_aps_indication(
+        report(&s, 1, 0x0000, Some(0x115F), 7, &[(0xFF01, ff01)]),
+        t + 600,
+    );
+    let u = |k: &str| format!("{MINI_ID}:1:{k}");
+    assert_eq!(state(&hub, &u("device_temperature")), json!(23));
+    assert_eq!(state(&hub, &u("voltage")), json!(3000));
+}
+
+const OPPLE: u64 = 0x0415_8d00_00cc_0003;
+const OPPLE_ID: &str = "zb:04158d0000cc0003";
+
+/// Aqara Opple WXCJKG13LM (6 buttons): event mode written at configure
+/// (0xFCC0 0x0009 = 1, manufacturer 0x115F); presentValue clicks per
+/// button endpoint, a hold released 5 s later unless the button reports.
+#[test]
+fn opple_switch_event_mode_buttons_and_commands() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-wxcjkg13lm.yaml")]);
+    let mut sim = Sim::default();
+    let mut dev = SimDevice::new(OPPLE, 0x6103, LogicalType::EndDevice, false, 0x115F).endpoint(
+        1,
+        0x0104,
+        0x0105,
+        &[0x0000, 0x0001, 0x0003, 0x0012, 0xFCC0],
+        &[0x0003, 0x0006, 0x0008, 0x0300],
+    );
+    for ep in 2..=6 {
+        dev = dev.endpoint(ep, 0x0104, 0x0105, &[0x0003, 0x0012], &[0x0006]);
+    }
+    sim.devices
+        .push(dev.basic("LUMI", "lumi.remote.b686opcn01", 0x03));
+    sim.join(&mut hub, OPPLE, T0);
+    assert_eq!(layer(&hub, OPPLE_ID), "aqara/wxcjkg13lm");
+    let s = sim.dev(OPPLE).clone();
+    assert!(
+        s.writes.iter().any(|w| (w.1, w.2, w.3, w.4.value.clone())
+            == (0xFCC0, 0x0009, Some(0x115F), ZclValue::Uint(1))),
+        "{:?}",
+        s.writes
+    );
+    assert!(
+        hub.entity(&format!("{OPPLE_ID}:1:operation_mode"))
+            .is_some()
+    );
+    let uid = format!("{OPPLE_ID}:1:action");
+    hub.drain_events();
+    let pv = |ep, tsn, v| {
+        report(
+            &s,
+            ep,
+            0x0012,
+            None,
+            tsn,
+            &[(0x0055, TypedValue::uint(ZclType::U16, v))],
+        )
+    };
+    let t = T0 + 10_000;
+    hub.on_aps_indication(pv(3, 1, 1), t);
+    hub.on_aps_indication(pv(6, 2, 2), t + 100);
+    hub.on_aps_indication(pv(5, 3, 0), t + 200);
+    hub.tick(t + 5199);
+    assert_eq!(
+        events(&mut hub, &uid),
+        ["button_3_single", "button_6_double", "button_5_hold"]
+    );
+    hub.tick(t + 5200);
+    assert_eq!(events(&mut hub, &uid), ["button_5_release"]);
+    // Released in time: its own release, no second one.
+    hub.on_aps_indication(pv(2, 4, 0), t + 6000);
+    hub.on_aps_indication(pv(2, 5, 255), t + 7000);
+    hub.tick(t + 20_000);
+    assert_eq!(
+        events(&mut hub, &uid),
+        ["button_2_hold", "button_2_release"]
+    );
+    // Command mode (On/Off, Level): no actions, the template writes
+    // event mode.
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 6, 0x01, &[]), t + 30_000);
+    assert!(events(&mut hub, &uid).is_empty());
+}
+
+const H1: u64 = 0x5415_8d00_00cc_0004;
+const H1_ID: &str = "zb:54158d0000cc0004";
+
+/// Aqara H1 wall switch WS-EUK03 (`lumi_specific` and settings on 0xFCC0):
+/// the 0x00F7 struct's device temperature, energy and power outage count;
+/// the button's operation mode and the flip indicator write 0xFCC0 with
+/// the Lumi manufacturer code; a Basic 0xFFF0 reset announcement is
+/// answered (`lumi_prevent_reset`).
+#[test]
+fn aqara_h1_switch_struct_settings_and_prevent_reset() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-ws-euk03.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(H1, 0x6104, LogicalType::Router, true, 0x115F)
+            .endpoint(
+                1,
+                0x0104,
+                0x0002,
+                &[
+                    0x0000, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0009, 0x0702, 0x0B04, 0xFCC0,
+                ],
+                &[0x000A, 0x0019],
+            )
+            .endpoint(41, 0x0104, 0x0100, &[0x0012], &[])
+            .basic("LUMI", "lumi.switch.n1aeu1", 0x01)
+            .attr(
+                1,
+                0x0006,
+                0x0000,
+                TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(false))),
+            ),
+    );
+    sim.join(&mut hub, H1, T0);
+    assert_eq!(layer(&hub, H1_ID), "aqara/ws-euk03");
+    let k = keys(&hub, H1_ID);
+    for want in [
+        "1:switch",
+        "1:operation_mode",
+        "1:flip_indicator_light",
+        "1:led_disabled_night",
+        "1:power_outage_memory",
+        "1:device_temperature",
+        "1:energy",
+        "1:power_outage_count",
+    ] {
+        assert!(k.iter().any(|x| x == want), "{want}: {k:?}");
+    }
+    let s = sim.dev(H1).clone();
+    // 0x00F7: tag 3 device temperature 31 °C, tag 5 outage count 9 + 1,
+    // tag 0x95 energy 1.25 kWh (single).
+    let mut f7 = vec![0x03, 0x28, 31, 0x05, 0x21, 0x0A, 0x00, 0x95, 0x39];
+    f7.extend_from_slice(&1.25f32.to_le_bytes());
+    let v = TypedValue::new(ZclType::OCTET_STR, ZclValue::Octets(f7));
+    hub.on_aps_indication(
+        report(&s, 1, 0xFCC0, Some(0x115F), 1, &[(0x00F7, v)]),
+        T0 + 1000,
+    );
+    let u = |k: &str| format!("{H1_ID}:1:{k}");
+    assert_eq!(state(&hub, &u("device_temperature")), json!(31));
+    assert_eq!(state(&hub, &u("power_outage_count")), json!(9.0));
+    assert_eq!(state(&hub, &u("energy")), json!(1.25));
+    let t = T0 + 2000;
+    hub.entity_command(
+        &u("operation_mode"),
+        "select_option",
+        &json!({"option": "decoupled"}),
+        t,
+    )
+    .unwrap();
+    hub.entity_command(&u("flip_indicator_light"), "turn_on", &json!({}), t)
+        .unwrap();
+    sim.run(&mut hub, t);
+    let w: Vec<_> = sim
+        .dev(H1)
+        .writes
+        .iter()
+        .map(|(ep, c, a, m, v)| (*ep, *c, *a, *m, v.value.clone()))
+        .collect();
+    assert!(
+        w.contains(&(1, 0xFCC0, 0x0200, Some(0x115F), ZclValue::Uint(0))),
+        "{w:?}"
+    );
+    assert!(
+        w.contains(&(1, 0xFCC0, 0x00F0, Some(0x115F), ZclValue::Uint(1))),
+        "{w:?}"
+    );
+    // The reset announcement and its answer.
+    let ask = vec![0xAA, 0x10, 0x05, 0x41, 0x87, 0x01, 0x01, 0x10, 0x00];
+    let v = TypedValue::new(ZclType::OCTET_STR, ZclValue::Octets(ask));
+    hub.on_aps_indication(
+        report(&s, 1, 0x0000, Some(0x115F), 2, &[(0xFFF0, v)]),
+        t + 1000,
+    );
+    sim.run(&mut hub, t + 1000);
+    let last = sim.dev(H1).writes.last().cloned().unwrap();
+    assert_eq!(
+        (last.1, last.2, last.3, last.4.value),
+        (
+            0x0000,
+            0xFFF0,
+            Some(0x115F),
+            ZclValue::Octets(vec![0xAA, 0x10, 0x05, 0x41, 0x47, 0x01, 0x01, 0x10, 0x01])
+        )
+    );
+}
+
+const Z1: u64 = 0x5415_8d00_00cc_0005;
+const Z1_ID: &str = "zb:54158d0000cc0005";
+
+/// Aqara Z1 double rocker ZNQBKG39LM (zhc's modern `lumiAction` and
+/// `lumiOnOff` with arguments): operation mode and relay lock per rocker,
+/// power-on behaviour; presentValue actions `<click>_<rocker>`; voltage,
+/// current and energy from 0x00F7; event mode written at configure.
+#[test]
+fn aqara_z1_switch_modern_actions_and_settings() {
+    let mut hub = hub_of(&[include_str!("fixtures/aqara-znqbkg39lm.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(
+        SimDevice::new(Z1, 0x6105, LogicalType::Router, true, 0x115F)
+            .endpoint(
+                1,
+                0x0104,
+                0x0002,
+                &[0x0000, 0x0003, 0x0006, 0x000C, 0x0012, 0xFCC0],
+                &[0x000A, 0x0019],
+            )
+            .endpoint(2, 0x0104, 0x0002, &[0x0006, 0x0012], &[])
+            .basic("LUMI", "lumi.switch.acn049", 0x01)
+            .attr(
+                1,
+                0x0006,
+                0x0000,
+                TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+            )
+            .attr(
+                2,
+                0x0006,
+                0x0000,
+                TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(false))),
+            ),
+    );
+    sim.join(&mut hub, Z1, T0);
+    assert_eq!(layer(&hub, Z1_ID), "aqara/znqbkg39lm");
+    let k = keys(&hub, Z1_ID);
+    for want in [
+        "1:switch",
+        "2:switch",
+        "1:operation_mode",
+        "2:operation_mode",
+        "1:lock_relay",
+        "2:lock_relay",
+        "1:power_on_behavior",
+        "1:voltage",
+        "1:current",
+        "1:energy",
+    ] {
+        assert!(k.iter().any(|x| x == want), "{want}: {k:?}");
+    }
+    let s = sim.dev(Z1).clone();
+    assert!(
+        s.writes.iter().any(|w| (w.1, w.2, w.3, w.4.value.clone())
+            == (0xFCC0, 0x0009, Some(0x115F), ZclValue::Uint(1))),
+        "{:?}",
+        s.writes
+    );
+    let uid = format!("{Z1_ID}:1:action");
+    hub.drain_events();
+    let pv = |ep, tsn, v| {
+        report(
+            &s,
+            ep,
+            0x0012,
+            None,
+            tsn,
+            &[(0x0055, TypedValue::uint(ZclType::U16, v))],
+        )
+    };
+    let t = T0 + 10_000;
+    for (i, (ep, v)) in [(1, 1), (2, 2), (2, 0), (2, 255)].into_iter().enumerate() {
+        hub.on_aps_indication(pv(ep, i as u8 + 1, v), t + 100 * i as u64);
+    }
+    assert_eq!(
+        events(&mut hub, &uid),
+        [
+            "single_top",
+            "double_bottom",
+            "hold_bottom",
+            "release_bottom"
+        ]
+    );
+    // 0x00F7: tag 150 voltage (0.1 V), 151 current (mA), 149 energy.
+    let mut f7 = vec![0x96, 0x23];
+    f7.extend_from_slice(&2305u32.to_le_bytes());
+    f7.extend_from_slice(&[0x97, 0x23]);
+    f7.extend_from_slice(&1500u32.to_le_bytes());
+    f7.extend_from_slice(&[0x95, 0x39]);
+    f7.extend_from_slice(&2.5f32.to_le_bytes());
+    let v = TypedValue::new(ZclType::OCTET_STR, ZclValue::Octets(f7));
+    hub.on_aps_indication(
+        report(&s, 1, 0xFCC0, Some(0x115F), 9, &[(0x00F7, v)]),
+        t + 1000,
+    );
+    let u = |k: &str| format!("{Z1_ID}:1:{k}");
+    assert_eq!(state(&hub, &u("voltage")), json!(230.5));
+    assert_eq!(state(&hub, &u("current")), json!(1.5));
+    assert_eq!(state(&hub, &u("energy")), json!(2.5));
+    // The bottom rocker decoupled: 0xFCC0 0x0200 on its endpoint.
+    let t = t + 2000;
+    hub.entity_command(
+        &format!("{Z1_ID}:2:operation_mode"),
+        "select_option",
+        &json!({"option": "decoupled"}),
+        t,
+    )
+    .unwrap();
+    sim.run(&mut hub, t);
+    let w = sim.dev(Z1).writes.last().cloned().unwrap();
+    assert_eq!(
+        (w.0, w.1, w.2, w.3, w.4.value),
+        (2, 0xFCC0, 0x0200, Some(0x115F), ZclValue::Uint(0))
+    );
 }

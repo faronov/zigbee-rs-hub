@@ -19,8 +19,8 @@
 //! - `electricity_measurement_poll`: Electrical Measurement (and Metering)
 //!   read every 60 s.
 
-use super::{Cx, K, Row, TExpr, build, h, label, tx};
-use crate::model::EventSel;
+use super::{Cx, K, Row, TExpr, build, h, lab, tx};
+use crate::model::TriggerSource;
 use crate::zcl::ZclType;
 
 const E8: ZclType = ZclType::ENUM8;
@@ -297,15 +297,12 @@ pub(crate) fn feature<'a>(cx: &mut Cx<'a>, f: &str, p: &'a serde_json::Value) ->
                 (0xFD, &[(0, "single"), (1, "double"), (2, "hold")][..]),
                 (0xFC, &[(0, "rotate_right"), (1, "rotate_left")]),
             ] {
-                let types: Vec<String> = map.iter().map(|m| m.1.to_string()).collect();
-                let ev = EventSel::Expr(tx(label(map, "", true, None)));
-                cx.on(None, 0x0006, id, ev, &types);
+                cx.on_label(on_off(id), lab(map), ("", ""), None);
             }
             cx.x.remote = true;
         }
         H_SWITCH_SCENE => {
-            let ev = EventSel::Fixed("switch_scene".into());
-            let t = cx.on(None, 0x0006, 0xFD, ev, &["switch_scene".into()]);
+            let t = cx.on_label(on_off(0xFD), Vec::new(), ("", ""), Some("switch_scene"));
             t.attrs.push(("scene".into(), tx(TExpr::Byte)));
             // The remote's On/Off and Level Control commands stay events.
             cx.x.remote = true;
@@ -352,3 +349,14 @@ const H_ON_OFF: u32 = h("tuya_on_off");
 const H_MULTI_ACTION: u32 = h("multi_action");
 const H_SWITCH_SCENE: u32 = h("switch_scene");
 const H_POLL: u32 = h("electricity_measurement_poll");
+
+/// An On/Off cluster command of the device.
+fn on_off(id: u8) -> TriggerSource {
+    TriggerSource::Cmd {
+        ep: None,
+        cluster: 0x0006,
+        id,
+        mfr: None,
+        global: false,
+    }
+}

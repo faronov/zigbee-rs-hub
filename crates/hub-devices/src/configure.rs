@@ -745,18 +745,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     mfr,
                     attr,
                     value,
-                } => {
-                    let tsn = self.next_zcl_tsn();
-                    let payload = zf::write_attributes(&[(attr, value)]).unwrap_or_default();
-                    let f = ZclFrame::command(
-                        FrameType::Global,
-                        tsn,
-                        global::WRITE_ATTRIBUTES,
-                        mfr,
-                        payload,
-                    );
-                    self.send_zcl(id, ep, cluster, f, purpose, now);
-                }
+                } => self.send_write(id, ep, cluster, mfr, &[(attr, value)], purpose, now),
                 OpKind::Cmd {
                     ep,
                     cluster,

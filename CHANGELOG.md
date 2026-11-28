@@ -29,6 +29,19 @@ install instructions and the list of merged pull requests. A pre-release
   Upgrading: a TS004F paired before keeps its mode (command or event),
   as Zigbee2MQTT does; change it with its `operation_mode` select or
   Reconfigure, or remove the device and pair it again.
+- **Xiaomi/Aqara devices run zigbee-herdsman-converters' definitions that
+  need the `lumi` vendor template**, which the hub refused before
+  ("requires template.lumi": they ran on the generic tier): battery,
+  voltage, device temperature, power outage count and the other values of
+  the Basic 0xFF01/0xFF02 and 0xFCC0 0x00F7 structs; WXKG01LM single,
+  double (and more) clicks, hold and release; mini switches', wall
+  switches' and Opple remotes' clicks (Opple: event mode written at
+  pairing, release after a long hold); the 0xFCC0 settings (operation
+  mode, power outage memory, LED, flip indicator, click mode, …); motion
+  sensors' occupancy timeout, illuminance, detection interval and
+  sensitivity; a switch's reset or leave announcement is answered as by
+  Zigbee2MQTT. 99 of the 178 generated definitions that use `lumi` run;
+  the others name what they lack (e.g. `template.lumi.lumi_light`).
 
 ### Fixes
 

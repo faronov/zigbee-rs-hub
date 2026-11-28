@@ -289,10 +289,12 @@ a parsable rest, as zhaquirks does); a ZCL-structure 0xFF02 binds by element
 index (`struct: {…, tag: 1}`: the WXKG01LM's battery voltage, mV). A
 button's reports of its On/Off client cluster fire its remote events (5.4).
 zigbee-herdsman-converters' lumi definitions need the `lumi` vendor template
-(battery and voltage from these structs, the WXKG01LM's single, double and
-hold clicks from 0x0006 0x8000 and a timer), which this firmware does not
-implement yet: they are refused (`catalog_refused`) and lumi devices run on
-the generic tier.
+(17.4: battery and voltage from these structs, the WXKG01LM's single,
+double and hold clicks from 0x0006 0x0000/0x8000 and a timer, Multistate
+Input clicks, the Opple switches' event mode, the 0xFCC0 settings); the
+hub implements the common helpers, a definition that needs others is
+refused (`catalog_refused`, `template.lumi.<helper>`) and its device runs
+on the generic tier.
 
 ### 3.2 Fingerprint
 
@@ -428,10 +430,10 @@ Precedence rules:
   `catalog/status` `missing` and `definitions/fetch` (when it would be
   chosen over what the device resolves to), and the web UI's Find
   definition says so rather than "no definition". A family vendor
-  template (`tuya`, 17.4) adds what its helpers need beyond those this
-  firmware implements as features it lacks, `template.<family>.<helper>`
+  template (`tuya`, `lumi`, 17.4) adds what its helpers need beyond those
+  this firmware implements as features it lacks, `template.<family>.<helper>`
   (an argument: `template.tuya.tuya_on_off.inchingSwitch`; an expose no
-  implemented helper gives: `template.tuya.expose.<key>`). (Hub 0.3.0 kept
+  implemented helper gives: `template.lumi.expose.<key>`). (Hub 0.3.0 kept
   Tuya TS011F plugs generic this way: their zhc definitions need the
   vendor templates `tuya` and `tuya_metering_zero_debounce`, 17.4. Hub 0.4
   implemented the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
@@ -1574,7 +1576,7 @@ without that device class or unit) and is reported in diagnostics.
   the definition instead of matching it without the date),
   `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
   `23 template.tuya_metering_zero_debounce` (implemented by the hub after
-  0.3.0; `22` after 0.4, with the helpers 17.4 lists) (vendor
+  0.3.0; `21` and `22` after 0.4, each with the helpers 17.4 lists) (vendor
   templates, C tier 17.4: `templates: [{name, params}]`, `params`
   free-form, key 21 at the top level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
@@ -3747,7 +3749,7 @@ when that comes first); a held zero current also sets the power to 0 when it is
 published; while the endpoint's On/Off is off, every Electrical
 Measurement report sets the power to 0 at once.
 
-Implemented: the family template **`tuya`** (`hub-devices`
+Implemented: the family templates **`tuya`** and **`lumi`** (`hub-devices`
 `templates/`). The generator turns a zhc helper it cannot express in v1
 into a feature of its family's template, `params: {features: {<helper>:
 <its literal arguments>}, keys: [<exposes they give>]}` (a helper used
@@ -3755,13 +3757,14 @@ twice with different arguments: `{instances: [...]}`). The hub expands
 them at resolution into ordinary entities, configure ops and triggers,
 from tables (one entity builder, one expression type), so a helper costs
 the firmware a table row more often than code; the firmware keeps the
-hashes (FNV-1a) of the helper and argument names it matches, not the
-names. What a definition's template needs beyond that — a helper, an
+hashes (FNV-1a) of the helper, argument and model names it matches, not
+the names. What a definition's template needs beyond that — a helper, an
 argument, an expose (`keys`) no implemented helper gives — is a required
-feature it lacks,
-`template.<family>.<item>` (3.3, 9.3: refused and named, the device runs
-generic or approximate). Partial definitions (no `keys`) get the helpers'
-entities.
+feature it lacks, `template.<family>.<item>` (3.3, 9.3: refused and
+named, the device runs generic or approximate). Partial definitions (no
+`keys`) get the helpers' entities and, for the struct values, battery and
+voltage (with a battery curve), device temperature and power outage
+count.
 
 - `tuya`: `tuya_on_off` (TS011F plugs, switch modules, DIN relays: zhc's
   settings on On/Off 0x8000 child lock, 0x8001 indicator or backlight
@@ -3780,15 +3783,60 @@ entities.
   reported within those 60 s, not while it is unavailable or has left).
   `multi_action` and `switch_scene` keep the generic remote events (Lidl
   FB21-001: its on/off and dimming commands).
+- `lumi`: struct values of `lumi_basic` (Basic 0xFF01; the old 0xFF02
+  structure is read as the 0xFF01 it stands for: element 1 voltage,
+  element 4 outage count) and `lumi_specific`/`lumi_electricity_meter`/
+  modern `lumi_on_off` (0xFCC0 0x00F7, manufacturer 0x115F): zhc's
+  `numericAttributes2Payload` tags for the listed exposes — voltage (tag 1
+  mV with a battery curve, else tag 150 V), battery (`battery_percent` of
+  tag 1), device temperature 3, power outage count 5 (less one), trigger
+  count 6, temperature/humidity/pressure 100–102 (/100), contact 100,
+  energy 149, current 151, power 152, consumer connected (0x0207); 0xFCC0
+  settings (operation mode 0x0009 of Opple remotes, 0x0200 of switch
+  buttons per endpoint, power outage memory 0x0201, auto off 0x0202, LED
+  off at night 0x0203, flip indicator 0x00F0, click mode 0x0125/0x0286,
+  switch type 0x000A, mode switch 0x0004, overload protection 0x020B,
+  button lock 0x0200, relay lock 0x0285, power-on behaviour 0x0517, button
+  switch mode 0x0226, detection interval 0x0102, motion sensitivity
+  0x010C, trigger indicator 0x0152), old switches' operation mode (Basic
+  0xFF22/0xFF23); motion occupancy (0xFCC0 0x0112 or Occupancy Sensing, off
+  after the detection interval — default 60 s, RTCGQ14LM 30 s — plus 2 s)
+  and illuminance; power (Analog Input), contact (On/Off), illuminance
+  (lx); actions: Multistate Input presentValue clicks by model
+  (`lumi_action_multistate`: buttons by endpoint as zhc's lookups; Opple
+  remotes `button_<n>_<click>`, released 5 s after a hold without a
+  report), On/Off reports (`lumi_action`; with arguments zhc's modern
+  `lumiAction`: presentValue lookups, `<click>_<button>` by endpoint
+  name), the WXKG01LM (press 0, release 1:
+  `single`, or `hold` after 1 s and `release` with its `duration` within
+  4 s; click count 0x8000: `double` … `quadruple`, `many`); Opple remotes'
+  commands in command mode (`lumi_action_on` … `_move_color_temp`) make no
+  action (their definitions write event mode at configure);
+  `lumi_set_event_mode` (configure writes 0xFCC0 0x0009 = 1),
+  `lumi_prevent_reset` (a Basic 0xFFF0 reset announcement is answered),
+  `lumi_prevent_leave` (0x00FC false is written true). Not implemented:
+  cubes, lights, curtains, locks, alarms, the settings old models write as
+  Basic 0xFFF0 frames, the old wall switches' hold and release
+  (QBKG03/04/11/21/22LM).
+
+Event triggers of these templates may listen to an attribute of Report
+Attributes frames (not in v1 definitions): they are matched with the
+command triggers, so such an event fires once per frame (a repeated TSN
+within 2 s is dropped), and a timed one (the WXKG01LM hold, the Opple
+release) is kept with the entity and fires from the hub's tick. Struct
+values are scaled by exact divisors (tag 150 voltage /10, 151 current
+/1000, 100–102 /100).
 
 Coverage of zhc 26.130.0's generated definitions (hub-devices test
 `template_coverage`): of the 223 using `tuya`, 50 fully translated and 8
 partial run (165 refused: Tuya lights `tuya_light` 44, the legacy EF00
-helpers, covers, breakers' value converters, thermostats). App image cost
-(8 MB S3 image, CI): ~14 KiB with the template machinery. The
+helpers, covers, breakers' value converters, thermostats); of the 178
+using `lumi`, 93 and 6 run (79 refused: lights, curtains, TRVs, presence
+sensors, locks, alarms, cubes). App image cost (8 MB S3 image):
+`tuya` with the template machinery ~14 KiB, `lumi` ~16 KiB more. The
 catalog lists the implemented helpers in `templates_available`
 (`<family>.<helper>`), so that its banks hold the definitions the released
-hub runs. Next: `lumi` (178 definitions).
+hub runs.
 
 ### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
 

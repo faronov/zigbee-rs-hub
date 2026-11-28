@@ -27,6 +27,7 @@ pub const HUB_FEATURES: &[&str] = &[
     "match.date_code",
     "template.tuya_metering_zero_debounce",
     "template.tuya",
+    "template.lumi",
 ];
 
 /// A source of definitions (bank + fetched cache, or user uploads). The
@@ -476,6 +477,9 @@ pub struct Resolution {
     pub diagnostics: Vec<String>,
     /// Template `tuya_metering_zero_debounce` ([`crate::templates`]).
     pub metering_zero_debounce: bool,
+    /// zhc `lumiPreventReset` (bit 0) and `lumiPreventLeave` (bit 1),
+    /// template `lumi` ([`crate::templates::lumi`]).
+    pub lumi_guard: u8,
     /// zhc `electricityMeasurementPoll` (template `tuya`,
     /// [`crate::templates::Expansion::poll`]).
     pub electrical_poll: u8,
@@ -530,6 +534,7 @@ fn bound_cluster(e: &EntityDef) -> Option<(u16, bool)> {
     }
     e.triggers.iter().find_map(|t| match t.source {
         TriggerSource::Cmd { cluster, .. } => Some((cluster, false)),
+        TriggerSource::Attr { cluster, .. } => Some((cluster, true)),
         TriggerSource::Tuya { .. } => Some((cl::TUYA, false)),
         TriggerSource::GpCmd(_) => None,
     })
@@ -557,7 +562,7 @@ pub fn default_endpoint(e: &EntityDef, fp: &Fingerprint) -> u8 {
         return ep;
     }
     if let Some(ep) = e.triggers.iter().find_map(|t| match t.source {
-        TriggerSource::Cmd { ep, .. } => ep,
+        TriggerSource::Cmd { ep, .. } | TriggerSource::Attr { ep, .. } => ep,
         _ => None,
     }) {
         return ep;
@@ -781,7 +786,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         });
         // Family templates (17.4): their entities first, so that the
         // definition's own replace them; generic entities they stand for go.
-        let x = crate::templates::expand(d);
+        let x = crate::templates::expand(d, fp);
         let mut remote = crate::templates::drop_generic(&mut merged, &x);
         let n = x.entities.len();
         for (i, e) in x.entities.iter().chain(&d.entities).enumerate() {
@@ -812,6 +817,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         }
         res.configure.extend(d.configure.iter().cloned());
         res.configure.extend(x.configure.iter().cloned());
+        res.lumi_guard |= x.lumi_guard;
         res.electrical_poll |= x.poll;
         res.ignore.extend(d.ignore.iter().copied());
         if d.tuya.is_some() {

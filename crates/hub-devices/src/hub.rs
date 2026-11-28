@@ -1033,6 +1033,24 @@ impl<T: ZigbeeTransport> Hub<T> {
         Ok(rid)
     }
 
+    /// Sends Write Attributes to a device endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_write(
+        &mut self,
+        id: &str,
+        ep: u8,
+        cluster: u16,
+        mfr: Option<u16>,
+        recs: &[(u16, TypedValue)],
+        purpose: Purpose,
+        now: Millis,
+    ) {
+        let tsn = self.next_zcl_tsn();
+        let p = zf::write_attributes(recs).unwrap_or_default();
+        let f = ZclFrame::command(FrameType::Global, tsn, global::WRITE_ATTRIBUTES, mfr, p);
+        self.send_zcl(id, ep, cluster, f, purpose, now);
+    }
+
     /// Sends a ZCL frame to a device endpoint.
     pub(crate) fn send_zcl(
         &mut self,
@@ -2013,7 +2031,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
             (FrameType::Global, global::REPORT_ATTRIBUTES) => {
-                let recs = zf::parse_report_lenient(ind.cluster, &frame.payload);
+                let mut recs = zf::parse_report_lenient(ind.cluster, &frame.payload);
+                if ind.cluster == cl::BASIC {
+                    lumi::ff02_as_ff01(&mut recs);
+                }
                 let mfr = lumi::report_mfr(ind.cluster, h.mfr, &recs);
                 let mut structural = false;
                 if let Some(d) = self.devices.get_mut(id) {
@@ -2033,9 +2054,12 @@ impl<T: ZigbeeTransport> Hub<T> {
                     structural |= self.learn_basic(id, &recs, false, now);
                 }
                 self.dispatch_attrs(id, ep, ind.cluster, mfr, &recs, true, now);
+                // Template triggers on reports (17.4).
+                self.dispatch_command(id, ep, ind.cluster, &frame, &recs, now);
                 if ind.cluster == cl::ON_OFF {
                     self.client_on_off(id, ep, h.tsn, &recs, now);
                 }
+                self.lumi_guard(id, ind.cluster, &recs, now);
                 if structural {
                     self.maybe_reresolve(id, now);
                 }
@@ -2161,7 +2185,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     _ => false,
                 };
                 if !handled {
-                    self.dispatch_command(id, ep, ind.cluster, &frame, now);
+                    self.dispatch_command(id, ep, ind.cluster, &frame, &[], now);
                 }
             }
         }
@@ -2844,8 +2868,33 @@ impl<T: ZigbeeTransport> Hub<T> {
         false
     }
 
-    fn dispatch_command(&mut self, id: &str, ep: u8, cluster: u16, frame: &ZclFrame, now: Millis) {
+    /// The triggers of a command, or the template triggers of a Report
+    /// Attributes frame (its records `recs`, [`TriggerSource::Attr`]) with
+    /// their timers.
+    pub(crate) fn dispatch_command(
+        &mut self,
+        id: &str,
+        ep: u8,
+        cluster: u16,
+        frame: &ZclFrame,
+        recs: &[(u16, TypedValue)],
+        now: Millis,
+    ) {
         let h = frame.header;
+        let report = h.frame_type == FrameType::Global && h.cmd == global::REPORT_ATTRIBUTES;
+        let listens = |s: &TriggerSource| {
+            matches!(*s, TriggerSource::Attr { cluster: c, ep: e, .. }
+                if c == cluster && e.is_none_or(|e| e == ep))
+        };
+        if report
+            && !self.devices.get(id).is_some_and(|d| {
+                d.entities
+                    .iter()
+                    .any(|e| e.r.def.triggers.iter().any(|t| listens(&t.source)))
+            })
+        {
+            return;
+        }
         if self.duplicate(id, ep, cluster, &h, now) {
             return;
         }
@@ -2865,40 +2914,83 @@ impl<T: ZigbeeTransport> Hub<T> {
                     continue;
                 }
                 for t in &e.r.def.triggers {
-                    let TriggerSource::Cmd {
-                        ep: tep,
-                        cluster: tc,
-                        id: tid,
-                        mfr,
-                        global,
-                    } = t.source
-                    else {
-                        continue;
+                    let mut x = Value::Null;
+                    let timing = match t.source {
+                        TriggerSource::Cmd {
+                            ep: tep,
+                            cluster: tc,
+                            id: tid,
+                            mfr,
+                            global,
+                        } if !report => {
+                            if tc != cluster
+                                || tid != h.cmd
+                                || tep.is_some_and(|x| x != ep)
+                                || mfr.is_some_and(|m| h.mfr != Some(m))
+                                || global != (h.frame_type == FrameType::Global)
+                            {
+                                continue;
+                            }
+                            AttrTiming::Now
+                        }
+                        TriggerSource::Attr { attr, timing, .. }
+                            if report && listens(&t.source) =>
+                        {
+                            let Some((_, v)) = recs.iter().find(|r| r.0 == attr) else {
+                                continue;
+                            };
+                            x = values::from_zcl(&v.value);
+                            timing
+                        }
+                        _ => continue,
                     };
-                    if tc != cluster
-                        || tid != h.cmd
-                        || tep.is_some_and(|x| x != ep)
-                        || mfr.is_some_and(|m| h.mfr != Some(m))
-                        || global != (h.frame_type == FrameType::Global)
-                    {
-                        continue;
-                    }
-                    if let Some(ev) =
-                        eval_trigger(t, &frame.payload, e.state.last_event.as_deref(), &env)
-                    {
+                    let last = e.state.last_event.as_deref();
+                    if let Some(ev) = eval_trigger(t, x, &frame.payload, last, &env) {
                         let mut attrs = ev.1;
                         attrs.insert("endpoint".into(), ep.into());
-                        fired.push((i, ev.0, attrs));
+                        fired.push((i, ev.0, attrs, timing));
                         break;
                     }
                 }
             }
         }
-        if fired.is_empty() {
+        if fired.is_empty() && !report {
             d.diag.count("unhandled_command");
         }
-        for (i, et, attrs) in fired {
-            self.fire_event(id, i, et, attrs, now);
+        // Timed events: a timer is the entity's `held` event.
+        for (i, et, mut attrs, timing) in fired {
+            let Some(d) = self.devices.get_mut(id) else {
+                return;
+            };
+            let s = &mut d.entities[i].state;
+            let et = match timing {
+                AttrTiming::Now => Some(et),
+                AttrTiming::HoldRelease => {
+                    s.held = et.strip_suffix("_hold").map(|b| {
+                        let r = crate::templates::cat(b, "_release", "");
+                        (now + 5000, Value::Str(r))
+                    });
+                    Some(et)
+                }
+                AttrTiming::PressRelease if et == "hold" => {
+                    s.held = Some((now + 1000, Value::Str(et)));
+                    None
+                }
+                AttrTiming::PressRelease => {
+                    let ms = now.saturating_sub(s.last_reported.unwrap_or(now));
+                    if s.held.take().is_some() {
+                        Some(et)
+                    } else if s.last_event.as_deref() == Some("hold") && ms <= 4000 {
+                        attrs.insert("duration".into(), ms.into());
+                        Some("release".into())
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(et) = et {
+                self.fire_event(id, i, et, attrs, now);
+            }
         }
     }
 
@@ -3144,20 +3236,31 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
-    /// Held zero readings (template tuya_metering_zero_debounce) that are
-    /// due: from the tick, and before a frame of the device (the tick is
-    /// 1 s apart).
+    /// Held zero readings (template tuya_metering_zero_debounce) and timed
+    /// events (family templates) that are due: from the tick, and before
+    /// a frame of the device (the tick is 1 s apart).
     fn fire_due(&mut self, id: &str, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
         let mut touched = Vec::new();
+        let mut events = Vec::new();
         for (i, v) in crate::templates::due(d, now) {
-            set_value(d, i, None, v, now);
-            touched.push(d.entities[i].uid.clone());
+            match v {
+                Value::Str(et) if d.entities[i].r.def.platform == Platform::Event => {
+                    events.push((i, et));
+                }
+                v => {
+                    set_value(d, i, None, v, now);
+                    touched.push(d.entities[i].uid.clone());
+                }
+            }
         }
         for u in touched {
             self.publish_state(&u);
+        }
+        for (i, et) in events {
+            self.fire_event(id, i, et, Map::new(), now);
         }
     }
 
@@ -3876,12 +3979,13 @@ pub(crate) fn set_value(d: &mut Device, i: usize, part: Option<&str>, v: Value, 
 /// Evaluates a trigger: `when`, `event`, `attrs`.
 pub(crate) fn eval_trigger(
     t: &Trigger,
+    x: Value,
     payload: &[u8],
     last: Option<&str>,
     env: &dyn ExprEnv,
 ) -> Option<(String, Map<String, J>)> {
     let ctx = ExprCtx {
-        x: Value::Null,
+        x,
         payload: Some(payload),
         last,
         env,

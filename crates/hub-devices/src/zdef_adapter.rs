@@ -687,14 +687,15 @@ pub fn canonical_feature(name: &str) -> String {
 }
 
 /// The `zdef` features this engine implements: all of v1 (not `wasm`) and
-/// the vendor templates (17.4) `tuya_metering_zero_debounce` and `tuya`
-/// ([`crate::templates`]; what a family template needs beyond the helpers
-/// implemented is a required `template.<family>.<item>`).
+/// the vendor templates (17.4) `tuya_metering_zero_debounce`, `tuya` and
+/// `lumi` ([`crate::templates`]; what a family template needs beyond the
+/// helpers implemented is a required `template.<family>.<item>`).
 pub fn hub_features() -> zdef::HubFeatures {
     use zdef::enums::TemplateName as T;
     zdef::HubFeatures::v1()
         .with(T::TuyaMeteringZeroDebounce.feature())
         .with(T::Tuya.feature())
+        .with(T::Lumi.feature())
 }
 
 /// The hub's load path for CBOR (catalog, uploads, fetched definitions,
