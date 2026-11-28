@@ -608,9 +608,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                     if t.source != TriggerSource::GpCmd(f.command_id) {
                         continue;
                     }
-                    if let Some(ev) =
-                        eval_trigger(t, &f.payload, e.state.last_event.as_deref(), &env)
-                    {
+                    if let Some(ev) = eval_trigger(
+                        t,
+                        Value::Null,
+                        &f.payload,
+                        e.state.last_event.as_deref(),
+                        &env,
+                    ) {
                         fired.push((i, ev.0, ev.1));
                         break;
                     }

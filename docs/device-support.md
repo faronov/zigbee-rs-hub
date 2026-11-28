@@ -289,10 +289,12 @@ a parsable rest, as zhaquirks does); a ZCL-structure 0xFF02 binds by element
 index (`struct: {…, tag: 1}`: the WXKG01LM's battery voltage, mV). A
 button's reports of its On/Off client cluster fire its remote events (5.4).
 zigbee-herdsman-converters' lumi definitions need the `lumi` vendor template
-(battery and voltage from these structs, the WXKG01LM's single, double and
-hold clicks from 0x0006 0x8000 and a timer), which this firmware does not
-implement yet: they are refused (`catalog_refused`) and lumi devices run on
-the generic tier.
+(17.4: battery and voltage from these structs, the WXKG01LM's single,
+double and hold clicks from 0x0006 0x0000/0x8000 and a timer, Multistate
+Input clicks, the Opple switches' event mode, the 0xFCC0 settings); the
+hub implements the common helpers, a definition that needs others is
+refused (`catalog_refused`, `template.lumi.<helper>`) and its device runs
+on the generic tier.
 
 ### 3.2 Fingerprint
 
@@ -427,14 +429,19 @@ Precedence rules:
   names it instead: `catalog_refused` in `devices/diagnostics`, `refused` in
   `catalog/status` `missing` and `definitions/fetch` (when it would be
   chosen over what the device resolves to), and the web UI's Find
-  definition says so rather than "no definition". (Hub 0.3.0 kept Tuya
-  TS011F plugs generic this way: their zhc definitions need the vendor
-  templates `tuya` and `tuya_metering_zero_debounce`, 17.4. The hub now
-  implements the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
-  resolves; where zhc picks a TS011F definition that needs `tuya`
-  (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays), the hub uses
-  `TS011F_plug_1`, the `zigbeeModel` match, and names the other. Such a
-  fallback is marked: the device record's `definition_approximate`
+  definition says so rather than "no definition". A family vendor
+  template (`tuya`, `lumi`, 17.4) adds what its helpers need beyond those
+  this firmware implements as features it lacks, `template.<family>.<helper>`
+  (an argument: `template.tuya.tuya_on_off.inchingSwitch`; an expose no
+  implemented helper gives: `template.lumi.expose.<key>`). (Hub 0.3.0 kept
+  Tuya TS011F plugs generic this way: their zhc definitions need the
+  vendor templates `tuya` and `tuya_metering_zero_debounce`, 17.4. Hub 0.4
+  implemented the latter, so `TS011F_plug_1`, zhc's `zigbeeModel` choice,
+  resolved, and where zhc picks a TS011F definition that needs `tuya`
+  (`TS011F_plug_2`/`_3`, multi-gang strips, DIN relays) it used
+  `TS011F_plug_1` and named the other; with `tuya` they run as zhc picks
+  them. Where the better definition still needs something this firmware
+  lacks, the fallback is marked: the device record's `definition_approximate`
   `{better: "<id> (<vendor> <model>)", needs: [features]}` (also in
   `devices/diagnostics`; the web UI shows an "approx." badge explaining
   that Zigbee2MQTT uses the other definition, which needs the feature,
@@ -471,6 +478,20 @@ changed, the self-description hash changed, or the user asks. Effects:
   on several endpoints (herdsman endpoint maps name every endpoint);
 - configure (binds, reporting) is redone only if the configure hash (the
   canonical CBOR of all binds, reporting configs and configure ops) changed.
+  The queue of configure ops is not stored: a device restored at boot
+  rebuilds its ops at its first frame and sends those without a result
+  (nothing done is repeated).
+  A device already configured under a definition (every op of it has a
+  result), or paired by an earlier build (its record's `paired`, the
+  templates' revision when it joined, differs; 0 for one saved before
+  this field, or imported), that gets another resolution (a new
+  definition, a firmware that now runs one) keeps the attributes a
+  setting entity controls (select, switch, number): their configure
+  writes that were never sent — a remote's operation mode — are counted
+  done, not sent, as Zigbee2MQTT writes them at pairing only. A device paired by this build whose first definition
+  comes after its interview (fetched in a shard) sends them, as do
+  `devices/reconfigure` and a new pairing (after removing the device); a
+  write that failed is retried, also when reporting settings change.
 
 ## 4. Entity model and the Home Assistant mapping
 
@@ -734,7 +755,8 @@ For battery devices the hub caps `max` at the device's check-in or 6 h,
 whichever is shorter, so availability (4.6) has a signal. A failed Configure
 Reporting (UNSUPPORTED_ATTRIBUTE, UNREPORTABLE_ATTRIBUTE) is recorded and the
 entity is polled instead only if it is a primary measurement on a mains
-device (every `max` seconds); sleepy devices are never polled.
+device (every `max` seconds); sleepy devices are never polled, nor a device
+while it is unavailable or has left (its next frame resumes the polls).
 
 **User settings.** The table is editable per attribute class (global
 defaults), and the reporting of any ZCL-bound value of an entity can be
@@ -1535,8 +1557,9 @@ without that device class or unit) and is reported in diagnostics.
   bank's string table, encoded like the shared-item references of "Packed
   CBOR" (draft-ietf-cbor-packed): simple value *n* for *n* < 16, tag 6 with
   *n* − 16 otherwise. The bank format version pins this encoding, whatever
-  the draft's final numbering. Catalog form is derived mechanically from the
-  standalone form and is never hashed.
+  the draft's final numbering. A vendor template's `params` (key 158,
+  free-form, 17.4) stay as they are. Catalog form is derived mechanically
+  from the standalone form and is never hashed.
 
 ### 8.5 Versioning
 
@@ -1553,9 +1576,9 @@ without that device class or unit) and is reported in diagnostics.
   the definition instead of matching it without the date),
   `20 template.hue_light`, `21 template.lumi`, `22 template.tuya`,
   `23 template.tuya_metering_zero_debounce` (implemented by the hub after
-  0.3.0) (vendor templates, C tier 17.4:
-  `templates: [{name, params}]`, `params` free-form, key 21 at the top
-  level), `60 wasm` (reserved). The compiler computes it from what the definition
+  0.3.0; `21` and `22` after 0.4, each with the helpers 17.4 lists) (vendor
+  templates, C tier 17.4: `templates: [{name, params}]`, `params`
+  free-form, key 21 at the top level), `60 wasm` (reserved). The compiler computes it from what the definition
   uses and merges names written in the source; the hub rejects a definition
   that uses a feature it does not list. A hub lacking any listed feature
   treats the definition as non-matching (3.3); a code it does not know at
@@ -1778,7 +1801,9 @@ GET {base}/bank-8m.zdb            bank for 8 MB hubs
   shard uploaded for another device that shares a key checks that shard
   only); a device with refusals is checked again under a newer catalog —
   and after a restart on a firmware that gained their features, which
-  drops those (what it can run now is fetched) — until every one of its
+  drops those (what it can run now is fetched; a family template's
+  `template.<family>.<item>` when the firmware's template code differs,
+  `templates::REVISION` saved with the refusal) — until every one of its
   shards is: `missing` lists it with `recheck: true` also while it has a
   definition (the web UI does not count those as "without definition").
   `missing` lists a device's shards not yet checked under the installed
@@ -3712,16 +3737,115 @@ After that, the coverage report's ranking decides (Ledvance light 105,
 IKEA 89 + 66 are next).
 
 Implemented: **`tuya_metering_zero_debounce`** (`hub-devices`
-`templates.rs`; zhc `tuya.fz.TS011F_electrical_measurement`, used by
+`templates/mod.rs`; zhc `tuya.fz.TS011F_electrical_measurement`, used by
 `TS011F_plug_1` — zhc's choice for any TS011F without a more specific
 fingerprint — and `TS011F_with_threshold`; no parameters). A zero power,
 current or voltage reading (Electrical Measurement 0x050B, 0x0508, 0x0505
 on the entity's endpoint) is held for twice the attribute's minimum
 reporting interval plus one second (5 s without a reporting record, so
 11 s) and published only if no other reading of that attribute came
-meanwhile; a held zero current also sets the power to 0 when it is
+meanwhile (from the hub's 1 s tick, or before the device's next frame
+when that comes first); a held zero current also sets the power to 0 when it is
 published; while the endpoint's On/Off is off, every Electrical
 Measurement report sets the power to 0 at once.
+
+Implemented: the family templates **`tuya`** and **`lumi`** (`hub-devices`
+`templates/`). The generator turns a zhc helper it cannot express in v1
+into a feature of its family's template, `params: {features: {<helper>:
+<its literal arguments>}, keys: [<exposes they give>]}` (a helper used
+twice with different arguments: `{instances: [...]}`). The hub expands
+them at resolution into ordinary entities, configure ops and triggers,
+from tables (one entity builder, one expression type), so a helper costs
+the firmware a table row more often than code; the firmware keeps the
+hashes (FNV-1a) of the helper, argument and model names it matches, not
+the names. What a definition's template needs beyond that — a helper, an
+argument, an expose (`keys`) no implemented helper gives — is a required
+feature it lacks, `template.<family>.<item>` (3.3, 9.3: refused and
+named, the device runs generic or approximate). Partial definitions (no
+`keys`) get the helpers' entities and, for the struct values, battery and
+voltage (with a battery curve), device temperature and power outage
+count.
+
+- `tuya`: `tuya_on_off` (TS011F plugs, switch modules, DIN relays: zhc's
+  settings on On/Off 0x8000 child lock, 0x8001 indicator or backlight
+  mode, 0x8002 power-on behaviour or outage memory, 0x5000 backlight
+  switch, Tuya 0xE001 0xD010 per-endpoint power-on behaviour, 0xD020 switch
+  mode, 0xD030 switch type, 0xEF00 0x4002; the generic ZCL power-on
+  behaviour 0x4003 gives way; `onOffCountdown`: `countdown` per endpoint,
+  On/Off 0x4001 in s, set with On With Timed Off 0x42; not
+  `inchingSwitch`), `operation_mode` (TS004F: On/Off 0x8004 command or
+  event; in command mode the generic remote events stay on the `action`
+  entity), `multi_action` (0xFD single, double, hold; 0xFC rotate right,
+  left), `switch_scene` (0xFD with the scene), `tuya_led_indicator`,
+  `relay_din_led_indicator` (0x8001), `electricity_measurement_poll`
+  (Electrical Measurement voltage, current, power and/or Metering
+  summation read on endpoint 1 every 60 s, less the attributes the device
+  reported within those 60 s, not while it is unavailable or has left).
+  `multi_action` and `switch_scene` keep the generic remote events (Lidl
+  FB21-001: its on/off and dimming commands).
+- `lumi`: struct values of `lumi_basic` (Basic 0xFF01; the old 0xFF02
+  structure is read as the 0xFF01 it stands for: element 1 voltage,
+  element 4 outage count) and `lumi_specific`/`lumi_electricity_meter`/
+  modern `lumi_on_off` (0xFCC0 0x00F7, manufacturer 0x115F; with both
+  `lumi_basic` and one of these, as in zhc, both structs give the values):
+  zhc's
+  `numericAttributes2Payload` tags for the listed exposes — voltage (tag 1
+  mV with a battery curve, else tag 150 V), battery (`battery_percent` of
+  tag 1), device temperature 3, power outage count 5 (less one), trigger
+  count 6, temperature/humidity/pressure 100–102 (/100), contact 100,
+  energy 149, current 151, power 152, consumer connected (0x0207); 0xFCC0
+  settings (operation mode 0x0009 of Opple remotes, 0x0200 of switch
+  buttons per endpoint, power outage memory 0x0201, auto off 0x0202, LED
+  off at night 0x0203, flip indicator 0x00F0, click mode 0x0125/0x0286,
+  switch type 0x000A, mode switch 0x0004, overload protection 0x020B,
+  button lock 0x0200, relay lock 0x0285, power-on behaviour 0x0517, button
+  switch mode 0x0226, detection interval 0x0102, motion sensitivity
+  0x010C, trigger indicator 0x0152), old switches' operation mode (Basic
+  0xFF22/0xFF23); motion occupancy (0xFCC0 0x0112 or Occupancy Sensing, off
+  after the detection interval — default 60 s, RTCGQ14LM 30 s — plus 2 s)
+  and illuminance; power (Analog Input), contact (On/Off), illuminance
+  (lx); actions: Multistate Input presentValue clicks by model
+  (`lumi_action_multistate`: buttons by endpoint as zhc's lookups; Opple
+  remotes `button_<n>_<click>` by the frame's endpoint, 1 to the model's
+  button count — WXKG04LM 3, WXCJKG11LM 2, WXCJKG12LM 4, WXCJKG13LM 6 —
+  whatever endpoints the interview got, released 5 s after a hold without
+  a report), On/Off reports (`lumi_action`; with arguments zhc's modern
+  `lumiAction`: presentValue lookups, `<click>_<button>` by endpoint
+  name), the WXKG01LM (press 0, release 1:
+  `single`, or `hold` after 1 s and `release` with its `duration` within
+  4 s; click count 0x8000: `double` … `quadruple`, `many`); Opple remotes'
+  commands in command mode (`lumi_action_on` … `_move_color_temp`) make no
+  action (their definitions write event mode at configure);
+  `lumi_set_event_mode` (configure writes 0xFCC0 0x0009 = 1),
+  `lumi_prevent_reset` (a Basic 0xFFF0 reset announcement is answered),
+  `lumi_prevent_leave` (0x00FC false is written true). Not implemented:
+  cubes, lights, curtains, locks, alarms, the settings old models write as
+  Basic 0xFFF0 frames, the old wall switches' hold and release
+  (QBKG03/04/11/21/22LM).
+
+Event triggers of these templates may listen to an attribute of Report
+Attributes frames (not in v1 definitions): they are matched with the
+command triggers, so such an event fires once per frame (a repeated TSN
+within 2 s is dropped), and a timed one (the WXKG01LM hold, the Opple
+release) is kept with the entity and fires from the hub's tick, stamped
+with its due time, or before the device's next frame if that comes
+first (a WXKG01LM released 1.5 s after its press between two ticks gives
+`hold` and `release`, not `single`). Struct
+values are scaled by exact divisors (tag 150 voltage /10, 151 current
+/1000, 100–102 /100).
+
+Coverage of zhc 26.130.0's generated definitions (hub-devices test
+`template_coverage`): of the 223 using `tuya`, 50 fully translated and 8
+partial run (165 refused: Tuya lights `tuya_light` 44, the legacy EF00
+helpers, covers, breakers' value converters, thermostats); of the 178
+using `lumi`, 93 and 6 run (79 refused: lights, curtains, TRVs, presence
+sensors, locks, alarms, cubes). App image cost (8 MB S3 image):
+`tuya` with the template machinery ~14 KiB, `lumi` ~16 KiB more. The
+catalog lists the implemented helpers in `templates_available`
+(`<family>.<helper>`), so that its banks hold the definitions the released
+hub runs. A refusal of `template.tuya.<item>` or `template.lumi.<item>`
+saved by a hub whose templates had another revision (helper, argument and
+model names, by hash) is checked again on restore (9.3).
 
 ### 17.5 Generator results (herdsman-gen, zhc 26.130.0)
 

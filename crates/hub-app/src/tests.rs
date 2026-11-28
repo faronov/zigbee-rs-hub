@@ -683,6 +683,9 @@ impl crate::SessionSink for PieceSink {
 fn snapshot_waits_for_the_sink_and_later_frames_wait_for_the_snapshot() {
     let r = rig(Store::volatile());
     let app = App::start(r.ncp.clone(), cfg());
+    // Started: its own events (`hub_updated`, `network_state`) come before
+    // the subscription, not between it and the request below.
+    assert!(app.wait(T, |s| s.endpoint_registered && s.session_up));
     let (tx, rx) = mpsc::channel();
     let busy = Arc::new(std::sync::atomic::AtomicUsize::new(1));
     let sid = app.connect(Box::new(PieceSink { tx, busy: busy.clone(), held: 64 * 1024, closed: Arc::default() })).unwrap();
@@ -712,9 +715,17 @@ fn snapshot_waits_for_the_sink_and_later_frames_wait_for_the_snapshot() {
     assert!(pieces > 2, "{pieces} pieces");
     let snap: J = serde_json::from_str(&text).unwrap();
     assert_eq!(snap["event"]["topic"], "snapshot");
-    let (info, flags) = next();
-    assert!(flags.is_none());
-    assert_eq!(serde_json::from_str::<J>(&info).unwrap()["id"], 2);
+    // Whole frames after the snapshot: events of the subscription that
+    // came meanwhile, then the result.
+    let info = loop {
+        let (f, flags) = next();
+        assert!(flags.is_none());
+        let f: J = serde_json::from_str(&f).unwrap();
+        if f["type"] != "event" {
+            break f;
+        }
+    };
+    assert_eq!(info["id"], 2);
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

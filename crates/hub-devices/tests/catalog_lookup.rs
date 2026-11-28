@@ -176,9 +176,9 @@ fn picked(r: &Resolution) -> (Option<&str>, Option<&str>) {
 /// the published catalog-2026.11.24 (the shards it asks for, unchanged):
 /// the in-memory matcher (every record of those shards, the parity test's
 /// view) and the hub's index path (keys → shard numbers → `shard_matches`)
-/// find the same and pick zhc's definition and white label once the hub
-/// has the features, and agree with this firmware's features (hub 0.3.0
-/// without the template: generic only).
+/// find the same and pick zhc's definition and white label, with every
+/// feature and with this firmware's (hub 0.3.0 without the templates:
+/// generic only; 0.4 with `tuya_metering_zero_debounce` only: plug_1).
 #[test]
 fn published_catalog_gjnozsaz_ts011f() {
     let dir = format!(
@@ -239,19 +239,16 @@ fn published_catalog_gjnozsaz_ts011f() {
             (Some(want.0), Some(want.1)),
             "app {app}"
         );
-        // With this firmware's features both agree as well: TS011F_plug_1
-        // (template tuya_metering_zero_debounce); TS011F_plug_3 needs
-        // template tuya and is skipped as if it did not match (3.3).
+        // With this firmware's features both agree as well, on zhc's
+        // choice: TS011F_plug_1 (template tuya_metering_zero_debounce) and
+        // TS011F_plug_3 (template tuya; hub 0.4 skipped it as if it did not
+        // match, 3.3, and ran TS011F_plug_1).
         let on_hub = resolve_with(&mem, &fp, HUB_FEATURES);
         assert_eq!(
             picked(&resolve_with(&found, &fp, HUB_FEATURES)),
             picked(&on_hub),
             "app {app}"
         );
-        assert_eq!(
-            picked(&on_hub),
-            (Some("TS011F_plug_1"), Some("NAS-WR01B")),
-            "app {app}"
-        );
+        assert_eq!(picked(&on_hub), (Some(want.0), Some(want.1)), "app {app}");
     }
 }

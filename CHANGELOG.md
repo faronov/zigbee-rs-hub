@@ -6,6 +6,56 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
+## Unreleased
+
+### New
+
+- **Tuya devices run zigbee-herdsman-converters' definitions that need the
+  `tuya` vendor template**, which the hub refused before ("requires
+  template.tuya": the device stayed generic or ran TS011F_plug_1): TS011F
+  plugs (`TS011F_plug_2`, `_3`), multi-gang strips, switch modules and DIN
+  relays with child lock, indicator mode, power-on behaviour or outage
+  memory, switch type and a countdown per switch (On With Timed Off);
+  TS004F remotes and knobs such as HOBEIAN ZG-101ZD and Moes
+  ERS-10TZBVB-AA (operation mode command/event; single, double, hold and
+  rotation actions, and in command mode the Level Control steps); scene
+  remotes such as the Lidl FB21-001 (scene buttons besides their on/off
+  and dimming events); the measurements of relays and plugs whose
+  definition asks for it (TS011F_din_smart_relay_polling; TS011F_plug_3's
+  voltage, current and power with the next catalog) read every 60 s while
+  they are reachable, less what the device reported meanwhile. 58 of
+  the 223 generated definitions that use `tuya` run; the others name what
+  they lack (e.g. `template.tuya.tuya_light`) and fall back as before.
+  Upgrading: a TS004F paired before keeps its mode (command or event),
+  as Zigbee2MQTT does; change it with its `operation_mode` select or
+  Reconfigure, or remove the device and pair it again.
+- **Xiaomi/Aqara devices run zigbee-herdsman-converters' definitions that
+  need the `lumi` vendor template**, which the hub refused before
+  ("requires template.lumi": they ran on the generic tier): battery,
+  voltage, device temperature, power outage count and the other values of
+  the Basic 0xFF01/0xFF02 and 0xFCC0 0x00F7 structs (both read for
+  definitions with both, e.g. WXKG04LM); WXKG01LM single,
+  double (and more) clicks, hold and release (a hold released between two
+  ticks of the hub is still a hold); mini switches', wall switches' and
+  Opple remotes' clicks (Opple: event mode written at pairing, release
+  after a long hold, every button of the model even when the interview
+  got only some endpoints); the 0xFCC0 settings (operation
+  mode, power outage memory, LED, flip indicator, click mode, …); motion
+  sensors' occupancy timeout, illuminance, detection interval and
+  sensitivity; a switch's reset or leave announcement is answered as by
+  Zigbee2MQTT. 99 of the 178 generated definitions that use `lumi` run;
+  the others name what they lack (e.g. `template.lumi.lumi_light`).
+  Upgrading: an Opple remote paired before keeps its mode (command or
+  event); change it with its `operation_mode` select or Reconfigure, or
+  remove the device and pair it again.
+
+### Fixes
+
+- **A TS011F plug's zero power, current or voltage could be lost** (template
+  `tuya_metering_zero_debounce`): a zero held back the 11 s was dropped
+  when the next reading came after those 11 s but before the hub's next
+  1 s tick. It is published first now.
+
 ## 0.4.2 (2026-11-28)
 
 A fix release for 0.4.1, with the Dongle Max's MG24 firmware update and

@@ -26,6 +26,8 @@ pub const HUB_FEATURES: &[&str] = &[
     "codec.bitmap_flags",
     "match.date_code",
     "template.tuya_metering_zero_debounce",
+    "template.tuya",
+    "template.lumi",
 ];
 
 /// A source of definitions (bank + fetched cache, or user uploads). The
@@ -475,6 +477,11 @@ pub struct Resolution {
     pub diagnostics: Vec<String>,
     /// Template `tuya_metering_zero_debounce` ([`crate::templates`]).
     pub metering_zero_debounce: bool,
+    /// Template `lumi` ([`crate::templates::Expansion::lumi`]).
+    pub lumi: u8,
+    /// zhc `electricityMeasurementPoll` (template `tuya`,
+    /// [`crate::templates::Expansion::poll`]).
+    pub electrical_poll: u8,
 }
 
 impl Resolution {
@@ -526,6 +533,7 @@ fn bound_cluster(e: &EntityDef) -> Option<(u16, bool)> {
     }
     e.triggers.iter().find_map(|t| match t.source {
         TriggerSource::Cmd { cluster, .. } => Some((cluster, false)),
+        TriggerSource::Attr { cluster, .. } => Some((cluster, true)),
         TriggerSource::Tuya { .. } => Some((cl::TUYA, false)),
         TriggerSource::GpCmd(_) => None,
     })
@@ -553,7 +561,7 @@ pub fn default_endpoint(e: &EntityDef, fp: &Fingerprint) -> u8 {
         return ep;
     }
     if let Some(ep) = e.triggers.iter().find_map(|t| match t.source {
-        TriggerSource::Cmd { ep, .. } => ep,
+        TriggerSource::Cmd { ep, .. } | TriggerSource::Attr { ep, .. } => ep,
         _ => None,
     }) {
         return ep;
@@ -775,7 +783,12 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             partial: d.partial(),
             priority: d.priority,
         });
-        for e in &d.entities {
+        // Family templates (17.4): their entities first, so that the
+        // definition's own replace them; generic entities they stand for go.
+        let x = crate::templates::expand(d);
+        let mut remote = crate::templates::drop_generic(&mut merged, &x);
+        let n = x.entities.len();
+        for (i, e) in x.entities.iter().chain(&d.entities).enumerate() {
             if let Some(p) = &e.present_if {
                 let v = p.eval(&ExprCtx::with_x(Value::Null, &env));
                 if v.truthy() != Some(true) {
@@ -785,6 +798,11 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             let ep = default_endpoint(e, fp);
             let mut def = e.clone();
             def.ep = Some(ep);
+            if def.key == "action" && def.platform == Platform::Event {
+                if let Some(g) = remote.take() {
+                    crate::templates::with_remote(&mut def, g, i < n);
+                }
+            }
             put(
                 &mut merged,
                 &mut order,
@@ -797,6 +815,9 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
             );
         }
         res.configure.extend(d.configure.iter().cloned());
+        res.configure.extend(x.configure.iter().cloned());
+        res.lumi |= x.lumi;
+        res.electrical_poll |= x.poll;
         res.ignore.extend(d.ignore.iter().copied());
         if d.tuya.is_some() {
             res.tuya.clone_from(&d.tuya);
@@ -807,7 +828,7 @@ pub fn resolve(input: &ResolveInput<'_>) -> Resolution {
         res.metering_zero_debounce |= d
             .templates
             .iter()
-            .any(|t| t == crate::templates::METERING_ZERO_DEBOUNCE);
+            .any(|t| t.name == crate::templates::METERING_ZERO_DEBOUNCE);
         if !d.vendor.is_empty() {
             res.vendor = Some(d.vendor.clone());
             res.model = Some(d.model.clone());

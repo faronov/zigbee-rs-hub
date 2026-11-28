@@ -23,7 +23,9 @@
     "codec.utf16be_hex",
     "codec.bitmap_flags",
     "match.date_code",
-    "template.tuya_metering_zero_debounce"
+    "template.tuya_metering_zero_debounce",
+    "template.tuya",
+    "template.lumi"
   ],
   "maintenance": [
     "diagnostics",

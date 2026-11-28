@@ -246,6 +246,9 @@ pub enum ZclWrite {
     CoverTilt,
     /// Door Lock 0x00 Lock / 0x01 Unlock.
     LockCommands,
+    /// On/Off On With Timed Off (0x42), on time = off wait time = the
+    /// value in s (Tuya countdown).
+    OnWithTimedOff,
     /// Not writable.
     ReadOnly,
 }
@@ -535,6 +538,34 @@ pub enum TriggerSource {
         /// DP.
         dp: u8,
     },
+    /// An attribute in a Report Attributes frame (vendor templates, not in
+    /// definitions): `x` is its value.
+    Attr {
+        /// Endpoint filter.
+        ep: Option<u8>,
+        /// Cluster.
+        cluster: u16,
+        /// Attribute.
+        attr: u16,
+        /// What the event starts.
+        timing: AttrTiming,
+    },
+}
+
+/// Timed behaviour of an attribute trigger ([`TriggerSource::Attr`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrTiming {
+    /// The event fires at once.
+    Now,
+    /// Press and release of a button that reports nothing else (zhc
+    /// `lumi_action_WXKG01LM`; the expression gives `hold` for a press,
+    /// `single` for a release): `hold` after 1 s pressed, then `release`
+    /// (within 4 s of the hold), else `single` at the release.
+    PressRelease,
+    /// The event fires at once and cancels a pending one; a `…_hold`
+    /// event is followed by its `…_release` after 5 s unless another
+    /// report came (Aqara Opple: no release after a long hold).
+    HoldRelease,
 }
 
 /// How a trigger chooses its event type.
@@ -1137,6 +1168,16 @@ pub enum LayerSource {
     User,
 }
 
+/// A vendor template a definition turns on (17.4, [`crate::templates`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Template {
+    /// Name (`tuya`, `lumi`, `tuya_metering_zero_debounce`).
+    pub name: String,
+    /// `params`; the family templates' `features` (zhc helper → its
+    /// arguments) and `keys` (the exposes they provide).
+    pub params: serde_json::Value,
+}
+
 /// A definition or a self-description fragment.
 #[derive(Debug, Clone)]
 pub struct Definition {
@@ -1174,8 +1215,8 @@ pub struct Definition {
     pub tuya: Option<TuyaFlags>,
     /// GP flags.
     pub gp: Option<GpFlags>,
-    /// Vendor templates by name (17.4).
-    pub templates: Vec<String>,
+    /// Vendor templates (17.4).
+    pub templates: Vec<Template>,
     /// `mfr` of a fragment.
     pub mfr: Option<u16>,
     /// Source.
@@ -1241,7 +1282,7 @@ impl Definition {
             add("gp");
         }
         for t in &self.templates {
-            add(&format!("template.{t}"));
+            add(&format!("template.{}", t.name));
         }
         for e in &self.entities {
             for (_, v) in e.values() {

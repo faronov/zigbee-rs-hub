@@ -220,8 +220,67 @@ impl<T: ZigbeeTransport> Hub<T> {
                 let mut f =
                     ZclFrame::command(FrameType::Cluster, tsn, u8::from(*on), None, Vec::new());
                 f.header.disable_default_response = true;
-                self.dispatch_command(id, ep, cl::ON_OFF, &f, now);
+                self.dispatch_command(id, ep, cl::ON_OFF, &f, &[], now);
             }
         }
     }
+
+    /// Template `lumi` on a report: zhc `lumiPreventReset` (a Basic 0xFFF0
+    /// report announcing a reset gets its answer), `lumiPreventLeave`
+    /// (0xFCC0 0x00FC reported false is written true), and a 0xFCC0 0x00F7
+    /// struct dispatched as Basic 0xFF01 where the struct values are
+    /// bound to that ([`crate::templates::Expansion::lumi`]).
+    pub(crate) fn lumi_report(
+        &mut self,
+        id: &str,
+        ep: u8,
+        cluster: u16,
+        recs: &[(u16, TypedValue)],
+        now: Millis,
+    ) {
+        let guard = self.devices.get(id).map_or(0, |d| d.resolution.lumi);
+        if guard & 4 != 0 && cluster == 0xFCC0 {
+            if let Some((_, v)) = recs.iter().find(|r| r.0 == 0x00F7) {
+                let r = [(0xFF01, v.clone())];
+                self.dispatch_attrs(id, ep, cl::BASIC, None, &r, true, now);
+            }
+        }
+        let (ask, answer) = crate::templates::lumi::PREVENT_RESET;
+        let write = recs
+            .iter()
+            .find_map(|(a, v)| match (cluster, *a, &v.value) {
+                (cl::BASIC, 0xFFF0, ZclValue::Octets(b))
+                    if guard & 1 != 0 && b.starts_with(&ask) =>
+                {
+                    Some((
+                        0xFFF0,
+                        TypedValue::new(ZclType::OCTET_STR, ZclValue::Octets(answer.to_vec())),
+                    ))
+                }
+                (0xFCC0, 0x00FC, ZclValue::Bool(Some(false))) if guard & 2 != 0 => Some((
+                    0x00FC,
+                    TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+                )),
+                _ => None,
+            });
+        if let Some(rec) = write {
+            self.send_write(id, 1, cluster, Some(0x115F), &[rec], Purpose::None, now);
+        }
+    }
+}
+
+/// The old Xiaomi Basic 0xFF02 structure (zhc's 65282: voltage element 1,
+/// power outage count element 4) is also taken as the 0xFF01 it stands
+/// for, so that the `lumi` template's struct values (tags 1 and 5) read it.
+pub(crate) fn ff02_as_ff01(recs: &mut Vec<(u16, TypedValue)>) {
+    let Some(items) = recs.iter().find_map(|(a, v)| match &v.value {
+        ZclValue::Struct(i) if *a == 0xFF02 && i.len() > 4 => Some(i),
+        _ => None,
+    }) else {
+        return;
+    };
+    let mut tagged = items[..5].to_vec();
+    tagged.push(items[4].clone());
+    let v = TypedValue::new(ZclType::STRUCT, ZclValue::Struct(tagged));
+    recs.push((0xFF01, v));
 }
