@@ -1540,8 +1540,9 @@ without that device class or unit) and is reported in diagnostics.
   bank's string table, encoded like the shared-item references of "Packed
   CBOR" (draft-ietf-cbor-packed): simple value *n* for *n* < 16, tag 6 with
   *n* − 16 otherwise. The bank format version pins this encoding, whatever
-  the draft's final numbering. Catalog form is derived mechanically from the
-  standalone form and is never hashed.
+  the draft's final numbering. A vendor template's `params` (key 158,
+  free-form, 17.4) stay as they are. Catalog form is derived mechanically
+  from the standalone form and is never hashed.
 
 ### 8.5 Versioning
 
