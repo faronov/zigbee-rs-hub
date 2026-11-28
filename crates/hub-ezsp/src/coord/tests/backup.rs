@@ -472,7 +472,7 @@ fn a_restore_starts_above_the_ncps_own_frame_counters() {
         let mut r = Rig::new(cfg);
         r.next_up();
         if leave_first {
-            r.admin.leave_reset().unwrap();
+            r.admin.leave_reset(false).unwrap();
         }
         let report = r
             .admin

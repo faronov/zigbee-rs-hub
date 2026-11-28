@@ -1617,7 +1617,7 @@ fn leave_reset_clears_the_network_and_a_new_one_can_be_formed() {
         add: true,
     });
     rig.outcome(add);
-    rig.admin.leave_reset().unwrap();
+    rig.admin.leave_reset(false).unwrap();
     let st = rig.coord().status();
     assert_eq!(
         (st.network_state, st.network, st.ownership),

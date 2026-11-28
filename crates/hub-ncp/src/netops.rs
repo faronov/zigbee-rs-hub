@@ -467,12 +467,17 @@ impl Hub {
     }
 
     /// `NWK_LEAVE_RESET` (keeping the IEEE override and the host
-    /// endpoints): the NCP leaves and wipes its network; the store forgets
-    /// it and the NCP's device records, so a new one can be formed. Device
-    /// entries of the application are not touched.
-    pub fn leave_reset(&self) -> Result<(), Error> {
+    /// endpoints): the NCP wipes its network; the store forgets it and the
+    /// NCP's device records, so a new one can be formed. Device entries of
+    /// the application are not touched. `announce` (flags bit2): the NCP
+    /// broadcasts a NWK Leave first, for an explicit "leave network" only;
+    /// without it the wipe is local (NCP 0.1.3 and later; older NCPs ignore
+    /// the bit and always broadcast it).
+    pub fn leave_reset(&self, announce: bool) -> Result<(), Error> {
+        use zigbee_zrhp::msg::network::leave_reset_flags as f;
         let opts = CallOpts::timeout(Duration::from_secs(30));
-        self.inner.client.call(&NwkLeaveReset { flags: 0x03 }, opts)?;
+        let flags = f::KEEP_IEEE | f::KEEP_ENDPOINTS | if announce { f::ANNOUNCE_LEAVE } else { 0 };
+        self.inner.client.call(&NwkLeaveReset { flags }, opts)?;
         self.commit(Change::NetworkClear);
         let devices: Vec<[u8; 8]> = self.inner.store.lock().unwrap().state().devices.keys().copied().collect();
         for ieee in devices {
@@ -485,7 +490,7 @@ impl Hub {
             s.ownership = Ownership::NoNetwork;
             s.permit_join_s = 0;
         });
-        info!("hub: the NCP left its network and wiped it");
+        info!("hub: the NCP left its network and wiped it{}", if announce { " (Leave broadcast)" } else { "" });
         Ok(())
     }
 

@@ -537,8 +537,14 @@ pub trait NetworkAdmin: Send + Sync {
         Err(CoordError::Unsupported)
     }
 
-    /// Leaves the network and clears it from the NCP.
-    fn leave_reset(&self) -> Result<(), CoordError> {
+    /// Leaves the network and clears it from the NCP. `announce`: the
+    /// coordinator broadcasts a NWK Leave first (an explicit "leave
+    /// network": its routers drop it from their tables); otherwise the
+    /// wipe is local where the NCP can make it so, as before a restore or
+    /// a new formation must be (ZRHP `NWK_LEAVE_RESET` flags bit2;
+    /// EmberZNet's `leaveNetwork` always announces it).
+    fn leave_reset(&self, announce: bool) -> Result<(), CoordError> {
+        let _ = announce;
         Err(CoordError::Unsupported)
     }
 
