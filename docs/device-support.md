@@ -3764,7 +3764,7 @@ Coverage of zhc 26.130.0's generated definitions (hub-devices test
 `template_coverage`): of the 223 using `tuya`, 50 fully translated and 8
 partial run (165 refused: Tuya lights `tuya_light` 44, the legacy EF00
 helpers, covers, breakers' value converters, thermostats). App image cost
-(8 MB S3 image, measured): ~16 KiB with the template machinery. The
+(8 MB S3 image, CI): ~14 KiB with the template machinery. The
 catalog lists the implemented helpers in `templates_available`
 (`<family>.<helper>`), so that its banks hold the definitions the released
 hub runs. Next: `lumi` (178 definitions).
