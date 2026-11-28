@@ -819,6 +819,41 @@ fn opple_event_mode_written_for_a_pairing_not_after_an_upgrade() {
     assert_eq!(mode(&mut sim), 1);
 }
 
+/// Its definition fetched while it sleeps, then a restart before the write
+/// went (the configure queue is not stored): its first frame after the
+/// restart sends the write, once.
+#[test]
+fn opple_event_mode_queued_before_a_restart_is_sent_after_it() {
+    let src = include_str!("fixtures/aqara-wxcjkg13lm.yaml");
+    let mode = |sim: &mut Sim| {
+        sim.dev(OPPLE)
+            .writes
+            .iter()
+            .filter(|w| (w.1, w.2) == (0xFCC0, 0x0009))
+            .count()
+    };
+    let mut first = hub_of(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(opple());
+    sim.join(&mut first, OPPLE, T0);
+    let t = T0 + 600_000;
+    let mut cat = MemoryCatalog::default();
+    cat.insert(def(src));
+    first.set_catalog(Box::new(cat), t);
+    sim.run(&mut first, t);
+    assert_eq!(mode(&mut sim), 0, "it waits for the remote");
+    let mut hub = hub_of(&[src]);
+    let snap = first.snapshot_device(OPPLE_ID).unwrap();
+    hub.restore_device(snap, None, t + 1000).unwrap();
+    assert_eq!(layer(&hub, OPPLE_ID), "aqara/wxcjkg13lm");
+    // Commands (command mode): no attribute that would resolve it again.
+    for (n, at) in [(1, t + 2000), (2, t + 3000)] {
+        hub.on_aps_indication(cmd(&opple(), 1, 0x0006, n, 0x01, &[]), at);
+        sim.run(&mut hub, at);
+        assert_eq!(mode(&mut sim), 1);
+    }
+}
+
 /// Aqara Opple WXCJKG13LM (6 buttons): event mode written at configure
 /// (0xFCC0 0x0009 = 1, manufacturer 0x115F); presentValue clicks per
 /// button endpoint, a hold released 5 s later unless the button reports.
