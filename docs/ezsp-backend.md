@@ -289,6 +289,8 @@ The application shows the capacities in `network/info` (`capacity`:
 the hub endpoint's groups to the multicast table: `groups/create` or
 `groups/update` with the hub as a member is refused `no_space` once it is
 a member of that many groups (groups without the hub are not limited).
+The groups devices' configure joins (an IKEA remote's bind group 901 and
+0x0000, a definition's `group` op; device-support 5.3) count too.
 
 ## Identity and ownership
 

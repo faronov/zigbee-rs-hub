@@ -489,9 +489,11 @@ fn bindings_on_a_sleepy_remote_wait_for_it() {
     );
     let b = &hub.bindings_list(Some(IDR))[0];
     assert!(b["pending"].as_array().unwrap().is_empty());
-    assert_eq!(b["table"].as_array().unwrap().len(), 2);
+    // Its configure's binds to the hub (On/Off, Level), then these two.
+    assert_eq!(b["table"].as_array().unwrap().len(), 4);
+    assert_eq!(b["table"][0]["target"], json!({"hub": true, "endpoint": 1}));
     assert_eq!(
-        b["table"][0]["target"],
+        b["table"][2]["target"],
         json!({"device": ID1, "endpoint": 11})
     );
 

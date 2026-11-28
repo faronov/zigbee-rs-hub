@@ -12,6 +12,7 @@ mod lumi;
 mod merge;
 mod plain;
 mod props;
+mod remotes;
 mod reporting;
 mod tuya_plug;
 mod tuya_trv;

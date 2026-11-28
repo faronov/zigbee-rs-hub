@@ -205,9 +205,22 @@ impl<T: ZigbeeTransport> Hub<T> {
             Then::Nothing => None,
             Then::Membership { group, tail } => self.membership_done(group, tail, r.err(), now),
             Then::Configure { device, key } => {
-                let ok = r.is_ok();
-                let status = if ok { "SUCCESS" } else { "FAILURE" };
-                self.configure_done(&device, &key, ok, status.into(), now);
+                let full = r.as_ref().is_err_and(|e| {
+                    matches!(
+                        e.meaning(),
+                        CoordError::Backend {
+                            kind: hub_coord::Kind::TableFull,
+                            ..
+                        }
+                    )
+                });
+                self.group_table_full |= full;
+                let status = match (&r, full) {
+                    (Ok(()), _) => "SUCCESS",
+                    (_, true) => "TABLE_FULL",
+                    _ => "FAILURE",
+                };
+                self.configure_done(&device, &key, r.is_ok(), status.into(), now);
                 None
             }
             Then::PermitJoin { gp, at } => match (r, gp) {
