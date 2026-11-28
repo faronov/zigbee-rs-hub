@@ -179,13 +179,18 @@ impl ApiServer {
         self.sessions.remove(&s);
     }
 
-    /// Sets a field of the `hub/info` result (`null` removes it).
-    pub fn set_info(&mut self, key: &str, value: J) {
+    /// Sets a field of the `hub/info` result (`null` removes it); whether
+    /// it changed.
+    pub fn set_info(&mut self, key: &str, value: J) -> bool {
+        if self.info.get(key).unwrap_or(&J::Null) == &value {
+            return false;
+        }
         if value.is_null() {
             self.info.remove(key);
         } else {
             self.info.insert(key.into(), value);
         }
+        true
     }
 
     /// The current event sequence number.
@@ -531,6 +536,7 @@ impl ApiServer {
                 }
                 r
             }
+            R::NetworkEvents => hub.network_events(),
             R::NetworkInfo => network_info(hub, now)
                 .ok_or_else(|| ApiError::new("unsupported", "no network information"))?,
             R::PermitJoin {
@@ -550,7 +556,7 @@ impl ApiServer {
             }
             R::DevicesList => hub
                 .devices()
-                .map(|d| d.record())
+                .map(|d| hub.device_record(d))
                 .chain(hub.zg_device_records())
                 .collect(),
             R::DevicesGet { id } if id.starts_with("grp:") => {
@@ -558,7 +564,7 @@ impl ApiServer {
             }
             R::DevicesGet { id } => {
                 let d = hub.device(&id).ok_or_else(|| missing(&id))?;
-                let mut r = d.record();
+                let mut r = hub.device_record(d);
                 r["endpoints"] = serde_json::to_value(&d.fp.endpoints).unwrap_or_default();
                 r["resolution"] = json!({
                     "layers": d.resolution.layers,
@@ -586,7 +592,7 @@ impl ApiServer {
                 if let Some(x) = disabled {
                     d.disabled = x;
                 }
-                let r = d.record();
+                let r = hub.device_record(&hub.devices[&id]);
                 hub.events.push(HubEvent::DeviceUpdated(id));
                 r
             }
@@ -1088,11 +1094,11 @@ impl ApiServer {
             let (topic, body) = match ev {
                 HubEvent::DeviceAdded(id) => (
                     "devices",
-                    json!({"topic": "device_added", "device": hub.device(&id).map(|d| d.record()).or_else(|| hub.zg_device_record(&id))}),
+                    json!({"topic": "device_added", "device": hub.device(&id).map(|d| hub.device_record(d)).or_else(|| hub.zg_device_record(&id))}),
                 ),
                 HubEvent::DeviceUpdated(id) => (
                     "devices",
-                    json!({"topic": "device_updated", "device": hub.device(&id).map(|d| d.record()).or_else(|| hub.zg_device_record(&id))}),
+                    json!({"topic": "device_updated", "device": hub.device(&id).map(|d| hub.device_record(d)).or_else(|| hub.zg_device_record(&id))}),
                 ),
                 HubEvent::DeviceRemoved(id) => {
                     ("devices", json!({"topic": "device_removed", "id": id}))
@@ -1276,6 +1282,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 self.events.push(HubEvent::EntityRemoved(e.uid.clone()));
             }
             self.dispatch.remove(id);
+            self.notes.remove(id);
             self.events.push(HubEvent::DeviceRemoved(id.to_string()));
         }
     }

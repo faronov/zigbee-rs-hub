@@ -34,6 +34,7 @@ pub(crate) mod control;
 pub(crate) mod ikea;
 pub mod import;
 pub(crate) mod lumi;
+pub mod netlog;
 pub mod zgroups;
 
 /// Hub configuration.
@@ -544,6 +545,10 @@ pub struct Hub<T: ZigbeeTransport> {
     /// (`TableFull`): configure's group joins wait until the hub endpoint
     /// leaves a group or a new NCP session starts.
     pub(crate) group_table_full: bool,
+    /// The network log ([`netlog`]).
+    pub(crate) netlog: std::collections::VecDeque<netlog::NetEntry>,
+    /// Interview and availability details of devices ([`netlog::DevNote`]).
+    pub(crate) notes: crate::vecmap::VecMap<String, netlog::DevNote>,
 }
 
 /// A cluster command for the application (see [`Hub::app_clusters`]).
@@ -680,6 +685,8 @@ impl<T: ZigbeeTransport> Hub<T> {
             removed: Vec::new(),
             interview_quirks: Vec::new(),
             group_table_full: false,
+            netlog: std::collections::VecDeque::new(),
+            notes: crate::vecmap::VecMap::new(),
         }
     }
 
@@ -1187,7 +1194,10 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.fp.endpoints.clear();
         d.awake_until = d.awake_until.max(now + AWAKE_AFTER_RX_MS);
         self.interview_quirks.retain(|x| x != id);
+        self.note_interview_start(id, true);
         self.interview_step(id, InterviewStep::NodeDesc, now);
+        // The record says `in_progress` from now on.
+        self.updated(id);
         Ok(())
     }
 
@@ -1296,6 +1306,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.interview_partial = false;
         let step = resume_step(d);
         self.interview_quirks.retain(|x| x != id);
+        self.note_interview_start(id, false);
         self.interview_step(id, step, now);
         true
     }
@@ -1304,16 +1315,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         if let Some(d) = self.devices.get_mut(id) {
             d.interview = step;
         }
-        let name = match step {
-            InterviewStep::NodeDesc => "node_descriptor".to_string(),
-            InterviewStep::ActiveEp => "active_endpoints".into(),
-            InterviewStep::SimpleDesc(i) => format!("simple_descriptor_{i}"),
-            InterviewStep::Basic(i) => format!("basic_{i}"),
-            InterviewStep::SchemaHeader => "self_description".into(),
-            InterviewStep::SchemaChunk(i) => format!("self_description_chunk_{i}"),
-            InterviewStep::Configure => "configure".into(),
-            InterviewStep::Done => "done".into(),
-        };
+        let name = netlog::step_name(step);
         self.emit(HubEvent::InterviewProgress {
             device: id.to_string(),
             step: name,
@@ -1445,7 +1447,22 @@ impl<T: ZigbeeTransport> Hub<T> {
         } = msg
         {
             let did = zigbee_id(ieee);
-            if self.devices.contains_key(&did) {
+            let prev = self.devices.get_mut(&did).map(|d| {
+                d.diag.count("announces");
+                d.nwk().filter(|p| *p != nwk)
+            });
+            self.net_log(netlog::NetEntry {
+                at: now,
+                ieee,
+                nwk,
+                prev: prev.flatten(),
+                event: netlog::NetEvent::Announced,
+                denied: false,
+                how: "",
+                reason: "",
+                rejoin: None,
+            });
+            if prev.is_some() {
                 self.renumber(&did, nwk);
                 if let Some(d) = self.devices.get_mut(&did) {
                     d.awake_until = now + AWAKE_AFTER_RX_MS;
@@ -1456,6 +1473,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 // An uplink like any other: heard from, awake, what waits
                 // for it goes out (after the interview's own resumption).
                 self.seen(&did, Some(ind.lqi), Some(ind.rssi), now);
+                self.updated(&did);
                 self.on_rejoin(&did, now);
                 self.flush_queue(&did, now);
             } else {
@@ -1546,7 +1564,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                     }
                 } else if !gp_step(d, step) {
                     d.interview_partial = true;
+                    self.note_interview_failed(id, step, now);
                 }
+                let Some(d) = self.devices.get(id) else {
+                    return;
+                };
                 let next = next_asked(d, InterviewStep::SimpleDesc(i + 1));
                 self.interview_step(id, next, now);
             }
@@ -1559,7 +1581,14 @@ impl<T: ZigbeeTransport> Hub<T> {
                 let Some(d) = self.devices.get_mut(id) else {
                     return;
                 };
-                d.interview_partial |= !gp_step(d, step);
+                let failed = !gp_step(d, step);
+                d.interview_partial |= failed;
+                if failed {
+                    self.note_interview_failed(id, step, now);
+                }
+                let Some(d) = self.devices.get(id) else {
+                    return;
+                };
                 let next = match step {
                     InterviewStep::NodeDesc => InterviewStep::ActiveEp,
                     InterviewStep::ActiveEp => InterviewStep::Basic(0),
@@ -1836,6 +1865,12 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.available = true;
         d.left = false;
         d.check = None;
+        if !was && let Some(n) = self.notes.get_mut_by(id) {
+            n.unavailable = None;
+        }
+        let Some(d) = self.devices.get_mut(id) else {
+            return;
+        };
         let mut fields = vec![
             (
                 DeviceField::Linkquality,
@@ -2974,7 +3009,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                     return;
                 }
                 if let Some(d) = self.devices.get_mut(id) {
-                    d.interview_partial |= !gp_step(d, *step) && !optional;
+                    let failed = !gp_step(d, *step) && !optional;
+                    d.interview_partial |= failed;
+                    if failed {
+                        self.note_interview_failed(id, *step, now);
+                    }
                 }
                 let next = match *step {
                     InterviewStep::NodeDesc => InterviewStep::ActiveEp,
@@ -3184,7 +3223,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
                 Some((left, next)) if now >= next => {
                     if left == 0 {
-                        self.set_unavailable(id);
+                        self.set_unavailable(id, "no_response", now);
                     } else {
                         self.availability_probe(id, now);
                     }
@@ -3195,7 +3234,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         if let Some(t) = self.availability_timeout_s(d) {
             if silence >= t * 1000 {
-                self.set_unavailable(id);
+                self.set_unavailable(id, "timeout", now);
             }
         }
     }
@@ -3218,7 +3257,7 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// rejoins is not said): it stays, unavailable with the reason `left`
     /// (`device_updated`, its entities' states), until its next frame or
     /// rejoin. Unknown devices are ignored.
-    pub fn on_device_left(&mut self, ieee: u64) {
+    pub fn on_device_left(&mut self, ieee: u64, now: Millis) {
         let id = zigbee_id(ieee);
         let Some(d) = self.devices.get_mut(&id) else {
             return;
@@ -3227,15 +3266,20 @@ impl<T: ZigbeeTransport> Hub<T> {
             return;
         }
         d.left = true;
-        self.set_unavailable(&id);
+        self.set_unavailable(&id, "left", now);
     }
 
-    fn set_unavailable(&mut self, id: &str) {
+    /// The device is unavailable, `why` (see [`netlog::DevNote::unavailable`]).
+    fn set_unavailable(&mut self, id: &str, why: &'static str, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
         d.available = false;
         d.check = None;
+        self.note(id).unavailable = Some((now, why));
+        let Some(d) = self.devices.get(id) else {
+            return;
+        };
         let uids: Vec<String> = d.entities.iter().map(|e| e.uid.clone()).collect();
         self.emit(HubEvent::DeviceUpdated(id.to_string()));
         for u in uids {
@@ -3433,6 +3477,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.dispatch.remove(id);
         self.pending.retain(|_, p| p.device != id);
         self.interview_quirks.retain(|x| x != id);
+        self.notes.remove(id);
         self.emit(HubEvent::DeviceRemoved(id.to_string()));
     }
 
@@ -3842,6 +3887,9 @@ impl<T: ZigbeeTransport> Hub<T> {
             "interview_partial": d.interview_partial,
             "interview_resumes": d.interview_resumes,
             "interview_quirk": self.interview_quirks.iter().any(|x| x == id).then_some("lumi"),
+            "interview_step": crate::hub::netlog::step_name(d.interview),
+            "interview_since": self.notes.get(id).and_then(|n| n.partial_since).filter(|_| d.interview_partial).map(ts),
+            "interview_failed": self.notes.get(id).map(|n| n.failed.clone()).unwrap_or_default(),
         }))
     }
 }

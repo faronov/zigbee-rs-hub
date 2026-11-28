@@ -1,8 +1,9 @@
 //! One suite, run on both coordinator backends: the app on the ZRHP host
 //! core and on the EZSP backend, each with its simulated NCP and a device
 //! of the engine's device simulator behind it. Join → interview → command
-//! → report, groups, permit join, forming and resetting the network; on
-//! EZSP also device leaves and the `NcpNv` ownership decision (design §2.5,
+//! → report, groups, permit join, forming and resetting the network,
+//! device leaves and the network log; on EZSP also the `NcpNv` ownership
+//! decision (design §2.5,
 //! §2.7): unverified records become the hub's once the NCP's network
 //! matches their tag, another network's are foreign (no device traffic)
 //! until adopted or cleared, records of unknown origin stay closed until
@@ -47,11 +48,14 @@ trait SimLink: Send + Sync {
     /// A device's frame reaches the NCP.
     fn indicate(&self, i: &ApsIndication);
     /// A device joins through the trust center.
-    fn join(&self, ieee: u64, nwk: u16);
-    /// The trust center reports that a device left (EZSP only).
-    fn leave(&self, ieee: u64, nwk: u16) {
-        let _ = (ieee, nwk);
+    fn join(&self, ieee: u64, nwk: u16) {
+        self.join_as(ieee, nwk, 0, false);
     }
+    /// A join (`how` as ZRHP's `join_type`: 0 association, 1 secured
+    /// rejoin, 2 trust center rejoin) the trust center admits or refuses.
+    fn join_as(&self, ieee: u64, nwk: u16, how: u8, denied: bool);
+    /// The coordinator reports that a device left.
+    fn leave(&self, ieee: u64, nwk: u16);
     /// Joining is open on the NCP.
     fn permit_open(&self) -> bool;
     /// Groups the hub endpoint is a member of on the NCP.
@@ -97,17 +101,23 @@ impl SimLink for Zrhp {
         self.sim.inject_event(zigbee_zrhp::msg::ids::EVT_APS_DATA_INDICATION, p);
     }
 
-    fn join(&self, ieee: u64, nwk: u16) {
+    fn join_as(&self, ieee: u64, nwk: u16, how: u8, denied: bool) {
         use zigbee_zrhp::msg::network::EvtDeviceJoined;
         let ev = EvtDeviceJoined {
             nwk,
             ieee: zigbee_zrhp::types::Ieee::from_u64(ieee),
             parent_nwk: 0,
-            join_type: 0,
+            join_type: how,
             capability: 0x8E,
-            decision: 0,
+            decision: denied.into(),
         };
         self.sim.inject_event(zigbee_zrhp::msg::ids::EVT_DEVICE_JOINED, hub_ncp::driver::encode_body(&ev).unwrap());
+    }
+
+    fn leave(&self, ieee: u64, nwk: u16) {
+        use zigbee_zrhp::msg::network::EvtDeviceLeft;
+        let ev = EvtDeviceLeft { nwk, ieee: zigbee_zrhp::types::Ieee::from_u64(ieee), flags: 0, reason: 0 };
+        self.sim.inject_event(zigbee_zrhp::msg::ids::EVT_DEVICE_LEFT, hub_ncp::driver::encode_body(&ev).unwrap());
     }
 
     fn permit_open(&self) -> bool {
@@ -187,13 +197,19 @@ impl SimLink for Ezsp {
         });
     }
 
-    fn join(&self, ieee: u64, nwk: u16) {
+    fn join_as(&self, ieee: u64, nwk: u16, how: u8, denied: bool) {
+        let status = match how {
+            1 => DeviceUpdate::STANDARD_SECURITY_SECURED_REJOIN,
+            2 => DeviceUpdate::STANDARD_SECURITY_UNSECURED_REJOIN,
+            _ => DeviceUpdate::STANDARD_SECURITY_UNSECURED_JOIN,
+        };
+        let policy_decision = if denied { JoinDecision::DENY_JOIN } else { JoinDecision::USE_PRECONFIGURED_KEY };
         self.sim.ncp(|n| {
             n.callback(Callback::TrustCenterJoin {
                 new_node_id: nwk,
                 new_node_eui64: Eui64::from_u64(ieee),
-                status: DeviceUpdate::STANDARD_SECURITY_UNSECURED_JOIN,
-                policy_decision: JoinDecision::USE_PRECONFIGURED_KEY,
+                status,
+                policy_decision,
                 parent_of_new_node_id: 0,
             })
         });
@@ -437,16 +453,86 @@ fn join_interview_command_and_report() {
         rig.link.indicate(&report);
         wait(&format!("{kind:?}: reported off"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
         assert!(rig.app.status().aps.accepted > 0);
-        if kind == Kind::Ezsp {
-            // A leave: kept, unavailable with its reason, until heard again.
-            rig.link.leave(PLUG, PLUG_NWK);
-            let get = || ok(&call(&rig.app, sid, &rx, 5, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
-            wait("the plug left", || get()["available"] == false);
-            assert_eq!(get()["unavailable_reason"], "left");
-            rig.link.indicate(&report);
-            wait("the plug back", || get()["available"] == true);
-            assert_eq!(get().get("unavailable_reason"), None);
+        // A leave: kept, unavailable with its reason, until heard again.
+        rig.link.leave(PLUG, PLUG_NWK);
+        let get = || ok(&call(&rig.app, sid, &rx, 5, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+        wait(&format!("{kind:?}: the plug left"), || get()["available"] == false);
+        assert_eq!(get()["unavailable_reason"], "left");
+        rig.link.indicate(&report);
+        wait(&format!("{kind:?}: the plug back"), || get()["available"] == true);
+        assert_eq!(get().get("unavailable_reason"), None);
+        rig.finish();
+    }
+}
+
+/// The network log (API 1.4) on both backends: an admitted join, a join
+/// refused while joining is closed, a secured rejoin under a new address,
+/// a Device_annce and a leave come as `device_network` events and in
+/// `network/events`; the device record counts them and says why and since
+/// when the device is unavailable.
+#[test]
+fn joins_refusals_rejoins_announcements_and_leaves_are_logged() {
+    const STRANGER: u64 = 0x5A52_5300_0000_00FF;
+    for kind in BOTH {
+        let mut rig = Rig::new(kind, true);
+        let answered = Arc::new(Mutex::new(Vec::new()));
+        let devs = Arc::new(Mutex::new(vec![plug()]));
+        rig.devices_shared(devs.clone(), answered);
+        let (sid, rx) = session(&rig.app);
+        let (esid, erx) = session(&rig.app);
+        ok(&call(&rig.app, esid, &erx, 1, json!({"type": "subscribe", "topics": ["network"]})));
+        let get = || ok(&call(&rig.app, sid, &rx, 2, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+        let log = || ok(&call(&rig.app, sid, &rx, 3, json!({"type": "network/events"}))).as_array().unwrap().clone();
+
+        rig.link.join(PLUG, PLUG_NWK);
+        wait(&format!("{kind:?}: the plug's state"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
+        rig.link.join_as(STRANGER, 0x5AFF, 0, true);
+        devs.lock().unwrap()[0].nwk = 0x5A11;
+        rig.link.join_as(PLUG, 0x5A11, 1, false);
+        let annce = hub_devices::zdo::device_annce(1, 0x5A11, PLUG, 0x8E);
+        rig.link.indicate(&plug().ind(0, 0, 0x0013, annce));
+        // The plug, under its new address.
+        let mut p = plug();
+        p.nwk = 0x5A11;
+        wait(&format!("{kind:?}: announced"), || log().len() == 4);
+        rig.link.leave(PLUG, 0x5A11);
+        wait(&format!("{kind:?}: five entries"), || log().len() == 5);
+
+        let l = log();
+        let pick = |e: &J| (e["event"].clone(), e["decision"].clone(), e["how"].clone(), e["reason"].clone(), e["device"].clone());
+        let dev = json!("zb:5a52530000000001");
+        let none = J::Null;
+        assert_eq!(
+            l.iter().map(pick).collect::<Vec<_>>(),
+            [
+                (json!("joined"), json!("admitted"), json!("association"), none.clone(), dev.clone()),
+                (json!("joined"), json!("denied"), json!("association"), json!("permit_closed"), json!("zb:5a525300000000ff")),
+                (json!("rejoined"), json!("admitted"), json!("secured"), none.clone(), dev.clone()),
+                (json!("announced"), none.clone(), none.clone(), none.clone(), dev.clone()),
+                (json!("left"), none.clone(), none.clone(), json!("self"), dev.clone()),
+            ],
+            "{kind:?}: {l:?}"
+        );
+        assert_eq!((l[2]["nwk"].as_u64(), l[2]["prev_nwk"].as_u64()), (Some(0x5A11), Some(u64::from(PLUG_NWK))), "{kind:?}");
+        assert!(l.iter().all(|e| e["time"].as_f64().is_some() && e["topic"] == "device_network"), "{kind:?}");
+        // Each as an event of topic `network`, in the same order.
+        let mut seen = Vec::new();
+        while seen.len() < 5 {
+            let f: J = serde_json::from_str(&erx.recv_timeout(T).unwrap()).unwrap();
+            if f["event"]["topic"] == "device_network" {
+                seen.push(f["event"]["event"].clone());
+            }
         }
+        assert_eq!(seen, ["joined", "joined", "rejoined", "announced", "left"], "{kind:?}");
+
+        let d = get();
+        assert_eq!((&d["rejoins"], &d["announces"], &d["leaves"]), (&json!(1), &json!(1), &json!(1)), "{kind:?}: {d}");
+        assert_eq!((&d["logical_type"], &d["rx_on_when_idle"]), (&json!("router"), &json!(true)), "{kind:?}: {d}");
+        assert_eq!((&d["available"], &d["unavailable_reason"]), (&json!(false), &json!("left")), "{kind:?}: {d}");
+        assert!(d["unavailable_since"].as_f64().is_some(), "{kind:?}: {d}");
+        rig.link.indicate(&p.report(1, 0x0006, None, &[(0x0000, TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))))]));
+        wait(&format!("{kind:?}: back"), || get()["available"] == true);
+        assert_eq!(get().get("unavailable_since"), None, "{kind:?}");
         rig.finish();
     }
 }
@@ -469,6 +555,12 @@ fn a_partial_interview_resumes_on_the_devices_announcement() {
             || call(&rig.app, sid, &rx, 2, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))["result"]["interview"].clone();
         rig.link.join(PLUG, PLUG_NWK);
         wait(&format!("{kind:?}: interview partial"), || interview() == "partial");
+        // What failed, and since when (API 1.4).
+        let dev = ok(&call(&rig.app, sid, &rx, 3, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+        assert_eq!(dev["interview_failed"], json!(["simple_descriptor_0"]), "{kind:?}: {dev}");
+        assert!(dev["interview_since"].as_f64().is_some(), "{kind:?}: {dev}");
+        let diag = ok(&call(&rig.app, sid, &rx, 4, json!({"type": "devices/diagnostics", "device": "zb:5a52530000000001"}))).clone();
+        assert_eq!((&diag["interview_failed"], &diag["interview_step"]), (&json!(["simple_descriptor_0"]), &json!("done")), "{kind:?}");
 
         devs.lock().unwrap()[0].zdo_failing.clear();
         answered.lock().unwrap().clear();
@@ -476,8 +568,21 @@ fn a_partial_interview_resumes_on_the_devices_announcement() {
         rig.link.indicate(&plug().ind(0, 0, 0x0013, annce));
         wait(&format!("{kind:?}: the plug's state"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
         assert_eq!(interview(), "complete", "{kind:?}");
+        let dev = ok(&call(&rig.app, sid, &rx, 5, json!({"type": "devices/get", "device": "zb:5a52530000000001"}))).clone();
+        assert_eq!((dev.get("interview_failed"), dev.get("interview_since")), (None, None), "{kind:?}: {dev}");
         let zdo: Vec<u16> = answered.lock().unwrap().iter().filter(|r| r.profile == 0).map(|r| r.cluster).collect();
         assert!(zdo.contains(&SIMPLE_DESC_REQ) && !zdo.contains(&NODE_DESC_REQ), "{kind:?}: {zdo:04x?}");
+
+        // A requested interview: the record says so at once.
+        let (esid, erx) = session(&rig.app);
+        ok(&call(&rig.app, esid, &erx, 1, json!({"type": "subscribe", "topics": ["devices"]})));
+        ok(&call(&rig.app, sid, &rx, 6, json!({"type": "devices/reinterview", "device": "zb:5a52530000000001"})));
+        loop {
+            let f: J = serde_json::from_str(&erx.recv_timeout(T).unwrap()).unwrap();
+            if f["event"]["topic"] == "device_updated" && f["event"]["device"]["interview"] == "in_progress" {
+                break;
+            }
+        }
         rig.finish();
     }
 }
@@ -517,7 +622,9 @@ fn a_sleepy_devices_announcement_sends_what_waits_for_it() {
     wait("restored", || rig.app.status().restored == 1);
     answered.lock().unwrap().clear();
     let reading = || ok(&call(&rig.app, sid, &rx, 4, json!({"type": "bindings/list", "device": ID})))[0]["reading"].clone();
-    ok(&call(&rig.app, sid, &rx, 3, json!({"type": "bindings/read", "device": ID})));
+    let read = call(&rig.app, sid, &rx, 3, json!({"type": "bindings/read", "device": ID}));
+    // Said at once (API 1.4).
+    assert_eq!(ok(&read)["queued"], true, "{read}");
     thread::sleep(Duration::from_millis(300));
     assert_eq!(reading(), json!(true), "queued while it sleeps");
     assert!(!answered.lock().unwrap().iter().any(|r| r.profile == 0 && r.cluster == 0x0033));
@@ -525,6 +632,8 @@ fn a_sleepy_devices_announcement_sends_what_waits_for_it() {
     let annce = hub_devices::zdo::device_annce(1, SENSOR_NWK, SENSOR, 0x80);
     rig.link.indicate(&sensor().ind(0, 0, 0x0013, annce));
     wait("the binding table read", || reading() == json!(false));
+    let list = call(&rig.app, sid, &rx, 5, json!({"type": "bindings/list", "device": ID}));
+    assert_eq!(ok(&list)[0].get("queued"), None, "{list}");
     assert!(answered.lock().unwrap().iter().any(|r| r.profile == 0 && r.cluster == 0x0033));
     rig.finish();
 }

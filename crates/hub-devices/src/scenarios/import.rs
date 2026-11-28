@@ -513,7 +513,7 @@ fn an_unavailable_imported_device_is_not_probed() {
     let p = plug(PLUG, 0x5A01);
     let mut hub = hub_with(&[]);
     hub.import_device(&imported(&p), IMPORT_VERIFY, T0).unwrap();
-    hub.on_device_left(PLUG);
+    hub.on_device_left(PLUG, T0);
     let _ = hub.transport.take();
     for k in 0..5 {
         hub.tick(T0 + k * 1000);

@@ -3,12 +3,12 @@
 //! with `zigbee_zrhp::msg`). Moved from `hub-app` (`convert.rs`).
 
 use hub_coord::gp as eg;
-use hub_coord::{ApsDst as EApsDst, ApsIndication, ApsRequest, CoordEvent, NetChange};
+use hub_coord::{ApsDst as EApsDst, ApsIndication, ApsRequest, CoordEvent, JoinKind, NetChange};
 use zigbee_zrhp::codec::List;
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication, indication_flags, tx_options};
 use zigbee_zrhp::msg::gp as wg;
 use zigbee_zrhp::msg::ids;
-use zigbee_zrhp::msg::network::{EvtDeviceJoined, EvtNetworkState, EvtPermitJoinState};
+use zigbee_zrhp::msg::network::{EvtDeviceJoined, EvtDeviceLeft, EvtNetworkState, EvtPermitJoinState};
 use zigbee_zrhp::records::Record;
 use zigbee_zrhp::types::Ieee;
 
@@ -92,10 +92,22 @@ pub fn coord_event(m: &Message) -> Option<CoordEvent> {
         }
         ids::EVT_DEVICE_JOINED => {
             let e: EvtDeviceJoined = m.decode().ok()?;
+            let kind = match e.join_type {
+                1 => JoinKind::SecuredRejoin,
+                2 => JoinKind::TcRejoin,
+                3 => JoinKind::Direct,
+                _ => JoinKind::Association,
+            };
+            let (ieee, nwk) = (e.ieee.to_u64(), e.nwk);
             if e.decision != 0 {
-                return None;
+                return Some(CoordEvent::JoinDenied { ieee, nwk, kind });
             }
-            CoordEvent::DeviceJoined { ieee: e.ieee.to_u64(), nwk: e.nwk }
+            CoordEvent::DeviceJoined { ieee, nwk, kind }
+        }
+        // Flags bit 0: it leaves to rejoin.
+        ids::EVT_DEVICE_LEFT => {
+            let e: EvtDeviceLeft = m.decode().ok()?;
+            CoordEvent::DeviceLeft { ieee: e.ieee.to_u64(), nwk: e.nwk, rejoin: Some(e.flags & 0x01 != 0) }
         }
         ids::EVT_GP_FRAME => {
             let e: wg::EvtGpFrame = m.decode().ok()?;
@@ -317,6 +329,22 @@ mod tests {
         assert_eq!(i.src_ieee, Some(0x00158d0001a2b3c4));
         assert_eq!(i.group, Some(0x0B84));
         assert_eq!(i.payload, [0x18, 0x01, 0x0A]);
+    }
+
+    #[test]
+    fn joins_say_how_refusals_and_leaves_are_events() {
+        let ev = |msg_id, payload| coord_event(&Message { kind: Kind::Event, msg_id, tid: 1, payload });
+        let join = |join_type, decision| {
+            let e = EvtDeviceJoined { nwk: 0x1234, ieee: Ieee::from_u64(7), parent_nwk: 0, join_type, capability: 0x80, decision };
+            ev(ids::EVT_DEVICE_JOINED, crate::driver::encode_body(&e).unwrap())
+        };
+        assert_eq!(join(2, 0), Some(CoordEvent::DeviceJoined { ieee: 7, nwk: 0x1234, kind: JoinKind::TcRejoin }));
+        assert_eq!(join(0, 1), Some(CoordEvent::JoinDenied { ieee: 7, nwk: 0x1234, kind: JoinKind::Association }));
+        let left = EvtDeviceLeft { nwk: 0x1234, ieee: Ieee::from_u64(7), flags: 0x01, reason: 0 };
+        assert_eq!(
+            ev(ids::EVT_DEVICE_LEFT, crate::driver::encode_body(&left).unwrap()),
+            Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(true) })
+        );
     }
 
     #[test]

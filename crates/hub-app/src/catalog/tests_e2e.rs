@@ -772,6 +772,8 @@ fn a_definition_needing_an_unknown_feature_is_refused() {
     let flash: SharedFlash = Arc::new(Mutex::new(Box::new(MemData::new(1 << 20)) as Box<dyn DataFlash>));
     let app = start(&r, &flash);
     let (sid, rx) = session(&app);
+    let (esid, erx) = session(&app);
+    assert_eq!(call(&app, esid, &erx, 1, json!({"type": "subscribe", "topics": ["catalog"]}))["success"], true);
     let mut id = 0;
     let m = upload(&app, sid, &rx, &mut id, "manifest", &files["manifest.cose"], 0, json!({}));
     assert_eq!(m["success"], true, "{m}");
@@ -796,6 +798,14 @@ fn a_definition_needing_an_unknown_feature_is_refused() {
     }
     let g = call(&app, sid, &rx, 910, json!({"type": "devices/diagnostics", "device": PLUG}));
     assert_eq!(g["result"]["catalog_refused"], want, "{g}");
+    // Every shard checked, no definition it can run: said once (API 1.4).
+    let ev = loop {
+        let f: J = serde_json::from_str(&erx.recv_timeout(T).unwrap()).unwrap();
+        if f["event"]["topic"] == "definition_missing" {
+            break f["event"].clone();
+        }
+    };
+    assert_eq!((&ev["device"], &ev["status"], &ev["refused"]), (&json!(PLUG), &json!("refused"), &want), "{ev}");
     app.shutdown();
     r.ncp.shutdown();
     r.sim.stop();

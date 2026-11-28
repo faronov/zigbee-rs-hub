@@ -498,6 +498,10 @@ impl<T: ZigbeeTransport> Hub<T> {
         let mut r = self.bindings_json(b);
         let queued = self.zg_queued(&b.device);
         r["reading"] = b.reading.into();
+        // The read waits for a sleepy device to wake up (API 1.4).
+        if b.reading && queued {
+            r["queued"] = true.into();
+        }
         r["error"] = b.read_error.clone().into();
         for (i, o) in b.ops.iter().enumerate() {
             r["pending"][i]["state"] = match (&o.failed, queued) {

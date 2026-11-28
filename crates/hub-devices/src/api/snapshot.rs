@@ -180,7 +180,9 @@ impl SnapshotStream {
                     // A device removed meanwhile: its `device_removed` event follows.
                     if let Some(d) = hub.device(id) {
                         match per {
-                            PerDevice::Record => item(&mut s, &mut self.first, &d.record()),
+                            PerDevice::Record => {
+                                item(&mut s, &mut self.first, &hub.device_record(d))
+                            }
                             PerDevice::Entities => {
                                 for e in &d.entities {
                                     item(&mut s, &mut self.first, &e.record(&d.id));

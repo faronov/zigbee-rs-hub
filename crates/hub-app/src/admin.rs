@@ -124,6 +124,8 @@ pub enum JobOut {
     Reply(SessionId, String),
     /// A `network` topic event.
     Event(J),
+    /// A `network` topic event as JSON text (a large one).
+    EventText(String),
     /// The NCP's network was replaced: import its devices again.
     Reimport,
     /// A restored backup's groups (`metadata.internal.zigbee_rs.groups`)
@@ -217,6 +219,9 @@ pub struct Admin {
     import_stage: Option<Box<import::Stage>>,
     /// An import is being applied ([`Admin::import_holds`]).
     import_hold: Arc<AtomicBool>,
+    /// Random per start of the application (`hub/system` `boot_id`): a
+    /// client sees the hub restarted when it changes.
+    boot_id: u32,
 }
 
 fn ncp_error(what: &str, e: CoordError) -> ApiError {
@@ -759,7 +764,13 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
+        let mut b = [0u8; 4];
+        match &platform {
+            Some(p) => p.random(&mut b),
+            None => b = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()) as u32).to_le_bytes(),
+        }
         Self {
+            boot_id: u32::from_le_bytes(b),
             platform,
             source,
             job_stack: 16 * 1024,
@@ -794,6 +805,7 @@ impl Admin {
                 (c.radio.tx_power, "tx_power"),
                 (c.backup.export, "backup"),
                 (c.backup.restore, "restore"),
+                (c.backend == BackendKind::Zrhp, "ncp_log"),
             ] {
                 if has {
                     f.push(name);
@@ -870,6 +882,7 @@ impl Admin {
             o.insert("ncp".into(), ncp);
             o.insert("time".into(), ctx.now_s.into());
             o.insert("time_synced".into(), hub_devices::device::time_synced().into());
+            o.insert("boot_id".into(), format!("{:08x}", self.boot_id).into());
         }
         v
     }

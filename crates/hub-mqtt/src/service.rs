@@ -293,7 +293,10 @@ impl MqttService {
         });
         let s = Self { shared };
         s.apply(cfg);
-        app.add_hook(Box::new(MqttHook { svc: s.clone() }));
+        app.add_hook(Box::new(MqttHook {
+            svc: s.clone(),
+            last: None,
+        }));
         s
     }
 
@@ -359,6 +362,8 @@ impl MqttService {
 /// `mqtt/*` on the app thread.
 struct MqttHook {
     svc: MqttService,
+    /// The state and error last announced (`mqtt_status`).
+    last: Option<(&'static str, Option<String>)>,
 }
 
 impl RequestHook for MqttHook {
@@ -395,6 +400,21 @@ impl RequestHook for MqttHook {
                 format!("unknown request {other}"),
             )),
         }
+    }
+    fn event(&mut self) -> Option<J> {
+        let st = self.svc.status();
+        let now = (st.state, st.last_error);
+        if self.last.as_ref() == Some(&now) {
+            return None;
+        }
+        let ev = Obj::new()
+            .with("topic", "mqtt_status")
+            .with("state", now.0)
+            .with("last_error", now.1.clone())
+            .with("connects", st.connects)
+            .j();
+        self.last = Some(now);
+        Some(ev)
     }
 }
 

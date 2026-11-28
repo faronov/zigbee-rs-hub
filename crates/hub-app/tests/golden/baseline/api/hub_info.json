@@ -1,6 +1,6 @@
 {
   "advanced": "<feature>",
-  "api_version": "1.3",
+  "api_version": "1.4",
   "automations": {
     "format": 1,
     "max_rules": 64
@@ -34,6 +34,7 @@
     "tx_power",
     "backup",
     "restore",
+    "ncp_log",
     "logs"
   ],
   "name": "zigbee-rs-hub",

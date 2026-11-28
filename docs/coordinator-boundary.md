@@ -92,7 +92,8 @@ pub enum Terminal {                       // exactly one per RequestId
 pub enum CoordEvent {                     // large variants boxed: bounded slots are preallocated
     Session(Box<SessionEvent>),           // Up{epoch, info, caps: Arc<Capabilities>} | Down | Incompatible
     Ownership(Box<NetworkOwnership>), NetworkState(NetState), PermitJoin { remaining_s: u32 },
-    Indication(ApsIndication), DeviceJoined { ieee: u64, nwk: u16 },
+    Indication(ApsIndication), DeviceJoined { ieee: u64, nwk: u16, kind: JoinKind },
+    JoinDenied { ieee: u64, nwk: u16, kind: JoinKind },  // JoinKind: Association | SecuredRejoin | TcRejoin | Direct
     DeviceLeft { ieee: u64, nwk: u16, rejoin: Option<bool> }, Gp(Box<GpEvent>),
     Progress { id: RequestId, p: Progress }, Done { id: RequestId, t: Terminal },
     ScanProgress { scan: u8, done: u8, total: u8 }, Dropped { events: u32 },
@@ -575,7 +576,7 @@ choices: `docs/ezsp-backend.md`.
 | Terminal | **pinned:** `messageSentHandler` 0x003F (status last in 13, first from 14): success = `Delivered` only for a unicast with APS `RETRY`, else `Sent`; `DELIVERY_FAILED` → `NotDelivered(NoAck)` | `AF_DATA_CONFIRM(endpoint, TransID, status)`; none if the SRSP failed |
 | Busy / in-flight | **pinned:** `MAX_MESSAGE_LIMIT_REACHED` (0x72; `sl_status` 0x0C03 from 14), `NO_BUFFERS`, `NETWORK_BUSY` → `Refused(Busy)`; `EZSP_CONFIG_APS_UNICAST_MESSAGE_COUNT` (0x03, set to 32) = `max_in_flight`, excess waits in the worker FIFO | no capacity report: fixed per pinned firmware |
 | Max ASDU | **pinned:** `maximumPayloadLength` 0x0033 after NETWORK_UP | AF limit; `_EXT` for larger |
-| Indications, joins | **pinned:** `incomingMessageHandler` 0x0045 (separate fields in 13, `rx_packet_info` from 14; loopbacks dropped), `trustCenterJoinHandler` 0x0024 (`trustCenterPostJoinHandler` from 14, same layout) → `DeviceJoined`, DEVICE_LEFT → `DeviceLeft { rejoin: None }` (the engine marks the device unavailable, reason `left`), `childJoinHandler` 0x0023 | `AF_INCOMING_MSG`, `ZDO_TC_DEV_IND`, `ZDO_END_DEVICE_ANNCE_IND` |
+| Indications, joins | **pinned:** `incomingMessageHandler` 0x0045 (separate fields in 13, `rx_packet_info` from 14; loopbacks dropped), `trustCenterJoinHandler` 0x0024 (`trustCenterPostJoinHandler` from 14, same layout) → `DeviceJoined` (its status says the `JoinKind`), a DENY_JOIN decision → `JoinDenied`, DEVICE_LEFT → `DeviceLeft { rejoin: None }` (the engine marks the device unavailable, reason `left`), `childJoinHandler` 0x0023 | `AF_INCOMING_MSG`, `ZDO_TC_DEV_IND`, `ZDO_END_DEVICE_ANNCE_IND` |
 | Session epoch | **pinned:** every session starts with an ASH reset; an unprompted RSTACK or ERROR ends it (UG101 §5, §6); epoch = a counter per session; `stackStatusHandler` 0x0019 reports the network | `SYS_RESET_IND`, `ZDO_STATE_CHANGE_IND` |
 | Endpoints | **pinned:** `addEndpoint` 0x0002 before `networkInit` 0x0017, in every session | `AF_REGISTER` after reset (duplicate = success) |
 | Groups | **pinned:** `setMulticastTableEntry` 0x0064; the table is written again in every session (RAM on the NCP; assumed, the replay is harmless either way) | `ZDO_EXT_ADD_GROUP` (NV: duplicates on resync) |

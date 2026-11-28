@@ -242,6 +242,53 @@ fn last_values_come_back_marked_restored_until_a_report() {
     assert_eq!(d.record().get("link_stale"), None, "measured again");
 }
 
+/// A battery device silent beyond its availability timeout: unavailable,
+/// `timeout` since then; the network log keeps the last [`NET_LOG`]
+/// entries (API 1.4).
+///
+/// [`NET_LOG`]: crate::hub::netlog::NET_LOG
+#[test]
+fn a_silent_device_times_out_and_the_network_log_is_bounded() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(sensor());
+    sim.join(&mut hub, SENSOR, T0);
+    let id = "zb:00158d0001a2b3c4";
+    let later = T0 + 26 * 3_600_000;
+    hub.tick(later);
+    let rec = hub.device_record(hub.device(id).unwrap());
+    assert_eq!(
+        (
+            &rec["available"],
+            &rec["unavailable_reason"],
+            &rec["unavailable_since"]
+        ),
+        (
+            &json!(false),
+            &json!("timeout"),
+            &json!(crate::device::ts(later))
+        )
+    );
+    assert_eq!(rec["logical_type"], "end_device");
+    for i in 0..40u16 {
+        hub.on_join_denied(
+            0x10 + u64::from(i),
+            i,
+            hub_coord::JoinKind::Association,
+            true,
+            later,
+        );
+    }
+    let log = hub.network_events();
+    let nwks: Vec<u64> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["nwk"].as_u64().unwrap())
+        .collect();
+    assert_eq!(nwks, (8..40).collect::<Vec<u64>>());
+}
+
 /// A leave the coordinator reports: the device stays, unavailable with the
 /// reason `left`, until its next frame or rejoin.
 #[test]
@@ -259,14 +306,14 @@ fn a_device_that_left_is_unavailable_until_it_is_heard_again() {
     );
     hub.drain_events();
 
-    hub.on_device_left(SENSOR);
+    hub.on_device_left(SENSOR, T0);
     let d = hub.device(id).unwrap();
     assert!(!d.available);
     assert_eq!(d.record()["unavailable_reason"], "left");
     let ev = hub.drain_events();
     assert!(ev.contains(&HubEvent::DeviceUpdated(id.into())), "{ev:?}");
     assert_eq!(states(&ev, &uid).last().unwrap()["available"], false);
-    hub.on_device_left(SENSOR);
+    hub.on_device_left(SENSOR, T0);
     assert!(hub.drain_events().is_empty(), "reported once");
     // No probes while it is gone, whatever the time.
     hub.tick(T0 + 30 * 3_600_000);
@@ -286,7 +333,7 @@ fn a_device_that_left_is_unavailable_until_it_is_heard_again() {
     );
 
     // Left again, then a rejoin: back as well.
-    hub.on_device_left(SENSOR);
+    hub.on_device_left(SENSOR, T0);
     hub.drain_events();
     hub.on_device_joined(SENSOR, 0x1235, T0 + 32 * 3_600_000);
     let d = hub.device(id).unwrap();
@@ -298,7 +345,7 @@ fn a_device_that_left_is_unavailable_until_it_is_heard_again() {
     );
 
     // A device the hub does not know.
-    hub.on_device_left(0x0011_2233_4455_6677);
+    hub.on_device_left(0x0011_2233_4455_6677, T0);
     assert!(hub.drain_events().is_empty());
 }
 
@@ -595,6 +642,12 @@ fn on_off_light_entities_commands_and_mains_availability() {
     assert!(hub.device(id).unwrap().available);
     hub.tick(t + 30_003);
     assert!(!hub.device(id).unwrap().available);
+    // Why and since when (API 1.4).
+    let rec = hub.device_record(hub.device(id).unwrap());
+    assert_eq!(
+        (&rec["unavailable_reason"], &rec["unavailable_since"]),
+        (&json!("no_response"), &json!(crate::device::ts(t + 30_003)))
+    );
     // Any frame makes it available again.
     let s = sim.dev(LIGHT).clone();
     hub.on_aps_indication(
