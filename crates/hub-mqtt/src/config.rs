@@ -123,7 +123,9 @@ impl MqttConfig {
 
     /// Applies the fields present in `o` (absent ones keep their value;
     /// `password` replaces the password, `""` removes it); with `check` the
-    /// result is validated.
+    /// result is validated. A new `host` or `username` without a
+    /// `password` in the same request removes the stored one: it was given
+    /// for the old broker and user, and is never sent to another.
     pub fn apply(&mut self, o: &Map<String, J>, check: bool) -> Result<(), String> {
         let mut c = self.clone();
         for (k, v) in o {
@@ -160,6 +162,9 @@ impl MqttConfig {
                 other if check => return Err(bad(format!("unknown setting {other:?}"))),
                 _ => {}
             }
+        }
+        if (c.host != self.host || c.username != self.username) && !o.contains_key("password") {
+            c.password.clear();
         }
         if check {
             c.validate()?;
@@ -267,6 +272,33 @@ mod tests {
         c.apply(json!({"password": ""}).as_object().unwrap(), true)
             .unwrap();
         assert_eq!(c.to_api()["password_set"], false);
+        // The same host and user sent back (a form): the password stays.
+        let set = json!({"host": "192.168.1.5", "username": "hub", "password": "pw"});
+        c.apply(set.as_object().unwrap(), true).unwrap();
+        let same = json!({"host": "192.168.1.5", "username": "hub", "port": 1884});
+        c.apply(same.as_object().unwrap(), true).unwrap();
+        assert_eq!(c.password, "pw");
+        // Another broker or user without a password: the stored one goes.
+        for other in [json!({"host": "10.0.0.9"}), json!({"username": "other"})] {
+            c.apply(set.as_object().unwrap(), true).unwrap();
+            c.apply(other.as_object().unwrap(), true).unwrap();
+            assert_eq!(
+                (c.password.as_str(), &c.to_api()["password_set"]),
+                ("", &json!(false)),
+                "{other}"
+            );
+        }
+        // With a password in the same request: that one.
+        c.apply(
+            json!({"host": "10.0.0.8", "password": "new"})
+                .as_object()
+                .unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(c.password, "new");
+        // The stored form loads with its password.
+        assert_eq!(MqttConfig::from_store(Some(&c.to_store())).password, "new");
         assert_eq!(
             MqttConfig::from_store(Some("garbage")),
             MqttConfig::default()
