@@ -671,3 +671,88 @@ fn echo_on(c: &crate::Client, data: &[u8]) -> Result<Vec<u8>, Error> {
     let rsp = c.call(&SysEcho { data: Rest(data) }, CallOpts::default())?;
     Ok(rsp.payload[1..].to_vec())
 }
+
+/// `host_caps` bit 4 (`CHILD_POLL_EVENTS`) goes only to an NCP that
+/// advertises capability bit 25: one without it (NCP 0.1.3) negotiates
+/// once, without the bit, as before; with it a second `SYS_NEGOTIATE`
+/// opts in, and the next session opts in at once.
+#[test]
+fn child_poll_events_are_asked_only_of_an_ncp_that_has_them() {
+    use zigbee_zrhp::msg::system::host_caps::CHILD_POLL_EVENTS;
+    let base = HubConfig::default().driver.host_caps & !CHILD_POLL_EVENTS;
+    for child_polls in [false, true] {
+        let (host, ncp) = pipe::pair();
+        let sim = SimNcp::start(ncp);
+        sim.with(|s| s.child_polls = child_polls);
+        let (rx, tx) = host.split();
+        let mut cfg = HubConfig::default();
+        cfg.driver.lines = vec![Line::BR_DEFAULT];
+        let hub = Hub::start(cfg, rx, tx, None, Store::volatile(), rng());
+        assert!(hub.wait_ready(T));
+        let negotiated = hub.client().session().unwrap().negotiated.host_caps;
+        if child_polls {
+            assert_eq!(sim.state().negotiations, [base, base | CHILD_POLL_EVENTS]);
+            assert_eq!(negotiated, base | CHILD_POLL_EVENTS);
+            reboot(&hub, &sim);
+            assert!(hub.wait_ready(T));
+            assert_eq!(sim.state().negotiations[2..], [base | CHILD_POLL_EVENTS]);
+        } else {
+            assert_eq!(sim.state().negotiations, [base]);
+            assert_eq!(negotiated, base);
+        }
+        hub.shutdown();
+        sim.stop();
+    }
+}
+
+/// An NCP that never answers after the hub's start (an H2 left in its ROM
+/// loader) is reset once through its EN line, and then comes up; one that
+/// answers, or a stopped hub, is not reset.
+#[test]
+fn a_silent_ncp_is_reset_once_at_the_start() {
+    use std::sync::Mutex;
+    #[derive(Clone, Default)]
+    struct Lines {
+        resets: Arc<AtomicU32>,
+        ncp: Arc<Mutex<Option<pipe::End>>>,
+        sim: Arc<Mutex<Option<SimNcp>>>,
+    }
+    impl crate::transport::NcpControl for Lines {
+        fn reset(&mut self) -> std::io::Result<()> {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            // Out of the ROM loader: the NCP's application answers.
+            if let Some(end) = self.ncp.lock().unwrap().take() {
+                *self.sim.lock().unwrap() = Some(SimNcp::start(end));
+            }
+            Ok(())
+        }
+        fn enter_rom_loader(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (host, ncp) = pipe::pair();
+    let lines = Lines::default();
+    *lines.ncp.lock().unwrap() = Some(ncp);
+    let (rx, tx) = host.split();
+    let mut cfg = HubConfig::default();
+    cfg.driver.lines = vec![Line::BR_DEFAULT];
+    let hub = Hub::start(cfg, rx, tx, Some(Box::new(lines.clone())), Store::volatile(), rng());
+    assert!(hub.reset_if_silent(Duration::from_millis(300)));
+    assert!(hub.wait_ready(T));
+    assert!(!hub.reset_if_silent(Duration::ZERO), "it answers");
+    assert_eq!(lines.resets.load(Ordering::SeqCst), 1);
+    hub.shutdown();
+    lines.sim.lock().unwrap().take().unwrap().stop();
+
+    // `hub rom` stops the hub first: a stopped hub resets nothing.
+    let (host, _ncp) = pipe::pair();
+    let lines = Lines::default();
+    let (rx, tx) = host.split();
+    let mut cfg = HubConfig::default();
+    cfg.driver.lines = vec![Line::BR_DEFAULT];
+    let hub = Hub::start(cfg, rx, tx, Some(Box::new(lines.clone())), Store::volatile(), rng());
+    hub.shutdown();
+    assert!(hub.client().wait_state(T, |s| s == crate::SessionState::Stopped).is_some());
+    assert!(!hub.reset_if_silent(Duration::ZERO));
+    assert_eq!(lines.resets.load(Ordering::SeqCst), 0);
+}

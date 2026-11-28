@@ -1,6 +1,6 @@
 {
   "advanced": "<feature>",
-  "api_version": "1.4",
+  "api_version": "1.5",
   "automations": {
     "format": 2,
     "max_rules": 64

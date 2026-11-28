@@ -51,6 +51,10 @@ impl PortTx for UartTx {
         }
         Ok(())
     }
+    /// UART1: the link paces itself by its rate.
+    fn line_rate(&self, line: Line) -> u32 {
+        line.baud
+    }
 }
 
 impl NcpControl for H2Lines {

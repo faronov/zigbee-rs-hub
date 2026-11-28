@@ -25,7 +25,11 @@
 //!   with [`Error::LinkReset`] (delivery unknown);
 //! - while no session comes up, the driver cycles through
 //!   [`DriverConfig::lines`] (921 600 with RTS/CTS, then the 460 800
-//!   fallback).
+//!   fallback); the link paces itself by the line's rate when the transport
+//!   has one ([`PortTx::line_rate`], spec 5.6);
+//! - host capabilities the NCP must advertise first
+//!   ([`host_caps_for`]: `CHILD_POLL_EVENTS`) are set by a second
+//!   `SYS_NEGOTIATE` in the same session once its answer shows them.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -41,7 +45,9 @@ use zigbee_zrhp::frame::{ResetReason, TX_BUFFER_LEN};
 use zigbee_zrhp::link::{
     Link, LinkConfig, LinkCounters, LinkEvent, LinkState, PeerChange, SessionInfo, TxFailure,
 };
-use zigbee_zrhp::msg::system::{EvtNcpReady, SysGetInfoRsp, SysNegotiateReq, SysNegotiateRsp};
+use zigbee_zrhp::msg::system::{
+    EvtNcpReady, SysGetInfoRsp, SysNegotiateReq, SysNegotiateRsp, caps, host_caps,
+};
 use zigbee_zrhp::msg::{self, Batch, BatchWriter, Kind, MessageDef, TidAllocator, ids};
 use zigbee_zrhp::queue::TxSource;
 use zigbee_zrhp::types::{Endpoint, Status};
@@ -107,7 +113,8 @@ pub struct DriverConfig {
     pub link: LinkConfig,
     /// Host name sent in `SYS_NEGOTIATE`.
     pub host_name: String,
-    /// `host_caps` of `SYS_NEGOTIATE` (spec 8.8).
+    /// `host_caps` of `SYS_NEGOTIATE` (spec 8.8); the opt-in bits are only
+    /// sent to an NCP that advertises them ([`host_caps_for`]).
     pub host_caps: u64,
     /// Host line settings tried in order while no session comes up.
     pub lines: Vec<Line>,
@@ -133,7 +140,9 @@ impl Default for DriverConfig {
         Self {
             link: LinkConfig::embedded_host(),
             host_name: "zigbee-rs-hub".into(),
-            host_caps: msg::system::host_caps::FC_CHECKPOINTS | msg::system::host_caps::RETRY_CACHE,
+            host_caps: host_caps::FC_CHECKPOINTS
+                | host_caps::RETRY_CACHE
+                | host_caps::CHILD_POLL_EVENTS,
             lines: vec![Line::BR_DEFAULT, Line::BR_FALLBACK],
             hunt_after: Duration::from_secs(4),
             ready_timeout: Duration::from_secs(2),
@@ -299,6 +308,25 @@ pub struct Negotiated {
     pub build_id: [u8; 8],
     /// Chip ID (1 = ESP32-H2).
     pub chip: u8,
+    /// `host_caps` this session negotiated ([`host_caps_for`]).
+    pub host_caps: u64,
+    /// `NWK_SET_TX_POWER` range `(min, max)` in dBm (capacities 20 and 21);
+    /// `None` when the NCP reports none (before zigbee-rs NCP 0.1.4).
+    pub tx_power_range: Option<(i8, i8)>,
+}
+
+/// `(host_caps bit, ncp_caps bit)`: host capabilities sent only to an NCP
+/// that advertises the matching capability.
+const OPT_IN: [(u64, u64); 1] = [(host_caps::CHILD_POLL_EVENTS, caps::CHILD_POLL_EVENTS)];
+
+/// The `host_caps` to negotiate with an NCP of `ncp_caps`: `wanted`
+/// without the opt-in bits it does not advertise (`EVT_CHILD_POLL` only
+/// from an NCP with capability bit 25, spec 7.2).
+pub fn host_caps_for(wanted: u64, ncp_caps: u64) -> u64 {
+    OPT_IN.iter().fold(
+        wanted,
+        |c, &(host, ncp)| if ncp_caps & ncp == 0 { c & !host } else { c },
+    )
 }
 
 impl Negotiated {
@@ -425,6 +453,7 @@ struct Call {
     opts: CallOpts,
     reply: SyncSender<Result<Outcome, Error>>,
     tid: SyncSender<u16>,
+    accepted: Arc<AtomicBool>,
 }
 
 struct Shared {
@@ -450,9 +479,16 @@ pub struct Ticket {
     /// TID allocated for the request.
     pub tid: u16,
     rx: Receiver<Result<Outcome, Error>>,
+    accepted: Arc<AtomicBool>,
 }
 
 impl Ticket {
+    /// The NCP answered `SUCCESS` and the completion event is awaited
+    /// ([`CallOpts::confirm`]): an `APS_DATA_REQUEST` the NCP took.
+    pub fn accepted(&self) -> bool {
+        self.accepted.load(Ordering::Relaxed)
+    }
+
     /// Block until the response (and confirmation, if requested).
     pub fn wait(self) -> Result<Outcome, Error> {
         self.rx.recv().unwrap_or(Err(Error::Closed))
@@ -473,6 +509,7 @@ impl Client {
     pub fn start(&self, msg_id: u16, payload: Vec<u8>, opts: CallOpts) -> Result<Ticket, Error> {
         let (reply, rx) = mpsc::sync_channel(1);
         let (tid_tx, tid_rx) = mpsc::sync_channel(1);
+        let accepted = Arc::new(AtomicBool::new(false));
         self.input
             .send(Input::Call(Call {
                 msg_id,
@@ -480,10 +517,11 @@ impl Client {
                 opts,
                 reply,
                 tid: tid_tx,
+                accepted: accepted.clone(),
             }))
             .map_err(|_| Error::Closed)?;
         let tid = tid_rx.recv().map_err(|_| Error::Closed)?;
-        Ok(Ticket { tid, rx })
+        Ok(Ticket { tid, rx, accepted })
     }
 
     /// Request with a raw payload; non-success statuses are errors.
@@ -750,6 +788,7 @@ struct Pending {
     retry: bool,
     reply_msg: Option<Message>,
     reply: Option<SyncSender<Result<Outcome, Error>>>,
+    accepted: Option<Arc<AtomicBool>>,
 }
 
 struct Outgoing {
@@ -858,6 +897,10 @@ struct Driver<T: PortTx> {
     line_idx: usize,
     line_since: Instant,
     cookie: u32,
+    /// `host_caps` of the last `SYS_NEGOTIATE` sent.
+    sent_caps: u64,
+    /// This session negotiated twice already (opt-in bits).
+    renegotiated: bool,
 }
 
 impl<T: PortTx> Driver<T> {
@@ -893,6 +936,8 @@ impl<T: PortTx> Driver<T> {
             line_idx: 0,
             line_since: now,
             cookie,
+            sent_caps: 0,
+            renegotiated: false,
         }
     }
 
@@ -912,6 +957,15 @@ impl<T: PortTx> Driver<T> {
         let _ = self.events.send(ev);
     }
 
+    /// The host side of `line`, and its rate for the link's pacing (0
+    /// without a UART).
+    fn apply_line(&mut self, line: Line) {
+        if let Err(e) = self.tx.set_line(line) {
+            warn!("zrhp: set_line {line:?}: {e}");
+        }
+        self.link.set_line_rate(self.tx.line_rate(line));
+    }
+
     fn set_phase(&mut self, phase: Phase) {
         self.phase = phase;
         let public = match phase {
@@ -926,9 +980,7 @@ impl<T: PortTx> Driver<T> {
     }
 
     fn run(mut self, inputs: Receiver<Input>) {
-        if let Err(e) = self.tx.set_line(self.line()) {
-            warn!("zrhp: set_line {:?}: {e}", self.line());
-        }
+        self.apply_line(self.line());
         let now = self.now_us();
         self.link.reopen(now, self.cookie, ResetReason::HostOpen);
         let mut transmit_us = 0;
@@ -1000,9 +1052,7 @@ impl<T: PortTx> Driver<T> {
                 }
             }
             Input::SetLine(line) => {
-                if let Err(e) = self.tx.set_line(line) {
-                    warn!("zrhp: set_line {line:?}: {e}");
-                }
+                self.apply_line(line);
                 if let Some(i) = self.cfg.lines.iter().position(|l| *l == line) {
                     self.line_idx = i;
                 } else {
@@ -1170,6 +1220,7 @@ impl<T: PortTx> Driver<T> {
         );
         self.session = Some(info);
         self.resync = same;
+        self.renegotiated = false;
         self.established_at = Instant::now();
         // Every session starts with the handshake's credit (none on LOG).
         if self.cfg.log_credits > 0 {
@@ -1243,6 +1294,9 @@ impl<T: PortTx> Driver<T> {
             let p = self.pending.get_mut(&m.tid).unwrap();
             p.state = PState::AwaitConfirm(Instant::now());
             p.reply_msg = Some(m);
+            if let Some(a) = &p.accepted {
+                a.store(true, Ordering::Relaxed);
+            }
             return;
         }
         let p = self.pending.remove(&m.tid).unwrap();
@@ -1283,10 +1337,13 @@ impl<T: PortTx> Driver<T> {
 
     fn negotiate(&mut self) {
         let name = self.cfg.host_name.clone();
+        // The NCP of the previous session is likely this one.
+        let known = self.negotiated.as_ref().map_or(0, |n| n.ncp_caps);
+        self.sent_caps = host_caps_for(self.cfg.host_caps, known);
         let req = SysNegotiateReq {
             major_min: zigbee_zrhp::PROTOCOL_MAJOR,
             major_max: zigbee_zrhp::PROTOCOL_MAJOR,
-            host_caps: self.cfg.host_caps,
+            host_caps: self.sent_caps,
             name: Bytes8(&name.as_bytes()[..name.len().min(32)]),
         };
         match encode_body(&req) {
@@ -1321,6 +1378,7 @@ impl<T: PortTx> Driver<T> {
                 retry: false,
                 reply_msg: None,
                 reply: None,
+                accepted: None,
             },
         );
         self.out.push(
@@ -1357,6 +1415,8 @@ impl<T: PortTx> Driver<T> {
                     fw: String::from_utf8_lossy(rsp.fw.0).into_owned(),
                     build_id: rsp.build_id,
                     chip: rsp.chip,
+                    host_caps: self.sent_caps,
+                    tx_power_range: rsp.tx_power_range(),
                 };
                 if negotiated.major != zigbee_zrhp::PROTOCOL_MAJOR {
                     self.set_phase(Phase::Incompatible);
@@ -1366,7 +1426,15 @@ impl<T: PortTx> Driver<T> {
                     )));
                     return;
                 }
+                let want = host_caps_for(self.cfg.host_caps, negotiated.ncp_caps);
                 self.negotiated = Some(negotiated);
+                // Opt in (or out) now that the NCP's capabilities are known;
+                // the NCP takes the new host_caps and nothing else changes.
+                if want != self.sent_caps && !self.renegotiated {
+                    self.renegotiated = true;
+                    self.negotiate();
+                    return;
+                }
                 self.set_phase(Phase::Info);
                 self.internal(Internal::GetInfo, ids::SYS_GET_INFO, Vec::new());
             }
@@ -1456,6 +1524,7 @@ impl<T: PortTx> Driver<T> {
                 retry: false,
                 reply_msg: None,
                 reply: Some(call.reply),
+                accepted: Some(call.accepted),
             },
         );
         self.held.push(tid);
@@ -1568,9 +1637,7 @@ impl<T: PortTx> Driver<T> {
                 self.line_since = now;
                 let line = self.line();
                 info!("zrhp: no session, trying {line:?}");
-                if let Err(e) = self.tx.set_line(line) {
-                    warn!("zrhp: set_line {line:?}: {e}");
-                }
+                self.apply_line(line);
                 let at = self.now_us();
                 self.link.open(at, ResetReason::HostOpen);
             }

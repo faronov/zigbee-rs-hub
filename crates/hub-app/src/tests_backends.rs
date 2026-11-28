@@ -1941,6 +1941,8 @@ fn the_network_and_its_devices_move_from_the_ezsp_ncp_to_the_zrhp_ncp() {
     let mut c = ezsp_sim(true, 0xDD);
     c.eui64 = Eui64(CHIP_EUI64);
     c.nwk_frame_counter = 70_000;
+    // As the hub forms an EmberZNet network without a TX power set.
+    c.network.radio_tx_power = 0;
     let mut rig = Rig::ezsp(c, flash.store());
     rig.devices(vec![plug()], Arc::new(Mutex::new(Vec::new())));
     let (sid, rx) = session(&rig.app);
@@ -1979,6 +1981,11 @@ fn the_network_and_its_devices_move_from_the_ezsp_ncp_to_the_zrhp_ncp() {
         })
         .collect();
     assert_eq!(roots, [root], "the root record restored");
+    // No TX power was set: the EmberZNet network's 0 dBm is not applied,
+    // the zigbee-rs NCP keeps its own (0x7F), and none is set afterwards.
+    assert_eq!(backup["metadata"]["internal"]["tx_power"], 0);
+    assert_eq!(restored_tx_power(&rig), [0x7F]);
+    assert_eq!(rig.zrhp.as_ref().unwrap().stored_tx_power(), None);
     wait("the restored network owned", || {
         let i = info(&rig.app, sid, &rx);
         i["ownership"] == "owned" && i["registry"]["state"] == "owned" && i["ext_pan_id"] == "dddddddddddddddd"
@@ -1991,6 +1998,40 @@ fn the_network_and_its_devices_move_from_the_ezsp_ncp_to_the_zrhp_ncp() {
     wait("On reached the plug through the ZRHP NCP", || {
         answered.lock().unwrap().iter().any(|r| r.cluster == 0x0006 && r.payload.get(2) == Some(&0x01))
     });
+    rig.finish();
+}
+
+/// `tx_power` of the NETWORK records of the simulated ZRHP NCP's last restore.
+fn restored_tx_power(rig: &Rig) -> Vec<i8> {
+    let stream = rig.zsim.as_ref().unwrap().with(|s| s.restored.clone()).unwrap();
+    zigbee_zrhp::records::RawRecords::new(&stream)
+        .flatten()
+        .filter_map(|(_, tlv)| match zigbee_zrhp::codec::Reader::new(tlv).read() {
+            Ok(zigbee_zrhp::records::Record::Network(n)) => Some(n.tx_power),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The TX power the operator set goes with a backup of the hub: restored
+/// on another hub, the NCP gets it and that hub keeps it (re-applied after
+/// every NCP restart).
+#[test]
+fn the_operators_tx_power_goes_with_the_backup() {
+    let rig = Rig::zrhp(true);
+    let (sid, rx) = session(&rig.app);
+    wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+    ok(&call(&rig.app, sid, &rx, 1, json!({"type": "network/set_tx_power", "dbm": -3})));
+    let backup = ok(&call(&rig.app, sid, &rx, 2, json!({"type": "network/backup"}))).clone();
+    assert_eq!(backup["metadata"]["internal"]["zigbee_rs"]["tx_power"], -3);
+    rig.finish();
+
+    let rig = Rig::zrhp(false);
+    let (sid, rx) = session(&rig.app);
+    ok(&call(&rig.app, sid, &rx, 3, json!({"type": "network/restore", "backup": backup, "confirm": true})));
+    assert_eq!(restored_tx_power(&rig), [-3]);
+    assert_eq!(rig.zrhp.as_ref().unwrap().stored_tx_power(), Some(-3));
+    assert_eq!(rig.zsim.as_ref().unwrap().state().tx_power, -3);
     rig.finish();
 }
 

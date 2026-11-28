@@ -24,11 +24,11 @@ hub-ota = { path = "crates/hub-ota", default-features = false }
 hub-app = { path = "crates/hub-app", default-features = false }
 hub-web = { path = "crates/hub-web" }
 hub-mqtt = { path = "crates/hub-mqtt" }
-# zigbee-rs crates, all at one master revision (cb9b5c0e, 2026-11-28, NCP 0.1.3, PR #26):
+# zigbee-rs crates, all at one master revision (2c841178, 2026-11-28, NCP 0.1.3 plus PRs #27 to #35):
 # ZRHP v1 protocol crate and the Green Power commissioning decoder and
 # default translation used by the device engine.
-zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "cb9b5c0e060ed33ac8cec29f43586e44d6aca675", default-features = false }
-zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "cb9b5c0e060ed33ac8cec29f43586e44d6aca675", features = ["sink"] }
+zigbee-zrhp = { git = "https://github.com/faronov/zigbee-rs", rev = "2c8411783bd97636320bb9fbd4ccdb0f515387b8", default-features = false }
+zigbee-gp = { git = "https://github.com/faronov/zigbee-rs", rev = "2c8411783bd97636320bb9fbd4ccdb0f515387b8", features = ["sink"] }
 
 [profile.release]
 opt-level = "z"

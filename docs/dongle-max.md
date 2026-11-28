@@ -499,7 +499,7 @@ committed claim is finished), the hub, network, LED and button, console.
 
 | Part | What |
 |---|---|
-| Coordinator | the boot's choice ("Which backend runs"): `Backend::ezsp` on UART1 (TX GPIO17, RX GPIO13, 115 200 Bd, no flow control), `EzspOptions` defaults (worker 16 KiB stack), or `Backend::zrhp` on the ZRHP host core (460 800 Bd, then 115 200, no flow control; the MG24's reset line as its `NcpControl`). The backend owns the UART for the whole boot; the NCP updater borrows it (parked) |
+| Coordinator | the boot's choice ("Which backend runs"): `Backend::ezsp` on UART1 (TX GPIO17, RX GPIO13, 115 200 Bd, no flow control), `EzspOptions` defaults (worker 16 KiB stack), or `Backend::zrhp` on the ZRHP host core (460 800 Bd, then 115 200, no flow control, the link paced by the line rate (ZRHP ACK-first and its RTO floor); the MG24's reset line as its `NcpControl`; the TX power stays the NCP's own until `network/set_tx_power`: +8 dBm on the 20 dBm PA in images after zigbee-rs NCP 0.1.3, +10 before). The backend owns the UART for the whole boot; the NCP updater borrows it (parked) |
 | Store | the host store journal in `files` `hubdata` once claimed, RAM before; `NcpNvRecords` decide ownership (`docs/ezsp-backend.md`) |
 | Catalog | the `hubdata` area mapped (`zrh_espapp::catalog::HubData::window`) once claimed |
 | Zigbee OTA | the server with streams (4 at once) and, once claimed, the image store in `ota_store` |

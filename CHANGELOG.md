@@ -6,6 +6,73 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
+## Unreleased
+
+### New
+
+- **Sleepy devices get their requests when they poll** (ZRHP, zigbee-rs
+  NCP images after 0.1.3). The hub asks an NCP that offers them for its
+  reports of its children's data polls (`EVT_CHILD_POLL`) and takes one
+  as a frame from the device: seen, awake, and what waits for it
+  (configure, reads, binds, settings) goes out at once, the NCP holding it
+  for the next poll. A button that polls but rarely sends, like a SONOFF
+  SNZB-01, is configured without a press, and gets each request once (one
+  the NCP holds for the next poll is not sent again). The reports are
+  hints (at most one per child every 2 s, 10 per second in all, only the
+  NCP's own children): any frame still sends the queue, as before. NCP
+  0.1.3 and EmberZNet are unaffected (`docs/device-support.md` 3.1).
+- **API 1.5: the NCP's TX power range.** `network/info` has `tx_power_min`
+  and `tx_power_max` when the NCP reports them (zigbee-rs NCP images after
+  0.1.3: ESP32-H2/C6, and the MG24 with −24…+20 dBm on its 20 dBm PA);
+  `network/set_tx_power` clamps to them and keeps the clamped value, and
+  Settings shows the range. The hub sets no TX power of its own: until
+  one is set the NCP keeps its default (+8 dBm on the Dongle Max's
+  zigbee-rs NCP).
+- zigbee-rs crates at master `2c841178` (after NCP 0.1.3, PRs #27 to #35:
+  the MG24's `NWK_SET_TX_POWER` and the TX power range, ZRHP ACK-first
+  transmission with a line-rate RTO floor, the child poll reports, faster
+  polling of sleepy sensors while the network talks to them).
+
+### Fixes
+
+- **A restore no longer sets a TX power nobody chose.** A backup's
+  `tx_power` is the radio's power at the time, and on a network the hub
+  formed on EmberZNet without a setting that is 0 dBm: after the Dongle
+  Max's move to the zigbee-rs NCP (or any restore of such a backup) the
+  NCP ran at 0 dBm until its next reset. A backup of the hub now carries
+  the power the operator set (`metadata.internal.zigbee_rs.tx_power`),
+  which the restore applies and the hub keeps (its own setting wins);
+  otherwise the NCP keeps its default. Backups of the hub from before
+  this release cannot tell a set power from a default: their power is not
+  applied (set it again with `network/set_tx_power`). Other stacks'
+  backups (bellows, zigpy-znp, the ZRHP adapters of Z2M and ZHA) bring
+  their configured power, as before.
+- **Thread BR board: an H2 left in its ROM loader comes back by itself.**
+  After a flash in bridge mode cut short (an interrupted web flasher
+  session), the hub found no NCP until `hub ncp reset hard`. Now, when
+  the H2 has not answered 10 s after the hub's start, the hub pulses its
+  EN once (BOOT released: a normal boot) and logs it; never when it
+  answered, after `hub rom`, or over an NCP image being activated. The
+  Dongle Max's MG24 was already reset into its application when nothing
+  answers (backend detection).
+- **ZRHP over a UART: no spurious retransmissions at 115 200 Bd.** The
+  link now knows the UART's rate (S3 hub to the H2, Dongle Max to the
+  MG24, `hubctl` through a USB-UART bridge, also after a line change): it
+  sends ACKs first and holds data while the UART is still busy, and its
+  retransmission timeout no longer runs out before the peer could answer
+  (about 0.1 s at 115 200 Bd). An NCP's own USB keeps the fixed timeout.
+- **No more `BUSY` refusals from a ZRHP NCP under load.** The hub sends at
+  most the NCP's `max_aps_inflight` APS requests it has not answered yet
+  (16 on the zigbee-rs NCP); the others wait in the hub, in order, and a
+  request the NCP refuses as busy goes again shortly instead of failing
+  (the `busy` APS counter of `hub/system`). Requests waiting for their
+  delivery (to a sleepy or unreachable device) hold nothing, and control
+  requests (permit join, removal, groups, GP) never wait for APS ones.
+- **The NCP's debug and trace log records are shown.** `network/ncp_log`
+  levels 4 and 5 let the NCP send them, but the firmware logs nothing
+  below info: they were dropped, yet counted as `forwarded`. They now go
+  into the hub's log at info with `D:` or `T:` before their text.
+
 ## 0.4.2 (2026-11-28)
 
 A fix release for 0.4.1, with the Dongle Max's MG24 firmware update and

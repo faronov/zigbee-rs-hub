@@ -74,6 +74,10 @@ impl PortTx for Tx {
         }
         Ok(())
     }
+    /// A UART (no RTS/CTS on the Dongle-M): the link paces itself by its rate.
+    fn line_rate(&self, line: Line) -> u32 {
+        line.baud
+    }
 }
 
 /// The MG24's reset line. The Gecko bootloader is the NCP updater's

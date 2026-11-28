@@ -263,6 +263,8 @@ pub fn capabilities(config: &BTreeMap<u8, u16>, max_payload: Option<u8>) -> Capa
             active_scan: true,
             channel: true,
             tx_power: true,
+            // EmberZNet reports no range.
+            tx_power_range: None,
         },
         backup: BackupSupport {
             export: true,

@@ -550,6 +550,11 @@ static mut CRASH_REASON: u32 = 0;
 
 /// Hub restarts after a crash before the safe mode takes over.
 const MAX_CRASH_RESTARTS: u32 = 3;
+
+/// Both host lines tried (4 s each) before an H2 that never answered is
+/// reset once ([`Hub::reset_if_silent`]).
+const NCP_ANSWER_WAIT: Duration = Duration::from_secs(10);
+
 /// Uptime after which a hub boot counts as healthy (ends a crash streak).
 const HEALTHY_UPTIME_MS: i64 = 10 * 60 * 1000;
 const STREAK_MAGIC: u32 = 0x4353_0000;
@@ -678,6 +683,15 @@ fn main() {
     }
     stage(9);
     tbr_bridge::wait_usb_mount();
+    // An H2 left in its ROM loader (a flash in bridge mode cut short) never
+    // answers the hub: one EN pulse (BOOT released) when nothing answered
+    // within NCP_ANSWER_WAIT of the hub's start. Not in bridge mode; `hub
+    // rom` stops the hub first; never over an NCP image being activated.
+    if boot.mode == Mode::Hub
+        && let Some(hub) = HUB.get()
+    {
+        hub.reset_if_silent(NCP_ANSWER_WAIT);
+    }
     // Returning ends the main task: ESP-IDF frees its stack
     // (CONFIG_ESP_MAIN_TASK_STACK_SIZE of internal RAM); the threads keep running.
 }

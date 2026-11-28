@@ -10,8 +10,9 @@
 //!   DTR/RTS to them).
 //!
 //! Implementations: `hubctl` (macOS/Linux serial port through the phase-0
-//! bridge), `firmware/hub` (S3 UART1 with RTS/CTS), [`pipe`] (in-memory,
-//! tests and the simulated NCP).
+//! bridge), `firmware/hub` (S3 UART1 with RTS/CTS), `firmware/gateway`
+//! (the Dongle-M's UART to the MG24), [`pipe`] (in-memory, tests and the
+//! simulated NCP).
 
 use std::io;
 use std::time::Duration;
@@ -52,6 +53,16 @@ pub trait PortTx: Send {
     /// Switch the host side of the line. A transport that cannot change a
     /// setting (a USB bridge that owns flow control) ignores it.
     fn set_line(&mut self, line: Line) -> io::Result<()>;
+
+    /// The rate (baud, 8N1) bytes leave the host at on `line`, which the
+    /// link paces its transmissions and its retransmission timeout by
+    /// (ZRHP spec 5.6, ACK-first): `line.baud` for a UART, also one behind a
+    /// USB-UART bridge. 0, the default, for a transport without one (the
+    /// NCP's own USB-Serial-JTAG).
+    fn line_rate(&self, line: Line) -> u32 {
+        let _ = line;
+        0
+    }
 }
 
 /// NCP reset and boot-strap lines.

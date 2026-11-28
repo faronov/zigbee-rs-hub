@@ -1864,7 +1864,40 @@ impl<T: ZigbeeTransport> Hub<T> {
         self.pump_configure(&id, now);
     }
 
-    /// Any frame from a device: last_seen, link quality, availability.
+    /// A child of the NCP polled it (ZRHP `EVT_CHILD_POLL`): as an uplink,
+    /// heard from, awake, and what waits for it goes out now (the NCP holds
+    /// it for the child's next poll), unless the ACK to the poll had Frame
+    /// Pending set (`frame_pending`: the NCP is delivering a frame to it).
+    /// A hint, rate-limited by the NCP: the queue still waits for frames
+    /// when no report comes.
+    pub fn on_child_poll(&mut self, ieee: Option<u64>, nwk: u16, frame_pending: bool, now: Millis) {
+        let by_ieee = ieee.map(zigbee_id).filter(|i| self.devices.contains_key(i));
+        let Some(id) = by_ieee
+            .clone()
+            .or_else(|| self.nwk_index.get(&nwk).cloned())
+        else {
+            return;
+        };
+        if by_ieee.is_some()
+            && self
+                .devices
+                .get(&id)
+                .and_then(Device::nwk)
+                .is_some_and(|n| n != nwk)
+        {
+            self.renumber(&id, nwk);
+        }
+        self.seen(&id, None, None, now);
+        if let Some(d) = self.devices.get_mut(&id) {
+            d.awake_until = d.awake_until.max(now + AWAKE_AFTER_RX_MS);
+        }
+        if !frame_pending {
+            self.flush_queue(&id, now);
+        }
+    }
+
+    /// Any frame from a device: last_seen, link quality, availability; a
+    /// data poll (no LQI, no RSSI): last_seen and availability.
     pub(crate) fn seen(&mut self, id: &str, lqi: Option<u8>, rssi: Option<i8>, now: Millis) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
@@ -1897,16 +1930,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
-        let mut fields = vec![
-            (
-                DeviceField::Linkquality,
-                d.lqi.map_or(Value::Null, |v| Value::Int(i64::from(v))),
-            ),
-            (
-                DeviceField::Rssi,
-                d.rssi.map_or(Value::Null, |v| Value::Int(i64::from(v))),
-            ),
-        ];
+        let mut fields = Vec::new();
+        // A data poll (no LQI, no RSSI) leaves the link's entities as they are.
+        if lqi.is_some() || !was {
+            let v = d.lqi.map_or(Value::Null, |v| Value::Int(i64::from(v)));
+            fields.push((DeviceField::Linkquality, v));
+        }
+        if rssi.is_some() || !was {
+            let v = d.rssi.map_or(Value::Null, |v| Value::Int(i64::from(v)));
+            fields.push((DeviceField::Rssi, v));
+        }
         if minute_passed || !was {
             fields.push((DeviceField::LastSeen, Value::Float(ts(now))));
         }
@@ -2947,14 +2980,6 @@ impl<T: ZigbeeTransport> Hub<T> {
             });
             return;
         }
-        let err = match &t {
-            Terminal::NotDelivered(e) => not_delivered(e),
-            Terminal::Refused(_) => ApiError::new(
-                "not_delivered",
-                "the NCP refused the request (queue full or network down)",
-            ),
-            _ => return,
-        };
         let Some(k) = self
             .pending
             .iter()
@@ -2962,6 +2987,21 @@ impl<T: ZigbeeTransport> Hub<T> {
             .map(|(k, _)| *k)
         else {
             return; // answered meanwhile, or nothing waits for it
+        };
+        let err = match &t {
+            Terminal::NotDelivered(e) => not_delivered(e),
+            Terminal::Refused(_) => ApiError::new(
+                "not_delivered",
+                "the NCP refused the request (queue full or network down)",
+            ),
+            _ => {
+                // The answer is due from the delivery on (the NCP holds a
+                // sleepy device's frame until it polls).
+                if let Some(p) = self.pending.get_mut(&k) {
+                    p.sent_at = now;
+                }
+                return;
+            }
         };
         let Some(mut p) = self.pending.remove(&k) else {
             return;
@@ -3003,12 +3043,17 @@ impl<T: ZigbeeTransport> Hub<T> {
         {
             self.aps_done(s.id, Terminal::Unknown(CoordError::Timeout), now);
         }
-        // Request timeouts.
+        // Request timeouts; a sleepy device's request the NCP still holds
+        // for its next poll has none (its outcome decides, then the answer
+        // has TX_TIMEOUT_SLEEPY_MS): sent again, it would arrive twice.
         let expired: Vec<(bool, u8)> = self
             .pending
             .iter()
             .filter(|(_, p)| {
                 let sleepy = self.devices.get(&p.device).is_some_and(Device::sleepy);
+                if sleepy && self.transport.in_flight(p.rid) {
+                    return false;
+                }
                 now.saturating_sub(p.sent_at)
                     > if sleepy {
                         TX_TIMEOUT_SLEEPY_MS

@@ -57,6 +57,9 @@ pub struct RadioOps {
     pub channel: bool,
     /// TX power setting.
     pub tx_power: bool,
+    /// The TX power range `(min, max)` in dBm the NCP reports (ZRHP
+    /// capacities 20/21); `None` when it reports none.
+    pub tx_power_range: Option<(i8, i8)>,
 }
 
 /// Backup and restore support.

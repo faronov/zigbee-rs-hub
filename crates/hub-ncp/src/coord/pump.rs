@@ -8,14 +8,20 @@
 //!
 //! - **APS data** goes out with [`Client::start`](crate::Client::start)
 //!   and the same call options as before (the driver holds requests across
-//!   an NCP resume). Its outcome is emitted at the position of its
-//!   `EVT_APS_DATA_CONFIRM` among the events (the driver completes the
-//!   request before it passes the event on), so it never precedes an
-//!   indication the NCP sent before it. Outcomes a response alone decides
-//!   (refusals, driver errors, timeouts) are emitted before the next event.
+//!   an NCP resume), at most `max_aps_inflight` (the NCP's capacity, of
+//!   the last session that reported it) not yet answered at once: the NCP
+//!   frees its slot when it hands a request to its stack, not at the
+//!   confirm. The others wait in the pump, in order; one the NCP refuses
+//!   with `BUSY` waits there and goes again ([`BUSY_RETRY`]). Its outcome
+//!   is emitted at the position of its `EVT_APS_DATA_CONFIRM` among the
+//!   events (the driver completes the request before it passes the event
+//!   on), so it never precedes an indication the NCP sent before it.
+//!   Outcomes a response alone decides (refusals, driver errors, timeouts)
+//!   are emitted before the next event.
 //! - **Control requests** (GP, group membership, removal, permit join, the
-//!   device inventory) are today's blocking [`Hub`] calls, made inline:
-//!   later commands and events wait in the queue until the call returns.
+//!   device inventory) are today's blocking [`Hub`] calls, made inline (an
+//!   APS request waiting for a slot does not hold them): later commands
+//!   and events wait in the queue until the call returns.
 //!   That makes them barriers, as when the application thread made them.
 //! - **Hub endpoints** ([`BackendConfig`]): added once per process unless
 //!   the store has them (the lifecycle replays them on every resume), then
@@ -37,6 +43,7 @@ use hub_coord::{
 };
 use log::{debug, info, warn};
 use zigbee_zrhp::msg::ids;
+use zigbee_zrhp::msg::system::capacity;
 use zigbee_zrhp::types::{Ieee, Status};
 
 use super::convert;
@@ -52,8 +59,8 @@ use crate::store::EndpointRecord;
 /// application thread made before (store commits, decoding, logging).
 pub const PUMP_STACK: usize = 8 * 1024;
 
-/// Requests queued for the pump at most; more are refused with
-/// [`CoordError::Busy`] (design §3.5).
+/// Requests queued for the pump at most (those waiting for an APS slot
+/// included); more are refused with [`CoordError::Busy`] (design §3.5).
 pub const COMMAND_CAP: usize = 2048;
 
 /// How long an accepted APS request waits for its confirm. The NCP holds a
@@ -72,10 +79,18 @@ const CONFIRM_SLACK: Duration = Duration::from_secs(2);
 /// Delay before an endpoint registration that failed is tried again.
 const ENDPOINT_RETRY: Duration = Duration::from_secs(1);
 
+/// An APS request the NCP refused with `BUSY` (its queue full) goes again
+/// after this, at most [`BUSY_TRIES`] times; then its outcome is the
+/// refusal.
+const BUSY_RETRY: Duration = Duration::from_millis(100);
+const BUSY_TRIES: u8 = 20;
+
 enum Cmd {
     Aps {
         payload: Vec<u8>,
         timeout: Duration,
+        /// Refused with `BUSY` this many times.
+        busy: u8,
     },
     Gp {
         msg_id: u16,
@@ -209,6 +224,9 @@ impl ZrhpCoordinator {
             endpoint_retry: None,
             up: None,
             inflight: Vec::new(),
+            held: VecDeque::new(),
+            aps_slots: None,
+            busy_until: None,
         };
         thread::Builder::new()
             .name("zrhp-pump".into())
@@ -242,6 +260,7 @@ impl ZrhpCoordinator {
             return Ok(Cmd::Aps {
                 payload,
                 timeout: deadline.unwrap_or(CONFIRM_TIMEOUT),
+                busy: 0,
             });
         }
         if state != SessionState::Ready {
@@ -386,6 +405,8 @@ struct Inflight {
     ticket: Ticket,
     /// Completed with a confirm: its event has not come through yet.
     done: Option<(Result<Outcome, Error>, Instant)>,
+    /// Until the NCP took it: the request, to send again after a `BUSY`.
+    again: Option<Cmd>,
 }
 
 struct Pump {
@@ -398,6 +419,12 @@ struct Pump {
     /// Epoch of the session announced up.
     up: Option<u32>,
     inflight: Vec<Inflight>,
+    /// APS requests waiting, in order, for a slot of the NCP.
+    held: VecDeque<(RequestId, Cmd)>,
+    /// `max_aps_inflight` of the last session that reported it.
+    aps_slots: Option<usize>,
+    /// After a `BUSY`: no APS request goes out before this.
+    busy_until: Option<Instant>,
 }
 
 /// Like a channel receiver going: queued messages are dropped and later
@@ -428,7 +455,7 @@ impl Pump {
         // `ZrhpCoordinator` sends `Stop` when it goes: no sender is ever
         // gone without one.
         let Some(msg) = msg else {
-            return self.replies(true);
+            return self.replies(true) && self.release();
         };
         // Nothing more reaches the NCP once the coordinator is gone.
         if self.events.is_closed() {
@@ -440,19 +467,48 @@ impl Pump {
         }
         match msg {
             PumpMsg::Stop => false,
-            PumpMsg::Ncp(m) => self.event(&m),
+            PumpMsg::Ncp(m) => self.event(&m) && self.release(),
             PumpMsg::Cmd(id, cmd) => {
-                self.shared.queued.fetch_sub(1, Ordering::Relaxed);
-                if self.take(id) {
-                    self.command(id, cmd)
-                } else {
-                    self.emit(CoordEvent::Done {
-                        id,
-                        t: Terminal::Cancelled,
-                    })
+                if !self.take(id) {
+                    self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+                    return self.done(id, Terminal::Cancelled);
                 }
+                if matches!(cmd, Cmd::Aps { .. }) {
+                    self.held.push_back((id, cmd));
+                    return self.release();
+                }
+                // Control requests wait for no APS slot.
+                self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+                self.command(id, cmd)
             }
         }
+    }
+
+    /// Sends the held APS requests, in order, while the NCP has a slot.
+    fn release(&mut self) -> bool {
+        if self.busy_until.is_some_and(|t| Instant::now() < t) {
+            return true;
+        }
+        while self.aps_slot()
+            && let Some((id, cmd)) = self.held.pop_front()
+        {
+            self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+            if !self.command(id, cmd) {
+                return false;
+            }
+        }
+        if self.held.is_empty() && self.held.capacity() > INBOX_KEEP {
+            self.held.shrink_to(INBOX_KEEP);
+        }
+        true
+    }
+
+    /// Whether the NCP takes one more APS request: fewer not yet answered
+    /// than its `max_aps_inflight` (none known: no limit).
+    fn aps_slot(&self) -> bool {
+        self.aps_slots.is_none_or(|n| {
+            self.inflight.iter().filter(|f| f.done.is_none() && !f.ticket.accepted()).count() < n
+        })
     }
 
     fn emit(&self, ev: CoordEvent) -> bool {
@@ -476,9 +532,14 @@ impl Pump {
     /// session is gone.
     fn session(&mut self) -> bool {
         let c = self.hub.client();
-        let session = (c.state() == SessionState::Ready)
-            .then(|| c.session())
-            .flatten();
+        let current = c.session();
+        if let Some(s) = &current {
+            self.aps_slots = s
+                .negotiated
+                .capacity(capacity::MAX_APS_INFLIGHT)
+                .map(|n| n.max(1) as usize);
+        }
+        let session = current.filter(|_| c.state() == SessionState::Ready);
         let epoch = session.as_ref().map(|s| s.link.peer_cookie);
         if self.up.is_some() && self.up != epoch {
             self.up = None;
@@ -542,6 +603,9 @@ impl Pump {
         let mut i = 0;
         while i < self.inflight.len() {
             let f = &mut self.inflight[i];
+            if f.again.is_some() && f.ticket.accepted() {
+                f.again = None;
+            }
             if f.done.is_none()
                 && let Some(r) = f.ticket.try_wait()
             {
@@ -549,6 +613,16 @@ impl Pump {
                     f.done = Some((r, Instant::now()));
                 } else {
                     let f = self.inflight.remove(i);
+                    // The NCP's queue was full: again shortly, first.
+                    if let (Ok(o), Some(Cmd::Aps { payload, timeout, busy })) = (&r, f.again)
+                        && o.reply.status() == Status::Busy
+                        && busy < BUSY_TRIES
+                    {
+                        self.shared.queued.fetch_add(1, Ordering::Relaxed);
+                        self.held.push_front((f.id, Cmd::Aps { payload, timeout, busy: busy + 1 }));
+                        self.busy_until = Some(Instant::now() + BUSY_RETRY);
+                        continue;
+                    }
                     if !self.finish(f.id, f.ticket.tid, r) {
                         return false;
                     }
@@ -599,6 +673,7 @@ impl Pump {
                     id,
                     ticket,
                     done: Some((r, _)),
+                    ..
                 }) => self.finish(id, ticket.tid, r),
                 _ => true,
             };
@@ -612,17 +687,29 @@ impl Pump {
     fn command(&mut self, id: RequestId, cmd: Cmd) -> bool {
         let hub = &self.hub;
         let t = match cmd {
-            Cmd::Aps { payload, timeout } => {
+            Cmd::Aps {
+                payload,
+                timeout,
+                busy,
+            } => {
                 let opts = CallOpts {
                     confirm: Some(Confirm::aps(timeout)),
                     ..CallOpts::default()
                 };
-                return match hub.client().start(ids::APS_DATA_REQUEST, payload, opts) {
+                return match hub
+                    .client()
+                    .start(ids::APS_DATA_REQUEST, payload.clone(), opts)
+                {
                     Ok(ticket) => {
                         self.inflight.push(Inflight {
                             id,
                             ticket,
                             done: None,
+                            again: Some(Cmd::Aps {
+                                payload,
+                                timeout,
+                                busy,
+                            }),
                         });
                         true
                     }
@@ -1124,6 +1211,96 @@ mod tests {
         );
         let (i, t) = outcome(&evs, b);
         assert_eq!((t, i > at_up), (&Terminal::Delivered, true), "{evs:?}");
+    }
+
+    fn permit_join() -> Request {
+        Request::PermitJoin {
+            duration_s: 60,
+            target: None,
+        }
+    }
+
+    fn outcomes(evs: &[CoordEvent]) -> Vec<(RequestId, Terminal)> {
+        evs.iter()
+            .filter_map(|e| match e {
+                CoordEvent::Done { id, t } => Some((*id, t.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn until_sent(sim: &crate::sim::SimNcp, n: usize) {
+        let t = Instant::now();
+        while sent(sim, ids::APS_DATA_REQUEST) < n {
+            assert!(t.elapsed() < T);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// At most `max_aps_inflight` APS requests the NCP has not answered:
+    /// the others wait in the pump. A control request waits for none.
+    #[test]
+    fn unanswered_aps_requests_hold_the_others_but_no_control_request() {
+        use crate::sim::SIM_MAX_APS_INFLIGHT;
+        let (hub, sim, mut coord, q) = rig();
+        events_until(&q, |e| up(e).is_some());
+        sim.with(|s| s.stall = Some(ids::APS_DATA_REQUEST));
+        for _ in 0..SIM_MAX_APS_INFLIGHT + 2 {
+            coord.submit(aps(), None).unwrap();
+        }
+        until_sent(&sim, SIM_MAX_APS_INFLIGHT);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(sent(&sim, ids::APS_DATA_REQUEST), SIM_MAX_APS_INFLIGHT);
+        assert_eq!(coord.queued().0, 2);
+        let pj = coord.submit(permit_join(), None).unwrap();
+        let evs = events_until(&q, |e| done(e, pj));
+        assert_eq!(outcomes(&evs), [(pj, Terminal::Done(Reply::None))]);
+        drop(coord);
+        hub.shutdown();
+        sim.stop();
+    }
+
+    /// The NCP frees an APS slot when it takes a request, not at its
+    /// confirm: 16 requests waiting for their confirms (sleepy or
+    /// unreachable devices) hold neither a later APS request nor a
+    /// control request.
+    #[test]
+    fn unconfirmed_aps_requests_hold_nothing() {
+        let (hub, sim, mut coord, q) = rig();
+        events_until(&q, |e| up(e).is_some());
+        sim.with(|s| s.aps_confirm_delay = Duration::from_secs(2));
+        let t = Instant::now();
+        let mut reqs: Vec<_> = (0..16).map(|_| coord.submit(aps(), None).unwrap()).collect();
+        until_sent(&sim, 16);
+        let pj = coord.submit(permit_join(), None).unwrap();
+        reqs.push(coord.submit(aps(), None).unwrap());
+        let evs = events_until(&q, |e| done(e, pj));
+        until_sent(&sim, 17);
+        assert!(t.elapsed() < Duration::from_secs(2), "before the first confirm");
+        assert_eq!(outcomes(&evs), [(pj, Terminal::Done(Reply::None))]);
+        let evs = events_until(&q, |e| done(e, *reqs.last().unwrap()));
+        let delivered: Vec<_> = reqs.iter().map(|id| (*id, Terminal::Delivered)).collect();
+        assert_eq!(outcomes(&evs), delivered);
+        drop(coord);
+        hub.shutdown();
+        sim.stop();
+    }
+
+    /// An APS request the NCP refuses with `BUSY` (its queue full) goes
+    /// again shortly instead of failing.
+    #[test]
+    fn a_busy_ncp_gets_the_request_again() {
+        let (hub, sim, mut coord, q) = rig();
+        events_until(&q, |e| up(e).is_some());
+        sim.with(|s| s.busy = 2);
+        let id = coord.submit(aps(), None).unwrap();
+        let evs = events_until(&q, |e| done(e, id));
+        assert_eq!(outcomes(&evs), [(id, Terminal::Delivered)]);
+        assert_eq!(sent(&sim, ids::APS_DATA_REQUEST), 3);
+        assert_eq!(coord.queued().0, 0);
+        drop(coord);
+        hub.shutdown();
+        sim.stop();
     }
 
     #[test]

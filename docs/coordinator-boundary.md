@@ -415,8 +415,12 @@ admin job threads ─► NetworkAdmin (blocking allowed)
    counter); exceeding it returns `Busy`.
 6. **In-flight capacity.** Each backend enforces `max_in_flight` for its
    own NCP.
-   - ZRHP keeps today's enforcement (driver credits plus NCP `BUSY`), which
-     keeps the wire unchanged.
+   - ZRHP: the pump holds APS requests beyond the NCP's `max_aps_inflight`
+     not yet answered (the NCP frees its slot when it takes a request, not
+     at the confirm; the capacity of the last session that reported it),
+     in order; control requests do not wait for them. A request the NCP
+     refuses with `BUSY` waits there too and goes again after 100 ms, up
+     to 20 times.
    - EZSP and ZNP hold excess requests in the worker FIFO.
 
 ## 4. ZRHP mapping (`hub_ncp::coord`)

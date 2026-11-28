@@ -90,6 +90,7 @@ pub fn capabilities(n: &Negotiated) -> Capabilities {
             active_scan: true,
             channel: true,
             tx_power: n.has(caps::TX_POWER),
+            tx_power_range: n.tx_power_range,
         },
         backup: BackupSupport {
             export: n.has(caps::BACKUP_RESTORE),

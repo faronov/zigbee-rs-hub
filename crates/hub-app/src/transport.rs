@@ -253,6 +253,10 @@ impl CoordTransport {
 }
 
 impl ZigbeeTransport for CoordTransport {
+    fn in_flight(&self, id: RequestId) -> bool {
+        self.aps.contains(&id)
+    }
+
     fn submit(&mut self, req: Request) -> Result<RequestId, CoordError> {
         let req = match req {
             // The app reads the NCP's devices itself (`import_ncp_devices`).
@@ -320,6 +324,12 @@ pub fn network_info(st: &CoordStatus, tx_power_requested: Option<i8>, registry: 
     // Re-applied after every NCP restart.
     if let Some(p) = tx_power_requested {
         o["tx_power_requested"] = p.into();
+    }
+    // What `network/set_tx_power` can select (ZRHP capacities 20/21).
+    if let Some((min, max)) = st.caps.as_ref().and_then(|c| c.radio.tx_power_range) {
+        for (k, v) in [("tx_power_min", min), ("tx_power_max", max)] {
+            o[k] = v.into();
+        }
     }
     if let Some(r) = registry {
         o["registry"] = registry_json(r);

@@ -3304,7 +3304,7 @@ dependencies = [
 [[package]]
 name = "zigbee-crypto"
 version = "0.1.0"
-source = "git+https://github.com/faronov/zigbee-rs?rev=cb9b5c0e060ed33ac8cec29f43586e44d6aca675#cb9b5c0e060ed33ac8cec29f43586e44d6aca675"
+source = "git+https://github.com/faronov/zigbee-rs?rev=2c8411783bd97636320bb9fbd4ccdb0f515387b8#2c8411783bd97636320bb9fbd4ccdb0f515387b8"
 dependencies = [
  "aes",
  "heapless",
@@ -3313,7 +3313,7 @@ dependencies = [
 [[package]]
 name = "zigbee-gp"
 version = "0.1.0"
-source = "git+https://github.com/faronov/zigbee-rs?rev=cb9b5c0e060ed33ac8cec29f43586e44d6aca675#cb9b5c0e060ed33ac8cec29f43586e44d6aca675"
+source = "git+https://github.com/faronov/zigbee-rs?rev=2c8411783bd97636320bb9fbd4ccdb0f515387b8#2c8411783bd97636320bb9fbd4ccdb0f515387b8"
 dependencies = [
  "heapless",
  "zigbee-crypto",
@@ -3323,12 +3323,12 @@ dependencies = [
 [[package]]
 name = "zigbee-types"
 version = "0.1.0"
-source = "git+https://github.com/faronov/zigbee-rs?rev=cb9b5c0e060ed33ac8cec29f43586e44d6aca675#cb9b5c0e060ed33ac8cec29f43586e44d6aca675"
+source = "git+https://github.com/faronov/zigbee-rs?rev=2c8411783bd97636320bb9fbd4ccdb0f515387b8#2c8411783bd97636320bb9fbd4ccdb0f515387b8"
 
 [[package]]
 name = "zigbee-zrhp"
 version = "0.1.0"
-source = "git+https://github.com/faronov/zigbee-rs?rev=cb9b5c0e060ed33ac8cec29f43586e44d6aca675#cb9b5c0e060ed33ac8cec29f43586e44d6aca675"
+source = "git+https://github.com/faronov/zigbee-rs?rev=2c8411783bd97636320bb9fbd4ccdb0f515387b8#2c8411783bd97636320bb9fbd4ccdb0f515387b8"
 
 [[package]]
 name = "zlib-rs"

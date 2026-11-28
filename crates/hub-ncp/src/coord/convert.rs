@@ -8,7 +8,7 @@ use zigbee_zrhp::codec::List;
 use zigbee_zrhp::msg::data::{ApsDataRequest, ApsDst, EvtApsDataIndication, indication_flags, tx_options};
 use zigbee_zrhp::msg::gp as wg;
 use zigbee_zrhp::msg::ids;
-use zigbee_zrhp::msg::network::{EvtDeviceJoined, EvtDeviceLeft, EvtNetworkState, EvtPermitJoinState};
+use zigbee_zrhp::msg::network::{EvtChildPoll, EvtDeviceJoined, EvtDeviceLeft, EvtNetworkState, EvtPermitJoinState};
 use zigbee_zrhp::records::Record;
 use zigbee_zrhp::types::Ieee;
 
@@ -119,6 +119,15 @@ pub fn coord_event(m: &Message) -> Option<CoordEvent> {
                 nwk: e.nwk,
                 rejoin: Some(e.flags & 0x01 != 0),
                 aged_out: e.reason == LEFT_CHILD_TIMEOUT,
+            }
+        }
+        // Only sent when the hub opted in (`host_caps` bit 4).
+        ids::EVT_CHILD_POLL => {
+            let e: EvtChildPoll = m.decode().ok()?;
+            CoordEvent::ChildPoll {
+                ieee: e.known_ieee().map(|i| i.to_u64()),
+                nwk: e.nwk,
+                frame_pending: e.ack_frame_pending().known() == Some(true),
             }
         }
         ids::EVT_GP_FRAME => {
@@ -315,6 +324,7 @@ mod tests {
     use super::*;
     use zigbee_zrhp::codec::Bytes16;
     use zigbee_zrhp::msg::Kind;
+    use zigbee_zrhp::msg::network::AckFramePending;
 
     #[test]
     fn indication_keeps_ieee_byte_order_and_group() {
@@ -344,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn joins_say_how_refusals_and_leaves_are_events() {
+    fn joins_say_how_refusals_leaves_and_child_polls_are_events() {
         let ev = |msg_id, payload| coord_event(&Message { kind: Kind::Event, msg_id, tid: 1, payload });
         let join = |join_type, decision| {
             let e = EvtDeviceJoined { nwk: 0x1234, ieee: Ieee::from_u64(7), parent_nwk: 0, join_type, capability: 0x80, decision };
@@ -358,6 +368,14 @@ mod tests {
         };
         assert_eq!(left(0x01, 1), Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(true), aged_out: false }));
         assert_eq!(left(0, 4), Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(false), aged_out: true }));
+        let poll = |ieee, fp| {
+            let e = EvtChildPoll::new(0x4F21, ieee, fp, 0);
+            ev(ids::EVT_CHILD_POLL, crate::driver::encode_body(&e).unwrap())
+        };
+        let child_poll = |ieee, frame_pending| Some(CoordEvent::ChildPoll { ieee, nwk: 0x4F21, frame_pending });
+        assert_eq!(poll(Some(Ieee::from_u64(7)), AckFramePending::Clear), child_poll(Some(7), false));
+        assert_eq!(poll(None, AckFramePending::Set), child_poll(None, true));
+        assert_eq!(poll(None, AckFramePending::Unknown), child_poll(None, false));
     }
 
     #[test]

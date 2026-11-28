@@ -256,6 +256,10 @@ impl PortTx for SerialTx {
         }
         Ok(())
     }
+    /// A UART behind the USB bridge (spec 5.6): its rate paces the link.
+    fn line_rate(&self, line: Line) -> u32 {
+        line.baud
+    }
 }
 
 impl BridgeLines {
