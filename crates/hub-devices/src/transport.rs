@@ -55,6 +55,14 @@ pub trait ZigbeeTransport {
         None
     }
 
+    /// The APS request `id` still waits for its outcome: the NCP may hold
+    /// it for a sleepy child's next poll. `false` when the transport does
+    /// not know.
+    fn in_flight(&self, id: RequestId) -> bool {
+        let _ = id;
+        false
+    }
+
     /// Network and NCP facts for `network/info` (a JSON object; `None`:
     /// the host core does not know them).
     fn network_info(&mut self) -> Option<serde_json::Value> {
@@ -171,6 +179,12 @@ impl ZigbeeTransport for MockTransport {
 
     fn completed(&mut self) -> Option<(RequestId, Outcome)> {
         self.done.pop_front()
+    }
+
+    /// [`Self::manual`]: the requests the test has not taken from
+    /// [`Self::open`].
+    fn in_flight(&self, id: RequestId) -> bool {
+        self.open.iter().any(|(i, _)| *i == id)
     }
 
     fn network_info(&mut self) -> Option<serde_json::Value> {

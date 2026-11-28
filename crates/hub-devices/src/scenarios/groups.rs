@@ -832,18 +832,18 @@ fn a_sleepy_remote_s_poll_sends_its_queue() {
     let (mut hub, mut sim) = setup();
     let t = T0 + 120_000;
     let nwk = sim.dev(REMOTE).nwk;
-    hub.on_child_poll(Some(REMOTE), nwk, t - 20_000);
+    hub.on_child_poll(Some(REMOTE), nwk, false, t - 20_000);
     hub.drain_events();
-    hub.on_child_poll(Some(REMOTE), nwk, t - 19_000);
+    hub.on_child_poll(Some(REMOTE), nwk, false, t - 19_000);
     assert!(hub.drain_events().is_empty());
     bind_to_l1(&mut hub, t);
     hub.drain_events();
-    hub.on_child_poll(Some(0x0017880100aa00ff), 0x7777, t + 500);
+    hub.on_child_poll(Some(0x0017880100aa00ff), 0x7777, false, t + 500);
     assert!(hub.transport.aps().is_empty());
     assert!(pending_states(&hub.drain_events()).is_empty());
 
     sim.dev(REMOTE).nwk = 0x4444;
-    hub.on_child_poll(Some(REMOTE), 0x4444, t + 1000);
+    hub.on_child_poll(Some(REMOTE), 0x4444, false, t + 1000);
     assert_eq!(pending_states(&hub.drain_events()), ["pending"]);
     assert_eq!(hub.device(IDR).unwrap().nwk(), Some(0x4444));
     sim.run(&mut hub, t + 1000);
@@ -860,9 +860,52 @@ fn a_sleepy_remote_s_poll_sends_its_queue() {
     hub.bindings_read(IDR, t).unwrap();
     sim.run(&mut hub, t);
     assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], true);
-    hub.on_child_poll(None, 0x4444, t + 1000);
+    hub.on_child_poll(None, 0x4444, false, t + 1000);
     sim.run(&mut hub, t + 1000);
     assert_eq!(hub.bindings_list(Some(IDR))[0]["reading"], false);
+}
+
+/// A remote that polls every 30 s: the bind a poll sends waits in the NCP
+/// for the next poll, past the 20 s response timeout. It goes out once: not
+/// again while the NCP holds it, at the poll that delivers it (Frame
+/// Pending set: no flush) or at the remote's answer.
+#[test]
+fn a_request_the_ncp_holds_for_the_next_poll_is_sent_once() {
+    use crate::transport::Terminal;
+    use crate::zdo::cluster::BIND_REQ;
+    let (mut hub, mut sim) = setup();
+    let t = T0 + 120_000;
+    bind_to_l1(&mut hub, t);
+    hub.transport.manual = true;
+    let nwk = sim.dev(REMOTE).nwk;
+    hub.on_child_poll(Some(REMOTE), nwk, true, t + 500);
+    assert!(
+        hub.transport.aps().is_empty(),
+        "the NCP delivers another frame: nothing flushed"
+    );
+    hub.on_child_poll(Some(REMOTE), nwk, false, t + 1_000);
+    let bind = hub.transport.take();
+    assert_eq!(bind.len(), 1);
+    for k in 1..=3 {
+        hub.tick(t + 1_000 + k * 10_000);
+    }
+    hub.on_child_poll(Some(REMOTE), nwk, true, t + 31_000);
+    assert!(hub.transport.take().is_empty(), "not sent again");
+    let (id, _) = hub.transport.open.remove(0);
+    hub.on_outcome(id, Terminal::Delivered.into(), t + 31_000);
+    hub.transport.sent = bind;
+    sim.run(&mut hub, t + 31_000);
+    let binds = sim
+        .log
+        .iter()
+        .filter(|s| matches!(s, Sent::Aps(a) if a.profile == 0 && a.cluster == BIND_REQ))
+        .count();
+    assert_eq!(binds, 1);
+    assert!(
+        sim.dev(REMOTE)
+            .bind_table
+            .contains(&(1, 6, BindDst::Ieee(L1, 11)))
+    );
 }
 
 /// A remote that rejoined under another short address gets what waited

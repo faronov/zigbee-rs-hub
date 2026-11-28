@@ -124,7 +124,11 @@ pub fn coord_event(m: &Message) -> Option<CoordEvent> {
         // Only sent when the hub opted in (`host_caps` bit 4).
         ids::EVT_CHILD_POLL => {
             let e: EvtChildPoll = m.decode().ok()?;
-            CoordEvent::ChildPoll { ieee: e.known_ieee().map(|i| i.to_u64()), nwk: e.nwk }
+            CoordEvent::ChildPoll {
+                ieee: e.known_ieee().map(|i| i.to_u64()),
+                nwk: e.nwk,
+                frame_pending: e.ack_frame_pending().known() == Some(true),
+            }
         }
         ids::EVT_GP_FRAME => {
             let e: wg::EvtGpFrame = m.decode().ok()?;
@@ -364,12 +368,14 @@ mod tests {
         };
         assert_eq!(left(0x01, 1), Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(true), aged_out: false }));
         assert_eq!(left(0, 4), Some(CoordEvent::DeviceLeft { ieee: 7, nwk: 0x1234, rejoin: Some(false), aged_out: true }));
-        let poll = |ieee| {
-            let e = EvtChildPoll::new(0x4F21, ieee, AckFramePending::Clear, 0);
+        let poll = |ieee, fp| {
+            let e = EvtChildPoll::new(0x4F21, ieee, fp, 0);
             ev(ids::EVT_CHILD_POLL, crate::driver::encode_body(&e).unwrap())
         };
-        assert_eq!(poll(Some(Ieee::from_u64(7))), Some(CoordEvent::ChildPoll { ieee: Some(7), nwk: 0x4F21 }));
-        assert_eq!(poll(None), Some(CoordEvent::ChildPoll { ieee: None, nwk: 0x4F21 }));
+        let child_poll = |ieee, frame_pending| Some(CoordEvent::ChildPoll { ieee, nwk: 0x4F21, frame_pending });
+        assert_eq!(poll(Some(Ieee::from_u64(7)), AckFramePending::Clear), child_poll(Some(7), false));
+        assert_eq!(poll(None, AckFramePending::Set), child_poll(None, true));
+        assert_eq!(poll(None, AckFramePending::Unknown), child_poll(None, false));
     }
 
     #[test]

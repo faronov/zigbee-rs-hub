@@ -56,8 +56,9 @@ pub trait PortTx: Send {
 
     /// The rate (baud, 8N1) bytes leave the host at on `line`, which the
     /// link paces its transmissions and its retransmission timeout by
-    /// (ZRHP spec 5.6, ACK-first): `line.baud` for a UART. 0, the default,
-    /// for a transport without one (USB-Serial-JTAG, USB CDC).
+    /// (ZRHP spec 5.6, ACK-first): `line.baud` for a UART, also one behind a
+    /// USB-UART bridge. 0, the default, for a transport without one (the
+    /// NCP's own USB-Serial-JTAG).
     fn line_rate(&self, line: Line) -> u32 {
         let _ = line;
         0

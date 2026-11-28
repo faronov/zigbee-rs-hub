@@ -155,9 +155,9 @@ pub struct SimState {
     pub tx_power_range: Option<(i8, i8)>,
     /// `host_caps` of every `SYS_NEGOTIATE`.
     pub negotiations: Vec<u64>,
-    /// `APS_DATA_REQUEST`s accepted and not yet confirmed; more than
-    /// [`SIM_MAX_APS_INFLIGHT`] are refused with `BUSY`, as the NCP does.
-    pub aps_inflight: usize,
+    /// The next this many `APS_DATA_REQUEST`s are refused with `BUSY` (the
+    /// NCP's queue full).
+    pub busy: u32,
     /// Delay of `EVT_APS_DATA_CONFIRM` after the request.
     pub aps_confirm_delay: Duration,
 }
@@ -299,7 +299,7 @@ impl SimNcp {
             child_polls: false,
             tx_power_range: None,
             negotiations: Vec::new(),
-            aps_inflight: 0,
+            busy: 0,
             aps_confirm_delay: Duration::from_millis(10),
         }));
         let inject = Arc::new(Mutex::new(Vec::new()));
@@ -378,7 +378,6 @@ impl SimNcp {
             s.trial = false;
         }
         s.endpoints.clear();
-        s.aps_inflight = 0;
         s.staging = None;
         s.nwk_limit += STRIDE;
         s.aps_limit += STRIDE;
@@ -420,9 +419,6 @@ impl SimNcp {
                 match a {
                     Action::Reboot => self.reboot(),
                     Action::Event(id, payload) => {
-                        if id == ids::EVT_APS_DATA_CONFIRM {
-                            self.with(|s| s.aps_inflight = s.aps_inflight.saturating_sub(1));
-                        }
                         seq = seq.wrapping_add(1);
                         let ep = zigbee_zrhp::msg::home_endpoint(id).unwrap_or(Endpoint::Zigbee);
                         let _ = q.queue(ep).raw(Kind::Event, id, seq, &payload);
@@ -900,10 +896,10 @@ impl SimNcp {
                     zigbee_zrhp::msg::data::ApsDst::Nwk(n) => n,
                     _ => 0xFFFF,
                 };
-                if s.aps_inflight >= SIM_MAX_APS_INFLIGHT {
+                if s.busy > 0 {
+                    s.busy -= 1;
                     return (status(Status::Busy), actions);
                 }
-                s.aps_inflight += 1;
                 let zb_status = s.undeliverable.iter().find(|u| u.0 == dst).map_or(0, |u| u.1);
                 let (st, flags) = if zb_status == 0 { (0, 1) } else { (1, 0) };
                 if let Some(hook) = self.aps_hook.lock().unwrap().as_mut() {

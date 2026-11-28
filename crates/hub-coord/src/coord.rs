@@ -67,6 +67,9 @@ pub enum CoordEvent {
         ieee: Option<u64>,
         /// Short address.
         nwk: u16,
+        /// The ACK to the poll carried Frame Pending: the NCP is delivering
+        /// a frame it holds for the child.
+        frame_pending: bool,
     },
     /// Green Power event.
     Gp(Box<GpEvent>),

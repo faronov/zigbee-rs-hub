@@ -453,6 +453,7 @@ struct Call {
     opts: CallOpts,
     reply: SyncSender<Result<Outcome, Error>>,
     tid: SyncSender<u16>,
+    accepted: Arc<AtomicBool>,
 }
 
 struct Shared {
@@ -478,9 +479,16 @@ pub struct Ticket {
     /// TID allocated for the request.
     pub tid: u16,
     rx: Receiver<Result<Outcome, Error>>,
+    accepted: Arc<AtomicBool>,
 }
 
 impl Ticket {
+    /// The NCP answered `SUCCESS` and the completion event is awaited
+    /// ([`CallOpts::confirm`]): an `APS_DATA_REQUEST` the NCP took.
+    pub fn accepted(&self) -> bool {
+        self.accepted.load(Ordering::Relaxed)
+    }
+
     /// Block until the response (and confirmation, if requested).
     pub fn wait(self) -> Result<Outcome, Error> {
         self.rx.recv().unwrap_or(Err(Error::Closed))
@@ -501,6 +509,7 @@ impl Client {
     pub fn start(&self, msg_id: u16, payload: Vec<u8>, opts: CallOpts) -> Result<Ticket, Error> {
         let (reply, rx) = mpsc::sync_channel(1);
         let (tid_tx, tid_rx) = mpsc::sync_channel(1);
+        let accepted = Arc::new(AtomicBool::new(false));
         self.input
             .send(Input::Call(Call {
                 msg_id,
@@ -508,10 +517,11 @@ impl Client {
                 opts,
                 reply,
                 tid: tid_tx,
+                accepted: accepted.clone(),
             }))
             .map_err(|_| Error::Closed)?;
         let tid = tid_rx.recv().map_err(|_| Error::Closed)?;
-        Ok(Ticket { tid, rx })
+        Ok(Ticket { tid, rx, accepted })
     }
 
     /// Request with a raw payload; non-success statuses are errors.
@@ -778,6 +788,7 @@ struct Pending {
     retry: bool,
     reply_msg: Option<Message>,
     reply: Option<SyncSender<Result<Outcome, Error>>>,
+    accepted: Option<Arc<AtomicBool>>,
 }
 
 struct Outgoing {
@@ -1283,6 +1294,9 @@ impl<T: PortTx> Driver<T> {
             let p = self.pending.get_mut(&m.tid).unwrap();
             p.state = PState::AwaitConfirm(Instant::now());
             p.reply_msg = Some(m);
+            if let Some(a) = &p.accepted {
+                a.store(true, Ordering::Relaxed);
+            }
             return;
         }
         let p = self.pending.remove(&m.tid).unwrap();
@@ -1364,6 +1378,7 @@ impl<T: PortTx> Driver<T> {
                 retry: false,
                 reply_msg: None,
                 reply: None,
+                accepted: None,
             },
         );
         self.out.push(
@@ -1509,6 +1524,7 @@ impl<T: PortTx> Driver<T> {
                 retry: false,
                 reply_msg: None,
                 reply: Some(call.reply),
+                accepted: Some(call.accepted),
             },
         );
         self.held.push(tid);

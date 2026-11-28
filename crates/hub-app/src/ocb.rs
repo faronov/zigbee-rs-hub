@@ -210,17 +210,17 @@ pub fn to_restore(o: &J, encoder: Box<dyn RestoreEncoder>, policy: DevicePolicy)
         Some(a) => be_wire(a, "tc_address")?,
         None => ieee,
     };
-    // A backup of this hub says what the operator set (`zigbee_rs.tx_power`).
-    // Its `tx_power` is the radio's power at the time, which can be a
-    // default (an EmberZNet network the hub formed without a setting runs
-    // at 0 dBm): not applied, the NCP keeps its own. Other backups'
-    // `tx_power` is their stack's configured power (bellows, zigpy-znp).
-    let dbm = |p: Option<&J>| p.and_then(J::as_i64).map(|p| p.max(-128).min(127) as i8);
-    let tx_power_set = dbm(path(internal, &["zigbee_rs", "tx_power"]));
-    let tx_power = match path(internal, &["zigbee_rs"]) {
-        Some(_) => tx_power_set,
-        None => dbm(path(internal, &["tx_power"])),
-    };
+    // A backup of the hub (`metadata.source` "zigbee-rs-hub …") carries
+    // the power the operator set as `zigbee_rs.tx_power`. Its `tx_power` is
+    // the radio's power at the time, which can be a default (an EmberZNet
+    // network the hub formed without a setting runs at 0 dBm): not applied,
+    // the NCP keeps its own. Other backups' `tx_power` is their stack's
+    // configured power (bellows, zigpy-znp, and the ZRHP adapters of Z2M
+    // and ZHA, which write `zigbee_rs` too: spec 9.2).
+    let hub = meta.get("source").and_then(J::as_str).is_some_and(|s| s.starts_with("zigbee-rs-hub"));
+    let dbm = |p: Option<&J>| p.and_then(J::as_i64).map(|p| p.clamp(-128, 127) as i8);
+    let tx_power_set = dbm(path(internal, &["zigbee_rs", "tx_power"])).filter(|_| hub);
+    let tx_power = if hub { tx_power_set } else { dbm(path(internal, &["tx_power"])) };
     let mask = o
         .get("channel_mask")
         .and_then(J::as_array)
@@ -906,7 +906,7 @@ mod tests {
     /// this hub carries as `zigbee_rs.tx_power`, never the radio's power it
     /// also has as `tx_power` (a default of the hub's: an EmberZNet network
     /// it formed without a setting runs at 0 dBm). Other stacks' backups
-    /// keep their configured power (bellows, below).
+    /// keep their configured power (bellows below, Z2M's ZRHP adapter here).
     #[test]
     fn a_backup_of_the_hub_restores_only_the_operators_tx_power() {
         let network_tx_power = |items: &[BackupItem]| {
@@ -916,13 +916,21 @@ mod tests {
             })
         };
         for set in [None, Some(-3)] {
-            let (_, text) = export(&ezsp_items(), &ExportInfo { tx_power_set: set, ..ExportInfo::default() });
+            let info = ExportInfo { source: "zigbee-rs-hub 0.4.3".into(), tx_power_set: set, ..ExportInfo::default() };
+            let (_, text) = export(&ezsp_items(), &info);
             let v: J = serde_json::from_str(&text).unwrap();
             assert_eq!(v["metadata"]["internal"]["tx_power"], 8, "the radio's, as bellows writes it");
             assert_eq!(v["metadata"]["internal"]["zigbee_rs"].get("tx_power").and_then(J::as_i64), set.map(i64::from));
             let (r, back) = import(&v).unwrap();
             assert_eq!((r.tx_power_set, network_tx_power(&back)), (set, Some(set)));
         }
+        // Z2M's and ZHA's ZRHP adapters write `zigbee_rs` too: their
+        // `tx_power` is their configured power.
+        let mut v: J = serde_json::from_str(Z2M).unwrap();
+        v["metadata"]["internal"]["zigbee_rs"] = serde_json::json!({"fw": "0.1.4", "chip": 12});
+        v["metadata"]["internal"]["tx_power"] = 10.into();
+        let (r, back) = import(&v).unwrap();
+        assert_eq!((r.tx_power_set, network_tx_power(&back)), (None, Some(Some(10))));
     }
 
     /// bellows (zigpy 0.7x) on EZSP 13 and zigbee-herdsman's ember adapter

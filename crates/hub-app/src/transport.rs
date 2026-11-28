@@ -253,6 +253,10 @@ impl CoordTransport {
 }
 
 impl ZigbeeTransport for CoordTransport {
+    fn in_flight(&self, id: RequestId) -> bool {
+        self.aps.contains(&id)
+    }
+
     fn submit(&mut self, req: Request) -> Result<RequestId, CoordError> {
         let req = match req {
             // The app reads the NCP's devices itself (`import_ncp_devices`).
