@@ -240,8 +240,8 @@ and `zigbee-zrhp` (about 109 KB), so size is not on the backends' critical
 path. These are build results, not hardware results.
 
 Release 0.4.2 (CI dry run, quad / octal): 4 MB 2,966,656 / 2,967,824 B
-(98.4 % of the 2,944 KiB slot, ~46 KiB left); 8 MB 3,117,360 /
-3,118,528 B and its developer edition 3,118,016 / 3,119,200 B (99.2 % of
+(98.4 % of the 2,944 KiB slot, ~46 KiB left); 8 MB 3,117,344 /
+3,118,512 B and its developer edition 3,118,032 / 3,119,216 B (99.2 % of
 the 3 MiB slot, ~26 KiB left); `zrh-donglem` about 3.5 MB (55 % of its
 6 MiB slot). Release 0.4.1: 4 MB 2,934,864 B (~78 KiB left), 8 MB
 developer edition 3,087,456 B (~57 KiB left), so 0.4.2 added about
