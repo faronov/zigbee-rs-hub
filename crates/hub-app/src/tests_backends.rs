@@ -1397,10 +1397,13 @@ fn devices_list(app: &App, sid: u64, rx: &Receiver<String>) -> Vec<String> {
 /// A removed device stays removed while the NCP's tables still list it:
 /// neither a new NCP session nor a hub restart imports it again. The NCP
 /// purges what it can (ZRHP: `TBL_INVALIDATE` and the host store's device
-/// record, `NWK_REMOVE_DEVICE` answered `UNSUPPORTED_COMMAND` as by the
-/// zigbee-rs NCP; EZSP: an APS Remove-Device to the router), whether the
-/// device was reachable (Mgmt_Leave_req) or not (`force`). Once it joins
-/// again it is back as any device, and stays after a restart.
+/// record, `NWK_REMOVE_DEVICE` with flags bit2, removal through the parent,
+/// answered `UNSUPPORTED_COMMAND` as by the zigbee-rs NCP; EZSP: an APS
+/// Remove-Device to the router), whether the device was reachable
+/// (Mgmt_Leave_req) or not (`force`). It rejoins with the network key it
+/// holds while joining is closed: asked to leave again, still removed.
+/// Paired again (joining open) it is back as any device, and stays after
+/// a restart.
 #[test]
 fn a_removed_device_is_not_imported_again_until_it_joins() {
     for kind in BOTH {
@@ -1445,6 +1448,8 @@ fn removed_device_stays_removed(kind: Kind, force: bool) {
             wait(&format!("{what}: TBL_INVALIDATE"), || zsim.state().log.iter().any(|(id, _)| *id == ids::TBL_INVALIDATE));
             let invalidated = zsim.state().log.into_iter().find(|(id, _)| *id == ids::TBL_INVALIDATE).unwrap().1;
             assert_eq!(invalidated, [&[5u8, 1][..], &PLUG.to_le_bytes()].concat(), "{what}: DEVICE table, by IEEE");
+            let remove = zsim.state().trace.unwrap().into_iter().find(|(id, _)| *id == ids::NWK_REMOVE_DEVICE).unwrap().1;
+            assert_eq!(remove, [&PLUG_NWK.to_le_bytes()[..], &PLUG.to_le_bytes(), &[0x04]].concat(), "{what}: through its parent, no rejoin");
             assert!(zsim.state().table_devices.is_empty(), "{what}");
             wait(&format!("{what}: the host store's record"), || !ncp.store_state().devices.contains_key(&PLUG.to_le_bytes()));
         }
@@ -1486,9 +1491,43 @@ fn removed_device_stays_removed(kind: Kind, force: bool) {
     assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}");
     assert_eq!(rig.app.status().imported, 0, "{what}");
 
-    // It joins again: back, interviewed, and no longer remembered.
+    // It rejoins (secured, with the network key it holds) while joining is
+    // closed: asked to leave again, the coordinator removes it again, it
+    // stays removed; a network event says so.
     let answered = Arc::new(Mutex::new(Vec::new()));
-    rig.devices(vec![plug()], answered);
+    rig.devices(vec![plug()], answered.clone());
+    ok(&call(&rig.app, sid, &rx, 7, json!({"type": "subscribe", "topics": ["network"]})));
+    rig.link.join(PLUG, PLUG_NWK);
+    let leave = || answered.lock().unwrap().iter().filter(|r| r.profile == 0 && r.cluster == 0x0034).count();
+    wait(&format!("{what}: asked to leave again"), || leave() == 1);
+    let back = loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["type"] == "event" && f["event"]["topic"] == "removed_device_back" {
+            break f["event"].clone();
+        }
+    };
+    assert_eq!((back["device"].as_str(), back["via"].as_str()), (Some(plug_id), Some("rejoin")), "{what}: {back}");
+    match kind {
+        Kind::Zrhp => {
+            let zsim = rig.zsim.clone().unwrap();
+            wait(&format!("{what}: purged again"), || zsim.state().log.iter().filter(|(id, _)| *id == ids::TBL_INVALIDATE).count() >= 2);
+        }
+        Kind::Ezsp => {
+            // The NCP of the restarted hub.
+            let sim = rig.ezsp.clone().unwrap();
+            wait(&format!("{what}: Remove-Device again"), || !sim.ncp(|n| n.removals().is_empty()));
+        }
+    }
+    // Its announcement too (at most one leave request a minute).
+    rig.link.indicate(&plug().ind(0, 0, 0x0013, hub_devices::zdo::device_annce(2, PLUG_NWK, PLUG, 0x8E)));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(devices_list(&rig.app, sid, &rx), Vec::<String>::new(), "{what}: still removed");
+    assert_eq!(leave(), 1, "{what}");
+    assert!(stored().is_some(), "{what}: still remembered");
+
+    // Paired again (joining open): back, interviewed, and no longer
+    // remembered.
+    ok(&call(&rig.app, sid, &rx, 8, json!({"type": "network/permit_join", "duration_s": 60})));
     rig.link.join(PLUG, PLUG_NWK);
     wait(&format!("{what}: the plug back"), || state(&rig.app, sid, &rx, SWITCH) == json!(false));
     let kv = rig.kv.clone();

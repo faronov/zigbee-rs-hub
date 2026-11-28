@@ -1132,9 +1132,10 @@ impl Hub {
     }
 
     /// The host's deletion of a device (spec 8.3 I5), reachable or not:
-    /// the store's device record, then `NWK_REMOVE_DEVICE` (the Trust
-    /// Center asks it to leave; the zigbee-rs NCP answers
-    /// `UNSUPPORTED_COMMAND`), then `TBL_INVALIDATE` of its `DEVICE` entry
+    /// the store's device record, then `NWK_REMOVE_DEVICE` (flags bit2:
+    /// the Trust Center asks it to leave through its parent, no rejoin; the
+    /// zigbee-rs NCP answers `UNSUPPORTED_COMMAND`), then `TBL_INVALIDATE`
+    /// of its `DEVICE` entry
     /// (the NCP drops its Trust Center record and link key). Neither the
     /// store nor the table lists it in [`Hub::ncp_devices`] afterwards; a
     /// child entry stays on the NCP until the child ages out or rejoins. A
@@ -1152,7 +1153,7 @@ impl Hub {
             Err(e) => Err(e),
         };
         self.commit(Change::DeviceDel(ieee));
-        tolerated("NWK_REMOVE_DEVICE", self.remove_device(nwk, ieee, 0))?;
+        tolerated("NWK_REMOVE_DEVICE", self.remove_device(nwk, ieee, 0x04))?;
         let body = TblInvalidate { table: record_type::DEVICE, key: TableKey::Ieee(zigbee_zrhp::types::Ieee(ieee)) };
         tolerated("TBL_INVALIDATE", self.inner.client.call(&body, CallOpts::default()).map(|_| ()))
     }
