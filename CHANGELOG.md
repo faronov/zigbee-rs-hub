@@ -6,12 +6,77 @@ section at the top of its GitHub release notes, above the generated
 install instructions and the list of merged pull requests. A pre-release
 `X.Y.Z-rc.N` uses its own section if there is one, else `X.Y.Z`'s.
 
-## Unreleased
+## 0.4.2 (2026-11-28)
+
+A fix release for 0.4.1, with the Dongle Max's MG24 firmware update and
+API 1.4 for the Home Assistant integration, which now has its own
+repository. An update keeps all data.
+
+### Highlights
+
+- **Xiaomi (lumi) buttons and sensors finish their interview**, and a
+  request to a sleepy device is retried a bounded number of times instead
+  of at every wake-up for ever (#109).
+- **Automations: the new trigger `reported`** ("received" in the editor)
+  fires at every press of a button that reports the same state each time
+  (an SOS button's `alarm`, an `action` that reads the same at every
+  press), for which `changed` never fired (#110).
+- **IKEA remotes with older firmware** (E1524/E1810 and others before
+  2.3.075) are bound to group 901, so their presses reach the hub; a
+  remote's or button's bindings to the hub are listed on its device page
+  (#111).
+- **API 1.4**: a network log of joins (also refused ones), rejoins and
+  leaves, why a device is unavailable, interview details, the previous
+  boot's crash record on the S3 (#112).
+- **Security fixes**: no keys in the answers of `network/reset`,
+  `network/restore` and `network/import`; another MQTT broker or user
+  drops the stored password; removed devices that come back are asked to
+  leave again. An explicit "leave network" (Network › New network)
+  announces the leave on air; otherwise a zigbee-rs NCP 0.1.3 wipes
+  without one. zigbee-rs crates at NCP 0.1.3 (#113).
+- **SONOFF Dongle Max**: the hub replaces the MG24's firmware through its
+  Gecko bootloader (SONOFF's EmberZNet ⇄ the zigbee-rs NCP; experimental),
+  runs on either (EZSP or ZRHP backend), no longer crashes when it probes
+  for the zigbee-rs NCP, and shows that NCP's log (#105–#107).
+- **The Home Assistant integration moved** to
+  [faronov/ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)
+  (HACS) (#108).
+
+### Upgrading from 0.4.1
+
+- **Data:** an update keeps `nvs` (Wi-Fi, mode, API token) and the hub's
+  data, as before. The web flasher has the same entries as for 0.4.1.
+- **Home Assistant:** install the integration from
+  [faronov/ha-zigbee-rs-hub](https://github.com/faronov/ha-zigbee-rs-hub)
+  (HACS › Custom repositories, type Integration), version **0.6.1** or
+  later. A copied install: replace `custom_components/zigbee_rs_hub` with
+  the one HACS installs and restart Home Assistant. The domain is the
+  same, so config entries, devices and entities are kept (steps in its
+  README).
+- **Update the NCP to zigbee-rs NCP 0.1.3**
+  ([ncp-v0.1.3](https://github.com/faronov/zigbee-rs/releases/tag/ncp-v0.1.3)):
+  on the Thread BR board, flash the H2 with the web flasher (entry
+  "Espressif Thread Border Router board, H2: ZRHP NCP"). It fixes the H2's
+  RSSI (reported 10 dB low) and LQI (about 32 low), the secured rejoin of
+  sleepy children, and wipes the NCP before a restore without a Leave on
+  air. A Dongle Max running the zigbee-rs NCP takes that release's
+  `efr32mg24-ncp-sonoff-dongle-m.gbl` through Settings › Zigbee radio
+  firmware (MG24); the web flasher cannot reach the MG24.
+- **Button automations that never fired:** edit the rule and choose the
+  trigger "received" (`reported`) instead of "changed". Rules with
+  `reported` or "changed to" are format 2: older firmware refuses them.
+- **MQTT:** after changing the broker host or the user name, enter the
+  password again.
+- **API clients** that kept `backup` from the answers of `network/reset`,
+  `network/restore` or `network/import`: fetch the file with the request
+  named in `kept` (`network/backup/replaced` or `network/backup/last`).
+- **tbr-bridge 0.2.7** (bridge mode): no functional change; rebuilt, its
+  bytes differ from 0.2.6.
 
 ### New
 
 - **Dongle Max: the MG24's firmware can be replaced from the hub**
-  (experimental, not yet run on hardware). Settings › Zigbee radio
+  (experimental, not yet fully run on hardware). Settings › Zigbee radio
   firmware (MG24) uploads a GBL file and flashes it through the MG24's
   Gecko bootloader, from the ESP32, without USB: SONOFF's EmberZNet NCP by
   the zigbee-rs ZRHP NCP, and back. The image is checked first (never one
@@ -26,7 +91,8 @@ install instructions and the list of merged pull requests. A pre-release
   running and restore nothing: the kept network waits for the next
   application image. The way back to SONOFF's firmware (an NV clear,
   then SONOFF's GBL, with their checksums) is in `docs/dongle-max.md`. The
-  zigbee-rs NCP needs its Dongle-M radio (38.4 MHz, in review).
+  zigbee-rs NCP for the Dongle-M: `efr32mg24-ncp-sonoff-dongle-m.gbl` of
+  zigbee-rs `ncp-v0.1.3`.
 - **Dongle Max: the hub runs on either NCP firmware.** The image carries
   both coordinator backends (EZSP and ZRHP); at boot it asks the MG24
   which firmware it runs (setting `auto`, the default; `ezsp` or `zrhp` to
@@ -237,6 +303,63 @@ install instructions and the list of merged pull requests. A pre-release
   restoring a backup, the restore started from the backup's counters
   alone; the counters the EmberZNet NCP still reports are now floors, as
   without the restart.
+
+### Known limitations
+
+- The 8 MB images (and the OTA image store) have not run on an 8 MB board
+  yet. The 4 MB octal image ran with Zigbee on the lab board; the 4 MB
+  quad image ran on a 2 MB quad-PSRAM S3 devkit without a radio, so Zigbee
+  on a quad-PSRAM board is still untested.
+- Resuming a partial interview is tested on the simulated backends only
+  (a failing interview step cannot be forced on hardware).
+- Migration: host-tested on both simulated backends (ZRHP and EZSP) with
+  Zigbee2MQTT and ZHA files. On hardware a Zigbee2MQTT-format import of
+  the Dongle Max's own network ran (preview `same`, names applied, devices
+  complete); an import onto another radio or network and a ZHA import
+  have not. Green Power devices are not imported (commission them again);
+  after a change of the coordinator IEEE some devices keep the old trust
+  center address (prefer a radio that takes the backup's IEEE); Z2M/ZHA
+  per-device settings and external converters are not imported
+  (`docs/migration.md`, Limits).
+- No hub A/B self-update on the 4 MB dev layout; no SoftAP setup (Wi-Fi
+  from the console or the browser console).
+- Definitions that need Zigbee2MQTT's vendor templates `tuya` or `lumi`
+  are not run yet: TS011F devices for which Zigbee2MQTT picks
+  `TS011F_plug_2`/`_3`, multi-gang strips and DIN relays use
+  `TS011F_plug_1`, marked **approx.**; Xiaomi devices have no battery,
+  voltage or single/double/hold clicks.
+- An rx-on end device restored or imported from a backup becomes a
+  sleepy child of the coordinator (the backup format has no capability).
+- A zigbee-rs NCP (the Thread BR board's H2) may keep a stale child table
+  entry for a device that moved to another network: backups list it, and
+  a restore re-creates it as a partial device (remove it with
+  `devices/remove`; a fix is tracked).
+- SONOFF Dongle Max: experimental. Ran on the lab unit: the network,
+  joining and interviews, reports, a network backup export and restore
+  onto the same network, the hub name and version, a Zigbee2MQTT-format
+  import of its own network, the 0.4.1 claim refusals and restore. The
+  MG24 firmware update and the ZRHP backend are host-tested; their
+  hardware run is not complete (it found the probe crash fixed above).
+  Not yet run: Ethernet, `stock confirm`, the self-update, installation
+  through SONOFF's web console, a restore or import onto another radio,
+  the recovery claim of 0.4.1. The stock EmberZNet 7.4.5 does not report
+  the APS frame counter: its backups have no TCLK counter, and a restore
+  gives the APS counter a margin of 2²⁰ (note `counters_unknown`). No
+  Green Power; no crash record (`hub/system` `crash` is the S3's); at
+  most 8 groups on the hub's endpoint with SONOFF's NCP (its multicast
+  table; an IKEA remote's group 901 and group 0 count); if the first
+  boot cannot claim SONOFF's `files` partition the hub keeps its data in
+  RAM only (the banner says why). Not offered by the web flasher (its
+  erase option would wipe SONOFF's firmware): use SONOFF's web console or
+  esptool with the two USB parts, after the otadata check.
+- SONOFF Dongle Max, while SONOFF's firmware is still in `ota_0` (USB or
+  web-console install): a hub image in `ota_1` that fails to boot (e.g. an
+  interrupted USB write) makes the bootloader start SONOFF's firmware,
+  which reformats the `files` partition. The hub's devices, names,
+  automations and settings are lost (the Zigbee network stays in the MG24
+  and the devices come back through the NCP import, unnamed). The
+  recovery claim and a hub backup bring back the devices and groups;
+  names, areas, automations and settings have to be set again.
 
 ## 0.4.1 (2026-11-27)
 

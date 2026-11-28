@@ -655,6 +655,13 @@ the PHY, then puts the USJ pull-up registers back to their reset state
   two clean builds with different `SOURCE_DATE_EPOCH` gave byte-identical
   images and ELFs, and `tools/release-images.py` refuses a bridge image
   with a build time. The bridge now changes version only with its code.
+- **0.2.7** (hub release 0.4.2): no change in the bridge's code or in the
+  `hub-core` parts it uses (board wiring, reset lines). `hub-core` gained
+  modules the bridge does not link (the Gecko bootloader updater) and its
+  optional ZRHP dependency moved to zigbee-rs `cb9b5c0e`, and the rebuilt
+  image differs from 0.2.6 in code layout (same size), so it
+  gets its own version: one name, one image. The bridge changes version
+  with its code or its dependencies' code.
 
 ## Phase 1: ZRHP host (`hub-ncp`, `hubctl`, `tbr-hub`)
 
@@ -688,7 +695,7 @@ Phase 1 sets `FC_CHECKPOINTS | RETRY_CACHE`, not `HOST_TABLES`
 
 | Mode | What runs |
 |---|---|
-| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.6) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
+| **bridge** (default; no NVS key) | `tbr-bridge` (0.2.7) unchanged: same USB identity and ports, CDC 0 bridge, console on CDC 1 |
 | **hub** | `hub-ncp` on UART1 (921 600 + RTS/CTS, IRAM ISR, 16 KiB RX ring), H2 EN/BOOT on GPIO7/8; CDC 0 idle; console on CDC 1 with `hub …` commands; the bridge commands that touch the H2 UART or EN/BOOT are refused |
 
 Console additions: `mode`, `mode bridge|hub` (persisted in NVS `hub/mode`,
