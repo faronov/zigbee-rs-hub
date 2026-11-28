@@ -491,7 +491,10 @@ changed, the self-description hash changed, or the user asks. Effects:
 | `via` | the hub | the hub | `via_device` |
 | `power` | mains / battery / energy_harvesting | battery / energy_harvesting | (diagnostic) |
 | `sleepy` | `true` only for a sleepy end device (requests wait until it is heard from) | — | — (web UI hint) |
-| `availability`, `last_seen`, `lqi`, `rssi` | 4.6 | 4.6 | device availability |
+| `logical_type`, `rx_on_when_idle` | API 1.4: `coordinator`, `router`, `end_device` (Node descriptor) and the receiver's MAC capability bit; absent until known | — | (diagnostic) |
+| `rejoins`, `announces`, `leaves` | API 1.4: rejoins the trust center admitted, Device_annce frames, leaves the coordinator reported, this run (not stored; absent: none) | — | (diagnostic) |
+| `interview_since`, `interview_failed`, `interview_quirk` | API 1.4, while `interview` is `partial`: since when (this run; absent after a restart) and the steps that failed in its last attempt (`node_descriptor`, `active_endpoints`, `simple_descriptor_<n>`, `basic_<n>`); `interview_quirk`: `lumi` when the lumi quirk completed it (3.1). A `devices/reinterview` request sends `device_updated` at once (`interview: in_progress`) | — | repair issues (15) |
+| `availability`, `last_seen`, `lqi`, `rssi`, `unavailable_reason`, `unavailable_since` | 4.6 | 4.6 | device availability |
 | `warnings` | e.g. configure failures | `gp_unsecured` (13.1) | repair issues (15) |
 | `definition` | resolved layers, bottom (`generic`, always) to top: `source`, `id`, `revision`, `content_hash`; `partial: true` on a partially translated catalog definition (`x-partial`, 17.2: generic support gives what it lacks) | same | diagnostics only |
 
@@ -619,7 +622,13 @@ State message (WebSocket, 14.3):
 | GP sensor without a known interval | Unavailable after 25 h without an accepted GPDF (D19; FlowerX GP and BGT1 GP today). |
 | Any device, per definition | `device.availability.timeout_s` replaces the computed timeout; `gp.report_interval_s` sets 3 × that for GP sensors. |
 | GP switch or energy harvesting | Never unavailable. `last_seen` only. |
-| A Zigbee device the coordinator reports as left (EZSP's trust center) | Unavailable at once, device record `unavailable_reason: "left"`, no checks; kept (whether it rejoins is not said) until its next frame or rejoin, or `devices/remove`. |
+| A Zigbee device the coordinator reports as left (EZSP's trust center; ZRHP `EVT_DEVICE_LEFT` since API 1.4) | Unavailable at once, device record `unavailable_reason: "left"`, no checks; kept until its next frame or rejoin, or `devices/remove`. A ZRHP leave with the rejoin flag (bit 0) keeps the device available (it comes back), and so does a ZRHP child timeout (reason 4: the NCP dropped a child that missed its End Device Timeout, or a router child it no longer hears directly, which routes through others): the rules above decide. The network log (14.2) has them either way (`left`, `aged_out`). |
+
+While a device is unavailable its record says why (`unavailable_reason`,
+API 1.4 for all but `left`): `left`, `no_response` (a mains device failed
+the active check), `timeout` (silent beyond its timeout), and since when
+(`unavailable_since`, the hub's clock in s; this run: a restart forgets it,
+`left` stays derived).
 
 `available` is per device; HA marks all its entities. `last_seen`, `lqi` and
 `rssi` (from `EVT_APS_DATA_INDICATION` / `EVT_GP_FRAME`) are device fields and
@@ -2538,7 +2547,18 @@ code feels familiar:
   `part` parameters of `entities/update` and the event `entity_reporting`;
   the hub records' ownership: `registry` in `network/info`,
   `network/registry/adopt` and `network/registry/clear`; `tz_name` in
-  `hub/time` and `hub/time/set`.
+  `hub/time` and `hub/time/set`. 1.4 (the Home Assistant integration's
+  events, repairs and health) added the network log (`network/events`,
+  the event `device_network`), the device record's `logical_type`,
+  `rx_on_when_idle`, `rejoins`, `announces`, `leaves`,
+  `unavailable_since`, every `unavailable_reason` (4.6) and the partial
+  interview's `interview_since`, `interview_failed`, `interview_quirk`
+  (4.1, also in `devices/diagnostics` with `interview_step`); `hub_updated`
+  for the NCP session's `hub/info` fields and `ncp_log` in `maintenance`;
+  `boot_id` and `crash` in `hub/system`; the events `definition_missing`
+  (14.4), `topology_updated` (14.6), `mqtt_status` (14.10); `queued` in
+  binding records (14.9); ZRHP leaves and refused joins reach the hub
+  (`CoordEvent::DeviceLeft`, `JoinDenied`).
 - Subscriptions first deliver a **snapshot** (all devices/entities/states with
   the current `seq`), then deltas with increasing `seq`, so a client never
   misses a change between "list" and "subscribe".
@@ -2565,16 +2585,17 @@ code feels familiar:
 
 | Type | Parameters | Result |
 |---|---|---|
-| `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`, `edition` (`standard`, or `devtools`: the developer edition, 14.6 `hub/developer/set`); once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) |
+| `hub/info` | — | `name`, `api_version`, `features`, `seq`, `devices`, `entities`, `edition` (`standard`, or `devtools`: the developer edition, 14.6 `hub/developer/set`); once the NCP session is up also `coordinator_ieee` (16 hex), `ncp_board`, `ncp_product` (the HA config entry's unique ID) and `maintenance` (14.6). API 1.4: when these change (the first session, an NCP restart with other capabilities, a restore with another coordinator IEEE) the changed ones come as `hub_updated` (topic `network`) |
 | `network/info` | — | `state` (`up`, `formed_down`, `none`), `session`, `ownership` (`owned`, `no_network`, `lost`, `mismatch`, `observed`, `unknown`), `permit_join_s` (seconds left), `pan_id`, `ext_pan_id` (hex), `channel`, `nwk_update_id`, `tx_power`, `ncp`: {`fw`, `protocol`, `chip`, `ieee`, `flash_kib`, `board`, `product`, `baud`, `flow_control`}, `time` (the hub's clock in s, the time base of `last_seen` and state timestamps; clients use it for relative times while the hub's clock is not yet synchronised; Unix time once it is), `time_utc` (the same once synchronised, else null), `time_synced`, `registry` (whose the hub's network records are, below: {`state`: `owned`, `untagged` (nothing stored yet), `unverified` (an NCP-held network not compared yet), `foreign` with `backend` and `why`}) (fields the host core does not know are absent; `unsupported` without a host core) |
 | `network/permit_join` | `duration_s` (0–254), `target` (device id or all), `include_gp` (bool, opens the GP window too, 13.7) | — |
+| `network/events` | — | API 1.4: the network log, oldest first: the last 32 `device_network` event bodies (below), this run |
 | `devices/list` | — | device records (4.1) |
 | `devices/get` | `id` | device record + endpoints + resolution summary |
 | `devices/update` | `id`, `name`, `disabled` | device record |
 | `devices/remove` | `id`, `force` (skip Mgmt_Leave: the device is unreachable) | — (ZDO Mgmt_Leave_req (rejoin false) unless `force`, sent at once, also to a sleepy device (its parent holds it until its next poll), then the coordinator purges the device either way: ZRHP `NWK_REMOVE_DEVICE` (flags bit2: the Trust Center's removal through its parent; the zigbee-rs NCP answers `UNSUPPORTED_COMMAND`) and `TBL_INVALIDATE` of its `DEVICE` entry, the host store's device record; EZSP an APS Remove-Device to a router of the neighbor table, else its key table entry is erased. The hub remembers the device as removed (network record `removed`, the last 64): the import of the NCP's devices skips it while the NCP still lists it (a child until it ages out, a router that ignored the leave). A device that still holds the network key is admitted again on its next secured rejoin (EmberZNet; the zigbee-rs NCP since its 0.1.3): heard again while joining is closed (a join, its Device_annce, a frame with its IEEE) it is asked to leave again, Mgmt_Leave_req and the coordinator's removal, at most once a minute, stays removed and its frames go no further (`removed_device_back` event, topic `network`). A join or announcement while joining is open is the device paired again: it is back as any device, as when a migration import or the registry creates it. Only a new network key keeps out for good a device that holds the current one and ignores the leave: `network/reset`, then pair the other devices again (the hub has no key rotation yet). Forming, resetting or restoring the network forgets the list. GP: 13.7) |
 | `devices/reinterview` | `id` | progress events `interview_progress` |
 | `devices/reconfigure` | `id` | per-step results (binds, reporting, reads) |
-| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, last 50 frames (hex), GP commissioning payload, `interview_partial`, `interview_resumes` (partial interviews resumed on a rejoin this run, 3.1), `interview_quirk` (`lumi`: completed from the model this run, 3.1) |
+| `devices/diagnostics` | `id` | fingerprint, layers and their hashes, `catalog_refused` (catalog definitions it matches that need features this firmware lacks, 9.3), configure results, unknown attributes and Tuya DPs seen, expression error counters, `counters` (also `rejoins`, `announces`, `leaves`), last 50 frames (hex), GP commissioning payload, `interview_partial`, `interview_resumes` (partial interviews resumed on a rejoin this run, 3.1), `interview_quirk` (`lumi`: completed from the model this run, 3.1); API 1.4: `interview_step` (the current or last step, `done`), `interview_since` (while partial), `interview_failed` (4.1) |
 | `devices/pin_definition` | `id`, `definition` (id or null) | new resolution |
 
 Events (topic `devices`): `device_added`, `device_updated` (any registry field,
@@ -2589,6 +2610,27 @@ deadline, as an NCP image need not report `EVT_PERMIT_JOIN_STATE`) and `network_
 `removed_device_back` (`device`, `nwk`, `via`: `rejoin`, `announce`,
 `frame`): a device `devices/remove` removed was heard again while joining
 was closed and was asked to leave again (see `devices/remove`).
+
+Event `device_network` (topic `network`, API 1.4; also kept in
+`network/events`): what the coordinator reports of a device's membership,
+one per join, refusal, rejoin, announcement and leave, for every IEEE (a
+device the hub does not know too) — `{"topic": "device_network", "event":
+"rejoined", "device": "zb:…", "nwk": 23057, "prev_nwk": 23041, "decision":
+"admitted", "how": "secured", "time": 1764324000.5}`:
+
+| `event` | Fields besides `device`, `nwk`, `time` |
+|---|---|
+| `joined` | `decision` (`admitted`, `denied`), `how` (`association`, `direct`), `reason` when denied: `permit_closed` (joining was closed on the hub then) or `refused` (the trust center's own decision) |
+| `rejoined` | as `joined`, `how` `secured` (with the network key) or `tc` (through the trust center); `prev_nwk` when the address changed |
+| `announced` | a Device_annce; `prev_nwk` when the address changed |
+| `left` | `reason` `self` or `removed` (after `devices/remove`); `rejoin` when the backend says (ZRHP flags bit 0; EZSP's trust center does not) |
+| `aged_out` | ZRHP only (`EVT_DEVICE_LEFT` reason 4): the NCP dropped it from its child table after a timeout; not a leave (4.6), not counted in `leaves`, the host store keeps its record |
+
+ZRHP: `EVT_DEVICE_JOINED` `join_type` (0 association, 1 secured rejoin,
+2 trust center rejoin, 3 direct) and `decision`, `EVT_DEVICE_LEFT`; EZSP:
+`trustCenterJoinHandler` status and policy decision. Times are the hub's
+clock (Unix s once synchronised). The web UI lists them on the Network
+card ("Network log").
 
 ### 14.3 Entities
 
@@ -2644,7 +2686,12 @@ size, content_hash, requires}`, `decompile(cbor, format)`,
 
 Topic `catalog` (subscribe): `catalog_manifest`, `catalog_updated`,
 `web_tools_updated`, `definition_fetched` (the commit results) and
-`definition_needed` {`device`, `shards`}. `definitions/list` takes
+`definition_needed` {`device`, `shards`}; API 1.4: `definition_missing`
+{`device`, `status` (`none`: no catalog definition matches it, or
+`refused`: those that do need features this firmware lacks), `refused`
+(the messages of `catalog/status` `missing`)} once per device and start,
+when every shard holding its keys was checked (or none does) and it is
+still generic only. `definitions/list` takes
 `query` (substring of id, vendor or model), `offset` and `limit` (≤ 500);
 with any of them the result is `{total, offset, items}`, without them the
 first 200 summaries as before. With `device` it lists the catalog
@@ -2734,9 +2781,9 @@ written as text with fallible allocation, never as a JSON tree).
 | `network/set_tx_power` | `dbm` (antenna-referred) | `requested_dbm`, `applied_dbm` (the NCP clamps and rounds down to its radio's steps: ESP32-H2 −24…+20, ESP32-C6 −15…+20 dBm, 3 dB); persisted in the host store and re-applied after every NCP restart. `network/info` reports `tx_power` (applied, absent while the NCP reports 0x7F, unknown) and `tx_power_requested` |
 | `network/diagnostics` | `reset` (bool), `groups` (`DIAG` group mask, default all) | `ncp` (`SYS_GET_STATUS`: `uptime_s`, `free_aps_slots`, `pta_coex`, `key_export_locked`, `permit_join`, …), `counters` [{`id`, `group`, `name`, `value`}] (`DIAG_GET_COUNTERS`), `frame_counters`, `host_link` (the hub's link counters), `pta` {`capable`, `enabled`}, `tx_power_set`, `ezsp_hashed_tclk` (ZRHP: the NCP keeps an EZSP backup's hashed link key root and derives the devices' keys from it, capability bit 14), `ncp_log` (as `network/ncp_log`, ZRHP), `unsupported` (commands the NCP lacks), `errors` |
 | `network/ncp_log` | `level` (0 off, 1 error … 5 trace; absent: read) | `level`, `forwarded`, `suppressed` (over the rate limit: 16 at once, then 2 a second), `dropped` (by the NCP, its log full). ZRHP only: the hub grants the NCP's LOG endpoint credit, and its log records (first the ones it kept since its reset: crystal tuning, IEEE source, NV state) go into the hub's log under the target `ncp` up to `level` (default 3, info, the NCP's own default); a level set is kept in the host store and sent to the NCP in every session (`SYS_SET_CONFIG` `log_level`). Console (Dongle Max): `ncp log [on|off|level <n>]` |
-| `network/topology` | `refresh` (default true: a **background job**; false answers at once with the last map, null before the first scan or when it did not fit the 8 KB kept for results), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); cancelling stops before the next router |
+| `network/topology` | `refresh` (default true: a **background job**; false answers at once with the last map the hub kept, null before the first scan: maps up to 96 KiB with PSRAM, 8 KiB without (`Resources::kept_map_bytes`); a larger one goes only to the session that scanned, in its `job_result`, and the previous map stays), `routes` (default true) | `nodes` [{`nwk`, `ieee`, `type` (`coordinator`/`router`/`end_device`/`unknown`), `device`, `name`, `scanned`, `error`}], `links` [{`source`, `target` (NWK), `lqi`, `relationship`, `depth`}] as reported by `source`, `routes` [{`source`, `dst`, `next_hop`, `status`}], `notes`, `time`, `duration_ms`. The coordinator's rows come from `DIAG_GET_NEIGHBORS`/`ROUTES`/`CHILDREN` (ZRHP has no ZDO loopback), the routers' from Mgmt_Lqi_req/Mgmt_Rtg_req over the air, breadth first (48 routers, 4 s per answer, 150 s at most); cancelling stops before the next router |
 | `network/jobs` | — | `running` [{`job`, `kind`, `progress`, `pass`, `passes`, `elapsed_ms`, `eta_ms`, `cancelling`}] (every job, request/response ones included), `results` [{`job`, `kind`}]: the kept results |
-| `network/job/result` | `job` or `kind` (or neither: the newest) | `{job, kind, partial: false, result}` of a kept result: the last one of each kind, 8 KB for all kinds together (the oldest go first); `not_found` otherwise |
+| `network/job/result` | `job` or `kind` (or neither: the newest) | `{job, kind, partial: false, result}` of a kept result: the last one of each kind, the network map on its own (up to 96 KiB with PSRAM, 8 KiB without), the other kinds 8 KB together (the oldest go first); a result too large to keep leaves the kind's previous one; `not_found` otherwise |
 | `network/job/cancel` | `job` | `cancelling`: an energy scan stops after the current pass (its result is then marked `cancelled`), the map before the next router; an active scan runs to its end (one NCP command). `not_found` for a job that is not running |
 | `network/backup` | `keys` (default true), `keep` (default false: also kept as `network/backup/replaced`, hub-scoped, so that it survives a backend change, e.g. before the NCP's firmware is replaced; needs `keys`) | the backup file, Open ZigBee Coordinator Backup v1 (`zigpy/open-coordinator-backup`; ZRHP 9.1/9.2): the NCP's export (ZRHP `BKP_EXPORT_*`; EZSP: the network, `exportKey`, `getNetworkKeyInfo`, the child and key tables, `docs/ezsp-backend.md`) plus the hub's devices without keys, `metadata.internal.zigbee_rs`, `stack_specific.zigbee_rs` with the durable counter limits (ZRHP); `is_child` marks end device children only: a router that joined through a zigbee-rs NCP (listed there as a child) is written as a plain device, because OCB has no capability and a restored child is an rx-off end device that would get its frames only by polling; EZSP backups are written as bellows (ZHA) and Z2M's ember adapter write them: TCLK `ZigBeeAlliance09`, `stack_specific.ezsp.hashed_tclk`, `metadata.internal.ezspVersion`. With keys it is kept as the last backup in the host store; without keys (or when the NCP's key export is locked) it is marked `metadata.internal.incomplete` and cannot be restored. Keys need a non-empty API token |
 | `network/backup/last` | — | `backup`: the last complete backup (taken by `network/backup`, `network/reset` or `network/restore`), or null. It holds keys: `unauthorized` without an API token, as `network/backup` with keys |
@@ -2747,7 +2794,7 @@ written as text with fallible allocation, never as a JSON tree).
 | `network/reset` | `confirm` = `"RESET"`, `channel` or `channels` (default 11–26), `pan_id`, `ext_pan_id` (big-endian hex), `tx_power`, `skip_backup`, `leave` (default false) | `network` {`pan_id`, `ext_pan_id`, `channel`}, `previous_backup`: the automatic backup of the previous network summarised, or null: {`ext_pan_id`, `pan_id`, `channel`, `devices`, `link_keys`, `nwk_frame_counter`, `aps_frame_counter`, `kept`: the request that returns the file, `network/backup/replaced` (with this `ext_pan_id`) or `network/backup/last`}. No key is in the answer, nor in those of `network/restore` and `network/import`: keys leave the hub only through the backup requests, with an API token (the web UI fetches the kept file and offers it). Backup first, kept as `network/backup/replaced` before the leave (a failed or incomplete backup, `backup_incomplete`, changes nothing unless `skip_backup`; a forming failure after the leave answers the error with `previous_backup`, as `network/restore`), `NWK_LEAVE_RESET` (IEEE override and host endpoints kept; a local wipe, nothing on air, unless `leave`: flags bit2, the coordinator broadcasts a NWK Leave first and its routers drop it, for an explicit "leave network" only; the replaced network stays restorable from its kept backup without; zigbee-rs NCPs before 0.1.3 always broadcast it, EmberZNet's `leaveNetwork` always does), then forming with hub-chosen key and the given parameters. Also forms a network on an empty NCP. Devices stay in the registry and must join again (also `foreign` ones: the new network takes them) |
 | `network/registry/adopt` | `confirm` = `true` | `restored` (devices loaded), `registry`. The hub's network records (below) become this hub's, of the network it runs, and are loaded. Nothing is deleted |
 | `network/registry/clear` | `confirm` = `true` | `deleted` (records), `forgotten` (devices), `registry`. Deletes the network records and drops the devices, groups, bindings and automations from the hub without network traffic (no leave, no removal on the NCP); the NCP's devices are imported again. User definitions and the hub's settings stay |
-| `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason`), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time`, `time_synced` |
+| `hub/system` | — | platform facts (`version`, `uptime_s`, `heap` {`free`, `min_free`, `largest_block`}, `mode`, `wifi` {`ssid`, `state`, `ip`, `rssi`, `channel`}, `reset_reason` (ESP-IDF `esp_reset_reason_t`: 4 panic, 5–7 watchdogs)), `app` (devices, sessions, registry and APS counters), `store` (journal), `ncp` (firmware, resumes, restarts, last error, slots), `time`, `time_synced`. API 1.4: `boot_id` (8 hex, random per start of the hub application: a client sees a restart when it changes) and, in the S3 images, `crash` {`crashed` (the previous boot ended in a panic or watchdog reset), `streak` (crashed boots in a row; 0 again after 10 min up; at 3 the next crash boots the safe mode), `panic` (the previous boot's Rust panic message, this boot only, else null), `exception` (the last ESP-IDF panic record: boots since, core, kind, reason or abort text, task, PC, kept until a power-on, else null)} |
 | `hub/logs` | `lines` (default 100, at most 500) | `lines`: the hub's recent log lines (a small RAM ring; keys are never logged), stamped `MM-DD HH:MM:SS` local time once the clock is set, else seconds since boot |
 | `hub/time` | — | `time_utc` (Unix s, null before the clock is set), `time_synced`, `source` (`sntp`, `rtc`: kept over a restart, `system`: a desktop), `local` (`YYYY-MM-DD HH:MM:SS`), `tz` (POSIX TZ string, default `UTC0`), `tz_name` (the IANA name the client gave with `tz`, or null), `tz_offset_s` (now, with daylight saving), `dst` {`start`, `end` (Unix s, this year), `shift_s`, `active`} or null, `servers`, `last_set` |
 | `hub/time/set` | `tz` (POSIX TZ: `EET-2EEST,M3.5.0/3,M10.5.0/4`; `Mm.w.d`, `Jn` and `n` rules; times may be negative or past 24 h: `M3.5.0/-1`, `M3.4.4/26`), `tz_name` (optional, only with `tz`: the IANA zone it was made from, such as `Europe/Kyiv`; 1–64 of `A–Z a–z 0–9 / _ + -`, starting with a letter; display only, never interpreted; a `tz` without it removes the old name), `servers` (1–3 host names) | the `hub/time` record; all kept in the host store (`cfg/tz`, `cfg/tz_name`, `cfg/ntp`, hub-scoped). The web page turns an IANA zone into the POSIX string in the browser (Intl offsets of this and next year, hour by hour; rules that hold for 28 years; else today's offset, fixed, and it says so); the Home Assistant integration sends HA's zone with its TZif footer. The time zone drives the Time cluster server (0x000A) on the hub endpoint and the Tuya time sync (EF00 0x24); clients show times in their own zone |
@@ -2761,7 +2808,21 @@ Events (topic `network`, API 1.2): `network_updated` {`reason`:
 `channel_changed` (with `channel`, `nwk_update_id`), `tx_power`, `restored`,
 `imported`, `formed`, `registry_adopted`, `registry_cleared`} — clients read
 `network/info` again; `job_progress`, `job_done`, `job_failed` (below);
-`hub_updated` {the `hub/info` fields that changed: `developer_mode`}.
+`hub_updated` {the `hub/info` fields that changed: `developer_mode`; API
+1.4 also `coordinator_ieee`, `ncp_board`, `ncp_product`, `maintenance`
+(which now has `ncp_log` when the NCP is a ZRHP one)};
+`topology_updated` {`job`} after a map scan, once the new map is kept
+(API 1.4): clients fetch it with `network/job/result` {`job`} (or
+`network/topology` with `refresh: false`); the event does not carry it, as
+a map of tens of KB to every subscriber, next to the requester's
+`job_result`, would overrun a session's send budget (14.6). A map larger
+than the hub keeps (96 KiB with PSRAM, about 30 routers and 50 end devices
+take 77 KB; 8 KiB without) goes only to the session that scanned: no
+`topology_updated` then, and the previous map stays the kept one. The
+session that started the scan already has the map in its `job_result`
+and should not fetch it again on `topology_updated`: a second copy of a
+64–96 KiB map queued behind the first can exceed its send budget and
+close its session.
 
 **Network records and their owner.** The device registry, last values,
 groups, bindings, automations, per-device OTA state, the last backup and
@@ -3088,7 +3149,7 @@ light On/Off 0x0006, Level Control 0x0008, Color Control 0x0300.
 | `scenes/update` | `group`, `scene`, `name` | group record |
 | `scenes/view` | `group`, `scene`, `device`, `endpoint` | — ; `scene_view` event |
 | `bindings/list` | `device` (optional) | binding records |
-| `bindings/read` | `device` | binding record (`reading: true`) |
+| `bindings/read` | `device` | binding record (`reading: true`; API 1.4: `queued: true` while the read waits for a sleeping device to wake up) |
 | `bindings/create` | `device`, `endpoint`, `clusters` (list, or `cluster`), `target`: `{device, endpoint}`, `{group}` or `{hub: true}` | binding record |
 | `bindings/delete` | same as create | binding record |
 
@@ -3101,7 +3162,9 @@ op (bind/unbind), state (pending/queued/failed), error}]}`; a target is
 
 Topic `groups` (subscribe; the snapshot carries `groups` and `bindings`):
 `group_updated` `{group}`, `group_removed` `{group: id}`,
-`bindings_updated` (a binding record), `group_membership` `{device,
+`bindings_updated` (a binding record; one follows every change of a
+device's bindings: a read's table, a request's outcome, a queued request
+sent — clients need not poll `bindings/list`), `group_membership` `{device,
 endpoint, capacity, groups}`, `group_view` `{device, endpoint, group, name,
 status}`, `scene_view` `{device, endpoint, group, scene, status,
 transition_s, name, extension_fields: [{cluster, data}]}`, `group_error`
@@ -3152,6 +3215,11 @@ Requests (authenticated sessions; `hub/info` `maintenance` lists `mqtt`):
 | `mqtt/config/get` | — | `enabled`, `host`, `port` (1883), `client_id` (empty: `zigbee-rs-hub-<last 6 hex of the coordinator IEEE>`), `username`, `password_set` (the password is never returned), `base_topic` (`zigbee2mqtt`), `keepalive_s` (60), `discovery` (false), `discovery_prefix` (`homeassistant`), `retain_state` (false), `retain_availability` (true), `qos` (0) |
 | `mqtt/config/set` | any of the fields above, and `password` (`""` removes it; another `host` or `username` without a `password` in the same request removes the stored one, which is never sent to another broker or user) | the new settings; validated (`invalid_value`: no wildcards or empty levels in topics, host without a scheme), stored (NVS `hub/mqtt` on the S3; `hubctl serve --mqtt-settings FILE`), applied at once (the bridge restarts) |
 | `mqtt/status` | — | `state` (`disabled`, `low_memory`, `waiting_for_hub`, `connecting`, `connected`, `retrying`), `last_error` (e.g. `connection refused: not authorized` for CONNACK 5, `connection refused: bad user name or password` for 4, `the broker closed the connection after CONNECT` without a CONNACK, with `(it may require a user name and password)` for an anonymous client), `retry_in_s`, `connects`, `published`, `received`, `dropped`, `errors`, `devices`, `queued_bytes`, `api_resyncs`, `stack_min_free`, `tls: false` |
+
+Event `mqtt_status` (topic `network`, API 1.4): `{state, last_error,
+connects}` when the state or the error changed (looked at once a second,
+so a state shorter than that may not show; the first one after the start
+too).
 
 Topics (`<base>` = `base_topic`):
 

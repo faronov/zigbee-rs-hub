@@ -16,9 +16,9 @@ use std::time::Duration;
 use hub_coord::{
     ApsDst, ApsRequest, BackendConfig, Beacon, ChannelChange, Child, Code, CoordError, CoordEvent,
     CoordStatus, Coordinator, DiagCounter, Diagnostics, EndpointConfig, EnergyChannel, EventQueue,
-    FormParams, Inventory, InventoryDevice, Kind, NcpInfo, NcpStatus, Neighbor, NetChange,
-    NetState, NetworkIdentity, NetworkOwnership, NetworkParams, Progress, Reply, Request,
-    RequestId, Route, SessionEvent, SessionState, TablesRead, Terminal,
+    FormParams, Inventory, InventoryDevice, JoinKind, Kind, NcpInfo, NcpStatus, Neighbor,
+    NetChange, NetState, NetworkIdentity, NetworkOwnership, NetworkParams, Progress, Reply,
+    Request, RequestId, Route, SessionEvent, SessionState, TablesRead, Terminal,
 };
 use log::{debug, info, warn};
 
@@ -62,6 +62,15 @@ const ANY_EUI64: Eui64 = Eui64([0xFF; 8]);
 /// ZDO clusters (Zigbee spec 2.4.3).
 const ZDO_DEVICE_ANNCE: u16 = 0x0013;
 const ZDO_MGMT_PERMIT_JOINING_REQ: u16 = 0x0036;
+
+/// How a trust center join `status` says the device joined.
+fn join_kind(status: DeviceUpdate) -> JoinKind {
+    match status {
+        DeviceUpdate::STANDARD_SECURITY_SECURED_REJOIN => JoinKind::SecuredRejoin,
+        DeviceUpdate::STANDARD_SECURITY_UNSECURED_REJOIN => JoinKind::TcRejoin,
+        _ => JoinKind::Association,
+    }
+}
 
 /// A request as the worker runs it.
 pub(crate) enum Cmd {
@@ -891,9 +900,15 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                         ieee,
                         nwk: new_node_id,
                         rejoin: None,
+                        aged_out: false,
                     });
                 } else if policy_decision == JoinDecision::DENY_JOIN {
                     info!("ezsp: join of {ieee:016X} denied");
+                    self.emit(CoordEvent::JoinDenied {
+                        ieee,
+                        nwk: new_node_id,
+                        kind: join_kind(status),
+                    });
                 } else {
                     debug!(
                         "ezsp: {ieee:016X} joined as 0x{new_node_id:04X} via 0x{parent_of_new_node_id:04X} ({status:?})"
@@ -902,6 +917,7 @@ impl<T: Transport, C: Clock> Worker<T, C> {
                     self.emit(CoordEvent::DeviceJoined {
                         ieee,
                         nwk: new_node_id,
+                        kind: join_kind(status),
                     });
                 }
             }

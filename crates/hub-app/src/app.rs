@@ -138,6 +138,11 @@ pub trait RequestHook: Send {
     }
     /// Handles request `ty`; `req` is the whole frame.
     fn request(&mut self, ty: &str, req: &serde_json::Value) -> Result<serde_json::Value, hub_devices::hub::ApiError>;
+    /// An event for the `network` topic (an object with its `topic`),
+    /// asked once a second: e.g. the MQTT bridge's status when it changed.
+    fn event(&mut self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Request prefixes of optional services and why a build without their
@@ -202,6 +207,9 @@ pub struct AppConfig {
     /// OTA images streamed at once (`Resources::ota_streams` on the hub).
     #[cfg(feature = "ota")]
     pub ota_streams: usize,
+    /// The largest network map kept for every client, not only the one
+    /// that asked for it (`Resources::kept_map_bytes` on the hub).
+    pub kept_map_bytes: usize,
 }
 
 impl Default for AppConfig {
@@ -220,6 +228,8 @@ impl Default for AppConfig {
             ota_flash: Default::default(),
             #[cfg(feature = "ota")]
             ota_streams: hub_ota::stream::MAX_STREAMS,
+            // As with PSRAM.
+            kept_map_bytes: hub_core::resources::Resources::for_psram(1).kept_map_bytes,
         }
     }
 }
@@ -746,6 +756,7 @@ impl Runner {
         api.set_info("ota", ota.info());
         let mut admin = Admin::new(cfg.platform.clone(), cfg.hub_name.clone());
         admin.job_stack = cfg.admin_stack;
+        admin.keep_maps_up_to(cfg.kept_map_bytes);
         admin.developer = developer;
         admin.start_worker();
         admin.load_clock(&*records);
@@ -933,7 +944,7 @@ impl Runner {
                 }
                 self.engine.on_aps_indication(i, now);
             }
-            CoordEvent::DeviceJoined { ieee, nwk } => {
+            CoordEvent::DeviceJoined { ieee, nwk, kind } => {
                 if self.removed.contains(ieee) {
                     if self.engine.transport.permit_join_s() == 0 {
                         self.remove_again(ieee, nwk, "rejoin", now);
@@ -943,14 +954,20 @@ impl Runner {
                     info!("app: removed device {ieee:016x} joined again while joining was open: paired again");
                 }
                 self.engine.transport.nwk.insert(ieee, nwk);
-                self.engine.on_device_joined(ieee, nwk, now);
+                self.engine.on_join(ieee, nwk, kind, now);
             }
-            // The device stays (whether it rejoins is not said), unavailable
-            // with the reason `left` until it is heard again; removal stays
-            // the operator's (`devices/remove`).
-            CoordEvent::DeviceLeft { ieee, nwk, rejoin } => {
-                info!("app: device {ieee:016x} (0x{nwk:04X}) left, rejoin {rejoin:?}");
-                self.engine.on_device_left(ieee);
+            CoordEvent::JoinDenied { ieee, nwk, kind } => {
+                info!("app: {kind:?} of {ieee:016x} (0x{nwk:04X}) denied, joining {}", if self.permit_left == 0 { "closed" } else { "open" });
+                self.engine.on_join_denied(ieee, nwk, kind, self.permit_left == 0, now);
+            }
+            // The device stays (unavailable with the reason `left` until it
+            // is heard again, unless it said it rejoins or only aged out of
+            // the NCP's child table); removal stays the operator's
+            // (`devices/remove`).
+            CoordEvent::DeviceLeft { ieee, nwk, rejoin, aged_out } => {
+                info!("app: device {ieee:016x} (0x{nwk:04X}) {}, rejoin {rejoin:?}", if aged_out { "aged out" } else { "left" });
+                let removed = self.removed.contains(ieee);
+                self.engine.on_leave(ieee, nwk, rejoin, removed, aged_out, now);
             }
             CoordEvent::Gp(e) => self.engine.on_gp_event(*e, now),
             CoordEvent::NetworkState(c) => {
@@ -1183,7 +1200,22 @@ impl Runner {
     fn set_maintenance(&mut self, caps: Option<&hub_coord::Capabilities>) {
         let mut f = self.admin.features(caps);
         f.extend(self.hooks.iter().filter_map(|h| h.feature()));
-        self.api.set_info("maintenance", f.into());
+        self.set_infos([("maintenance", f.into())]);
+    }
+
+    /// Sets `hub/info` fields; the changed ones are announced
+    /// (`hub_updated`, topic `network`).
+    fn set_infos<const N: usize>(&mut self, fields: [(&'static str, serde_json::Value); N]) {
+        let mut changed = serde_json::Map::new();
+        for (k, v) in fields {
+            if self.api.set_info(k, v.clone()) {
+                changed.insert(k.into(), v);
+            }
+        }
+        if !changed.is_empty() {
+            changed.insert("topic".into(), "hub_updated".into());
+            self.engine.network_event(serde_json::Value::Object(changed));
+        }
     }
 
     /// A request of a [`RequestHook`]: the result frame, `None` when no
@@ -1437,6 +1469,11 @@ impl Runner {
         for ev in self.admin.progress_events() {
             self.engine.network_event(ev);
         }
+        for h in &mut self.hooks {
+            if let Some(ev) = h.event() {
+                self.engine.network_event(ev);
+            }
+        }
         // Requests that waited for the records' decision in vain end.
         self.engine.transport.expire_waiting();
         // Confirms first: the tick fails undeliverable requests at once.
@@ -1483,9 +1520,11 @@ impl Runner {
                 info!("app: coordinator now {ieee:016X} (was {:016X})", self.engine.cfg.coordinator_ieee);
             }
             self.engine.cfg.coordinator_ieee = ieee;
-            self.api.set_info("coordinator_ieee", format!("{ieee:016x}").into());
-            self.api.set_info("ncp_board", info.board.clone().into());
-            self.api.set_info("ncp_product", info.product.clone().into());
+            self.set_infos([
+                ("coordinator_ieee", format!("{ieee:016x}").into()),
+                ("ncp_board", info.board.clone().into()),
+                ("ncp_product", info.product.clone().into()),
+            ]);
         }
         if self.registered {
             return;

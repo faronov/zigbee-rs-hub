@@ -217,6 +217,9 @@ pub struct Admin {
     import_stage: Option<Box<import::Stage>>,
     /// An import is being applied ([`Admin::import_holds`]).
     import_hold: Arc<AtomicBool>,
+    /// Random per start of the application (`hub/system` `boot_id`): a
+    /// client sees the hub restarted when it changes.
+    boot_id: u32,
 }
 
 fn ncp_error(what: &str, e: CoordError) -> ApiError {
@@ -759,7 +762,13 @@ fn take_backup(net: &dyn NetworkAdmin, kv: &dyn KvStore, keys: bool, known: &[Kn
 impl Admin {
     /// No platform, default job stack.
     pub fn new(platform: Option<Arc<dyn Platform>>, source: String) -> Self {
+        let mut b = [0u8; 4];
+        match &platform {
+            Some(p) => p.random(&mut b),
+            None => b = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()) as u32).to_le_bytes(),
+        }
         Self {
+            boot_id: u32::from_le_bytes(b),
             platform,
             source,
             job_stack: 16 * 1024,
@@ -771,6 +780,12 @@ impl Admin {
             import_stage: None,
             import_hold: Arc::default(),
         }
+    }
+
+    /// The largest network map kept for every client
+    /// (`Resources::kept_map_bytes`).
+    pub fn keep_maps_up_to(&mut self, bytes: usize) {
+        self.board.lock().unwrap().set_map_limit(bytes);
     }
 
     /// Start the long-lived job thread (with `job_stack`); call once,
@@ -794,6 +809,7 @@ impl Admin {
                 (c.radio.tx_power, "tx_power"),
                 (c.backup.export, "backup"),
                 (c.backup.restore, "restore"),
+                (c.backend == BackendKind::Zrhp, "ncp_log"),
             ] {
                 if has {
                     f.push(name);
@@ -827,7 +843,7 @@ impl Admin {
             "network/topology" => match TopologyReq::from(v) {
                 Ok(q) if !q.refresh => {
                     let b = self.board.lock().unwrap();
-                    let r = raw_frame(id, b.result(None, Some("topology")).map_or("null", |(_, _, t)| t));
+                    let r = raw_frame(id, b.result(None, Some(jobs::TOPOLOGY)).map_or("null", |(_, _, t)| t));
                     return vec![r.unwrap_or_else(|e| frame(id, Err(e)))];
                 }
                 Ok(q) => return self.job_topology(ctx, sid, id, q),
@@ -870,6 +886,7 @@ impl Admin {
             o.insert("ncp".into(), ncp);
             o.insert("time".into(), ctx.now_s.into());
             o.insert("time_synced".into(), hub_devices::device::time_synced().into());
+            o.insert("boot_id".into(), format!("{:08x}", self.boot_id).into());
         }
         v
     }
@@ -1327,7 +1344,7 @@ impl Admin {
         let known = (ctx.known)();
         let now_s = ctx.now_s;
         self.start_bg(
-            "topology",
+            jobs::TOPOLOGY,
             1,
             Duration::from_secs(10),
             ctx.out.clone(),

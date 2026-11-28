@@ -432,6 +432,7 @@ fn start_app(hub: Hub, verdict: Verdict) {
         builtin_catalog,
         #[cfg(feature = "ota")]
         ota_streams: resources::get().ota_streams,
+        kept_map_bytes: resources::get().kept_map_bytes,
         platform: Some(std::sync::Arc::new(platform::S3)),
         admin_stack: ADMIN_STACK,
         ..Default::default()

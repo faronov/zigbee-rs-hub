@@ -40,8 +40,8 @@ pub use caps::{
     BackupSupport, Capabilities, FwUpdateMethod, GpSupport, OwnershipModel, RadioOps, Tables,
 };
 pub use coord::{
-    BackendConfig, CoordEvent, CoordStatus, Coordinator, EndpointConfig, NcpInfo, NetChange,
-    NetState, NetworkParams, RadioControl, SessionEvent, SessionState,
+    BackendConfig, CoordEvent, CoordStatus, Coordinator, EndpointConfig, JoinKind, NcpInfo,
+    NetChange, NetState, NetworkParams, RadioControl, SessionEvent, SessionState,
 };
 pub use error::{BackendKind, Code, CoordError, Described, Kind};
 pub use gp::{GpEvent, GpRequest};

@@ -316,21 +316,32 @@ impl CatalogService {
     }
 
     /// Announces devices that newly need a definition (event
-    /// `definition_needed`), once per device and start.
+    /// `definition_needed`), once per device and start, and those left
+    /// without one once every shard holding their keys was checked (event
+    /// `definition_missing`: `status` `none`, or `refused` with why).
     #[inline(never)]
     pub fn tick<T: ZigbeeTransport>(&mut self, hub: &Hub<T>) {
         if self.store.manifest.is_none() {
             return;
         }
-        let new: Vec<(String, Vec<u8>)> = to_fetch(hub, &self.store, manifest_version(&self.store))
-            .filter(|(d, _, _)| !self.announced.contains(&d.id))
-            .map(|(d, shards, _)| (d.id.clone(), shards))
-            .collect();
-        for (id, shards) in new {
-            self.announced.insert(id.clone());
-            if !shards.is_empty() {
-                self.event("definition_needed", obj!({"device": id, "shards": shards}));
+        let mut evs = Vec::new();
+        for (d, shards, again) in to_fetch(hub, &self.store, manifest_version(&self.store)) {
+            if !self.announced.contains(&d.id) {
+                self.announced.insert(d.id.clone());
+                if !shards.is_empty() {
+                    evs.push(("definition_needed", obj!({"device": d.id.clone(), "shards": shards.clone()})));
+                }
             }
+            let key = format!("!{}", d.id);
+            if shards.is_empty() && !again && !self.announced.contains(&key) {
+                self.announced.insert(key);
+                let why = refused_messages(d);
+                let status = if why.is_empty() { "none" } else { "refused" };
+                evs.push(("definition_missing", obj!({"device": d.id.clone(), "status": status, "refused": why})));
+            }
+        }
+        for (topic, body) in evs {
+            self.event(topic, body);
         }
     }
 

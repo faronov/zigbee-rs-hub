@@ -39,8 +39,8 @@ use hub_ncp::zrhp::msg::ids;
 use hub_ncp::zrhp::msg::system::SysEcho;
 
 const USAGE: &str = "\
-usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices | --sim-ts011f] [--sim-ota] [--sim-unsupported ID,…]) [--store FILE] [--ota-store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
-       hubctl --backend ezsp --sim [--sim-devices] [--store FILE] [--ota-store FILE] [-v|-vv] serve …
+usage: hubctl (--serial PATH [--baud N] | --sim [--sim-demo] [--sim-devices | --sim-z2m-devices | --sim-ts011f] [--sim-ota] [--sim-unsupported ID,…] [--sim-crash]) [--store FILE] [--ota-store FILE] [--read-only] [--hold-trial] [-v|-vv] COMMAND
+       hubctl --backend ezsp --sim [--sim-devices] [--sim-crash] [--store FILE] [--ota-store FILE] [-v|-vv] serve …
 commands:
   status                    session, NCP, network, slots, counters (default)
   echo [N]                  N SYS_ECHO round trips (latency)
@@ -82,7 +82,13 @@ simulated NCP:
                             answering Mgmt_Lqi/Mgmt_Rtg) for the network map
   --sim-devices             two On/Off plugs and a temperature sensor that
                             answer the hub (interview, reads, commands; the
-                            sensor reports every 15 s), e.g. for automations
+                            sensor reports every 15 s), e.g. for automations;
+                            serve adds the requests sim/join {device, how:
+                            association|secured|tc, nwk, denied} or {partial:
+                            true} (a new plug whose interview ends partial),
+                            sim/announce {device, nwk}, sim/leave {device,
+                            rejoin, aged_out (ZRHP: the child timed out)}
+                            (both backends)
   --sim-z2m-devices         instead: form on channel 15 and join four simulated
                             devices (sensor, light, plug, remote) that answer
                             the interview and commands and report; the remote
@@ -96,6 +102,8 @@ simulated NCP:
   --sim-unsupported IDS     answer these message IDs UNSUPPORTED_COMMAND, e.g.
                             0x0106,0x0108 (no energy scan / TX power, like the
                             current NCP image)
+  --sim-crash               hub/system reports a crashed previous boot (reset
+                            reason 4, panic, crash streak 1)
 also, without a hub:
   hubctl ws-call URL --token T [--listen SECS] JSON...
                             authenticate, send requests, print the frames
@@ -414,6 +422,8 @@ fn echo_round(hub: &Hub, i: u32) -> Result<Duration, hub_ncp::driver::Error> {
 
 static HOLD_TRIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static OTA_STORE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+/// `--sim-crash`: hub/system reports a crashed previous boot.
+static SIM_CRASH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `serve`'s OTA area: `--ota-store FILE`, or RAM (512 KiB).
 fn ota_area() -> hub_app::OtaFlash {
@@ -634,6 +644,7 @@ fn serve_app(args: &mut Args, backend: hub_app::Backend) -> Result<(), String> {
         rng: urandom(),
         wifi_channel,
         wifi: Default::default(),
+        crashed: SIM_CRASH.load(std::sync::atomic::Ordering::Relaxed),
     };
     let cfg = hub_app::AppConfig {
         hub_name: "hubctl".into(),
@@ -647,6 +658,9 @@ fn serve_app(args: &mut Args, backend: hub_app::Backend) -> Result<(), String> {
     let transport: hub_mqtt::TransportFactory =
         Arc::new(|| Box::new(hub_mqtt::tcp::TcpTransport::new()) as Box<dyn hub_mqtt::Transport>);
     let mqtt = hub_mqtt::MqttService::start(&app, mqtt_store, transport, hub_mqtt::ServiceConfig::default());
+    if let Some(h) = simdev::SimHook::new() {
+        app.add_hook(Box::new(h));
+    }
     println!("token: {token}");
     let result = serve::serve(&app, &addr, until).map_err(|e| format!("{addr}: {e}"));
     mqtt.stop();
@@ -919,6 +933,7 @@ fn main() -> ExitCode {
     let sim_ts011f = args.flag("--sim-ts011f");
     let sim_z2m_devices = args.flag("--sim-z2m-devices") || sim_ts011f;
     let sim_ota = args.flag("--sim-ota");
+    SIM_CRASH.store(args.flag("--sim-crash"), std::sync::atomic::Ordering::Relaxed);
     let _ = OTA_STORE.set(args.value("--ota-store"));
     match args.value("--backend").as_deref() {
         None | Some("zrhp") => {}

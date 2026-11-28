@@ -94,6 +94,7 @@ progress{width:12em}
 <select id="pjd"><option value="60">1 min</option><option value="180" selected>3 min</option><option value="254">254 s</option></select>
 <button class="p" id="pj">Permit join</button><button id="pjc" class="hide">Close</button><span id="pjt" class="mut"></span>
 </div>
+<details><summary class="mut">Network log</summary><ul class="ents" id="nlog"></ul></details>
 </section>
 <section><div class="row"><h2 style="flex:1;margin:0;font-size:1em">Devices <span id="nd" class="mut"></span></h2></div></section>
 </div>
@@ -292,6 +293,7 @@ function onMsg(m,tok){
 // ota:end
   ]}).catch(e=>toast(e.message));
   // A scan started before (by this page or another client) is still running?
+  call("network/events").then(r=>{nlog=r;nlDraw()}).catch(()=>{});
   for(const k in JOB)delete JOB[k];call("network/jobs").then(j=>{for(const r of j.running)if(KINDS.includes(r.kind)){JOB[r.kind]=r.job;jobProg(r)}jobUi()}).catch(()=>{});return}
  if(m.type=="result"){const p=pend[m.id];if(!p)return;if(p.q&&m.success&&m.result&&m.result.status=="queued"){p.q(m.result);return}delete pend[m.id];kept(m.previous_backup);if(m.success)p.ok(m.result);else p.no(new Error((m.error&&(m.error.message||m.error.code))||"failed"));return}
  if(m.type=="job_result"){jobRes(m);return}
@@ -325,6 +327,7 @@ function onEvent(e){
  case"frame":uiDo("zcl",()=>zFrame(e));break;
 // advanced:end
  case"permit_join":pjEnd=Date.now()+e.remaining_s*1000;pjTick();break;
+ case"device_network":nlog.push(e);if(nlog.length>32)nlog.shift();nlDraw();break;
  case"network_state":case"network_updated":call("network/info").then(setNet).catch(()=>{});break;
  case"job_progress":if(KINDS.includes(e.kind)){if(JOB[e.kind]!=e.job){JOB[e.kind]=e.job;jobUi()}jobProg(e)}break;
  case"job_done":case"job_failed":jobEnd(e);break;
@@ -347,6 +350,10 @@ function renderNet(){
   ["NCP firmware",c.fw&&(c.fw+(c.protocol?" · ZRHP "+c.protocol:""))],["NCP IEEE",c.ieee],["NCP board",c.board],["NCP link",c.baud&&c.baud+" baud"+(c.flow_control?", RTS/CTS":"")],
   ["Hub API",hub.api_version&&hub.api_version+" · "+Object.keys(devs).length+" devices, "+Object.values(ents).filter(x=>!x.orphaned).length+" entities"]]);
 }
+// Joins, refusals, rejoins, announcements and leaves, newest first.
+let nlog=[];
+function nlDraw(){const u=$("#nlog");u.textContent="";for(const e of nlog.slice().reverse()){const d=devs[e.device];
+ u.append(el("li",{},new Date((e.time-skew)*1000).toLocaleTimeString()+" "+(d&&d.name||e.device)+" "+hex(e.nwk,4)+": "+e.event+(e.how&&e.how!="association"?" ("+e.how+")":"")+(e.decision=="denied"?", denied":"")+(e.reason?", "+e.reason.replace("_"," "):"")))}}
 function pjTick(){
  clearTimeout(pjTick.h);const left=Math.max(0,Math.round((pjEnd-Date.now())/1000));
  $("#pjt").textContent=left?"open, "+left+" s left":"closed";$("#pjc").classList.toggle("hide",!left);

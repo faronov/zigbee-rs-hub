@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use hub_coord::{
     ApsDst, ApsRequest, BackendConfig, BackendKind, CoordError, CoordEvent, Coordinator,
-    EVENT_SLOTS, EndpointConfig, EventQueue, FormParams, Kind, NetChange, NetState, NetworkAdmin,
-    NetworkIdentity, NetworkOwnership, OwnershipModel, Progress, Reply, Request, RequestId,
-    SessionEvent, SessionState, Terminal, TxOptions,
+    EVENT_SLOTS, EndpointConfig, EventQueue, FormParams, JoinKind, Kind, NetChange, NetState,
+    NetworkAdmin, NetworkIdentity, NetworkOwnership, OwnershipModel, Progress, Reply, Request,
+    RequestId, SessionEvent, SessionState, Terminal, TxOptions,
 };
 
 mod backup;
@@ -1131,7 +1131,7 @@ fn a_lossy_uart_still_ends_every_request_once() {
 // ------------------------------------------------------------ events
 
 #[test]
-fn joins_rejoins_and_leaves_are_reported_denials_are_not() {
+fn joins_rejoins_leaves_and_denials_are_reported() {
     let mut rig = Rig::new(sim(13));
     rig.next_up();
     let dev = 0x0015_8D00_0012_3456;
@@ -1176,15 +1176,26 @@ fn joins_rejoins_and_leaves_are_reported_denials_are_not() {
     // An IEEE-addressed request goes to the address of the last join.
     let id = rig.submit(aps(ApsDst::Ieee(dev), true));
     assert_eq!(rig.outcome(id), Terminal::Delivered);
-    let joined: Vec<(u64, u16)> = rig
+    let joined: Vec<(u64, u16, JoinKind)> = rig
         .log
         .iter()
         .filter_map(|e| match e {
-            CoordEvent::DeviceJoined { ieee, nwk } => Some((*ieee, *nwk)),
+            CoordEvent::DeviceJoined { ieee, nwk, kind } => Some((*ieee, *nwk, *kind)),
             _ => None,
         })
         .collect();
-    assert_eq!(joined, [(dev, 0x4321), (dev, 0x4322)]);
+    assert_eq!(
+        joined,
+        [
+            (dev, 0x4321, JoinKind::Association),
+            (dev, 0x4322, JoinKind::SecuredRejoin)
+        ]
+    );
+    assert!(rig.log.contains(&CoordEvent::JoinDenied {
+        ieee: 0x99,
+        nwk: 0x4323,
+        kind: JoinKind::Association
+    }));
     let left: Vec<&CoordEvent> = rig
         .log
         .iter()
@@ -1195,7 +1206,8 @@ fn joins_rejoins_and_leaves_are_reported_denials_are_not() {
         [&CoordEvent::DeviceLeft {
             ieee: 0x98,
             nwk: 0x4324,
-            rejoin: None
+            rejoin: None,
+            aged_out: false
         }]
     );
     assert!(matches!(

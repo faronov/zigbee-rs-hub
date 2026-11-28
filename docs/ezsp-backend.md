@@ -568,7 +568,10 @@ firmware console: `hub` on the Dongle Max.
 - Leaves: `trustCenterJoinHandler` DEVICE_LEFT becomes
   `CoordEvent::DeviceLeft` with `rejoin: None` (the trust center's update
   does not say); the engine keeps the device, unavailable with the reason
-  `left` until it is heard again. The ZRHP adapter does not emit it yet.
+  `left` until it is heard again. The ZRHP adapter emits it from
+  `EVT_DEVICE_LEFT` with `rejoin` from its flags and `aged_out` for reason
+  4 (a child timeout, which EZSP's DEVICE_LEFT never reports). A DENY_JOIN decision
+  becomes `CoordEvent::JoinDenied` (the network log's refused joins).
 - `TxOptions::extended_timeout` is not applied (EmberZNet sets it per
   destination with `setExtendedTimeout`).
 - Beacons of an active scan carry no sender address (0xFFFF).

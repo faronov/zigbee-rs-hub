@@ -925,7 +925,7 @@ fn energy_scan_channel_change_tx_power_and_diagnostics() {
     assert_eq!(formed["backup"], J::Null, "no network before: nothing to back up");
     let info = call(&app, sid, &rx, 1, json!({"type": "hub/info"}));
     let maint = ok(&info)["maintenance"].as_array().unwrap().clone();
-    for f in ["energy_scan", "tx_power", "backup", "restore", "topology", "wifi"] {
+    for f in ["energy_scan", "tx_power", "backup", "restore", "topology", "wifi", "ncp_log"] {
         assert!(maint.contains(&json!(f)), "{f} in {maint:?}");
     }
 
@@ -1042,8 +1042,21 @@ fn network_map_from_coordinator_tables_and_router_answers() {
     });
     let sub = call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]}));
     ok(&sub);
-    let map = job(&app, sid, &rx, 2, json!({"type": "network/topology"}));
+    let mut evs = Vec::new();
+    let map = job_with(&app, sid, &rx, 2, json!({"type": "network/topology"}), &mut evs);
     let map = ok(&map).clone();
+    // Every `network` subscriber hears of the new map (API 1.4), without
+    // it: `network/job/result` has it.
+    let ev = loop {
+        if let Some(e) = evs.iter().find(|e| e["topic"] == "topology_updated") {
+            break e.clone();
+        }
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        evs.push(f["event"].clone());
+    };
+    assert_eq!((ev.get("map"), ev["job"].as_u64().is_some()), (None, true), "{ev}");
+    let kept = call(&app, sid, &rx, 4, json!({"type": "network/job/result", "job": ev["job"]}));
+    assert_eq!(ok(&kept)["result"], map);
     let nodes = map["nodes"].as_array().unwrap();
     let nwks: Vec<u64> = nodes.iter().map(|n| n["nwk"].as_u64().unwrap()).collect();
     assert_eq!(nwks, vec![0, 0x1111, 0x2222, 0x3333, 0x4444], "the previous child is left out: {map}");
@@ -1064,6 +1077,63 @@ fn network_map_from_coordinator_tables_and_router_answers() {
     assert_eq!(ok(&cached)["nodes"], map["nodes"]);
     assert_eq!(r.sim.state().aps.len(), aps, "no requests for the cached map");
     app.shutdown();
+}
+
+/// A network map over the 8 KiB the other results share: with PSRAM it is
+/// kept for every client (`topology_updated`, `network/job/result`,
+/// `network/topology` without a scan); without, only the requester gets
+/// it, no `topology_updated` says otherwise and the previous map stays.
+#[test]
+fn a_large_network_map_is_kept_for_every_client_with_psram() {
+    use hub_core::resources::Resources;
+    for psram in [2 * 1024 * 1024, 0] {
+        let r = rig(Store::volatile());
+        let app = App::start(r.ncp.clone(), AppConfig { kept_map_bytes: Resources::for_psram(psram).kept_map_bytes, ..cfg() });
+        assert!(app.wait(T, |s| s.endpoint_registered));
+        let (sid, rx) = session(&app);
+        form(&app, sid, &rx, 15);
+        ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]})));
+        // A scan: its job, the requester's map, whether `topology_updated` came.
+        let scan = |id: u64| {
+            let job = ok(&call(&app, sid, &rx, id, json!({"type": "network/topology"})))["job"].as_u64().unwrap();
+            let (mut map, mut updated) = (J::Null, false);
+            loop {
+                let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+                let e = &f["event"];
+                if f["type"] == "job_result" && f["job"] == job && f["partial"] == false {
+                    map = f["result"].clone();
+                } else if e["job"] == job && e["topic"] == "topology_updated" {
+                    updated = true;
+                } else if e["job"] == job && e["topic"] == "job_done" {
+                    return (job, map, updated);
+                }
+            }
+        };
+        let (small_job, small, updated) = scan(2);
+        assert!(updated && small["nodes"].is_array(), "{small}");
+        r.sim.with(|s| {
+            s.neighbors = Some((0..60u8).map(|i| ([0xA0, i, 0, 0, 0, 0, 0, 0], 0x4000 + u16::from(i), 2, 1)).collect());
+            s.children = Some((0..60u8).map(|i| ([0xB0, i, 0, 0, 0, 0, 0, 0], 0x5000 + u16::from(i), 0x80)).collect());
+        });
+        let (job, map, updated) = scan(3);
+        let len = map.to_string().len();
+        assert_eq!(map["nodes"].as_array().map(Vec::len), Some(121));
+        assert!(len > 8 * 1024 && len <= Resources::for_psram(1).kept_map_bytes, "{len} B");
+        let cached = call(&app, sid, &rx, 4, json!({"type": "network/topology", "refresh": false}));
+        let by_job = call(&app, sid, &rx, 5, json!({"type": "network/job/result", "job": job}));
+        if psram > 0 {
+            assert!(updated);
+            assert_eq!(ok(&cached), &map);
+            assert_eq!(ok(&by_job)["result"], map);
+        } else {
+            assert!(!updated, "a map the other clients cannot fetch");
+            assert_eq!(ok(&cached), &small, "the previous map stays");
+            assert_eq!(err_code(&by_job), "not_found");
+            let prev = call(&app, sid, &rx, 6, json!({"type": "network/job/result", "job": small_job}));
+            assert_eq!(ok(&prev)["result"], small);
+        }
+        app.shutdown();
+    }
 }
 
 #[test]
@@ -1199,6 +1269,8 @@ fn hub_settings_through_the_platform() {
     assert_eq!(sys["heap"]["free"], 65000);
     assert_eq!(sys["app"]["sessions"], 1);
     assert_eq!(sys["ncp"]["fw"], "sim-ncp 0.1.0");
+    // Random per start of the app (API 1.4).
+    assert_eq!(sys["boot_id"].as_str().map(str::len), Some(8), "{sys}");
     let logs = call(&app, sid, &rx, 2, json!({"type": "hub/logs", "lines": 5}));
     assert_eq!(ok(&logs)["lines"], json!(["INFO hub: started"]));
     let w = call(&app, sid, &rx, 3, json!({"type": "hub/wifi/set", "ssid": "home", "password": "short"}));
@@ -1228,6 +1300,37 @@ fn hub_settings_through_the_platform() {
     assert_eq!(p.reboots.load(Ordering::SeqCst), 1);
     let m = call(&app, sid, &rx, 7, json!({"type": "hub/mode/set", "mode": "bridge"}));
     assert_eq!(err_code(&m), "failed", "the test platform has no boot modes");
+    app.shutdown();
+}
+
+/// `hub/info` fields that follow the NCP session (its features, the
+/// coordinator, the NCP's board) are announced when they change:
+/// `hub_updated` (topic `network`, API 1.4).
+#[test]
+fn hub_info_changes_are_announced() {
+    let r = rig(Store::volatile());
+    let app = admin_app(&r, None);
+    let (sid, rx) = session(&app);
+    ok(&call(&app, sid, &rx, 1, json!({"type": "subscribe", "topics": ["network"]})));
+    let maint = |id| ok(&call(&app, sid, &rx, id, json!({"type": "hub/info"})))["maintenance"].clone();
+    let t = std::time::Instant::now();
+    while !maint(2).as_array().is_some_and(|m| m.contains(&json!("tx_power"))) {
+        assert!(t.elapsed() < T, "the session's features");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The NCP restarts without TX power control.
+    r.sim.with(|s| s.unsupported.push(ids::NWK_SET_TX_POWER));
+    r.sim.reboot();
+    let ev = loop {
+        let f: J = serde_json::from_str(&rx.recv_timeout(T).unwrap()).unwrap();
+        if f["event"]["topic"] == "hub_updated" {
+            break f["event"].clone();
+        }
+    };
+    let m = ev["maintenance"].as_array().unwrap();
+    assert!(!m.contains(&json!("tx_power")) && m.contains(&json!("ncp_log")), "{ev}");
+    assert_eq!(ev.get("coordinator_ieee"), None, "unchanged fields are not repeated: {ev}");
+    assert_eq!(maint(3), ev["maintenance"]);
     app.shutdown();
 }
 

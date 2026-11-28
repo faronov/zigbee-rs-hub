@@ -66,6 +66,30 @@ impl<K: Ord, V> VecMap<K, V> {
         self.find(k).ok().map(|i| &mut self.0[i].1)
     }
 
+    /// [`Self::get_mut`] by a borrowed key.
+    pub fn get_mut_by<Q: Ord + ?Sized>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+    {
+        self.find(k).ok().map(|i| &mut self.0[i].1)
+    }
+
+    /// The value of `k`, a default one inserted when missing.
+    pub fn entry_default<Q: Ord + ?Sized + ToOwned<Owned = K>>(&mut self, k: &Q) -> &mut V
+    where
+        K: Borrow<Q>,
+        V: Default,
+    {
+        let i = match self.find(k) {
+            Ok(i) => i,
+            Err(i) => {
+                self.0.insert(i, (k.to_owned(), V::default()));
+                i
+            }
+        };
+        &mut self.0[i].1
+    }
+
     /// Whether `k` has a value.
     pub fn contains_key<Q: Ord + ?Sized>(&self, k: &Q) -> bool
     where

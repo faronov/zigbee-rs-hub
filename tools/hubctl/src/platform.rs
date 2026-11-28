@@ -21,11 +21,13 @@ pub struct Desktop {
     pub rng: Rng,
     pub wifi_channel: Option<u8>,
     pub wifi: Mutex<Option<String>>,
+    /// `--sim-crash`: the previous boot crashed (as an S3 reports it).
+    pub crashed: bool,
 }
 
 impl hub_app::Platform for Desktop {
     fn system(&self) -> J {
-        json!({
+        let mut v = json!({
             "version": format!("hubctl {}", env!("CARGO_PKG_VERSION")),
             "uptime_s": self.started.elapsed().as_secs(),
             "mode": "desktop",
@@ -34,7 +36,17 @@ impl hub_app::Platform for Desktop {
                 "state": "simulated",
                 "channel": self.wifi_channel,
             },
-        })
+        });
+        if self.crashed {
+            v["reset_reason"] = 4.into();
+            v["crash"] = json!({
+                "crashed": true,
+                "streak": 1,
+                "panic": "panicked at src/sim.rs:1:1:\nsimulated crash (hubctl --sim-crash)",
+                "exception": null,
+            });
+        }
+        v
     }
     fn wifi_channel(&self) -> Option<u8> {
         self.wifi_channel

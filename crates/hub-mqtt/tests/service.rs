@@ -122,6 +122,14 @@ fn settings_lwt_reconnect_credentials_and_disable() {
 
     // The API: settings without the password, status, the feature.
     let (sid, rx) = session(&app);
+    let (esid, erx) = session(&app);
+    call(
+        &app,
+        esid,
+        &erx,
+        1,
+        json!({"type": "subscribe", "topics": ["network"]}),
+    );
     let got = call(&app, sid, &rx, 1, json!({"type": "mqtt/config/get"}));
     assert_eq!(got["result"]["password_set"], true, "{got}");
     assert!(got["result"].get("password").is_none());
@@ -211,6 +219,16 @@ fn settings_lwt_reconnect_credentials_and_disable() {
     until("offline after disable", offline);
     until("no clients", || broker.clients() == 0);
     assert_eq!(svc.status().state, "disabled");
+    // Status changes as events (topic `network`, API 1.4; polled once a
+    // second, so short-lived states may not show).
+    loop {
+        let f: J = serde_json::from_str(&erx.recv_timeout(T).unwrap()).unwrap();
+        let e = &f["event"];
+        if e["topic"] == "mqtt_status" && e["state"] == "disabled" {
+            assert!(e["connects"].as_u64() > Some(0), "{e}");
+            break;
+        }
+    }
     app.shutdown();
     ncp.shutdown();
     sim.stop();

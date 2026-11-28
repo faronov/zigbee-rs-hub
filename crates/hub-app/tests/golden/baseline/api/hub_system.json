@@ -21,6 +21,7 @@
     "restored": 2,
     "sessions": 1
   },
+  "boot_id": "a3a2a1a0",
   "heap": {
     "free": 65000,
     "largest_block": 31000,

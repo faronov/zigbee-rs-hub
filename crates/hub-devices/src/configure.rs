@@ -636,6 +636,9 @@ impl<T: ZigbeeTransport> Hub<T> {
                     d.interview = InterviewStep::Done;
                     // An imported device configured again: verified.
                     d.imported = 0;
+                    if !d.interview_partial {
+                        self.note_interview_start(id, true);
+                    }
                     self.emit(HubEvent::InterviewProgress {
                         device: id.to_string(),
                         step: "done".into(),

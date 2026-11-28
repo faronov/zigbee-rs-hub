@@ -113,6 +113,32 @@ install instructions and the list of merged pull requests. A pre-release
   steps and a table of integration versions and hub firmware are in its
   README). `integrations/home-assistant` is gone from this repository; the
   release notes name the integration version to use.
+- **API 1.4: what the integration's events, logbook, repairs and health
+  need** (`docs/device-support.md` 14). A network log of joins (admitted
+  or refused, and why: joining closed), rejoins, Device_annce frames and
+  leaves, on both backends: `network/events` and the event
+  `device_network` (the ZRHP backend now passes on refused joins and
+  leaves too: a NWK leave without the rejoin flag, a parent's report or a
+  trust center removal makes the device unavailable, `left`; a child the
+  NCP dropped after a timeout, often a router that now routes through
+  others, is only logged, `aged_out`, and keeps its host store record,
+  which the import's inventory reads). The web UI lists it on the Network card
+  ("Network log"): a device that "blinks then stops" shows its join
+  attempts there. Device records gain `logical_type`, `rx_on_when_idle`,
+  `rejoins`, `announces`, `leaves`, every `unavailable_reason` (`left`,
+  `no_response`, `timeout`) with `unavailable_since`, and for a partial
+  interview `interview_since`, `interview_failed` and `interview_quirk`;
+  a reinterview sends `device_updated` at once. `hub/system` has a
+  `boot_id` and, on the S3, the previous boot's `crash` (panic message,
+  ESP-IDF panic record, crash streak). New events: `hub_updated` for the
+  NCP session's `hub/info` fields (and `ncp_log` in `maintenance`),
+  `definition_missing` (no catalog definition, or only refused ones),
+  `topology_updated` (a new network map to fetch: maps up to 96 KiB are
+  kept for every client, no longer 8 KB with every other result),
+  `mqtt_status`; binding
+  records say `queued` while a read waits for a sleeping device.
+  `hubctl --sim --sim-devices serve` takes `sim/join`, `sim/announce`
+  and `sim/leave` requests and `--sim-crash`, for the integration's tests.
 
 ### Fixes
 

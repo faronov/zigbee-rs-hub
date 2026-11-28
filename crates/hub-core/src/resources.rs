@@ -32,6 +32,12 @@ pub struct Resources {
     /// Zigbee OTA images streamed at once from API clients (each holds a
     /// 4 KiB window while a device downloads it).
     pub ota_streams: usize,
+    /// The last network map kept for every client (`network/job/result`,
+    /// `network/topology` without a scan); a larger one goes only to the
+    /// session that asked for it. Below `ws_client_bytes`: the reply may
+    /// go to a client with frames queued (30 routers and 50 end devices
+    /// make about 77 KB).
+    pub kept_map_bytes: usize,
 }
 
 impl Resources {
@@ -50,6 +56,7 @@ impl Resources {
                 mqtt_devices_bytes: 16 * 1024,
                 heap_guard: true,
                 ota_streams: 1,
+                kept_map_bytes: 8 * 1024,
             }
         } else {
             Self {
@@ -64,6 +71,7 @@ impl Resources {
                 mqtt_devices_bytes: 256 * 1024,
                 heap_guard: false,
                 ota_streams: 4,
+                kept_map_bytes: 96 * 1024,
             }
         }
     }
@@ -95,6 +103,7 @@ mod tests {
         assert!(fallback.ws_client_bytes < normal.ws_client_bytes);
         assert!(fallback.mqtt_queue_bytes < normal.mqtt_queue_bytes);
         assert!(fallback.ota_streams >= 1 && fallback.ota_streams < normal.ota_streams);
+        assert!(fallback.kept_map_bytes < normal.kept_map_bytes);
     }
 
     #[test]
@@ -113,6 +122,7 @@ mod tests {
         for r in [Resources::for_psram(0), Resources::for_psram(1)] {
             assert!(2 * r.snapshot_chunk_bytes <= r.ws_client_bytes / 2);
             assert!(r.ws_client_bytes <= r.ws_total_bytes);
+            assert!(r.kept_map_bytes < r.ws_client_bytes);
         }
     }
 }

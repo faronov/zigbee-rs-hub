@@ -181,9 +181,11 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.queue
             .retain(|x| !matches!(x.purpose, Purpose::Interview(_)));
         d.interview_partial = true;
+        let step = d.interview;
         if !self.interview_quirks.iter().any(|x| x == id) {
             self.interview_quirks.push(id.to_string());
         }
+        self.note_interview_failed(id, step, now);
         self.materialize(id, res, now);
         self.start_configure(id, now);
         true

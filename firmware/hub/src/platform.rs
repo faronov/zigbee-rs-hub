@@ -40,6 +40,15 @@ impl hub_app::Platform for S3 {
             "persisted_mode": match mode::stored() { Some(Mode::Hub) => "hub", Some(Mode::Bridge) => "bridge", None => "unknown" },
             "wifi": net::info(),
             "reset_reason": unsafe { sys::esp_reset_reason() },
+            // The previous boot's crash: the Rust panic message (this boot
+            // only), the last ESP-IDF panic record (until a power-on) and
+            // the crashed boots in a row (0 after 10 min up).
+            "crash": {
+                "crashed": tbr_bridge::recovery::crashed_last_boot(),
+                "streak": crate::crash_streak(),
+                "panic": zrh_espapp::cpanic::last_panic(),
+                "exception": zrh_espapp::cpanic::last(),
+            },
             "build": {"features": crate::resources::features(), "psram": crate::resources::psram_mode()},
             "memory_mode": r.memory_mode(),
             "limits": {

@@ -32,6 +32,17 @@ pub enum CoordEvent {
         ieee: u64,
         /// Short address.
         nwk: u16,
+        /// How.
+        kind: JoinKind,
+    },
+    /// The trust center refused a device's join or rejoin.
+    JoinDenied {
+        /// IEEE.
+        ieee: u64,
+        /// Short address it was given or asked for.
+        nwk: u16,
+        /// How it tried.
+        kind: JoinKind,
     },
     /// A device left the network (the trust center or the NCP reported
     /// it).
@@ -43,6 +54,11 @@ pub enum CoordEvent {
         /// Whether it announced a rejoin; `None` when the backend does not
         /// know (EZSP's trust center reports a leave without it).
         rejoin: Option<bool>,
+        /// The NCP only dropped it from its child table after a timeout
+        /// (ZRHP reason 4: an end device missed its End Device Timeout, a
+        /// router child stopped sending Link Status): it need not have
+        /// left the network.
+        aged_out: bool,
     },
     /// Green Power event.
     Gp(Box<GpEvent>),
@@ -74,6 +90,20 @@ pub enum CoordEvent {
         /// How many.
         events: u32,
     },
+}
+
+/// How a device joined (ZRHP `EVT_DEVICE_JOINED.join_type`, EZSP's trust
+/// center join status).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    /// MAC association (a new join).
+    Association,
+    /// Secured rejoin (it had the network key).
+    SecuredRejoin,
+    /// Unsecured rejoin, through the trust center.
+    TcRejoin,
+    /// Direct join (the NCP added it).
+    Direct,
 }
 
 /// NCP session change.

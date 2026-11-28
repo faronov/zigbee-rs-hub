@@ -738,6 +738,19 @@ impl Device {
         if self.sleepy() {
             v["sleepy"] = true.into();
         }
+        // The Node descriptor's logical type and receiver (API 1.4).
+        if let Some(t) = self.fp.logical_type {
+            v["logical_type"] = serde_json::to_value(t).unwrap_or_default();
+        }
+        if let Some(rx) = self.fp.rx_on_when_idle {
+            v["rx_on_when_idle"] = rx.into();
+        }
+        // Network events this run (absent: none).
+        for k in ["rejoins", "announces", "leaves"] {
+            if let Some(n) = self.diag.counters.get(k) {
+                v[k] = (*n).into();
+            }
+        }
         if let Some(a) = self.approximate_json() {
             v["definition_approximate"] = a;
         }
