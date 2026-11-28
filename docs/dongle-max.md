@@ -801,7 +801,7 @@ python3 tools/make-otadata.py --seq 2 -o target/otadata-donglem-ota1.bin
 (A local build whose ESP-IDF Python check fails on a constraint the
 package index cannot meet yet builds with `IDF_PYTHON_CHECK_CONSTRAINTS=no`.)
 
-Size: about **2.96 MB of the 6 MiB slot** (the bring-up image was 0.92
+Size: about **3.29 MB of the 6 MiB slot** (the bring-up image was 0.92
 MB; CI prints the exact number and fails above the slot). Static RAM:
 IRAM 101.5 KB of 128 KB, DRAM `.data` + `.bss` 33.2 KB (bring-up 30.9 KB).
 

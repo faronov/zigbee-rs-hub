@@ -29,6 +29,13 @@ install instructions and the list of merged pull requests. A pre-release
   Upgrading: a TS004F paired before keeps its mode (command or event),
   as Zigbee2MQTT does; change it with its `operation_mode` select or
   Reconfigure, or remove the device and pair it again.
+- **About 200 KiB more room in every image**, no feature removed: the
+  8 MB image leaves 221 KiB of its 3 MiB slot free (9 KiB before),
+  room for the vendor templates and online updates. The engine's small
+  maps are sorted vectors (same order and results, a fraction of the
+  B-tree code), debug log lines are no longer compiled in (they were
+  never written), and mbedTLS is a TLS client only, without Wi-Fi
+  Enterprise. Sizes per change: `docs/coordinator-profiles.md`.
 
 ### Fixes
 

@@ -245,8 +245,37 @@ Release 0.4.2 (CI dry run, quad / octal): 4 MB 2,966,656 / 2,967,824 B
 the 3 MiB slot, ~26 KiB left); `zrh-donglem` about 3.5 MB (55 % of its
 6 MiB slot). Release 0.4.1: 4 MB 2,934,864 B (~78 KiB left), 8 MB
 developer edition 3,087,456 B (~57 KiB left), so 0.4.2 added about
-32 KB to every S3 image. The 8 MB headroom is the tightest: the size pass
-must come before the next feature lands.
+32 KB to every S3 image. The 8 MB headroom is the tightest; the size pass
+below restored it.
+
+Size pass (after 0.4.2; CI app images, quad / octal). Before, on main
+with the `tuya` vendor template (#114): 8 MB 3,136,352 / 3,137,520 B
+(9.2 KiB left) and its developer edition 3,136,096 / 3,137,280 B; 4 MB
+2,984,224 / 2,985,392 B (29.7 KiB left); `zrh-donglem` 3,499,664 B.
+After: 8 MB 2,919,328 / 2,920,496 B (221.1 KiB left), developer
+edition 2,919,088 / 2,920,256 B; 4 MB 2,781,296 / 2,782,464 B (227.9 KiB
+left); `zrh-donglem` 3,290,048 B. With the `lumi` template (#115,
++16 KB) the 8 MB image keeps about 206 KiB. No feature was removed. One
+change after another (8 MB quad image, local builds on main 227471a):
+
+| Change | Bytes |
+|---|---|
+| Rust `log` debug and trace lines compiled out (`release_max_level_info`; the logger passes Info at most, so none was ever written) | −12,448 |
+| cargo `trim-paths`: no build-machine path prefixes in panic locations | −1,840 |
+| `hub-vecmap`: ~50 B-tree maps and sets as vectors sorted by key, with the `BTreeMap`/`BTreeSet` API and results (O(n) inserts, for maps of up to a few hundred entries) | −175,136 |
+| Insertion sorts (`hub_vecmap::sort`) for six short slices instead of core's driftsort/ipnsort | −20,720 |
+| mbedTLS as a TLS client only, no Wi-Fi Enterprise | −7,360 |
+
+Measured and left out: `-Zlocation-detail=none` (−73,472 B: panic
+messages, also the crash record's, would lose their file and line),
+`CONFIG_ESP_ERR_TO_NAME_LOOKUP=n` (−7,744 B: ESP-IDF errors would lose
+their names), std's `optimize_for_size` (stack, see
+`firmware/hub/.cargo/config.toml`) and `panic_immediate_abort` (no panic
+message). Left for later: the engine's device map, `Hub::tickets` and
+the resolver's merge map (B-trees, ~18 KB; 1.75 KB device values; the
+Tuya runtime and the vendor templates take the other two), serde_json's
+second reader for `from_str` callers (~5 KB), the `sha2` crate next to
+mbedTLS's hardware SHA (~5 KB). The web UI is 46 KB of gzip (level 10).
 
 Every image detects PSRAM at boot. Without it the application is not
 started (hardware run on the N4R8 lab board with a Quad image: ~35 KB of
@@ -263,8 +292,9 @@ ELF sections, static IRAM/DRAM, task-stack reservations and runtime
 heap/stack high-water separately. Keep identical paths, toolchains and
 unrelated features when comparing sizes. Do not count debug ELF data or
 NOLOAD flash address reservations as image bytes. SDK-level TLS removal is
-not pursued: esp-tls is required by esp-mqtt, and a TLS client-only
-configuration without Wi-Fi Enterprise saves only ~7 KB.
+not pursued: esp-tls is required by esp-mqtt (and a future HTTPS client);
+the S3 images build mbedTLS as a TLS client only, without Wi-Fi
+Enterprise (7 KB).
 
 ## 5. Delivery and qualification
 
