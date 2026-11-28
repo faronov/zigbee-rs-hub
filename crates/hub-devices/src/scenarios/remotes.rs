@@ -5,8 +5,9 @@
 use serde_json::json;
 
 use super::*;
+use crate::hub::import::{IMPORT_VERIFY, ImportedDevice};
 use crate::testutil::sim::{Sim, SimDevice};
-use crate::transport::{ApsIndication, Sent};
+use crate::transport::{ApsIndication, CoordError, Request, Sent, Terminal};
 use crate::zcl::frame::{Direction, ZclHeader};
 use crate::zcl::{FrameType, TypedValue, ZclFrame, ZclType, ZclValue};
 use crate::zdo::cluster::BIND_REQ;
@@ -176,4 +177,119 @@ fn newer_ikea_firmware_binds_to_the_hub() {
         )
     );
     assert!(!sim.log.iter().any(|s| matches!(s, Sent::Group(..))));
+}
+
+/// An old remote imported from Zigbee2MQTT (same coordinator IEEE: its
+/// configure is taken as done) is bound to group 901 already: the hub
+/// endpoint joins 0x0000 and 901 at the import, so its first groupcast is
+/// heard; that verifies it, and the joins are its configure's, recorded.
+/// Nothing is bound again.
+#[test]
+fn an_imported_old_ikea_remote_is_heard_through_its_group_at_once() {
+    let dev = e1524("2.3.014");
+    let (src, _) = joined(dev.clone());
+    let d = src.device(REMOTE_ID).unwrap();
+    let imp = ImportedDevice {
+        ieee: REMOTE,
+        nwk: dev.nwk,
+        name: None,
+        fp: d.fp.clone(),
+        node_desc: d.node_desc,
+        attrs: Vec::new(),
+        partial: false,
+    };
+    let mut hub = hub_with(&[]);
+    hub.import_device(&imp, IMPORT_VERIFY, T0).unwrap();
+    let sent = hub.transport.take();
+    for g in [0x0000, 901] {
+        assert!(sent.contains(&Sent::Group(1, g)), "{g}: {sent:?}");
+    }
+    assert!(!sent.iter().any(|s| matches!(s, Sent::Aps(_))), "{sent:?}");
+
+    let mut sim = Sim::default();
+    sim.devices.push(dev);
+    let s = sim.dev(REMOTE).clone();
+    hub.drain_events();
+    hub.on_aps_indication(press(&s, 6, 0x02, Some(901)), T0 + 60_000);
+    sim.run(&mut hub, T0 + 60_000);
+    let uid = format!("{REMOTE_ID}:1:action");
+    assert_eq!(fired(&hub.drain_events(), &uid)[0].0, "toggle");
+    let d = hub.device(REMOTE_ID).unwrap();
+    assert_eq!(d.imported, 0, "verified");
+    for k in ["group:1:0000", "group:1:0385"] {
+        assert_eq!(
+            d.diag.configure.get(k).map(String::as_str),
+            Some("SUCCESS"),
+            "{k}"
+        );
+    }
+    assert!(
+        !sim.aps()
+            .iter()
+            .any(|a| a.profile == 0 && a.cluster == BIND_REQ)
+    );
+}
+
+/// The coordinator's group table is full: a refused join is recorded
+/// `TABLE_FULL` and the joins are not sent again at every tick (a sleepy
+/// remote's own requests wait for its wake, the hub's group joins back off
+/// and wait for room); once the hub endpoint leaves a group they are tried
+/// at once.
+#[test]
+fn a_full_group_table_stops_the_group_joins_until_a_group_is_left() {
+    let mut hub = hub_with(&[]);
+    hub.transport.manual = true;
+    let mut sim = Sim::default();
+    sim.devices.push(e1524("2.3.014"));
+    sim.join(&mut hub, REMOTE, T0);
+    // The NCP refuses every join of the hub endpoint.
+    let refuse = |hub: &mut Hub<MockTransport>, t: u64| -> usize {
+        let mut n = 0;
+        while let Some(i) = hub
+            .transport
+            .open
+            .iter()
+            .position(|(_, r)| matches!(r, Request::Group { add: true, .. }))
+        {
+            let id = hub.transport.open.remove(i).0;
+            let full = CoordError::Backend {
+                code: hub_coord::Code {
+                    backend: hub_coord::BackendKind::Ezsp,
+                    value: 0xB4,
+                    text: None,
+                },
+                kind: hub_coord::Kind::TableFull,
+            };
+            hub.on_outcome(id, Terminal::Refused(full).into(), t);
+            n += 1;
+        }
+        n
+    };
+    assert_eq!(refuse(&mut hub, T0), 1, "the second join is not sent");
+    // The rest of its configure (the bind, the reads) while it is awake.
+    sim.run(&mut hub, T0);
+    let d = hub.device(REMOTE_ID).unwrap();
+    assert!(!d.configure.in_flight && d.configure.queue.is_empty());
+    for k in ["group:1:0000", "group:1:0385"] {
+        assert_eq!(d.diag.configure[k], "TABLE_FULL", "{k}");
+    }
+    let mut again = 0;
+    for k in 1..=600u64 {
+        hub.tick(T0 + k * 1000);
+        again += refuse(&mut hub, T0 + k * 1000);
+    }
+    assert_eq!(again, 0, "no join while the table is full");
+
+    // The hub endpoint leaves a group: the joins go out again.
+    let _ = hub.group_create("Kitchen", None, true, T0 + 600_000);
+    hub.group_delete(1, true, T0 + 601_000).unwrap();
+    hub.tick(T0 + 602_000);
+    assert!(hub.transport.open.iter().any(|(_, r)| matches!(
+        r,
+        Request::Group {
+            group: 0,
+            add: true,
+            ..
+        }
+    )));
 }

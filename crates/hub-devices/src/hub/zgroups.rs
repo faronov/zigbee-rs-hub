@@ -1351,6 +1351,9 @@ impl<T: ZigbeeTransport> Hub<T> {
     ) {
         // A device's configure needs the hub in the group: it stays.
         let add = add || self.configure_groups().contains(&id);
+        if !add {
+            self.group_table_freed(now);
+        }
         let req = Request::Group {
             endpoint: self.cfg.hub_endpoint,
             group: id,
@@ -1399,6 +1402,7 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// NCP keeps its APS group table across reboots, not across a reset or
     /// for another NCP).
     pub fn groups_resync(&mut self, now: Millis) -> usize {
+        self.group_table_freed(now);
         let ids = self.hub_groups();
         for id in &ids {
             self.hub_membership(*id, true, GroupTail::None, None, now);
@@ -1411,21 +1415,61 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// ([`super::ikea`]).
     pub(crate) fn configure_groups(&self) -> Vec<u16> {
         let mut v: Vec<u16> = Vec::new();
-        for d in self.devices.values().filter(|d| d.gp.is_none()) {
-            let ikea = super::ikea::group_only(&d.fp).then_some(super::ikea::HUB_GROUPS);
-            let defs = d.resolution.configure.iter().filter_map(|op| match op {
-                ConfigureOp::Group { ep, group } => ep
-                    .is_none_or(|e| e == self.cfg.hub_endpoint)
-                    .then_some(*group),
-                _ => None,
-            });
-            for g in ikea.into_iter().flatten().chain(defs) {
+        for d in self.devices.values() {
+            for g in self.device_groups(d) {
                 if !v.contains(&g) {
                     v.push(g);
                 }
             }
         }
         v
+    }
+
+    /// The groups `d`'s configure joins the hub endpoint to.
+    fn device_groups(&self, d: &Device) -> Vec<u16> {
+        if d.gp.is_some() {
+            return Vec::new();
+        }
+        let ikea = super::ikea::group_only(&d.fp).then_some(super::ikea::HUB_GROUPS);
+        let defs = d.resolution.configure.iter().filter_map(|op| match op {
+            ConfigureOp::Group { ep, group } => ep
+                .is_none_or(|e| e == self.cfg.hub_endpoint)
+                .then_some(*group),
+            _ => None,
+        });
+        ikea.into_iter().flatten().chain(defs).collect()
+    }
+
+    /// The hub endpoint joins the groups an imported device's configure
+    /// needs at once: a verified import takes its configure as done, and
+    /// a remote another coordinator bound to a group is heard only through
+    /// it.
+    pub(crate) fn join_device_groups(&mut self, id: &str, now: Millis) {
+        let groups = self
+            .devices
+            .get(id)
+            .map(|d| self.device_groups(d))
+            .unwrap_or_default();
+        for g in groups {
+            self.hub_membership(g, true, GroupTail::None, None, now);
+        }
+    }
+
+    /// The coordinator's group table may have room again: configure's
+    /// group joins that it refused are tried at once.
+    fn group_table_freed(&mut self, now: Millis) {
+        if !std::mem::take(&mut self.group_table_full) {
+            return;
+        }
+        for d in self.devices.values_mut() {
+            if d.configure
+                .done
+                .iter()
+                .any(|(k, ok)| !ok && k.starts_with("group:"))
+            {
+                d.configure.retry_at = Some(now);
+            }
+        }
     }
 
     /// Every group the hub endpoint is a member of.

@@ -107,7 +107,9 @@ install instructions and the list of merged pull requests. A pre-release
   groupcasts fire its `action` events. Newer firmware is bound to the hub
   as before. The hub endpoint's groups for devices (also a definition's
   `configure: group`) are joined again after an NCP reset or a restore,
-  on both NCPs, and count toward the EZSP multicast table.
+  on both NCPs, and when a Zigbee2MQTT/ZHA migration imports the remote;
+  they count toward the EZSP multicast table, and a full table stops the
+  joins (`TABLE_FULL`) until a group is left.
 - **A remote's or button's bindings to the hub are listed** (Bindings in
   the device page, `bindings/list`): configure binds its client clusters
   (a SONOFF SNZB-01's On/Off) to the hub endpoint, and the record now

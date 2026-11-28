@@ -540,6 +540,10 @@ pub struct Hub<T: ZigbeeTransport> {
     /// selection bug in the device map's B-tree code ("Cannot select:
     /// Constant<12288>").
     pub(crate) interview_quirks: Vec<String>,
+    /// The coordinator's group table refused the hub endpoint a group
+    /// (`TableFull`): configure's group joins wait until the hub endpoint
+    /// leaves a group or a new NCP session starts.
+    pub(crate) group_table_full: bool,
 }
 
 /// A cluster command for the application (see [`Hub::app_clusters`]).
@@ -675,6 +679,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             import_probe_last: None,
             removed: Vec::new(),
             interview_quirks: Vec::new(),
+            group_table_full: false,
         }
     }
 

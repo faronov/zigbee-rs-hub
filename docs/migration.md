@@ -204,12 +204,16 @@ Unique link keys per backend:
    take them in 2 minutes ends the job with `timeout`; running the import
    again finishes it.
 
-Nothing is sent to an imported device at import. When it is first heard
-from (any frame, an announce, the answer to a probe):
+Nothing is sent to an imported device at import. The hub endpoint joins
+the groups its configure needs at once (device-support 5.3: an IKEA
+remote on group-only firmware, which the previous coordinator bound to
+group 901, is heard only through it). When it is first heard from (any
+frame, an announce, the answer to a probe):
 
 - the same coordinator IEEE: the definition's configure is taken as done
-  (the previous coordinator did it), the identity (DateCode, SWBuildID)
-  and the states the hub does not know are read;
+  (the previous coordinator did it) but for the hub endpoint's group
+  joins, which run; the identity (DateCode, SWBuildID) and the states the
+  hub does not know are read;
 - another coordinator IEEE: the definition's configure runs, two awake
   devices at a time (a sleepy device that finds both turns taken tries
   again at its next wake; a sleeping one's requests wait for its wake and

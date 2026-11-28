@@ -1154,3 +1154,47 @@ fn a_router_marked_as_a_child_is_not_restored_as_one() {
         rig.finish();
     }
 }
+
+/// An IKEA remote on group-only firmware that Zigbee2MQTT bound to its bind
+/// group 901, imported into the running network (`same`: no new NCP
+/// session) with the same coordinator IEEE (its configure taken as done):
+/// the hub endpoint joins 0x0000 and 901 at once, so the remote's first
+/// groupcast is heard.
+#[test]
+fn an_imported_old_ikea_remote_is_heard_through_its_bind_group() {
+    const REMOTE: u64 = 0x5A52_5300_0000_0012;
+    let remote = SimDevice::new(REMOTE, 0x5A12, LogicalType::EndDevice, false, 0x117C)
+        .endpoint(1, 0x0104, 0x0820, &[0x0000, 0x0001, 0x0003, 0x1000], &[0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0019])
+        .basic("IKEA of Sweden", "TRADFRI remote control", 3)
+        .attr(1, 0x0000, 0x4000, TypedValue::new(ZclType::CHAR_STR, ZclValue::String("2.3.014".into())));
+    let entry = json!({"ieee": "0x5a52530000000012", "nwk": 0x5A12, "name": "Remote", "type": "end_device",
+        "manufacturer": "IKEA of Sweden", "model": "TRADFRI remote control", "manufacturer_code": 0x117C,
+        "power_source": 3, "sw_build_id": "2.3.014",
+        "endpoints": [{"id": 1, "profile": 260, "device_id": 0x0820, "in": [0, 1, 3, 4096], "out": [3, 4, 5, 6, 8, 25]}]});
+    for kind in BOTH {
+        let mut rig = rig(kind);
+        rig.devices(vec![plug(), remote.clone()], Arc::new(Mutex::new(Vec::new())));
+        let (sid, rx) = session(&rig.app);
+        let (esid, erx) = session(&rig.app);
+        ok(&call(&rig.app, esid, &erx, 1, json!({"type": "subscribe", "topics": ["events"]})));
+        wait("owned", || info(&rig.app, sid, &rx)["ownership"] == "owned");
+        let mut doc = document(sim_ieee(kind));
+        let r = call(&rig.app, sid, &rx, 2, json!({"type": "network/import", "document": doc, "force": true, "confirm": true}));
+        assert_eq!(ok(&r)["network"]["action"], "restored", "{kind:?}: {r}");
+        wait("the imported network owned", || info(&rig.app, sid, &rx)["registry"]["state"] == "owned");
+        thread::sleep(Duration::from_millis(300));
+        assert!(!rig.link.groups().contains(&901), "{kind:?}");
+
+        doc["devices"].as_array_mut().unwrap().push(entry.clone());
+        let r = call(&rig.app, sid, &rx, 3, json!({"type": "network/import", "document": doc, "force": true, "confirm": true}));
+        let res = ok(&r).clone();
+        assert_eq!((res["network"]["action"].as_str(), res["reconfigure"].as_bool()), (Some("same"), Some(false)), "{kind:?}: {res}");
+        wait(&format!("{kind:?}: the hub endpoint in 0x0000 and 901"), || {
+            let g = rig.link.groups();
+            g.contains(&0) && g.contains(&901)
+        });
+        rig.link.indicate(&press(&remote, Some(901)));
+        assert_eq!(next_event(&erx, "zb:5a52530000000012:1:action"), "toggle", "{kind:?}");
+        rig.finish();
+    }
+}

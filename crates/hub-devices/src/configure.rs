@@ -724,6 +724,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                     }
                     self.send_zcl(id, ep, cluster, f, purpose, now);
                 }
+                OpKind::Group { .. } if self.group_table_full => {
+                    self.configure_done(id, &key, false, "TABLE_FULL".into(), now);
+                    continue;
+                }
                 OpKind::Group { ep, group } => {
                     // `configure_done` follows the outcome.
                     let req = Request::Group {
@@ -771,7 +775,10 @@ impl<T: ZigbeeTransport> Hub<T> {
                 (d.configure.backoff_s * 2).min(3600)
             };
             d.configure.backoff_s = b;
-            d.configure.retry_at = Some(if d.sleepy() { now } else { now + b * 1000 });
+            // A sleepy device's own requests wait for its wake; the hub
+            // endpoint's group joins (`group:`) back off like mains ones.
+            let wake = d.sleepy() && !key.starts_with("group:");
+            d.configure.retry_at = Some(if wake { now } else { now + b * 1000 });
             if !d.warnings.iter().any(|w| w == "configure_failed") {
                 d.warnings.push("configure_failed".into());
             }

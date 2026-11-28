@@ -843,11 +843,16 @@ nothing changes (zhc binds nothing then).
 
 The groups the hub endpoint joins for configure (definitions' `group` ops,
 the IKEA bind groups) are joined again at the start of every NCP session,
-like the groups with `hub_member` (14.9), and count toward the
-coordinator's group table (`network/info` `capacity.hub_groups`; EZSP:
-the multicast table, 8 entries on the Dongle Max). The hub endpoint stays
-in such a group when the user deletes a group of the same ID; it is not
-taken out of one that no device needs any more (an NCP reset drops it).
+like the groups with `hub_member` (14.9), and when a migration imports
+the device (docs/migration.md), and count toward the coordinator's group
+table (`network/info` `capacity.hub_groups`; EZSP: the multicast table, 8
+entries on the Dongle Max). A join the table refuses is recorded
+`TABLE_FULL` (`devices/diagnostics` `configure`) and not tried again until
+the hub endpoint leaves a group or a new NCP session starts; a failed join
+backs off like a mains device's step, also for a sleepy device. The hub
+endpoint stays in such a group when the user deletes a group of the same
+ID; it is not taken out of one that no device needs any more (an NCP reset
+drops it).
 
 Every step is idempotent and its result is recorded per attribute, so a
 failed configure is retried (mains: after 60 s, then exponential up to 1 h;

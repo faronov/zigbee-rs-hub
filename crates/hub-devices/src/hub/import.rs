@@ -276,6 +276,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             s.reporting = mine.reporting;
         }
         self.restore_device(s, None, now)?;
+        self.join_device_groups(&zigbee_id(d.ieee), now);
         Ok(action)
     }
 
@@ -336,13 +337,22 @@ impl<T: ZigbeeTransport> Hub<T> {
             self.cfg.hub_endpoint,
             self.cfg.tz_offset_s,
         );
+        let mut hub_side = false;
         if let Some(d) = self.devices.get_mut(id) {
             let ops = build_ops(d, coord, hub_ep, &DevEnv { dev: d, now, tz });
             d.configure.hash = Some(configure_hash(&ops));
             for op in ops {
-                d.configure.done.insert(op.key, true);
+                // The hub endpoint's group joins are the hub's: they run.
+                if matches!(op.kind, super::OpKind::Group { .. }) {
+                    hub_side = true;
+                } else {
+                    d.configure.done.insert(op.key, true);
+                }
             }
             d.imported = 0;
+        }
+        if hub_side {
+            self.redo_configure(id, now);
         }
         self.emit(HubEvent::DeviceUpdated(id.to_string()));
         // A probed device's identity was just read.
