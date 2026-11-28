@@ -2818,7 +2818,11 @@ a map of tens of KB to every subscriber, next to the requester's
 `job_result`, would overrun a session's send budget (14.6). A map larger
 than the hub keeps (96 KiB with PSRAM, about 30 routers and 50 end devices
 take 77 KB; 8 KiB without) goes only to the session that scanned: no
-`topology_updated` then, and the previous map stays the kept one.
+`topology_updated` then, and the previous map stays the kept one. The
+session that started the scan already has the map in its `job_result`
+and should not fetch it again on `topology_updated`: a second copy of a
+64–96 KiB map queued behind the first can exceed its send budget and
+close its session.
 
 **Network records and their owner.** The device registry, last values,
 groups, bindings, automations, per-device OTA state, the last backup and
