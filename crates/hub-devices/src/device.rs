@@ -436,6 +436,10 @@ pub struct Device {
     pub tuya_seq: u16,
     /// Tuya last time push, ms.
     pub tuya_time_at: Option<Millis>,
+    /// The hub's Tuya requests the device may be answering: when they
+    /// went out, during which indication (`Hub::rx_n`), and a dataQuery
+    /// (`None`: any DP) or the write of a DP; not persisted.
+    pub tuya_asked: Vec<(Millis, u32, Option<u8>)>,
     /// Tuya / ZCL event de-duplication memory.
     pub dedup: VecDeque<(Millis, u64)>,
     /// GP specifics.
@@ -511,6 +515,7 @@ impl Device {
             refused_recheck: false,
             tuya_seq: 0,
             tuya_time_at: None,
+            tuya_asked: Vec::new(),
             dedup: VecDeque::new(),
             gp: None,
             schema: SchemaState::default(),

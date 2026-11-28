@@ -27,8 +27,10 @@ pub const MAX_RULE_BYTES: usize = 4096;
 pub const MAX_TOTAL_BYTES: usize = 16 * 1024;
 /// Default of `max_per_min`.
 pub const DEFAULT_PER_MIN: u32 = 20;
-/// Storage format version (`v`).
-pub const FORMAT: u64 = 1;
+/// Storage format version (`v`): the newest one read. A rule is written
+/// as 2 only when it needs it (`reported`, `changed` with a `value`), so
+/// older firmware refuses just those rules.
+pub const FORMAT: u64 = 2;
 
 /// API requests an action may send (`request`): device and group control,
 /// never maintenance or the automations themselves.
@@ -46,8 +48,12 @@ pub enum Op {
     Above,
     /// `below` (numbers).
     Below,
-    /// `changed` (triggers only).
+    /// `changed` (triggers only): to `value`, when it is not null.
     Changed,
+    /// `reported` (triggers only): every report, the same value again
+    /// too (buttons and other momentary states); of `value`, when it is
+    /// not null.
+    Reported,
 }
 
 /// What a state trigger or condition looks at.
@@ -59,7 +65,7 @@ pub struct StateRef {
     pub attribute: Option<String>,
     /// Comparison.
     pub op: Op,
-    /// Operand (`null` for `changed`).
+    /// Operand (optional for `changed` and `reported`).
     pub value: J,
 }
 
@@ -225,43 +231,40 @@ pub fn hhmm(s: &str) -> Option<u16> {
 
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
-fn state_ref(o: &Map<String, J>, path: &str, trigger: bool) -> Result<StateRef, ApiError> {
+/// `v1`: a format 1 rule, whose `changed` ignored the value.
+fn state_ref(o: &Map<String, J>, path: &str, trigger: bool, v1: bool) -> Result<StateRef, ApiError> {
     let op = match o.get("op").and_then(J::as_str) {
         Some("equals") => Op::Equals,
         Some("not_equals") => Op::NotEquals,
         Some("above") => Op::Above,
         Some("below") => Op::Below,
         Some("changed") if trigger => Op::Changed,
+        Some("reported") if trigger => Op::Reported,
         _ => {
             return Err(bad(
                 path,
                 if trigger {
-                    "`op` must be equals, not_equals, above, below or changed"
+                    "`op` must be equals, not_equals, above, below, changed or reported"
                 } else {
                     "`op` must be equals, not_equals, above or below"
                 },
             ));
         }
     };
-    let value = o.get("value").cloned().unwrap_or(J::Null);
+    let value = if v1 && op == Op::Changed { J::Null } else { o.get("value").cloned().unwrap_or(J::Null) };
     if matches!(op, Op::Above | Op::Below) && !value.is_number() {
         return Err(bad(path, "`value` must be a number for above/below"));
     }
-    if matches!(op, Op::Equals | Op::NotEquals) && (value.is_object() || value.is_array()) {
+    if value.is_object() || value.is_array() {
         return Err(bad(path, "`value` must be a string, number, bool or null"));
     }
-    Ok(StateRef {
-        uid: text(o, "uid", path)?,
-        attribute: opt_text(o, "attribute", path)?,
-        op,
-        value: if op == Op::Changed { J::Null } else { value },
-    })
+    Ok(StateRef { uid: text(o, "uid", path)?, attribute: opt_text(o, "attribute", path)?, op, value })
 }
 
-fn trigger(v: &J, path: &str) -> Result<Trigger, ApiError> {
+fn trigger(v: &J, path: &str, v1: bool) -> Result<Trigger, ApiError> {
     let o = obj(v, path)?;
     Ok(match o.get("type").and_then(J::as_str) {
-        Some("state") => Trigger::State(state_ref(o, path, true)?),
+        Some("state") => Trigger::State(state_ref(o, path, true, v1)?),
         Some("event") => Trigger::Event { uid: text(o, "uid", path)?, event_type: opt_text(o, "event_type", path)? },
         Some("availability") => Trigger::Availability {
             device: text(o, "device", path)?,
@@ -304,7 +307,7 @@ fn cond(v: &J, path: &str, depth: usize, nodes: &mut usize) -> Result<Cond, ApiE
         });
     }
     Ok(match ty {
-        Some("state") => Cond::State(state_ref(o, path, false)?),
+        Some("state") => Cond::State(state_ref(o, path, false, false)?),
         Some("time") => {
             let at = |k: &str| -> Result<Option<u16>, ApiError> {
                 match o.get(k) {
@@ -393,8 +396,9 @@ fn parse_full(v: &J, id: &str) -> Result<(Rule, Body), ApiError> {
     if !valid_id(id) {
         return Err(bad("rule.id", "1–32 characters a-z, 0-9, _ or -"));
     }
-    if let Some(f) = o.get("v").and_then(J::as_u64).filter(|f| *f > FORMAT) {
-        return Err(ApiError::new("unsupported", format!("rule format {f} is newer than {FORMAT}")));
+    let ver = o.get("v").and_then(J::as_u64).unwrap_or(FORMAT);
+    if ver > FORMAT {
+        return Err(ApiError::new("unsupported", format!("rule format {ver} is newer than {FORMAT}")));
     }
     let name = match o.get("name") {
         None | Some(J::Null) => id.to_string(),
@@ -419,8 +423,9 @@ fn parse_full(v: &J, id: &str) -> Result<(Rule, Body), ApiError> {
     let items = list(o, "triggers", "rule", MAX_TRIGGERS)?;
     let mut triggers = Vec::with_capacity(items.len());
     for (i, t) in items.iter().enumerate() {
-        triggers.push(trigger(t, &format!("rule.triggers[{i}]"))?);
+        triggers.push(trigger(t, &format!("rule.triggers[{i}]"), ver < 2)?);
     }
+    let v2 = triggers.iter().any(|t| matches!(t, Trigger::State(s) if s.op == Op::Reported || s.op == Op::Changed && !s.value.is_null()));
     let mut nodes = 0;
     let items = list(o, "conditions", "rule", MAX_CONDITIONS)?;
     let mut conditions = Vec::with_capacity(items.len());
@@ -437,7 +442,7 @@ fn parse_full(v: &J, id: &str) -> Result<(Rule, Body), ApiError> {
     }
     // The canonical JSON: known fields only, in a fixed order.
     let mut c = Map::new();
-    c.insert("v".into(), FORMAT.into());
+    c.insert("v".into(), if v2 { 2 } else { 1 }.into());
     c.insert("id".into(), id.into());
     c.insert("name".into(), name.clone().into());
     c.insert("enabled".into(), enabled.into());

@@ -170,6 +170,70 @@ fn unknown_values_do_not_count_as_changes() {
     assert_eq!(r.w.commands.len(), 1);
 }
 
+/// A state message as the engine publishes it; `pushed`: after a frame
+/// the device sent on its own.
+fn st(uid: &str, v: J, attrs: J, pushed: bool) -> HubEvent {
+    let mut m = json!({"uid": uid, "state": v, "attributes": attrs, "available": true, "last_reported": 1.0});
+    if pushed {
+        m["pushed"] = true.into();
+    }
+    HubEvent::EntityState(m)
+}
+
+#[test]
+fn reported_fires_at_every_value_the_device_sends() {
+    let mut r = Rig::new();
+    let sos = "zb:1:1:alarm";
+    r.create(json!({"id": "sos", "triggers": [state_trig(sos, "reported", json!("emergency"))], "actions": [cmd("plug", "toggle")]}));
+    r.create(json!({"id": "any", "triggers": [{"type": "state", "uid": sos, "op": "reported"}], "actions": [cmd("lamp", "toggle")]}));
+    r.create(json!({"id": "chg", "triggers": [{"type": "state", "uid": sos, "op": "changed"}], "actions": [cmd("bell", "toggle")]}));
+    assert_eq!(r.a.rule("sos").unwrap().json()["v"], 2, "format 1 firmware refuses it");
+    assert_eq!(r.a.rule("chg").unwrap().json()["v"], 1);
+    // The first press ever, then the same value at every press.
+    for _ in 0..3 {
+        r.feed(vec![st(sos, json!("emergency"), json!({}), true)]);
+    }
+    let n = |r: &Rig, u: &str| r.cmds().iter().filter(|c| c.0 == u).count();
+    assert_eq!((n(&r, "plug"), n(&r, "lamp"), n(&r, "bell")), (3, 3, 0));
+    // Not sent by the device on its own: a read response (a refresh after
+    // a restart), a command's completion, a state published again for its
+    // availability, a restored value.
+    r.feed(vec![st(sos, json!("emergency"), json!({}), false), st(sos, json!("emergency"), json!({"restored": true}), false)]);
+    assert_eq!((n(&r, "plug"), n(&r, "lamp")), (3, 3));
+    // Another value: only the rule without one.
+    r.feed(vec![st(sos, json!("clear"), json!({}), true)]);
+    assert_eq!((n(&r, "plug"), n(&r, "lamp"), n(&r, "bell")), (3, 4, 1));
+    let t = &r.traces("sos")[0];
+    assert_eq!((t["trigger"]["to"].clone(), t["result"].clone()), (json!("emergency"), json!("done")));
+    // Event entities: their event type is an attribute of every event.
+    r.create(json!({"id": "ev", "triggers": [{"type": "state", "uid": "b", "attribute": "event_type", "op": "reported", "value": "single"}], "actions": [cmd("fan", "toggle")]}));
+    for ty in ["single", "single", "double"] {
+        r.feed(vec![st("b", json!(1.0), json!({"event_type": ty}), true)]);
+    }
+    assert_eq!(n(&r, "fan"), 2);
+    // Not a condition.
+    let e = r.req("automations/validate", json!({"rule": {"conditions": [state_trig(sos, "reported", J::Null)], "actions": [cmd("a", "b")]}}));
+    assert_eq!(e.unwrap()["ok"], false);
+}
+
+#[test]
+fn changed_to_a_value_and_format_1_rules() {
+    let mut r = Rig::new();
+    r.w.states.insert("s".into(), json!("off"));
+    r.create(json!({"id": "on", "triggers": [state_trig("s", "changed", json!("on"))], "actions": [cmd("x", "turn_on")]}));
+    // Stored by format 1 firmware, whose `changed` ignored the value.
+    let old = br#"{"v":1,"id":"old","triggers":[{"type":"state","uid":"s","op":"changed","value":"on"}],"actions":[{"type":"command","uid":"y","command":"toggle"}]}"#;
+    assert_eq!(r.a.load(vec![("auto/old".into(), old.to_vec())]), 2);
+    r.a.prime(&r.w);
+    assert_eq!(r.a.rule("old").unwrap().json()["v"], 1);
+    assert_eq!(r.a.rule("on").unwrap().json()["v"], 2);
+    for v in ["on", "on", "dim", "off", "on"] {
+        r.state("s", json!(v));
+    }
+    let n = |u: &str| r.cmds().iter().filter(|c| c.0 == u).count();
+    assert_eq!((n("x"), n("y")), (2, 4), "to `on` twice; the format 1 rule at every change");
+}
+
 #[test]
 fn events_and_availability() {
     let mut r = Rig::new();
@@ -571,7 +635,7 @@ fn validation_and_limits() {
         json!({"actions": [{"type": "request", "request": {"type": "automations/delete", "automation": "x"}}]}),
         json!({"actions": [{"type": "request", "request": {"type": "network/reset"}}]}),
         json!({"actions": [{"type": "jump"}]}),
-        json!({"v": 2, "actions": [cmd("a", "b")]}),
+        json!({"v": 3, "actions": [cmd("a", "b")]}),
     ];
     for b in bad {
         let e = r.req("automations/create", json!({"rule": b})).unwrap_err();

@@ -2,7 +2,7 @@
   "advanced": "<feature>",
   "api_version": "1.4",
   "automations": {
-    "format": 1,
+    "format": 2,
     "max_rules": 64
   },
   "coordinator_ieee": "020100000000515a",

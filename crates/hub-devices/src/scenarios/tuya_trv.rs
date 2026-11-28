@@ -371,3 +371,156 @@ fn tuya_th_sensor_queries_on_configure_and_announce() {
             .any(|(c, _)| *c == cmd::DATA_QUERY)
     );
 }
+
+/// `pushed` (local automations' `reported`) by context, not by command:
+/// a TS0601 data frame, dataResponse too, is the device's own unless it
+/// answers the hub's dataQuery (any DP) or DP write (that DP) that went
+/// out less than 10 s before.
+#[test]
+fn tuya_data_frames_are_the_devices_own_unless_they_answer_the_hub() {
+    let mut hub = hub_with(&["tuya-ts0601-th-sensor", "tuya-ts0601-trv-me167"]);
+    let mut sim = Sim::default();
+    let ieee = 0xa4c1380102030405;
+    sim.devices.push(
+        SimDevice::new(ieee, 0x3002, LogicalType::EndDevice, false, 0x1002)
+            .endpoint(1, 0x0104, 0x0051, &[0x0000, 0xEF00], &[0x0019])
+            .basic("_TZE200_yjjdcqsq", "TS0601", 0x03),
+    );
+    sim.devices.push(trv());
+    sim.join(&mut hub, ieee, T0);
+    sim.join(&mut hub, TRV, T0);
+    let temp = "zb:a4c1380102030405:1:temperature";
+    let s = sim.dev(ieee).clone();
+    let frame = |hub: &mut Hub<MockTransport>, c: u8, seq: u16, t: u64| -> Vec<bool> {
+        hub.drain_events();
+        hub.on_aps_indication(
+            s.tuya_frame(c, seq, &[(1, 2, value(200 + i32::from(seq)))]),
+            T0 + t,
+        );
+        states(&hub.drain_events(), temp)
+            .iter()
+            .map(|m| m["pushed"] == true)
+            .collect()
+    };
+    // The configure query went out at the join, long ago.
+    assert_eq!(
+        frame(&mut hub, cmd::DATA_RESPONSE, 1, 60_000),
+        [true],
+        "a dataResponse nobody asked for"
+    );
+    assert_eq!(frame(&mut hub, cmd::DATA_REPORT, 2, 61_000), [true]);
+    let queried = |sim: &mut Sim| {
+        let q = sim
+            .dev(ieee)
+            .tuya_rx
+            .iter()
+            .any(|(c, _)| *c == cmd::DATA_QUERY);
+        sim.dev(ieee).tuya_rx.clear();
+        q
+    };
+    queried(&mut sim);
+    // The refresh after a restart queues a dataQuery for the sleeping
+    // sensor: the uplink that releases it is no answer, what follows is.
+    assert!(hub.refresh_unknown(T0 + 67_000) > 0);
+    sim.run(&mut hub, T0 + 67_000);
+    assert!(!queried(&mut sim), "queued");
+    assert_eq!(
+        frame(&mut hub, cmd::DATA_RESPONSE, 3, 68_000),
+        [true],
+        "the press that wakes it"
+    );
+    sim.run(&mut hub, T0 + 68_000);
+    assert!(queried(&mut sim), "sent");
+    assert_eq!(
+        frame(&mut hub, cmd::DATA_RESPONSE, 4, 68_500),
+        [false],
+        "the query's answer"
+    );
+    assert_eq!(frame(&mut hub, cmd::DATA_RESPONSE, 5, 79_000), [true]);
+    // Device_annce → dataQuery: what follows answers it, either command.
+    hub.on_aps_indication(
+        s.ind(
+            0,
+            0,
+            0x0013,
+            crate::zdo::device_annce(1, 0x3002, ieee, 0x80),
+        ),
+        T0 + 80_000,
+    );
+    sim.run(&mut hub, T0 + 80_000);
+    assert!(queried(&mut sim));
+    assert_eq!(frame(&mut hub, cmd::DATA_RESPONSE, 6, 81_000), [false]);
+    assert_eq!(frame(&mut hub, cmd::DATA_REPORT, 7, 89_000), [false]);
+    assert_eq!(frame(&mut hub, cmd::DATA_RESPONSE, 8, 91_000), [true]);
+
+    // A DP write: its answer (dataResponse) is not the device's own, nor
+    // the command's completion; another DP in the meantime is, and so is
+    // the written DP later (the knob turned).
+    let uid = "zb:a4c138aabbccddee:1:thermostat";
+    let lock = "zb:a4c138aabbccddee:1:child_lock";
+    let t = sim.dev(TRV).clone();
+    // The TRV's refresh query, queued too, goes out with its next frame:
+    // 10 s later, a frame wakes it for the write.
+    hub.on_aps_indication(
+        t.tuya_frame(cmd::DATA_REPORT, 1, &[(4, 2, value(200))]),
+        T0 + 100_000,
+    );
+    sim.run(&mut hub, T0 + 100_000);
+    hub.on_aps_indication(
+        t.tuya_frame(cmd::DATA_REPORT, 9, &[(4, 2, value(205))]),
+        T0 + 110_000,
+    );
+    hub.drain_events();
+    let ack = hub
+        .entity_command(
+            uid,
+            "set_temperature",
+            &json!({"temperature": 22.5}),
+            T0 + 110_500,
+        )
+        .unwrap();
+    assert_eq!(ack.status, "pending");
+    sim.run(&mut hub, T0 + 110_500);
+    let ev = hub.drain_events();
+    assert_eq!(result_of(&ev, ack.ticket), Some(Ok("ok".into())));
+    let p: Vec<bool> = states(&ev, uid)
+        .iter()
+        .map(|m| m["pushed"] == true)
+        .collect();
+    assert!(
+        !p.is_empty() && !p.contains(&true),
+        "the write's answer: {p:?}"
+    );
+    let pushed = |hub: &mut Hub<MockTransport>, f, at: u64, uid: &str| -> Vec<bool> {
+        hub.on_aps_indication(f, T0 + at);
+        states(&hub.drain_events(), uid)
+            .iter()
+            .map(|m| m["pushed"] == true)
+            .collect()
+    };
+    let f = t.tuya_frame(cmd::DATA_RESPONSE, 2, &[(7, 1, vec![1])]);
+    assert_eq!(pushed(&mut hub, f, 111_000, lock), [true], "another DP");
+    let f = t.tuya_frame(cmd::DATA_REPORT, 3, &[(4, 2, value(225))]);
+    assert_eq!(
+        pushed(&mut hub, f, 112_000, uid),
+        [false],
+        "the write's report"
+    );
+    let f = t.tuya_frame(cmd::DATA_RESPONSE, 4, &[(4, 2, value(230))]);
+    assert_eq!(pushed(&mut hub, f, 121_000, uid), [true], "the knob");
+    // A slow answer: past the 10 s, while the command still waits for it.
+    let ack = hub
+        .entity_command(
+            uid,
+            "set_temperature",
+            &json!({"temperature": 23}),
+            T0 + 121_500,
+        )
+        .unwrap();
+    assert_eq!(ack.status, "pending");
+    hub.transport.take();
+    let f = t.tuya_frame(cmd::DATA_RESPONSE, 5, &[(4, 2, value(230))]);
+    assert_eq!(pushed(&mut hub, f, 133_000, uid), [false], "a slow answer");
+    let f = t.tuya_frame(cmd::DATA_RESPONSE, 6, &[(4, 2, value(235))]);
+    assert_eq!(pushed(&mut hub, f, 140_000, uid), [true]);
+}

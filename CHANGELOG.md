@@ -56,6 +56,21 @@ install instructions and the list of merged pull requests. A pre-release
   and later: the old network's routers keep the coordinator, so its kept
   backup can still be restored. Older zigbee-rs NCPs and EmberZNet always
   broadcast it.
+- **Automations: a trigger at every press of a button that reports a
+  state.** An SOS button's `alarm`, or an `action` sensor that reads
+  `emergency` at every press, reports the same value each time, and a
+  `changed` trigger never fired for it. The new state trigger `reported`
+  ("received" in the editor, picked for `action`, `alarm` and `sos`
+  sensors) fires at every value the device sends on its own (a report, a
+  command, a Tuya data frame, a GP frame), of the value given; never at a
+  read (the refresh after a restart, a poll), the answer to the hub's Tuya
+  query or DP write (for 10 s, whatever the command: TS0601 devices send
+  their own changes as dataResponse too), a value the hub set (a
+  command's completion) or a restored state. An IAS Zone alarm counts when
+  its bit is set and nothing else changed (not at a battery-low or tamper
+  notification, nor when it clears); a notification sent again counts
+  once. `changed` takes a value too ("changed to"). Rules that use either
+  are format 2 (`v`): older firmware refuses them, other rules stay format 1.
 
 ### Security
 
@@ -127,6 +142,11 @@ install instructions and the list of merged pull requests. A pre-release
 
 ### Fixes
 
+- **Automations' run times were "20784 d ago"** when the hub started before
+  its clock was set (SNTP): runs were timed on the clock from power-on,
+  the page measured them against Unix time. They are now API times like
+  `last_seen` (trace `time`, `last_run`), Unix time once the clock is set,
+  runs from before it too.
 - **Old Xiaomi buttons and sensors finish their interview.** A WXKG01LM
   (`lumi.sensor_switch`) stayed at "interviewing: basic_0" or
   "active_endpoints" for ever: it answers the interview's requests poorly,
