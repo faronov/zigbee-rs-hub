@@ -53,9 +53,13 @@ install instructions and the list of merged pull requests. A pre-release
   `emergency` at every press, reports the same value each time, and a
   `changed` trigger never fired for it. The new state trigger `reported`
   ("received" in the editor, picked for `action`, `alarm` and `sos`
-  entities) fires at every report, of the value given; a state published
-  again without a report (availability, a pending command) or restored is
-  not one. `changed` takes a value too ("changed to"). Rules that use either
+  sensors) fires at every value the device sends on its own (a report, a
+  command, a Tuya DP report, a GP frame), of the value given; never at a
+  read (the refresh after a restart, a poll), a value the hub set (a
+  command's completion) or a restored state. An IAS Zone alarm counts when
+  its bit is set and nothing else changed (not at a battery-low or tamper
+  notification, nor when it clears); a notification sent again counts
+  once. `changed` takes a value too ("changed to"). Rules that use either
   are format 2 (`v`): older firmware refuses them, other rules stay format 1.
 
 ### Home Assistant

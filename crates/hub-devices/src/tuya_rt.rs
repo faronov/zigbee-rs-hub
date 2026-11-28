@@ -121,8 +121,11 @@ impl<T: ZigbeeTransport> Hub<T> {
                     }
                     return;
                 };
+                // A data response answers the hub (a query, a value it set);
+                // the reports are the device's own.
+                let push = h.cmd != cmd::DATA_RESPONSE;
                 for r in recs {
-                    self.tuya_dp(id, ep, seq, &r, flags.dedup, now);
+                    self.tuya_dp(id, ep, seq, &r, flags.dedup, push, now);
                 }
             }
             cmd::MCU_SYNC_TIME => self.tuya_time(id, now),
@@ -162,7 +165,17 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
-    fn tuya_dp(&mut self, id: &str, _ep: u8, seq: u16, r: &DpRecord, dedup: bool, now: Millis) {
+    #[allow(clippy::too_many_arguments)]
+    fn tuya_dp(
+        &mut self,
+        id: &str,
+        _ep: u8,
+        seq: u16,
+        r: &DpRecord,
+        dedup: bool,
+        push: bool,
+        now: Millis,
+    ) {
         let Some(d) = self.devices.get_mut(id) else {
             return;
         };
@@ -222,7 +235,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 }
             }
         }
-        self.apply_raw(id, work, now);
+        self.apply_raw(id, work, push, now);
         for (i, et, attrs) in fired {
             self.fire_event(id, i, et, attrs, now);
         }

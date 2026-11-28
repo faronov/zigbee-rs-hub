@@ -170,8 +170,7 @@ pub struct Automations {
     next_run: u32,
     tickets: VecMap<u64, (u32, usize)>,
     causes: VecMap<String, (Vec<String>, u64)>,
-    /// Watched state values (`uid` or `uid\x1fattribute`), and the last
-    /// report of entities that `reported` triggers watch (`uid\x1e`).
+    /// Watched state values (`uid` or `uid\x1fattribute`).
     last: VecMap<String, J>,
     /// Watched devices' availability.
     avail: VecMap<String, bool>,
@@ -200,20 +199,6 @@ fn key(s: &StateRef) -> String {
     match &s.attribute {
         Some(a) => format!("{}\x1f{a}", s.uid),
         None => s.uid.clone(),
-    }
-}
-
-fn report_key(uid: &str) -> String {
-    format!("{uid}\x1e")
-}
-
-/// The report a state message tells: its `last_reported` in engine time
-/// (the same across a step of the wall clock), null for none or a
-/// restored value.
-fn report(msg: &J) -> J {
-    match msg["last_reported"].as_f64() {
-        Some(t) if msg["attributes"]["restored"] != true => ((t * 1000.0).round() as i64 - hub_devices::device::wall_ms(0)).into(),
-        _ => J::Null,
     }
 }
 
@@ -278,13 +263,14 @@ fn holds(op: Op, v: &J, x: &J) -> bool {
 
 /// Whether a state trigger fires for `prev` → `new`: `changed` on any
 /// change between known values (to `value`, when given); `reported` on
-/// any new report (`fresh`) of `value`, when given; the comparisons when
-/// they start to hold (an unknown previous value does not hold).
-pub fn fires(s: &StateRef, prev: &J, new: &J, fresh: bool) -> bool {
+/// what the device sent on its own (`pushed`) of `value`, when given; the
+/// comparisons when they start to hold (an unknown previous value does
+/// not hold).
+pub fn fires(s: &StateRef, prev: &J, new: &J, pushed: bool) -> bool {
     let to = s.value.is_null() || loose_eq(new, &s.value);
     match s.op {
         Op::Changed => !prev.is_null() && !new.is_null() && !loose_eq(prev, new) && to,
-        Op::Reported => fresh && to,
+        Op::Reported => pushed && to,
         op => holds(op, new, &s.value) && !holds(op, prev, &s.value),
     }
 }
@@ -330,19 +316,12 @@ impl Automations {
             for t in &r.triggers {
                 match t {
                     Trigger::State(s) => {
-                        let msg = w.state(&s.uid).unwrap_or(J::Null);
                         let k = key(s);
                         if self.last.get(&k).is_none_or(J::is_null) {
-                            self.last.insert(k.clone(), value_of(&msg, &s.attribute));
+                            let v = w.state(&s.uid).map(|m| value_of(&m, &s.attribute)).unwrap_or(J::Null);
+                            self.last.insert(k.clone(), v);
                         }
                         keys.push(k);
-                        if s.op == Op::Reported {
-                            let k = report_key(&s.uid);
-                            if self.last.get(&k).is_none_or(J::is_null) {
-                                self.last.insert(k.clone(), report(&msg));
-                            }
-                            keys.push(k);
-                        }
                     }
                     Trigger::Availability { device, .. } => {
                         if !self.avail.contains_key(device)
@@ -390,10 +369,10 @@ impl Automations {
         let Some(uid) = msg.get("uid").and_then(J::as_str) else { return };
         let mut fire = Vec::new();
         let mut seen: Vec<(String, J)> = Vec::new();
-        // A new report: not one already seen (a state published again, for
-        // its availability or a command), not a restored value.
-        let (rk, at) = (report_key(uid), report(msg));
-        let fresh = !at.is_null() && self.last.get(&rk).is_some_and(|p| *p != at);
+        // The device sent it on its own (the engine's `pushed`: a report,
+        // a command; not a read response, a value the hub set, a state
+        // published again or restored).
+        let pushed = msg["pushed"] == true;
         for r in self.rules.values().filter(|r| r.enabled) {
             let mut hit = None;
             for t in &r.triggers {
@@ -404,7 +383,7 @@ impl Automations {
                 let new = value_of(msg, &s.attribute);
                 let k = key(s);
                 let prev = self.last.get(&k).cloned().unwrap_or(J::Null);
-                if hit.is_none() && fires(s, &prev, &new, fresh) {
+                if hit.is_none() && fires(s, &prev, &new, pushed) {
                     let mut h = json!({"type": "state", "uid": uid, "from": prev, "to": new});
                     if let Some(a) = &s.attribute {
                         h["attribute"] = a.clone().into();
@@ -424,9 +403,6 @@ impl Automations {
         }
         for (k, v) in seen {
             self.last.insert(k, v);
-        }
-        if fresh {
-            self.last.insert(rk, at);
         }
         let chain = self.chain_of(uid, clk);
         for (id, t) in fire {

@@ -955,6 +955,97 @@ fn ias_contact_sensor_enrollment_and_notifications() {
     assert_eq!(state(&hub, &format!("{id}:1:battery_low")), false);
 }
 
+/// `pushed` (local automations' `reported`): what the device sent on its
+/// own, never a read response or a value the hub set; an IAS Zone bit only
+/// when set and either just set or alone in changing nothing.
+#[test]
+fn pushed_states_are_what_the_device_sent_on_its_own() {
+    let mut hub = hub_with(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(light());
+    sim.join(&mut hub, LIGHT, T0);
+    let uid = "zb:0017880100aabbcc:11:light";
+    let pushed = |ev: &[HubEvent]| -> Vec<bool> {
+        states(ev, uid)
+            .iter()
+            .map(|s| s["pushed"] == true)
+            .collect()
+    };
+    hub.drain_events();
+    hub.entity_command(uid, "turn_on", &json!({}), T0 + 1000)
+        .unwrap();
+    sim.run(&mut hub, T0 + 1000);
+    let p = pushed(&hub.drain_events());
+    assert!(
+        !p.is_empty() && !p.contains(&true),
+        "a command's completion: {p:?}"
+    );
+    let s = sim.dev(LIGHT).clone();
+    let on = [(
+        0,
+        TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
+    )];
+    hub.on_aps_indication(s.report(11, 0x0006, None, &on), T0 + 2000);
+    assert_eq!(pushed(&hub.drain_events()), [true], "a report");
+    let read_rsp = vec![0x00, 0x00, 0x00, 0x10, 0x01];
+    hub.on_aps_indication(
+        s.zcl(
+            11,
+            0x0006,
+            crate::zcl::FrameType::Global,
+            None,
+            0x40,
+            0x01,
+            read_rsp,
+        ),
+        T0 + 3000,
+    );
+    assert_eq!(pushed(&hub.drain_events()), [false], "a read response");
+
+    // An SOS button: IAS Zone type 0x002C (alarm, tamper, battery low).
+    let ieee = 0x00158d00aaaa0002;
+    sim.devices.push(
+        SimDevice::new(ieee, 0x1302, LogicalType::EndDevice, false, 0x1234)
+            .endpoint(1, 0x0104, 0x0402, &[0x0000, 0x0001, 0x0500], &[])
+            .basic("ACME", "SOS-1", 0x03)
+            .attr(1, 0x0500, 0x0000, TypedValue::uint(ZclType::ENUM8, 0))
+            .attr(1, 0x0500, 0x0001, TypedValue::uint(ZclType::ENUM16, 0x002C))
+            .attr(1, 0x0500, 0x0002, TypedValue::uint(ZclType::MAP16, 0)),
+    );
+    sim.join(&mut hub, ieee, T0 + 10_000);
+    hub.drain_events();
+    let s = sim.dev(ieee).clone();
+    let mut notify = |tsn: u8, zs: u16, t: u64| -> Vec<&str> {
+        let p = vec![zs as u8, (zs >> 8) as u8, 0, 0, 0, 0];
+        let f = s.zcl(
+            1,
+            0x0500,
+            crate::zcl::FrameType::Cluster,
+            None,
+            tsn,
+            0x00,
+            p,
+        );
+        hub.on_aps_indication(f, T0 + t);
+        let ev = hub.drain_events();
+        ["alarm", "tamper", "battery_low"]
+            .into_iter()
+            .filter(|k| {
+                states(&ev, &format!("zb:00158d00aaaa0002:1:{k}"))
+                    .iter()
+                    .any(|s| s["pushed"] == true)
+            })
+            .collect()
+    };
+    assert_eq!(notify(1, 0x0001, 20_000), ["alarm"], "a press");
+    assert!(notify(1, 0x0001, 21_000).is_empty(), "sent again");
+    assert_eq!(notify(2, 0x0001, 30_000), ["alarm"], "another press");
+    assert_eq!(notify(3, 0x0009, 40_000), ["battery_low"]);
+    assert!(notify(4, 0x0008, 50_000).is_empty(), "the alarm clears");
+    assert_eq!(notify(5, 0x0009, 60_000), ["alarm"]);
+    assert_eq!(notify(6, 0x000D, 70_000), ["tamper"]);
+}
+
 #[test]
 fn generic_cover_lock_thermostat_and_polling() {
     let ieee = 0x00158d00bbbb0001;

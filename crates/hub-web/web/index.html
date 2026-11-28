@@ -962,8 +962,8 @@ onTab.auto=()=>{if(!authed||!hub.automations)return auRender();call("automations
 function auEv(e){const r=e.automation;if(e.topic=="automation_removed")delete au.rules[r];else if(r&&r.id)au.rules[r.id]=r;else if(e.topic=="automation_run"&&au.rules[r])Object.assign(au.rules[r],{last_result:e.result,last_run:e.time});if($("#aul").offsetParent){auRender();if(e.topic=="automation_run")auTr()}}
 for(const i of["att","atd","act","acd","aat","aaD","aau","aac"])$("#"+i).onchange=()=>{auForm();auBuild()};
 for(const i of["anm","amd","atu","ato","atv","acu","aco","acv","aav","aad","aa2"])$("#"+i).onchange=auBuild;
-// The entity's value as a hint; buttons and alarms report the same value at every press: “received” fires each time.
-for(const i of["att","atd","atu"])$("#"+i).addEventListener("change",()=>{const u=V("atu"),s=states[u]||{};if(V("att")=="state"){$("#atv").placeholder=s.state!=null?"now "+s.state:"value";if(/^(action|alarm|sos)/.test((ents[u]||{}).key)){V("ato","reported");auBuild()}}});
+// The entity's value as a hint; buttons and alarms (an `action` or `alarm` sensor) report the same value at every press: “received” fires each time.
+for(const i of["att","atd","atu"])$("#"+i).addEventListener("change",()=>{const u=V("atu"),s=states[u]||{},e=ents[u]||{},o=V("ato");if(V("att")=="state"){$("#atv").placeholder=s.state!=null?"now "+s.state:"value";const b=/^(binary_)?sensor$/.test(e.platform)&&e.category!="config"&&/^(action|alarm|sos)(_\d+)?$/.test(e.key);if(b||o=="reported"){V("ato",b?"reported":"changed");auBuild()}}});
 const auSrc=()=>{try{return JSON.parse(V("auj"))}catch(x){toast("JSON: "+x.message);throw x}};
 $("#aus").onclick=()=>{const r=auSrc();act(auId?"automations/update":"automations/create",auId?{automation:auId,rule:r}:{rule:r}).then(x=>{au.rules[x.id]=x;auEdit(x.id);auRender();$("#aum").textContent="saved"}).catch(()=>{})};
 $("#aux").onclick=()=>{if(!auId)return toast("Save first");act("automations/run",{automation:auId}).then(x=>{$("#aum").textContent=x.trace?x.trace.result:"";auTr()}).catch(()=>{})};

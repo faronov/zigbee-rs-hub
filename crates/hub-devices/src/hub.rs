@@ -1737,7 +1737,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             .filter(|(i, e)| added.contains(&e.uid) && !seeded.contains(i))
             .map(|(_, e)| e.uid.clone())
             .collect();
-        self.apply_raw(id, work, now);
+        self.apply_raw(id, work, false, now);
         for u in unseeded {
             self.publish_state(&u);
         }
@@ -1745,10 +1745,22 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// Emits an `entity_state` for a uid.
     pub(crate) fn publish_state(&mut self, uid: &str) {
+        self.publish(uid, false);
+    }
+
+    /// [`Self::publish_state`]; `pushed`: the device sent the value on its
+    /// own (an attribute report, a command, a Tuya DP, a GP frame; never a
+    /// read response or a value the hub set): the event's state message
+    /// says so with `pushed: true` for local automations (`reported`
+    /// triggers); the API drops it.
+    pub(crate) fn publish(&mut self, uid: &str, pushed: bool) {
         let Some((d, e)) = self.entity(uid) else {
             return;
         };
-        let msg = e.state_msg(d.available);
+        let mut msg = e.state_msg(d.available);
+        if pushed {
+            msg["pushed"] = true.into();
+        }
         self.emit(HubEvent::EntityState(msg));
         self.zg_member_changed(uid);
     }
@@ -1927,7 +1939,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     Some(Purpose::Identity) => self.identity_read(id, &recs, now),
                     _ => {}
                 }
-                self.dispatch_attrs(id, ep, ind.cluster, h.mfr, &values, now);
+                self.dispatch_attrs(id, ep, ind.cluster, h.mfr, &values, false, now);
                 if structural {
                     self.maybe_reresolve(id, now);
                 }
@@ -1945,7 +1957,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 if ind.cluster == cl::BASIC {
                     structural |= self.learn_basic(id, &recs, false, now);
                 }
-                self.dispatch_attrs(id, ep, ind.cluster, mfr, &recs, now);
+                self.dispatch_attrs(id, ep, ind.cluster, mfr, &recs, true, now);
                 if ind.cluster == cl::ON_OFF {
                     self.client_on_off(id, ep, h.tsn, &recs, now);
                 }
@@ -2021,14 +2033,24 @@ impl<T: ZigbeeTransport> Hub<T> {
                         true
                     }
                     cl::IAS_ZONE if h.direction == Direction::ServerToClient && cmd == 0x00 => {
-                        if frame.payload.len() >= 2 {
+                        // A notification sent again (same TSN) is no new alarm.
+                        if frame.payload.len() >= 2 && !self.duplicate(id, ep, ind.cluster, &h, now)
+                        {
                             let zs = u16::from_le_bytes([frame.payload[0], frame.payload[1]]);
                             let tv = TypedValue::uint(ZclType::MAP16, u64::from(zs));
                             if let Some(d) = self.devices.get_mut(id) {
                                 d.attrs
                                     .set(ep, cl::IAS_ZONE, 0x0002, None, Some(tv.value.clone()));
                             }
-                            self.dispatch_attrs(id, ep, cl::IAS_ZONE, None, &[(0x0002, tv)], now);
+                            self.dispatch_attrs(
+                                id,
+                                ep,
+                                cl::IAS_ZONE,
+                                None,
+                                &[(0x0002, tv)],
+                                true,
+                                now,
+                            );
                         }
                         true
                     }
@@ -2572,6 +2594,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         cluster: u16,
         mfr: Option<u16>,
         recs: &[(u16, TypedValue)],
+        push: bool,
         now: Millis,
     ) {
         let Some(table) = self.dispatch.get(id) else {
@@ -2617,14 +2640,16 @@ impl<T: ZigbeeTransport> Hub<T> {
                 d.diag.unknown_attrs.insert((ep, cluster, a), v);
             }
         }
-        self.apply_raw(id, work, now);
+        self.apply_raw(id, work, push, now);
     }
 
-    /// Decodes raw values for `(entity, part)` and applies them.
+    /// Decodes raw values for `(entity, part)` and applies them; `push`:
+    /// the device sent them on its own (see [`Self::publish`]).
     pub(crate) fn apply_raw(
         &mut self,
         id: &str,
         work: Vec<(usize, Option<usize>, Value)>,
+        push: bool,
         now: Millis,
     ) {
         if work.is_empty() {
@@ -2652,6 +2677,39 @@ impl<T: ZigbeeTransport> Hub<T> {
         let d = self.devices.get_mut(id).unwrap();
         if d.resolution.metering_zero_debounce {
             crate::templates::zero_debounce(d, &mut decoded, now);
+        }
+        // An IAS Zone bit (the zone status feeds alarm, tamper, battery
+        // low…) is pushed only when set, and either just set or no other
+        // bit changed: a repeated alarm is a new press, a battery-low or
+        // tamper change is not one, nor is the alarm clearing.
+        let mut pushed = BTreeSet::new();
+        if push {
+            let zone: Vec<Option<bool>> = decoded
+                .iter()
+                .map(|(i, p, v, _)| {
+                    let e = &d.entities[*i];
+                    let bit = p.is_none()
+                        && matches!(&e.r.def.value.binding,
+                            Binding::Zcl(z) if z.cluster == cl::IAS_ZONE && z.attr == 0x0002);
+                    bit.then(|| e.state.value != *v)
+                })
+                .collect();
+            for (k, (i, _, v, _)) in decoded.iter().enumerate() {
+                let own = match zone[k] {
+                    None => true,
+                    Some(changed) => {
+                        *v == Value::Bool(true)
+                            && (changed
+                                || !zone
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(j, c)| j != k && *c == Some(true)))
+                    }
+                };
+                if own {
+                    pushed.insert(*i);
+                }
+            }
         }
         let mut touched = BTreeSet::new();
         for (i, p, v, flags) in decoded {
@@ -2683,18 +2741,21 @@ impl<T: ZigbeeTransport> Hub<T> {
         for (i, at) in resets {
             d.entities[i].state.reset_at = Some(at);
         }
-        let uids: Vec<String> = touched.iter().map(|&i| d.entities[i].uid.clone()).collect();
-        for u in uids {
-            self.publish_state(&u);
+        let uids: Vec<(String, bool)> = touched
+            .iter()
+            .map(|&i| (d.entities[i].uid.clone(), pushed.contains(&i)))
+            .collect();
+        for (u, p) in uids {
+            self.publish(&u, p);
         }
     }
 
-    fn dispatch_command(&mut self, id: &str, ep: u8, cluster: u16, frame: &ZclFrame, now: Millis) {
-        let h = frame.header;
+    /// De-duplication of commands: the same endpoint, cluster, TSN and
+    /// command from device `id` within 2 s.
+    fn duplicate(&mut self, id: &str, ep: u8, cluster: u16, h: &ZclHeader, now: Millis) -> bool {
         let Some(d) = self.devices.get_mut(id) else {
-            return;
+            return true;
         };
-        // De-duplication: same source, TSN, cluster, command within 2 s.
         let key = (u64::from(ep) << 40)
             | (u64::from(cluster) << 24)
             | (u64::from(h.tsn) << 8)
@@ -2702,9 +2763,18 @@ impl<T: ZigbeeTransport> Hub<T> {
         d.dedup.retain(|(t, _)| now.saturating_sub(*t) < DEDUP_MS);
         if d.dedup.iter().any(|(_, k)| *k == key) {
             d.diag.count("duplicate_command");
-            return;
+            return true;
         }
         d.dedup.push_back((now, key));
+        false
+    }
+
+    fn dispatch_command(&mut self, id: &str, ep: u8, cluster: u16, frame: &ZclFrame, now: Millis) {
+        let h = frame.header;
+        if self.duplicate(id, ep, cluster, &h, now) {
+            return;
+        }
+        let d = self.devices.get_mut(id).unwrap();
         let ignored = d.resolution.ignore.iter().any(|r| {
             r.cluster == cluster && r.ep.is_none_or(|e| e == ep) && r.cmd.is_none_or(|c| c == h.cmd)
         });
@@ -2795,7 +2865,7 @@ impl<T: ZigbeeTransport> Hub<T> {
             attributes: attrs,
             time: ts(now),
         });
-        self.publish_state(&uid);
+        self.publish(&uid, true);
     }
 
     // ------------------------------------------------------------------

@@ -531,7 +531,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
         // Every accepted report refreshes the states (D16): apply_raw
         // publishes each touched entity even when the value is unchanged.
-        self.apply_raw(id, work, now);
+        self.apply_raw(id, work, true, now);
     }
 
     fn gp_command(&mut self, id: &str, f: &GpFrame, now: Millis) {
@@ -629,7 +629,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                     .insert(f.command_id, crate::expr::hex(&f.payload));
             }
         }
-        self.apply_raw(id, work, now);
+        self.apply_raw(id, work, true, now);
         // Hub-side virtual bindings (13.8 b) run on passed-through frames.
         // Events fire either way (a binding never swallows an event).
         if f.result == frame_result::PASSED_THROUGH {

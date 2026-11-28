@@ -170,13 +170,18 @@ fn unknown_values_do_not_count_as_changes() {
     assert_eq!(r.w.commands.len(), 1);
 }
 
-/// A state message as the engine publishes it after a report at `at` s.
-fn reported(uid: &str, v: J, at: f64, attrs: J) -> HubEvent {
-    HubEvent::EntityState(json!({"uid": uid, "state": v, "attributes": attrs, "available": true, "last_reported": at}))
+/// A state message as the engine publishes it; `pushed`: after a frame
+/// the device sent on its own.
+fn st(uid: &str, v: J, attrs: J, pushed: bool) -> HubEvent {
+    let mut m = json!({"uid": uid, "state": v, "attributes": attrs, "available": true, "last_reported": 1.0});
+    if pushed {
+        m["pushed"] = true.into();
+    }
+    HubEvent::EntityState(m)
 }
 
 #[test]
-fn reported_fires_on_every_report_of_the_value() {
+fn reported_fires_at_every_value_the_device_sends() {
     let mut r = Rig::new();
     let sos = "zb:1:1:alarm";
     r.create(json!({"id": "sos", "triggers": [state_trig(sos, "reported", json!("emergency"))], "actions": [cmd("plug", "toggle")]}));
@@ -185,33 +190,25 @@ fn reported_fires_on_every_report_of_the_value() {
     assert_eq!(r.a.rule("sos").unwrap().json()["v"], 2, "format 1 firmware refuses it");
     assert_eq!(r.a.rule("chg").unwrap().json()["v"], 1);
     // The first press ever, then the same value at every press.
-    for at in [10.0, 11.0, 12.0] {
-        r.feed(vec![reported(sos, json!("emergency"), at, json!({}))]);
+    for _ in 0..3 {
+        r.feed(vec![st(sos, json!("emergency"), json!({}), true)]);
     }
     let n = |r: &Rig, u: &str| r.cmds().iter().filter(|c| c.0 == u).count();
     assert_eq!((n(&r, "plug"), n(&r, "lamp"), n(&r, "bell")), (3, 3, 0));
-    // Published again without a report (availability, a command pending)
-    // or restored: no press.
-    r.feed(vec![reported(sos, json!("emergency"), 12.0, json!({})), reported(sos, json!("emergency"), 13.0, json!({"restored": true}))]);
-    assert_eq!(n(&r, "plug"), 3);
+    // Not sent by the device on its own: a read response (a refresh after
+    // a restart), a command's completion, a state published again for its
+    // availability, a restored value.
+    r.feed(vec![st(sos, json!("emergency"), json!({}), false), st(sos, json!("emergency"), json!({"restored": true}), false)]);
+    assert_eq!((n(&r, "plug"), n(&r, "lamp")), (3, 3));
     // Another value: only the rule without one.
-    r.feed(vec![reported(sos, json!("clear"), 14.0, json!({}))]);
+    r.feed(vec![st(sos, json!("clear"), json!({}), true)]);
     assert_eq!((n(&r, "plug"), n(&r, "lamp"), n(&r, "bell")), (3, 4, 1));
     let t = &r.traces("sos")[0];
     assert_eq!((t["trigger"]["to"].clone(), t["result"].clone()), (json!("emergency"), json!("done")));
-    // Enabled again, a report from while it was disabled, published
-    // again, is no press.
-    r.req("automations/disable", json!({"automation": "sos"})).unwrap();
-    r.feed(vec![reported(sos, json!("emergency"), 15.0, json!({}))]);
-    r.req("automations/enable", json!({"automation": "sos"})).unwrap();
-    r.feed(vec![reported(sos, json!("emergency"), 15.0, json!({}))]);
-    assert_eq!(n(&r, "plug"), 3);
-    r.feed(vec![reported(sos, json!("emergency"), 16.0, json!({}))]);
-    assert_eq!(n(&r, "plug"), 4);
-    // Event entities: their event type is an attribute of every report.
+    // Event entities: their event type is an attribute of every event.
     r.create(json!({"id": "ev", "triggers": [{"type": "state", "uid": "b", "attribute": "event_type", "op": "reported", "value": "single"}], "actions": [cmd("fan", "toggle")]}));
-    for (at, ty) in [(20.0, "single"), (21.0, "single"), (22.0, "double")] {
-        r.feed(vec![reported("b", json!(at), at, json!({"event_type": ty}))]);
+    for ty in ["single", "single", "double"] {
+        r.feed(vec![st("b", json!(1.0), json!({"event_type": ty}), true)]);
     }
     assert_eq!(n(&r, "fan"), 2);
     // Not a condition.
