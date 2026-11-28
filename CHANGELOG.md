@@ -21,13 +21,14 @@ install instructions and the list of merged pull requests. A pre-release
   rotation actions, and in command mode the Level Control steps); scene
   remotes such as the Lidl FB21-001 (scene buttons besides their on/off
   and dimming events); the measurements of relays and plugs whose
-  definition asks for it (TS011F_din_smart_relay_polling; TS011F_plug_3
-  with the next catalog) read every 60 s while they are reachable. 58 of
+  definition asks for it (TS011F_din_smart_relay_polling; TS011F_plug_3's
+  voltage, current and power with the next catalog) read every 60 s while
+  they are reachable, less what the device reported meanwhile. 58 of
   the 223 generated definitions that use `tuya` run; the others name what
   they lack (e.g. `template.tuya.tuya_light`) and fall back as before.
   Upgrading: a TS004F paired before keeps its mode (command or event),
-  as Zigbee2MQTT does; change it with its `operation_mode` select or pair
-  it again.
+  as Zigbee2MQTT does; change it with its `operation_mode` select or
+  Reconfigure, or remove the device and pair it again.
 
 ### Fixes
 

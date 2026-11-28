@@ -152,6 +152,7 @@ fn sml001_snapshot() -> DeviceSnapshot {
         refused_version: 0,
         refused_checked: vec![],
         refused_recheck: false,
+        paired: 0,
     }
 }
 

@@ -336,6 +336,11 @@ pub struct ConfigureState {
     /// key, dropped when the key is current again): their results are not
     /// recorded.
     pub stale: Vec<String>,
+    /// [`crate::templates::REVISION`] when it joined, until configured
+    /// under a definition (then 0; also 0 when paired by a build before):
+    /// a definition that comes later than that keeps the device's settings
+    /// (3.4).
+    pub paired: u32,
 }
 
 /// Self-description progress (12.3).

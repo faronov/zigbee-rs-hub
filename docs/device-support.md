@@ -476,11 +476,17 @@ changed, the self-description hash changed, or the user asks. Effects:
   on several endpoints (herdsman endpoint maps name every endpoint);
 - configure (binds, reporting) is redone only if the configure hash (the
   canonical CBOR of all binds, reporting configs and configure ops) changed.
-  A device configured before under another resolution (a new definition, a
-  firmware that now runs one) keeps the attributes a setting entity
-  controls (select, switch, number): their configure writes — a remote's
+  A device already configured under a definition, or paired by an
+  earlier build (its record's `paired`, the templates' revision when it
+  joined, differs; 0 for one saved before this field, or imported), that
+  gets another resolution (a new definition, a firmware that now runs
+  one) keeps the attributes a setting entity controls (select, switch,
+  number): their configure writes that were never sent — a remote's
   operation mode — are counted done, not sent, as Zigbee2MQTT writes them
-  at pairing only; `devices/reconfigure` and a new pairing send them.
+  at pairing only. A device paired by this build whose first definition
+  comes after its interview (fetched in a shard) sends them, as do
+  `devices/reconfigure` and a new pairing (after removing the device); a
+  write that failed is retried, also when reporting settings change.
 
 ## 4. Entity model and the Home Assistant mapping
 
@@ -3767,9 +3773,10 @@ entities.
   left), `switch_scene` (0xFD with the scene), `tuya_led_indicator`,
   `relay_din_led_indicator` (0x8001), `electricity_measurement_poll`
   (Electrical Measurement voltage, current, power and/or Metering
-  summation read on endpoint 1 every 60 s, not while the device is
-  unavailable or has left). `multi_action` and `switch_scene` keep the
-  generic remote events (Lidl FB21-001: its on/off and dimming commands).
+  summation read on endpoint 1 every 60 s, less the attributes the device
+  reported within those 60 s, not while it is unavailable or has left).
+  `multi_action` and `switch_scene` keep the generic remote events (Lidl
+  FB21-001: its on/off and dimming commands).
 
 Coverage of zhc 26.130.0's generated definitions (hub-devices test
 `template_coverage`): of the 223 using `tuya`, 50 fully translated and 8

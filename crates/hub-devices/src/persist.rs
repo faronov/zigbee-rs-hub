@@ -137,6 +137,10 @@ pub struct DeviceSnapshot {
     pub configure_hash: Option<String>,
     /// Configure results by op key.
     pub configure_done: BTreeMap<String, bool>,
+    /// [`crate::device::ConfigureState::paired`]; absent (0) from builds
+    /// before.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub paired: u32,
     /// Failed reporting configs.
     pub unreportable: Vec<(u8, u16, u16)>,
     /// Warnings.
@@ -181,6 +185,10 @@ fn is_zero(v: &u8) -> bool {
 }
 
 fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
@@ -264,6 +272,7 @@ impl DeviceSnapshot {
                 d.options.iter().map(|(k, v)| (k.clone(), v.to_json())),
             ),
             configure_hash: d.configure.hash.clone(),
+            paired: d.configure.paired,
             configure_done: d.configure.done.clone(),
             unreportable: d.configure.unreportable.clone(),
             warnings: d.warnings.clone(),
@@ -419,6 +428,7 @@ impl<T: ZigbeeTransport> Hub<T> {
                 .map(|(k, v)| (k.clone(), Value::from_json(v))),
         );
         d.configure.hash = s.configure_hash;
+        d.configure.paired = s.paired;
         d.configure.done = s.configure_done;
         d.configure.unreportable = s.unreportable;
         d.warnings = s.warnings;

@@ -39,20 +39,11 @@ templates:
   - name: tuya
     params:
       features:
-        electricity_measurement_poll: {metering: true}
+        electricity_measurement_poll: {}
         tuya_on_off:
           childLock: true
           electricalMeasurements: true
           indicatorMode: true
           onOffCountdown: true
           powerOutageMemory: true
-      keys:
-        - child_lock
-        - countdown
-        - current
-        - energy
-        - indicator_mode
-        - power
-        - power_outage_memory
-        - switch
-        - voltage
+x-partial: true

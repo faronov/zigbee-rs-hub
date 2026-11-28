@@ -80,7 +80,8 @@ const PLUG_ID: &str = "zb:a4c1380000000101";
 /// outage memory, countdown and electrical measurements;
 /// `electricity_measurement_poll`): Tuya's settings on On/Off as zhc maps
 /// them, the countdown set with On With Timed Off, no generic ZCL power-on
-/// behaviour, measurements polled every 60 s.
+/// behaviour, the electrical measurements polled every 60 s (not the
+/// energy: zhc polls it for some app versions only).
 #[test]
 fn ts011f_plug_3_runs_its_tuya_on_off() {
     let mut hub = hub_of(&[include_str!("fixtures/ts011f_plug_3.yaml")]);
@@ -187,8 +188,8 @@ fn ts011f_plug_3_runs_its_tuya_on_off() {
         w.contains(&(1, 0x0006, 0x8000, None, ZclValue::Bool(Some(true)))),
         "{w:?}"
     );
-    // `electricity_measurement_poll` (zhc's predicates as true, regenerated
-    // definition): voltage, current, power and the energy read every 60 s.
+    // `electricity_measurement_poll: {}` (zhc's `metering` predicate left
+    // out by the generator): voltage, current and power read every 60 s.
     let reads = |sim: &Sim, c: u16| {
         sim.aps()
             .iter()
@@ -200,7 +201,7 @@ fn ts011f_plug_3_runs_its_tuya_on_off() {
     sim.log.clear();
     hub.tick(t + 61_000);
     sim.run(&mut hub, t + 61_000);
-    assert_eq!((reads(&sim, 0x0b04), reads(&sim, 0x0702)), (1, 1));
+    assert_eq!((reads(&sim, 0x0b04), reads(&sim, 0x0702)), (1, 0));
 }
 
 const KNOB: u64 = 0xa4c1_3800_0000_0102;
@@ -299,15 +300,10 @@ fn ts004f_paired_before_keeps_its_mode() {
     sim.devices.push(knob());
     sim.join(&mut old, KNOB, T0);
     assert_eq!(layer(&old, KNOB_ID), "generic");
-    let mode_writes = |sim: &mut Sim| {
-        sim.dev(KNOB)
-            .writes
-            .iter()
-            .filter(|w| (w.1, w.2) == (0x0006, 0x8004))
-            .count()
-    };
     assert_eq!(mode_writes(&mut sim), 0);
-    let snap = old.snapshot_device(KNOB_ID).unwrap();
+    let mut snap = old.snapshot_device(KNOB_ID).unwrap();
+    // Saved by 0.4.2: no `paired`.
+    snap.paired = 0;
     let mut hub = hub_of(&[src]);
     hub.features.retain(|f| *f != "template.tuya");
     hub.restore_device(snap, None, T0 + 1000).unwrap();
@@ -328,6 +324,74 @@ fn ts004f_paired_before_keeps_its_mode() {
         .unwrap();
     sim.run(&mut hub, t);
     assert_eq!(mode_writes(&mut sim), 1);
+}
+
+fn mode_writes(sim: &mut Sim) -> usize {
+    sim.dev(KNOB)
+        .writes
+        .iter()
+        .filter(|w| (w.1, w.2) == (0x0006, 0x8004))
+        .count()
+}
+
+/// A TS004F paired by this build that runs generic until its definition
+/// is fetched after the interview (template definitions come in shards,
+/// fetched for interviewed devices), a restart in between: that definition
+/// writes the mode, once.
+#[test]
+fn ts004f_definition_after_the_interview_writes_its_mode() {
+    let mut first = hub_of(&[]);
+    let mut sim = Sim::default();
+    sim.devices.push(knob());
+    sim.join(&mut first, KNOB, T0);
+    assert_eq!(layer(&first, KNOB_ID), "generic");
+    assert_eq!(mode_writes(&mut sim), 0);
+    let mut hub = hub_of(&[]);
+    let snap = first.snapshot_device(KNOB_ID).unwrap();
+    hub.restore_device(snap, None, T0 + 1000).unwrap();
+    let mut cat = MemoryCatalog::default();
+    cat.insert(def(include_str!("fixtures/hobeian-zg-101zd.yaml")));
+    let t = T0 + 5000;
+    hub.set_catalog(Box::new(cat), t);
+    assert_eq!(layer(&hub, KNOB_ID), "hobeian/zg-101zd");
+    let s = sim.dev(KNOB).clone();
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 1, 0xFD, &[0x00]), t);
+    sim.run(&mut hub, t);
+    assert_eq!(mode_writes(&mut sim), 1);
+    // Configured under it now: another resolution does not write again.
+    hub.reresolve(None, t + 1000);
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 2, 0xFD, &[0x00]), t + 1000);
+    sim.run(&mut hub, t + 1000);
+    assert_eq!(mode_writes(&mut sim), 1);
+}
+
+/// A changed reporting setting rebuilds the configure ops: a mode write
+/// that failed is retried, not taken as done.
+#[test]
+fn ts004f_failed_mode_write_survives_a_reporting_change() {
+    let mut hub = hub_of(&[include_str!("fixtures/hobeian-zg-101zd.yaml")]);
+    let mut sim = Sim::default();
+    sim.devices.push(knob());
+    sim.join(&mut hub, KNOB, T0);
+    assert_eq!(mode_writes(&mut sim), 1);
+    let d = hub.devices.get_mut(KNOB_ID).unwrap();
+    let key = d
+        .configure
+        .done
+        .keys()
+        .find(|k| k.starts_with("write:1:0006:-:8004"))
+        .unwrap()
+        .clone();
+    d.configure.done.insert(key.clone(), false);
+    let t = T0 + 5000;
+    let mode = format!("{KNOB_ID}:1:operation_mode");
+    hub.set_entity_report(&mode, None, &json!([60, 3600]), t)
+        .unwrap();
+    let s = sim.dev(KNOB).clone();
+    hub.on_aps_indication(cmd(&s, 1, 0x0006, 1, 0xFD, &[0x00]), t);
+    sim.run(&mut hub, t);
+    assert_eq!(mode_writes(&mut sim), 2);
+    assert!(hub.device(KNOB_ID).unwrap().configure.done[&key]);
 }
 
 const LIDL: u64 = 0xa4c1_3800_0000_0103;
@@ -375,8 +439,9 @@ const DIN_SLEEPY: u64 = 0xa4c1_3800_0000_0105;
 
 /// TS011F_din_smart_relay_polling (`electricity_measurement_poll`):
 /// Electrical Measurement voltage, current and power read on endpoint 1
-/// every 60 s; never from a sleepy device, nor while the relay is
-/// unavailable or has left (its next frame resumes the polls).
+/// every 60 s, less what the relay reported meanwhile; never from a sleepy
+/// device, nor while the relay is unavailable or has left (its next frame
+/// resumes the polls).
 #[test]
 fn ts011f_din_smart_relay_polling() {
     let mut hub = hub_of(&[include_str!("fixtures/ts011f_din_smart_relay_polling.yaml")]);
@@ -403,17 +468,19 @@ fn ts011f_din_smart_relay_polling() {
         sim.join(&mut hub, ieee, T0);
     }
     assert_eq!(layer(&hub, DIN_ID), "tuya/ts011f_din_smart_relay_polling");
-    let polls = |sim: &Sim, nwk: u16| {
+    let reads = |sim: &Sim, nwk: u16, attrs: &[u8]| {
         sim.aps()
             .iter()
             .filter(|a| {
                 a.dst == crate::transport::ApsDst::Nwk(nwk)
                     && a.cluster == 0x0b04
                     && a.payload[2] == global::READ_ATTRIBUTES
-                    && a.payload[3..] == [0x05, 0x05, 0x08, 0x05, 0x0b, 0x05]
+                    && a.payload[3..] == *attrs
             })
             .count()
     };
+    let all = [0x05, 0x05, 0x08, 0x05, 0x0b, 0x05];
+    let polls = |sim: &Sim, nwk: u16| reads(sim, nwk, &all);
     let at = |hub: &mut Hub<MockTransport>, sim: &mut Sim, s: u64| {
         sim.log.clear();
         hub.tick(T0 + s * 1000);
@@ -423,10 +490,16 @@ fn ts011f_din_smart_relay_polling() {
     at(&mut hub, &mut sim, 1);
     assert_eq!(at(&mut hub, &mut sim, 30), (0, 0));
     assert_eq!(at(&mut hub, &mut sim, 61), (1, 0));
+    // Power reported at +100 s: at +121 s voltage and current only.
+    let d = sim.dev(DIN).clone();
+    let w = TypedValue::int(ZclType::I16, 120);
+    let p = report(&d, 1, 0x0b04, None, 0x30, &[(0x050b, w)]);
+    hub.on_aps_indication(p, T0 + 100_000);
+    assert_eq!(at(&mut hub, &mut sim, 121), (0, 0));
+    assert_eq!(reads(&sim, 0x4104, &[0x05, 0x05, 0x08, 0x05]), 1);
     // Unavailable: none; a frame from it resumes them.
     hub.device_mut(DIN_ID).unwrap().available = false;
-    assert_eq!(at(&mut hub, &mut sim, 122), (0, 0));
-    let d = sim.dev(DIN).clone();
+    assert_eq!(at(&mut hub, &mut sim, 182), (0, 0));
     let r = report(
         &d,
         1,
@@ -438,9 +511,9 @@ fn ts011f_din_smart_relay_polling() {
             TypedValue::new(ZclType::BOOL, ZclValue::Bool(Some(true))),
         )],
     );
-    hub.on_aps_indication(r, T0 + 123_000);
-    assert_eq!(at(&mut hub, &mut sim, 183), (1, 0));
+    hub.on_aps_indication(r, T0 + 183_000);
+    assert_eq!(at(&mut hub, &mut sim, 184), (1, 0));
     // Left: none.
     hub.device_mut(DIN_ID).unwrap().left = true;
-    assert_eq!(at(&mut hub, &mut sim, 244), (0, 0));
+    assert_eq!(at(&mut hub, &mut sim, 245), (0, 0));
 }
