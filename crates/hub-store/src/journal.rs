@@ -139,7 +139,7 @@ impl<F: Flash> Journal<F> {
     fn recover(&mut self) -> io::Result<()> {
         let mut order: Vec<(u32, u32)> =
             self.seqs.iter().enumerate().filter_map(|(i, s)| s.map(|s| (s, i as u32))).collect();
-        order.sort_unstable();
+        hub_vecmap::sort::sort(&mut order);
         // A ring without a snapshot is valid only from its oldest sector on.
         self.live_from = order.first().map_or(0, |(s, _)| *s);
         let mut current = HostState::default();

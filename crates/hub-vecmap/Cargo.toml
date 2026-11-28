@@ -1,0 +1,21 @@
+[package]
+name = "hub-vecmap"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Sorted-vector map and set with the BTreeMap/BTreeSet API, and insertion sorts: a fraction of the firmware code of B-tree and core sort instantiations, for the hub's small maps and slices"
+publish = false
+
+[dependencies]
+serde = { version = "1", default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+default = []
+# Serialize/Deserialize as a map (VecMap) or a sequence (VecSet), as serde
+# does for BTreeMap/BTreeSet.
+serde = ["dep:serde"]

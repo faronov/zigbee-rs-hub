@@ -4,7 +4,6 @@
 //! records that turn foreign between their loads at the start.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -14,6 +13,7 @@ use hub_coord::{BackendKind, CoordStatus, OwnerTag, RegistryState};
 use hub_ncp::coord::owner;
 use hub_store::kv::{Guarded, Kv, scope};
 use hub_store::{Flash, Gate, Journal, JournalStats, KvStore, OWNER_KEY, Scope, Store};
+use hub_vecmap::VecMap;
 use serde_json::{Value as J, json};
 
 use crate::backend::Report;
@@ -46,7 +46,7 @@ fn foreign() -> SharedMem {
     mem
 }
 
-fn kv(mem: &SharedMem) -> BTreeMap<String, Vec<u8>> {
+fn kv(mem: &SharedMem) -> VecMap<String, Vec<u8>> {
     Journal::open(mem.flash.lock().unwrap().clone()).unwrap().state().kv.clone()
 }
 
@@ -57,7 +57,7 @@ fn key_records(log: &[(u8, Vec<u8>)]) -> Vec<String> {
         .collect()
 }
 
-fn network_keys(kv: &BTreeMap<String, Vec<u8>>) -> Vec<&str> {
+fn network_keys(kv: &VecMap<String, Vec<u8>>) -> Vec<&str> {
     kv.keys().map(String::as_str).filter(|k| scope(k) == Scope::Network).collect()
 }
 

@@ -27,7 +27,7 @@
 //! the fragments of one message, each made once the earlier ones are sent
 //! (`hub_app::Pieces`).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -47,6 +47,7 @@ use esp_idf_svc::sys::{
     timeval,
 };
 use hub_app::{App, Pieces, SessionSink};
+use hub_vecmap::VecMap;
 use log::{info, warn};
 
 /// Largest API frame accepted from a client.
@@ -76,13 +77,13 @@ fn now_ms() -> u32 {
 
 /// Socket → generation of the WebSocket connection on it; only the httpd
 /// thread changes it.
-static GENERATIONS: Mutex<BTreeMap<i32, u32>> = Mutex::new(BTreeMap::new());
+static GENERATIONS: Mutex<VecMap<i32, u32>> = Mutex::new(VecMap::new());
 static NEXT_GENERATION: AtomicU32 = AtomicU32::new(1);
 
 struct Endpoint {
     app: App,
     /// Socket → API session; httpd thread only.
-    sessions: Mutex<BTreeMap<i32, u64>>,
+    sessions: Mutex<VecMap<i32, u64>>,
 }
 
 /// Registers `/api` on `server`.

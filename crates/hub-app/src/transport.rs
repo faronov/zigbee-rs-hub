@@ -22,7 +22,7 @@
 //!   decide against them, or do not decide in time, end here
 //!   ([`CoordTransport::expire_waiting`]).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use hub_coord::{CoordStatus, Coordinator, NetState, NetworkAdmin, RegistryState};
@@ -96,7 +96,7 @@ pub struct CoordTransport {
     coord: Box<dyn Coordinator>,
     admin: Arc<dyn NetworkAdmin>,
     /// IEEE → NWK of known devices (the address a removal names).
-    pub nwk: BTreeMap<u64, u16>,
+    pub nwk: hub_vecmap::VecMap<u64, u16>,
     /// The engine's APS requests in flight (`Vec`s: far less code than
     /// B-tree sets on the hub).
     aps: Vec<RequestId>,
@@ -127,7 +127,7 @@ impl CoordTransport {
         Self {
             coord,
             admin,
-            nwk: BTreeMap::new(),
+            nwk: hub_vecmap::VecMap::new(),
             aps: Vec::new(),
             controls: Vec::new(),
             own: Vec::new(),

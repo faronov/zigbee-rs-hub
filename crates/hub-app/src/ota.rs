@@ -28,8 +28,6 @@
 //! among the records not loaded). Settings are the hub's and always
 //! written.
 
-use std::collections::BTreeSet;
-
 use hub_devices::device::{Device as EngineDevice, Millis};
 use hub_devices::hub::{ApiError, Hub as Engine};
 use hub_devices::transport::{RequestId, Terminal, ZigbeeTransport};
@@ -140,7 +138,7 @@ pub struct Ota {
     #[cfg(feature = "ota-store")]
     pub store: crate::ota_store::StoreState,
     /// Devices whose state needs writing.
-    dirty: BTreeSet<String>,
+    dirty: hub_vecmap::VecSet<String>,
     /// The stored device states were loaded (the gate was not closed).
     loaded: bool,
     /// The network records are this hub's (the registry is writable).
@@ -215,7 +213,7 @@ impl Ota {
             streams,
             #[cfg(feature = "ota-store")]
             store: crate::ota_store::StoreState::open(&cfg.ota_flash),
-            dirty: BTreeSet::new(),
+            dirty: hub_vecmap::VecSet::new(),
             loaded: false,
             writable: false,
             snapshot_dirty: true,

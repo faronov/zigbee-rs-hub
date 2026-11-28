@@ -17,6 +17,11 @@ rustflags = ["--cfg", "espidf_time64", "-C", "target-feature=-s32c1i"]
 build-std = ["std", "panic_abort"]
 # No backtrace symbolisation (gimli/addr2line); panic messages stay.
 build-std-features = []
+# Source paths without the build machine's prefixes (firmware/hub).
+trim-paths = true
+
+[profile.release]
+trim-paths = "all"
 
 [env]
 MCU = "esp32"

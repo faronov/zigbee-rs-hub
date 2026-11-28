@@ -4,8 +4,7 @@
 //! RAM. The subscription snapshot is split into its records without parsing
 //! it as one JSON tree ([`array_items`]).
 
-use std::collections::BTreeMap;
-
+use hub_vecmap::VecMap;
 use serde_json::{Map, Value as J};
 
 /// HA platform of an entity (4.3).
@@ -270,10 +269,10 @@ impl State {
 /// Devices, entities and states.
 #[derive(Debug, Default)]
 pub struct Model {
-    /// Devices by ID (boxed: B-tree nodes hold eleven values each).
-    pub devices: BTreeMap<String, Box<Device>>,
+    /// Devices by ID (boxed: inserts move the later entries).
+    pub devices: VecMap<String, Box<Device>>,
     /// Entities by UID, with their states.
-    pub entities: BTreeMap<String, Box<Entity>>,
+    pub entities: VecMap<String, Box<Entity>>,
 }
 
 impl Model {

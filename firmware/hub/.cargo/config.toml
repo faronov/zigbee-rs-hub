@@ -16,6 +16,16 @@ build-std = ["std", "panic_abort"]
 # with a 4 KiB stack buffer (the app thread used 13 KB more stack and the
 # hub crashed at start-up), although it saves 63 KB of sort code.
 build-std-features = []
+# Source paths in panic locations and debug info without the build
+# machine's prefixes (std: /rustc/<commit>/library/..., crates.io:
+# index.crates.io-<hash>/<crate>-<version>/..., the workspace relative):
+# shorter strings, the same image wherever it is built. Not
+# `-Zlocation-detail=none` (another 73 KB): the crash record's panic
+# message keeps its file and line.
+trim-paths = true
+
+[profile.release]
+trim-paths = "all"
 
 [env]
 MCU = "esp32s3"

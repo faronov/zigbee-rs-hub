@@ -14,8 +14,6 @@
 //! maximum interval 0xFFFF (ZCL: stop reporting) and the hub never polls
 //! that attribute; `off` in a definition sends nothing (unchanged).
 
-use std::collections::BTreeMap;
-
 use serde_json::{Map, Value as J, json};
 
 use crate::device::{Device, Entity, InterviewStep, Millis, ts};
@@ -729,7 +727,7 @@ pub(crate) struct ReportingRead {
     error: Option<ApiError>,
 }
 
-type Groups = BTreeMap<(u8, u16, Option<u16>), Vec<u16>>;
+type Groups = VecMap<(u8, u16, Option<u16>), Vec<u16>>;
 
 /// An `entities/reporting` answer: `{status, records}`.
 fn answer(status: &str, rows: Vec<J>) -> J {

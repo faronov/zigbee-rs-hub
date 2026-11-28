@@ -2,11 +2,11 @@
 //! stats, `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS`), and FreeRTOS names
 //! for the Rust threads, which are otherwise all `pthread`.
 
-use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::time::Duration;
 
 use esp_idf_svc::sys;
+use hub_vecmap::VecMap;
 
 struct Task {
     name: String,
@@ -15,9 +15,9 @@ struct Task {
     stack_free: u32,
 }
 
-fn sample() -> (BTreeMap<usize, Task>, u32) {
+fn sample() -> (VecMap<usize, Task>, u32) {
     let mut total = 0u32;
-    let mut out = BTreeMap::new();
+    let mut out = VecMap::new();
     unsafe {
         let n = sys::uxTaskGetNumberOfTasks() as usize;
         let mut tasks: Vec<sys::TaskStatus_t> = vec![core::mem::zeroed(); n + 4];
@@ -53,7 +53,7 @@ pub fn report(window: Duration) -> String {
             )
         })
         .collect();
-    rows.sort_by(|x, y| y.0.cmp(&x.0));
+    hub_vecmap::sort::sort_by(&mut rows, |x, y| x.0 > y.0);
     let mut s = format!(
         "cpu over {} ms (% of one core; IDLE0/IDLE1 = free):\r\n",
         window.as_millis()

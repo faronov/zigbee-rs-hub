@@ -293,7 +293,7 @@ impl<T: ZigbeeTransport> Hub<T> {
 
     /// A device's note, created when missing.
     pub(crate) fn note(&mut self, id: &str) -> &mut DevNote {
-        self.notes.entry_default(id)
+        self.notes.entry(id.to_owned()).or_default()
     }
 
     /// An interview step of the device failed and made it partial.
@@ -310,7 +310,7 @@ impl<T: ZigbeeTransport> Hub<T> {
     /// `fresh` (a requested interview, or one that completed) also ends
     /// the partial interview's time.
     pub(crate) fn note_interview_start(&mut self, id: &str, fresh: bool) {
-        if let Some(n) = self.notes.get_mut_by(id) {
+        if let Some(n) = self.notes.get_mut(id) {
             n.failed.clear();
             if fresh {
                 n.partial_since = None;

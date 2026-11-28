@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 # The Dongle-M `files` region layout (`files`); no default features: no ZRHP.
 hub-core = { workspace = true }
+# Sorted-vector maps (less firmware code than B-tree instantiations).
+hub-vecmap = { workspace = true }
 
 [dev-dependencies]
 # Cross-check of the CRC against the ZRHP crate's implementation.

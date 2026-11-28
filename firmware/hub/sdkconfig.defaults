@@ -73,3 +73,9 @@ CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=n
 # lwIP's tcpip task also runs SNTP and its DNS lookups: 780 B of the
 # default 3 KiB were left on the lab board (hub 0.2.0); 1 KiB more margin.
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
+
+# No Wi-Fi Enterprise (802.1X/EAP: the hub joins with a passphrase) and a
+# TLS client only (no TLS server code: the hub serves plain HTTP; esp-tls
+# stays for esp-mqtt).
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y

@@ -27,10 +27,10 @@
 //! hundred devices would otherwise need tens of kilobytes of heap on a hub
 //! without PSRAM. Nothing here logs a key.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use hub_coord::{BackupChild, BackupDevice, BackupItem, BackupLinkKey, BackupSink, CoordError, NetworkIdentity, RestoreEncoder};
+use hub_vecmap::VecSet;
 use serde_json::Value as J;
 
 /// `metadata.format`.
@@ -62,7 +62,7 @@ pub struct Restore {
     pub devices: Vec<([u8; 8], Option<u16>)>,
     /// Devices the hub knows to be routers (wire order): restored without a
     /// child entry whatever `is_child` says (see [`DevicePolicy`]).
-    pub routers: BTreeSet<[u8; 8]>,
+    pub routers: VecSet<[u8; 8]>,
     /// Device items held back until [`Restore::flush_devices`].
     pending: Option<Vec<BackupDevice>>,
 }
@@ -82,7 +82,7 @@ pub struct Restore {
 pub struct DevicePolicy {
     /// Routers the hub knows (wire order): the registry's node descriptors
     /// (`network/restore`), an import document's device types.
-    pub routers: BTreeSet<[u8; 8]>,
+    pub routers: VecSet<[u8; 8]>,
     /// Hold the device items until [`Restore::flush_devices`]: an import's
     /// device types may come with later requests than its network part.
     pub defer: bool,
@@ -102,7 +102,7 @@ impl Restore {
 }
 
 /// A known router keeps no child entry.
-fn place(routers: &BTreeSet<[u8; 8]>, d: BackupDevice) -> BackupDevice {
+fn place(routers: &VecSet<[u8; 8]>, d: BackupDevice) -> BackupDevice {
     if routers.contains(&d.ieee) {
         BackupDevice { is_child: false, child: None, ..d }
     } else {
@@ -779,7 +779,7 @@ mod tests {
         let mut o: J = serde_json::from_str(ZIGPY).unwrap();
         let devices = o["devices"].take();
         let items = Items::default();
-        let policy = DevicePolicy { routers: BTreeSet::new(), defer: true };
+        let policy = DevicePolicy { routers: VecSet::new(), defer: true };
         let mut r = to_restore(&o, Box::new(items.clone()), policy).unwrap();
         add_devices(&mut r, &devices).unwrap();
         let is_device = |i: &BackupItem| matches!(i, BackupItem::Device(_));

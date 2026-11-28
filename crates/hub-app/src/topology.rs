@@ -7,7 +7,7 @@
 //! Runs on a job thread: every request blocks until its response or a
 //! timeout ([`NetworkAdmin::zdo_request`]).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use hub_coord::{CoordError, NetworkAdmin};
@@ -242,7 +242,7 @@ fn add_link(links: &mut Vec<Link>, from: u16, e: &NeighborEntry) {
 }
 
 /// Record what a neighbour entry says about a node; queue unscanned routers.
-fn learn(nodes: &mut BTreeMap<u16, Node>, queue: &mut VecDeque<u16>, e: &NeighborEntry) {
+fn learn(nodes: &mut hub_vecmap::VecMap<u16, Node>, queue: &mut VecDeque<u16>, e: &NeighborEntry) {
     let n = nodes.entry(e.nwk).or_default();
     if e.ieee != [0; 8] && e.ieee != [0xFF; 8] {
         n.ieee = Some(e.ieee);
@@ -268,7 +268,7 @@ struct Node {
 /// text (structs while scanning, no JSON tree: RAM).
 pub fn scan(net: &dyn NetworkAdmin, known: &[Known], opts: ScanOpts, now_s: f64, progress: &mut dyn FnMut(usize, usize)) -> Result<String, ApiError> {
     let started = Instant::now();
-    let mut nodes: BTreeMap<u16, Node> = BTreeMap::new();
+    let mut nodes: hub_vecmap::VecMap<u16, Node> = hub_vecmap::VecMap::new();
     let mut links: Vec<Link> = Vec::new();
     let mut routes: Vec<RouteRow> = Vec::new();
     let mut notes: Vec<String> = Vec::new();

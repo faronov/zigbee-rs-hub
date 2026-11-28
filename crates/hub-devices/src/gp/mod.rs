@@ -11,7 +11,7 @@ pub mod types {
     pub use hub_coord::gp::*;
 }
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 use serde_json::{Value as J, json};
 
@@ -143,13 +143,13 @@ fn exit_reason_name(r: u8) -> &'static str {
 #[derive(Debug, Default)]
 pub struct GpHubState {
     /// Last commissioning payload per GPD (kept 30 s).
-    pub payloads: BTreeMap<GpdId, (Millis, Vec<u8>)>,
+    pub payloads: crate::vecmap::VecMap<GpdId, (Millis, Vec<u8>)>,
     /// Bindings.
     pub bindings: Vec<bindings::GpBindingRecord>,
     /// Probed target capabilities by device ID.
-    pub caps: BTreeMap<String, bindings::TargetCaps>,
+    pub caps: crate::vecmap::VecMap<String, bindings::TargetCaps>,
     /// Outstanding remote requests by ZCL TSN.
-    pub remote: BTreeMap<u8, bindings::RemoteWait>,
+    pub remote: crate::vecmap::VecMap<u8, bindings::RemoteWait>,
     /// Remote answers that came before their request was accepted.
     pub early: VecDeque<GpEvent>,
     /// Next binding ID.

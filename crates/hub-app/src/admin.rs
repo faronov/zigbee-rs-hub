@@ -709,7 +709,7 @@ fn failed_with_backup(id: u64, e: ApiError, b: Option<&Backup>) -> Result<Reply,
 /// frame (one buffer, reserved fallibly); complete backups are also kept in
 /// the host store.
 /// The registry's routers (node descriptor), wire-order IEEEs.
-pub(crate) fn known_routers(known: &[Known]) -> std::collections::BTreeSet<[u8; 8]> {
+pub(crate) fn known_routers(known: &[Known]) -> hub_vecmap::VecSet<[u8; 8]> {
     known.iter().filter(|k| k.router).map(|k| k.ieee.to_le_bytes()).collect()
 }
 
