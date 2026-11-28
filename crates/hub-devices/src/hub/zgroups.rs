@@ -1294,6 +1294,16 @@ impl<T: ZigbeeTransport> Hub<T> {
         }
     }
 
+    /// A binding a configure step made (a remote's, `configure_done`):
+    /// in the device's binding record like a confirmed Bind_req.
+    pub(crate) fn zg_bound(&mut self, id: &str, entry: BindEntry) {
+        let b = self.zg.binds(id);
+        if !b.table.contains(&entry) {
+            b.table.push(entry);
+            self.bindings_event(id);
+        }
+    }
+
     /// Timers: re-sends, scheduled reads after a recall, entity upkeep.
     #[inline(never)]
     pub(crate) fn zg_tick(&mut self, now: Millis) {
@@ -1339,6 +1349,8 @@ impl<T: ZigbeeTransport> Hub<T> {
         answer: Option<AnswerTo>,
         now: Millis,
     ) {
+        // A device's configure needs the hub in the group: it stays.
+        let add = add || self.configure_groups().contains(&id);
         let req = Request::Group {
             endpoint: self.cfg.hub_endpoint,
             group: id,
@@ -1382,20 +1394,54 @@ impl<T: ZigbeeTransport> Hub<T> {
     }
 
     /// `NWK_GROUP_MEMBERSHIP` add of the hub endpoint for every group that
-    /// has it: at the start of an NCP session (the NCP keeps its APS group
-    /// table across reboots, not across a reset or for another NCP).
+    /// has it, and for the groups devices' configure joined it to
+    /// ([`Self::configure_groups`]): at the start of an NCP session (the
+    /// NCP keeps its APS group table across reboots, not across a reset or
+    /// for another NCP).
     pub fn groups_resync(&mut self, now: Millis) -> usize {
-        let ids: Vec<u16> = self
-            .zg
-            .groups
-            .iter()
-            .filter(|g| g.hub_member && !g.deleting)
-            .map(|g| g.id)
-            .collect();
+        let ids = self.hub_groups();
         for id in &ids {
             self.hub_membership(*id, true, GroupTail::None, None, now);
         }
         ids.len()
+    }
+
+    /// Groups the hub endpoint is in for devices' configure steps: those of
+    /// definitions' `group` ops and of IKEA remotes on group-only firmware
+    /// ([`super::ikea`]).
+    pub(crate) fn configure_groups(&self) -> Vec<u16> {
+        let mut v: Vec<u16> = Vec::new();
+        for d in self.devices.values().filter(|d| d.gp.is_none()) {
+            let ikea = super::ikea::group_only(&d.fp).then_some(super::ikea::HUB_GROUPS);
+            let defs = d.resolution.configure.iter().filter_map(|op| match op {
+                ConfigureOp::Group { ep, group } => ep
+                    .is_none_or(|e| e == self.cfg.hub_endpoint)
+                    .then_some(*group),
+                _ => None,
+            });
+            for g in ikea.into_iter().flatten().chain(defs) {
+                if !v.contains(&g) {
+                    v.push(g);
+                }
+            }
+        }
+        v
+    }
+
+    /// Every group the hub endpoint is a member of.
+    fn hub_groups(&self) -> Vec<u16> {
+        let mut v = self.configure_groups();
+        for g in self
+            .zg
+            .groups
+            .iter()
+            .filter(|g| g.hub_member && !g.deleting)
+        {
+            if !v.contains(&g.id) {
+                v.push(g.id);
+            }
+        }
+        v
     }
 
     /// Refuses one more group with the hub endpoint as a member when the
@@ -1406,13 +1452,7 @@ impl<T: ZigbeeTransport> Hub<T> {
         let Some(max) = self.cfg.hub_groups_max else {
             return Ok(());
         };
-        let n = self
-            .zg
-            .groups
-            .iter()
-            .filter(|g| g.hub_member && !g.deleting)
-            .count();
-        if n >= usize::from(max) {
+        if self.hub_groups().len() >= usize::from(max) {
             return Err(ApiError::new(
                 "no_space",
                 format!(

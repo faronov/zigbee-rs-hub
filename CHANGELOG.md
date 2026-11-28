@@ -97,11 +97,22 @@ install instructions and the list of merged pull requests. A pre-release
   shows the new address). A binding or group request no longer shows
   "until it wakes" after it was sent. The web UI says "press a button on
   the device to wake it" while a sleepy device's interview or binding
-  table read waits. An IKEA E1524/E1810 remote with old firmware (before
-  2.3.075) sends its presses to a group the coordinator is not in: the
-  NCP does not pass them on, so the hub never sees it awake; the
-  zigbee-herdsman-converters remote configure (bind to a group the hub
-  joins) is not supported yet.
+  table read waits.
+- **IKEA remotes with old firmware reach the hub.** An E1524/E1810 TRADFRI
+  remote (also E1743, E1766, E1841) before firmware 2.3.075 can only be
+  bound to a group, and sent its presses to a group the hub was not in.
+  As zigbee-herdsman-converters does, configure now binds its On/Off to
+  group 901 and the hub endpoint joins 901 and 0x0000 (where an unbound
+  remote sends, so a press also sends a bind that waited for it); its
+  groupcasts fire its `action` events. Newer firmware is bound to the hub
+  as before. The hub endpoint's groups for devices (also a definition's
+  `configure: group`) are joined again after an NCP reset or a restore,
+  on both NCPs, and count toward the EZSP multicast table.
+- **A remote's or button's bindings to the hub are listed** (Bindings in
+  the device page, `bindings/list`): configure binds its client clusters
+  (a SONOFF SNZB-01's On/Off) to the hub endpoint, and the record now
+  shows them once the device confirmed them, so a button whose presses do
+  not arrive shows whether it is bound.
 - **Basic attributes are read one per request** (identity first), as
   zigbee-herdsman does: some devices do not answer a read of several. A
   failed optional attribute (power source, versions, date code, build ID)

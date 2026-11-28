@@ -31,6 +31,7 @@ use crate::zcl::{
 use crate::zdo::{self, ZdoMessage};
 
 pub(crate) mod control;
+pub(crate) mod ikea;
 pub mod import;
 pub(crate) mod lumi;
 pub mod zgroups;
@@ -290,12 +291,14 @@ pub enum OpKind {
         /// Why.
         reason: String,
     },
-    /// Bind_req to the hub.
+    /// Bind_req to the hub endpoint, or to a group.
     Bind {
         /// Endpoint.
         ep: u8,
         /// Cluster.
         cluster: u16,
+        /// Group destination.
+        group: Option<u16>,
     },
     /// Configure Reporting (≤ 3 records).
     Report {

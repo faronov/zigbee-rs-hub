@@ -802,10 +802,13 @@ At configure (and when the configure hash changes), per endpoint:
 
 1. **Bind** every server cluster that has a reported attribute, and every
    client cluster whose commands become events (5.4), to the hub's endpoint
-   1 (`Bind_req`, destination = the coordinator IEEE, endpoint 1). Remotes
+   1 (`Bind_req`, destination = the coordinator IEEE, endpoint 1). The
+   client-cluster binds (a remote's, a button's) are listed in the
+   device's binding record (14.9) once the device confirmed them. Remotes
    that only send to groups get, in addition, a hub group: the hub adds its
-   endpoint to group 0x0000 + n (`NWK_GROUP_MEMBERSHIP`) when a definition
-   asks for it (`configure: - group: …`).
+   endpoint to the group (`NWK_GROUP_MEMBERSHIP`; EZSP: a multicast table
+   entry) when a definition asks for it (`configure: - group: …`), and
+   for IKEA remotes that bind to a group only (below).
 2. **Configure Reporting** (ZCL 0x06) per attribute, at most 3 records per
    frame so responses fit without fragmentation.
 3. **Read** the initial value of every exposed attribute (≤ 5 per Read).
@@ -823,6 +826,28 @@ Xiaomi (`lumi.*`) devices report on their own and refuse most binds:
 they get the binds and reporting a definition asks for (its `configure:`
 ops and its entities' `report:`), none of the generic tier's, and no Poll
 Control bind.
+
+IKEA remotes of zigbee-herdsman-converters' `ikeaConfigureRemote`
+(E1524/E1810 TRADFRI remote control, E1743 on/off switch, E1766 open/close
+remote, E1841 KNYCKLAN) with a SWBuildID below 2.3.075 accept a binding to
+one group only. As zhc and zigbee-herdsman do, the hub endpoint joins group
+901 (zhc's default bind group) and group 0x0000 (where such a remote sends
+while it is bound to nothing), the remote's On/Off is bound to 901 (its
+other commands follow that binding) and none of its client clusters is
+bound to the hub. Its groupcasts fire its events like unicasts (the
+sender's short address names the device). A press while it is still
+unbound reaches the hub through group 0x0000: the remote counts as awake
+and the waiting bind goes out. Newer firmware (2.3.075 on, and the 24.x
+versions) gets the generic binds to the hub endpoint; without a SWBuildID
+nothing changes (zhc binds nothing then).
+
+The groups the hub endpoint joins for configure (definitions' `group` ops,
+the IKEA bind groups) are joined again at the start of every NCP session,
+like the groups with `hub_member` (14.9), and count toward the
+coordinator's group table (`network/info` `capacity.hub_groups`; EZSP:
+the multicast table, 8 entries on the Dongle Max). The hub endpoint stays
+in such a group when the user deletes a group of the same ID; it is not
+taken out of one that no device needs any more (an NCP reset drops it).
 
 Every step is idempotent and its result is recorded per attribute, so a
 failed configure is retried (mains: after 60 s, then exponential up to 1 h;
@@ -3013,9 +3038,10 @@ reads the table with Mgmt_Bind_req pages. Every cluster must be on the
 source endpoint (client clusters for a remote's commands, server clusters
 for reports). Requests stay `pending` (`queued` for a sleeping device) until
 the device answers, then the table follows; a failed one keeps its `error`
-and is not resent. Bindings the hub made for reporting appear with target
-`{"hub": true}`. Typical presets (web UI): remote → light On/Off 0x0006,
-Level Control 0x0008, Color Control 0x0300.
+and is not resent. Bindings to the hub appear with target `{"hub": true}`:
+those read from the device, and configure's client-cluster and group binds
+(5.3) once the device confirmed them. Typical presets (web UI): remote →
+light On/Off 0x0006, Level Control 0x0008, Color Control 0x0300.
 
 | Type | Parameters | Result |
 |---|---|---|

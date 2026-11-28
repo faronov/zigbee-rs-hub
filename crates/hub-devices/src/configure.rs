@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::device::{Device, InterviewStep, Millis};
 use crate::hub::control::Then;
+use crate::hub::zgroups::BindEntry;
 use crate::hub::{Hub, HubEvent, OpKind, OpRun, Purpose};
 use crate::model::*;
 use crate::reporting::ReportSetting;
@@ -21,6 +22,13 @@ use crate::zdo::{self, BindDst};
 
 fn mfr_s(m: Option<u16>) -> String {
     m.map_or("-".into(), |m| format!("{m:04x}"))
+}
+
+/// `cluster` is a client cluster of endpoint `ep` (the device sends its
+/// commands).
+fn client_cluster(d: &Device, ep: u8, cluster: u16) -> bool {
+    d.fp.endpoint(ep)
+        .is_some_and(|e| e.out_clusters.contains(&cluster) && !e.in_clusters.contains(&cluster))
 }
 
 pub(crate) fn first_ep_with(d: &Device, cluster: u16) -> u8 {
@@ -163,11 +171,41 @@ pub fn build_ops(
     if tuya.as_ref().is_some_and(|t| t.bind_basic) {
         binds.push((basic_ep, cl::BASIC));
     }
+    if crate::hub::ikea::group_only(&d.fp) {
+        // An IKEA remote that binds to a group only (hub::ikea): the hub
+        // endpoint joins the groups, On/Off goes to the bind group, and no
+        // client cluster is bound to the hub.
+        for g in crate::hub::ikea::HUB_GROUPS {
+            push(
+                &mut ops,
+                format!("group:{hub_ep}:{g:04x}"),
+                OpKind::Group {
+                    ep: hub_ep,
+                    group: g,
+                },
+            );
+        }
+        let g = crate::hub::ikea::BIND_GROUP;
+        push(
+            &mut ops,
+            format!("bind:1:0006:{g:04x}"),
+            OpKind::Bind {
+                ep: 1,
+                cluster: cl::ON_OFF,
+                group: Some(g),
+            },
+        );
+        binds.retain(|&(ep, c)| !client_cluster(d, ep, c));
+    }
     for (ep, cluster) in binds {
         push(
             &mut ops,
             format!("bind:{ep}:{cluster:04x}"),
-            OpKind::Bind { ep, cluster },
+            OpKind::Bind {
+                ep,
+                cluster,
+                group: None,
+            },
         );
     }
     for ((ep, cluster, mfr), recs) in reports {
@@ -237,7 +275,11 @@ pub fn build_ops(
                     push(
                         &mut ops,
                         format!("bind:{ep}:{c:04x}"),
-                        OpKind::Bind { ep, cluster: c },
+                        OpKind::Bind {
+                            ep,
+                            cluster: c,
+                            group: None,
+                        },
                     );
                 }
             }
@@ -330,6 +372,7 @@ pub fn build_ops(
                     OpKind::Bind {
                         ep,
                         cluster: *cluster,
+                        group: None,
                     },
                 );
             }
@@ -613,15 +656,13 @@ impl<T: ZigbeeTransport> Hub<T> {
                     self.configure_done(id, &key, false, format!("INVALID: {reason}"), now);
                     continue;
                 }
-                OpKind::Bind { ep, cluster } => {
+                OpKind::Bind { ep, cluster, group } => {
                     let tsn = self.next_zdo_tsn();
-                    let p = zdo::bind_req(
-                        tsn,
-                        ieee,
-                        ep,
-                        cluster,
+                    let dst = group.map_or(
                         BindDst::Ieee(self.cfg.coordinator_ieee, self.cfg.hub_endpoint),
+                        BindDst::Group,
                     );
+                    let p = zdo::bind_req(tsn, ieee, ep, cluster, dst);
                     self.send_zdo(id, zdo::cluster::BIND_REQ, p, purpose, now);
                 }
                 OpKind::Report {
@@ -738,7 +779,27 @@ impl<T: ZigbeeTransport> Hub<T> {
         if d.configure.done.values().all(|v| *v) {
             d.warnings.retain(|w| w != "configure_failed");
         }
+        if let Some(e) = self.remote_bind(id, key).filter(|_| ok) {
+            self.zg_bound(id, e);
+        }
         self.pump_configure(id, now);
+    }
+
+    /// The binding a configure bind (`bind:<ep>:<cluster>[:<group>]`)
+    /// makes when it is a remote's (to a group, or of a client cluster to
+    /// the hub endpoint): kept with the device's bindings.
+    fn remote_bind(&self, id: &str, key: &str) -> Option<BindEntry> {
+        let mut p = key.strip_prefix("bind:")?.split(':');
+        let ep = p.next()?.parse().ok()?;
+        let cluster = u16::from_str_radix(p.next()?, 16).ok()?;
+        let dst = match p.next() {
+            Some(g) => BindDst::Group(u16::from_str_radix(g, 16).ok()?),
+            None if client_cluster(self.devices.get(id)?, ep, cluster) => {
+                BindDst::Ieee(self.cfg.coordinator_ieee, self.cfg.hub_endpoint)
+            }
+            None => return None,
+        };
+        Some(BindEntry { ep, cluster, dst })
     }
 }
 

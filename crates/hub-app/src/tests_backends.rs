@@ -85,7 +85,15 @@ impl SimLink for Zrhp {
     }
 
     fn indicate(&self, i: &ApsIndication) {
-        let p = hub_ncp::sim::indication(i.src_nwk, i.src_ieee.unwrap_or(0), i.src_ep, i.dst_ep, i.profile, i.cluster, &i.payload);
+        let mut p = hub_ncp::sim::indication(i.src_nwk, i.src_ieee.unwrap_or(0), i.src_ep, i.dst_ep, i.profile, i.cluster, &i.payload);
+        if let Some(g) = i.group {
+            // The NCP's APS drops a groupcast to a group without the hub endpoint.
+            if !self.groups().contains(&g) {
+                return;
+            }
+            p[0] = 0x01;
+            p[1..3].copy_from_slice(&g.to_le_bytes());
+        }
         self.sim.inject_event(zigbee_zrhp::msg::ids::EVT_APS_DATA_INDICATION, p);
     }
 
@@ -158,17 +166,23 @@ impl SimLink for Ezsp {
     }
 
     fn indicate(&self, i: &ApsIndication) {
+        let (kind, group_id) = match i.group {
+            // The NCP drops a multicast to a group its multicast table lacks.
+            Some(g) if !self.groups().contains(&g) => return,
+            Some(g) => (IncomingMessageType::MULTICAST, g),
+            None => (IncomingMessageType::UNICAST, 0),
+        };
         let aps = ApsFrame {
             profile_id: i.profile,
             cluster_id: i.cluster,
             source_endpoint: i.src_ep,
             destination_endpoint: i.dst_ep,
             options: ApsOptions::NONE,
-            group_id: 0,
+            group_id,
             sequence: 0,
         };
         self.sim.ncp(|n| {
-            let cb = n.incoming_message(IncomingMessageType::UNICAST, aps, i.src_nwk, &i.payload);
+            let cb = n.incoming_message(kind, aps, i.src_nwk, &i.payload);
             n.callback(cb);
         });
     }
@@ -513,6 +527,118 @@ fn a_sleepy_devices_announcement_sends_what_waits_for_it() {
     wait("the binding table read", || reading() == json!(false));
     assert!(answered.lock().unwrap().iter().any(|r| r.profile == 0 && r.cluster == 0x0033));
     rig.finish();
+}
+
+/// A remote's button press (On/Off Toggle, client to server), to the hub
+/// endpoint or to `group`.
+fn press(d: &SimDevice, group: Option<u16>) -> ApsIndication {
+    let mut i = d.ind(1, 0x0104, 0x0006, vec![0x11, 0x42, 0x02]);
+    if group.is_some() {
+        i.group = group;
+        i.src_ieee = None;
+    }
+    i
+}
+
+/// The next `entity_event` of `uid` (its `event_type`) on a session
+/// subscribed to `events`.
+fn next_event(rx: &Receiver<String>, uid: &str) -> String {
+    let t = Instant::now();
+    loop {
+        assert!(t.elapsed() < T * 3, "no event of {uid}");
+        let Ok(f) = rx.recv_timeout(T) else { continue };
+        let f: J = serde_json::from_str(&f).unwrap();
+        if f["event"]["topic"] == "entity_event" && f["event"]["uid"] == uid {
+            return f["event"]["event_type"].as_str().unwrap_or_default().to_string();
+        }
+    }
+}
+
+/// `NWK_GROUP_MEMBERSHIP` adds of the hub endpoint to `group` the ZRHP NCP got.
+fn zrhp_joins(rig: &Rig, group: u16) -> usize {
+    rig.zsim.as_ref().unwrap().with(|s| {
+        s.log.iter().filter(|(id, p)| *id == zigbee_zrhp::msg::ids::NWK_GROUP_MEMBERSHIP && p[0] == 1 && p[1..3] == group.to_le_bytes()).count()
+    })
+}
+
+/// Remotes whose presses reach the hub only when configure bound them, on
+/// either NCP: a SONOFF SNZB-01's On/Off and a TRADFRI remote's on
+/// firmware 2.3.080 are bound to the hub endpoint (and listed with their
+/// bindings); one on 2.3.014 (zhc `ikeaConfigureRemote`: a group only) is
+/// bound to group 901, which the hub endpoint joins on the NCP, so its
+/// groupcasts fire its events (the NCP drops a groupcast to a group the
+/// hub endpoint is not in). A restarted hub joins the groups again.
+#[test]
+fn remotes_are_bound_so_that_their_presses_reach_the_hub() {
+    use hub_devices::zdo::BindDst;
+    let ikea = |ieee: u64, nwk: u16, sw: &str| {
+        SimDevice::new(ieee, nwk, LogicalType::EndDevice, false, 0x117C)
+            .endpoint(1, 0x0104, 0x0820, &[0x0000, 0x0001, 0x0003, 0x1000], &[0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0019])
+            .basic("IKEA of Sweden", "TRADFRI remote control", 3)
+            .attr(1, 0x0000, 0x4000, TypedValue::new(ZclType::CHAR_STR, ZclValue::String(sw.into())))
+    };
+    let snzb = SimDevice::new(0x5A52_5300_0000_0011, 0x5A11, LogicalType::EndDevice, false, 0)
+        .endpoint(1, 0x0104, 0x0000, &[0x0000, 0x0003, 0x0001], &[0x0006, 0x0003])
+        .basic("eWeLink", "WB01", 3);
+    let old = ikea(0x5A52_5300_0000_0012, 0x5A12, "2.3.014");
+    let new = ikea(0x5A52_5300_0000_0013, 0x5A13, "2.3.080");
+    for kind in BOTH {
+        let flash = SharedFlash::new();
+        let mut rig = match kind {
+            Kind::Zrhp => Rig::zrhp(true),
+            Kind::Ezsp => Rig::ezsp(ezsp_sim(true, 0xDD), flash.store()),
+        };
+        let devs = Arc::new(Mutex::new(vec![snzb.clone(), old.clone(), new.clone()]));
+        rig.devices_shared(devs.clone(), Arc::new(Mutex::new(Vec::new())));
+        let (sid, rx) = session(&rig.app);
+        let (esid, erx) = session(&rig.app);
+        ok(&call(&rig.app, esid, &erx, 1, json!({"type": "subscribe", "topics": ["events"]})));
+        let bound = |ieee: u64, f: &dyn Fn(&BindDst) -> bool| {
+            devs.lock().unwrap().iter().find(|d| d.ieee == ieee).unwrap().bind_table.iter().any(|b| b.0 == 1 && b.1 == 6 && f(&b.2))
+        };
+        let to_hub = |d: &BindDst| matches!(d, BindDst::Ieee(_, 1));
+        for d in [&snzb, &new] {
+            rig.link.join(d.ieee, d.nwk);
+            let id = format!("zb:{:016x}", d.ieee);
+            let hub = json!({"endpoint": 1, "cluster": 6, "target": {"hub": true, "endpoint": 1}});
+            wait(&format!("{kind:?}: {id} bound to the hub, listed"), || {
+                ok(&call(&rig.app, sid, &rx, 2, json!({"type": "bindings/list", "device": id})))[0]["table"][0] == hub
+            });
+            assert!(bound(d.ieee, &to_hub), "{kind:?}");
+            rig.link.indicate(&press(d, None));
+            assert_eq!(next_event(&erx, &format!("{id}:1:action")), "toggle", "{kind:?}");
+        }
+        assert!(!rig.link.groups().contains(&901), "{kind:?}");
+
+        rig.link.join(old.ieee, old.nwk);
+        wait(&format!("{kind:?}: bound to group 901"), || bound(old.ieee, &|d| *d == BindDst::Group(901)));
+        let groups = rig.link.groups();
+        assert!(groups.contains(&0) && groups.contains(&901), "{kind:?}: {groups:?}");
+        assert!(!bound(old.ieee, &to_hub), "{kind:?}: no binds to the hub on group-only firmware");
+        rig.link.indicate(&press(&old, Some(901)));
+        assert_eq!(next_event(&erx, "zb:5a52530000000012:1:action"), "toggle", "{kind:?}");
+
+        // Restarted: the ZRHP NCP is asked again, the EZSP NCP's multicast
+        // table (a new one) gets both groups.
+        let rig = match kind {
+            Kind::Zrhp => {
+                let n = zrhp_joins(&rig, 901);
+                let rig = rig.restart_zrhp();
+                wait("ZRHP: group 901 joined again", || zrhp_joins(&rig, 901) > n);
+                rig
+            }
+            Kind::Ezsp => {
+                rig.finish();
+                let rig = Rig::ezsp(ezsp_sim(true, 0xDD), flash.store());
+                wait("EZSP: groups 0 and 901 joined again", || {
+                    let g = rig.link.groups();
+                    g.contains(&0) && g.contains(&901)
+                });
+                rig
+            }
+        };
+        rig.finish();
+    }
 }
 
 #[test]
